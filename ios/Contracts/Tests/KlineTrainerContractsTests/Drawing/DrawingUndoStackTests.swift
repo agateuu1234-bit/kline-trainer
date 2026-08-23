@@ -121,3 +121,90 @@ struct DrawingUndoPushTests {
         #expect(Self.topShape(e) == "inserted(B)@1", "栈里只能留最后一条")
     }
 }
+
+@Suite("1b-ii 撤销：会话生命周期与撤销栈（D74 + D103）")
+@MainActor
+struct DrawingUndoSessionLifecycleTests {
+
+    /// 造「已进画线模式 + 栈非空」。**必须走真实入栈路径**（不许用 inject 钩子）——
+    /// spec N-N3 原稿那条恒过测试的错误就是拿一条根本没经过被测路径的状态去断言。
+    static func drawingModeWithNonEmptyStack() -> TrainingEngine {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(e.canUndoDrawing == true, "前置：栈必须非空")
+        return e
+    }
+
+    // ── 两条**必须清**（且都是**非 UI 触发**的退出路径） ──
+
+    @Test("N-Q1 下单成交：advanceAndAccount 隐式结束会话 → 栈必须清空")
+    func tradeTriggeredClearsStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        // ⚠️ 用 `holdOrObserve` 而不是 `buy(panel:shares:)`：前者是**不需要资金/持仓**的推进路径，
+        //    同样走 `advanceAndAccount` → `.tradeTriggered` → `endDrawingSessionIfActive`（:532），
+        //    既有测试 `TrainingEngineDrawingHandlerH1Tests.swift:103` 用的就是它。
+        e.holdOrObserve(panel: .upper)
+        #expect(e.drawingSession.drawingModeActive == false, "前置：下单确实隐式结束了画线会话")
+        #expect(e.canUndoDrawing == false)
+        #expect(e.canRedoDrawing == false)
+        #expect(e.drawingUndoEntryForTesting == nil)
+    }
+
+    @Test("N-Q2 cancelDrawingAllPanels（第三条拆除路径）→ 栈必须清空")
+    func cancelAllPanelsClearsStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        e.cancelDrawingAllPanels()
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.canUndoDrawing == false)
+        #expect(e.drawingUndoEntryForTesting == nil)
+    }
+
+    @Test("N-L 栈生命期：退出画线模式再进入 → ↩ / ↪ 均不可用")
+    func reenteringDrawingModeStartsWithEmptyStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        e.toggleDrawingMode()                   // 退出（endDrawingSessionIfActive）
+        #expect(e.canUndoDrawing == false)
+        e.toggleDrawingMode()                   // 再进
+        #expect(e.canUndoDrawing == false)
+        #expect(e.canRedoDrawing == false)
+    }
+
+    // ── 一条**必须保留**（正向测试，防我们把切周期误当退出路径） ──
+
+    @Test("N-Q3 切周期必须**保留**栈 —— 切周期不结束会话（spec §2.1 的 ⛔ 段）")
+    func periodSwitchKeepsStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        let topBefore = e.drawingUndoEntryForTesting?.isUndone
+        e.switchPeriodCombo(direction: .toLarger)   // PeriodDirection 只有 .toLarger / .toSmaller
+        #expect(e.drawingSession.drawingModeActive == true,
+                "切周期后必须仍在画线模式（restoreDrawingSessionAfterPeriodChange 刻意保留会话）")
+        #expect(e.canUndoDrawing == true, "同一个会话没结束 → 撤销记录必须留着")
+        #expect(e.drawingUndoEntryForTesting?.isUndone == topBefore, "栈内容不得被动过")
+    }
+
+    // ── 两条**必须保留**（把「清栈写在函数入口」那种实现直接测红，D103） ──
+
+    @Test("N-Q4 被拒的 begin 必须保留栈（未实现工具 → 早退，无任何状态翻转）")
+    func rejectedBeginKeepsStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        // ⚠️ `DrawingToolType` **不是** CaseIterable（Models.swift:37 实测），没有 `allCases`。
+        //    直接点名 `.trend`，并**当场断言它确实不在 implemented 里** —— 将来 P1c 把 .trend
+        //    实现了，本断言会红，逼实施者换一个仍未实现的工具，而不是让本档静默失效。
+        #expect(DrawingToolType.implemented == [.horizontal], "implemented 变了 → 本档的早退前提失效")
+        e.beginDrawingSession(tool: .trend)     // 第一行 guard implemented 早退
+        #expect(e.canUndoDrawing == true, "被拒的 begin 一个状态都没翻，绝不许清栈")
+    }
+
+    @Test("N-Q5 冗余的 begin-while-active 必须保留栈（activate 幂等，无翻转）")
+    func redundantBeginKeepsStack() {
+        let e = Self.drawingModeWithNonEmptyStack()
+        e.beginDrawingSession(tool: .horizontal)   // 会话已开，再调一次
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.canUndoDrawing == true,
+                "D103：activate 幂等、没有翻转 —— 清栈若写在函数入口/activate 旁边无条件执行，本条必红")
+    }
+}

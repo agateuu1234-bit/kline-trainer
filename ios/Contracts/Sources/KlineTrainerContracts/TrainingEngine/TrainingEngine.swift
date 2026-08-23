@@ -1378,7 +1378,12 @@ extension TrainingEngine {
         stopAllDeceleration()
         setActiveBounds(nil, panel: .upper)
         setActiveBounds(nil, panel: .lower)
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.deactivate()                 // 幂等：先落会话真相
+        // D74 / D103：清栈绑「drawingModeActive 真的翻转」，不是「进了这个函数」。
+        // 本函数是**第三条真实拆除路径**（public，既有测试用它退出画线模式）——
+        // 只在 begin/end 清栈会让它退出后残留一个陈旧栈（spec §2.1 codex R4-F2）。
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
         normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
@@ -1415,11 +1420,18 @@ extension TrainingEngine {
         armPanelForDrawing(tool, panel: .upper)
         armPanelForDrawing(tool, panel: .lower)
         guard isDrawingActive(on: .upper), isDrawingActive(on: .lower) else {
+            let wasActive = drawingSession.drawingModeActive
             cancelDrawingAllPanels()          // 回滚（此刻会话仍未开 → fail-closed 守卫放行）
             drawingSession.deactivate()       // 幂等；确保工具/pending 不残留
+            if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }   // D103
             return
         }
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.activate(tool: tool)   // 两面板都武装好了，才认会话开启
+        // ⚠️ D103：`activate` 对 `drawingModeActive` 是**幂等**的（DrawingSession.swift:202 第一行就置 true）。
+        //    会话已开时再调一次 begin 会走到这里却**没有翻转** —— 无条件清栈会悄悄抹掉一条有效撤销记录
+        //    （用户什么都没做，↩ 就灰了）。N-Q5 就是把那种实现直接测红的档。
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }
     }
 
     /// 结束会话：清真相 + 两面板退出 `.drawing`。幂等（未开会话时全 no-op）。
@@ -1435,7 +1447,9 @@ extension TrainingEngine {
         stopAllDeceleration()
         setActiveBounds(nil, panel: .upper)
         setActiveBounds(nil, panel: .lower)
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.deactivate()
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }   // D103
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
         // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
