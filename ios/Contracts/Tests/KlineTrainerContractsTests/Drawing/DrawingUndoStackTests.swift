@@ -472,4 +472,44 @@ struct DrawingUndoStaleEntryTests {
         #expect(e.drawings.count == 1)
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
     }
+
+    // ── 修复轮 1：①②③ 按 case 枚举漏了「每个 case 两道门」里的另一道，各补一条只隔离单一门的测试 ──
+
+    @Test("N-N2④：remove 分支（undo 画线 / redo 删线共用）身份门单独隔离 —— 下标在界内但 id 对不上")
+    func removeBranchIdentityMismatchFailsClosed() {
+        // ⚠️ 下标 0 在界内，越界门不会先触发 —— 这条才真的只测身份门（remove(at:) 那一支）。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .inserted(after: makeStyledHLine(id: "GHOST"), at: 0), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings[0].id == "A", "下标 0 上那条无辜的 A 不许被删掉")
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
+
+    @Test("N-N2⑤：insert 分支（undo 删线 / redo 画线共用）越界门单独隔离 —— id 不存在，去重门不会先触发")
+    func insertBranchOutOfBoundsFailsClosed() {
+        // ⚠️ 这也是**崩溃回归测试**：insert(_:at:) 越界同样是 trap，不是红断言。
+        //    故意用一个数组里不存在的 id（"Z"），这样「id 已存在」那道去重门不会先触发，隔离出的就是越界门。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .removed(before: makeStyledHLine(id: "Z"), at: 99), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings.count == 1)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
+
+    @Test("N-N2⑥：replaced 分支越界门单独隔离 —— 下标越界，不涉及任何身份判断")
+    func replacedBranchOutOfBoundsFailsClosed() {
+        // ⚠️ 崩溃回归测试：`drawings[index] = target` 越界同样是 trap，不是红断言。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .replaced(before: makeStyledHLine(id: "A"),
+                                           after: makeStyledHLine(id: "A", thickness: 3), at: 99),
+                  isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
 }

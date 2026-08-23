@@ -1250,6 +1250,49 @@ struct DrawingUndoStaleEntryTests {
         #expect(e.drawings.count == 1)
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
     }
+
+    // ── 修复轮 1（评审 Important，控制者核实为计划缺陷）：①②③ 按 case 枚举，
+    //    但 applyUndoEntry 每个 case 都有**两道**门（越界 + 身份/去重），共 6 个判据点；
+    //    ①②③ 每个 case 只钉住其中一道，另外三道删掉不会有任何测试变红或变崩。
+    //    本仓纪律「修整族判据、不只修报到的那个点」在这里适用，补三条各只隔离一道门 ──
+
+    @Test("N-N2④：remove 分支（undo 画线 / redo 删线共用）身份门单独隔离 —— 下标在界内但 id 对不上")
+    func removeBranchIdentityMismatchFailsClosed() {
+        // ⚠️ 下标 0 在界内，越界门不会先触发 —— 这条才真的只测身份门（remove(at:) 那一支）。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .inserted(after: makeStyledHLine(id: "GHOST"), at: 0), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings[0].id == "A", "下标 0 上那条无辜的 A 不许被删掉")
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
+
+    @Test("N-N2⑤：insert 分支（undo 删线 / redo 画线共用）越界门单独隔离 —— id 不存在，去重门不会先触发")
+    func insertBranchOutOfBoundsFailsClosed() {
+        // ⚠️ 这也是**崩溃回归测试**：insert(_:at:) 越界同样是 trap，不是红断言。
+        //    故意用一个数组里不存在的 id（"Z"），这样「id 已存在」那道去重门不会先触发，隔离出的就是越界门。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .removed(before: makeStyledHLine(id: "Z"), at: 99), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings.count == 1)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
+
+    @Test("N-N2⑥：replaced 分支越界门单独隔离 —— 下标越界，不涉及任何身份判断")
+    func replacedBranchOutOfBoundsFailsClosed() {
+        // ⚠️ 崩溃回归测试：`drawings[index] = target` 越界同样是 trap，不是红断言。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .replaced(before: makeStyledHLine(id: "A"),
+                                           after: makeStyledHLine(id: "A", thickness: 3), at: 99),
+                  isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
 }
 ```
 
@@ -1455,6 +1498,8 @@ grep -E "Test Case .*(uG2|uG3).* passed" /tmp/undo-t3.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1922 + 14 = 1936**；XCTest = 基线 + 6。
+⚠️ 修复轮 1（评审 Important）后 N-N2 又补了④⑤⑥三条（见上方 N-N2 段落 + 变异表 U-M13b/U-M14b/U-M12b），
+   最终实测 swift-testing = **1936 + 3 = 1939**；XCTest 不受影响，仍为原基线 + 6（本次未加新 XCTest）。
 
 - [ ] **Step 5: 提交**
 
@@ -1479,6 +1524,9 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
 | U-M18 | `guard flow.mode != .review` 删掉 | 复盘门 | `reviewModeRejectsUndoRedo` |
 | U-M18b | 在 `undoDrawing` 里加一句 `injectDrawingUndoEntryForTesting(nil)`（**同文件**的非法生产调用） | R4 报的那个守卫盲区 | `test_uG3_testOnlyHooksHaveNoProductionUse`（修正前那版守卫**会全绿** —— 报告里点明这就是 R4 的价值） |
 | U-M19 | `drawingsRevision += 1` 删掉 | autosave 的输入没了 | `roundTripAppend` / `roundTripDelete` |
+| U-M13b | remove 分支（`.inserted`+undo / `.removed`+redo）的身份 guard `drawings[index].id == obj.id` 删掉 | 身份门单独隔离（修复轮 1） | `removeBranchIdentityMismatchFailsClosed` |
+| U-M14b | insert 分支的越界 guard `(0...drawings.count).contains(index)` 删掉 | 越界门单独隔离（修复轮 1） | `insertBranchOutOfBoundsFailsClosed`（**很可能表现为进程崩，不是红断言**，与 U-M12 同理） |
+| U-M12b | replaced 分支的越界 guard `drawings.indices.contains(index)` 删掉 | 越界门单独隔离（修复轮 1） | `replacedBranchOutOfBoundsFailsClosed`（**很可能表现为进程崩，不是红断言**，与 U-M12 同理）
 
 ---
 
