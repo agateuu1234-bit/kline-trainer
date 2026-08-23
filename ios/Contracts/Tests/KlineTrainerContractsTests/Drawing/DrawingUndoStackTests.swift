@@ -512,4 +512,39 @@ struct DrawingUndoStaleEntryTests {
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
     }
+
+    // ── N-N3：绕过栈的写入面必须**作废**栈（D79 第一层，根因）──
+    // ⚠️ 必须在**同一个引擎实例**上做。spec 原稿用 `resumePendingReplay` 举证是错的：
+    //    那条路径走 `TrainingEngine.make(...)` 造的是**全新引擎**，新引擎的栈本来就是空的
+    //    → 测试恒过、证明不了任何事（codex R2-F1）。
+
+    @Test("N-N3a：injectDrawingsForTesting 换一批线 → 撤销栈必须作废")
+    func injectDrawingsInvalidatesStack() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(e.canUndoDrawing == true, "前置：栈非空")
+        e.injectDrawingsForTesting([makeStyledHLine(id: "X"), makeStyledHLine(id: "Y", candleIndex: 4)])
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false, "栈必须已作废")
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N-N3b：deleteDrawing(at:)（零生产调用点、但会移位下标）→ 撤销栈必须作废")
+    func deleteByIndexInvalidatesStack() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 1, price: 60)) == true)
+        #expect(e.canUndoDrawing == true)
+        e.deleteDrawing(at: 0)                       // 把 B 的下标从 1 移到了 0 —— 栈里那条记录当场失准
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false, "栈必须已作废")
+    }
 }

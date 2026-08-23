@@ -1099,6 +1099,9 @@ extension TrainingEngine {
     func deleteDrawing(at index: Int) {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
+        // D79 第一层：本方法**绕过撤销栈**直接改数组，且会让栈里已存的下标全部失准。
+        // 它不是「用户动作」（零生产调用点），入栈没有语义 —— **作废**是唯一正确的表态。
+        clearDrawingUndoStack()
         drawingsRevision += 1
     }
 
@@ -1622,7 +1625,13 @@ extension TrainingEngine {
     /// 仅测试：直接置换 `drawings`，绕过全部写入门。用于构造生产入口**造不出**的坏状态
     /// （N21c：两条同 id → update/delete 必须 fail 而不是"打第一条"）。
     /// 不动 `drawingsRevision`（它只由真实写入面递增；测试自己记录基线）。
-    func injectDrawingsForTesting(_ ds: [DrawingObject]) { drawings = ds }
+    /// ⚠️ D79 第一层：整体换掉 `drawings` 会让栈里已存的下标必然错位。**必须作废栈** ——
+    ///    不作废的话，任何「先种一个非空栈、再注入一批线」的测试都会造出一个下标必然错位的
+    ///    引擎却全绿，正是本仓的假绿套路（N-N3a 就是钉这一条的）。
+    func injectDrawingsForTesting(_ ds: [DrawingObject]) {
+        drawings = ds
+        clearDrawingUndoStack()
+    }
 
     /// 仅测试：**只读**栈顶，用来断言"入栈了什么"（N-N4 要求断言**栈内容**，不是只断言行为）。
     var drawingUndoEntryForTesting: DrawingUndoEntry? { drawingUndoEntry }

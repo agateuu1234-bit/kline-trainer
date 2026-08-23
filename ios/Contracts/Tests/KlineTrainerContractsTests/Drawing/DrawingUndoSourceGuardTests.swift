@@ -78,6 +78,28 @@ func functionBody(_ code: String, funcName: String,
     return bodies[0]
 }
 
+/// 按**具名函数**统计 `drawings` 的结构性写入处数（D79 第一层的穷尽性判据用）。
+///
+/// ⚠️ 入参是 **`codeTextPreservingBoundaries` 的输出**（保留空白），**不是** `squeezedSource`
+///    （codex plan-R5 high，**已核实为真**）：squeeze 之后 `func ` 这个边界永远匹配不到，
+///    每个先出现的函数都会把它后面所有函数的写入算到自己头上 —— 逐函数计数根本无法满足。
+///    切片改由本文件的 `functionBodies` 用**大括号配对**完成（它返回的 body 已 squeeze，
+///    正好是 `engineDrawingsStructuralWrites` 需要的形态）。
+/// 同名重载（`deleteDrawing` 有 `(at:)` 与 `(id:)` 两个）会被**逐个**切片并累加 —— 这正是我们要的。
+/// ⚠️ 找不到某个函数名 → 该键**缺席**（返回的字典里没有它），**不返回 0** ——
+///    调用方的 `XCTAssertEqual(byFunc[name], want)` 会因 `nil != 某数` 而红，锚点失效因此出声。
+/// ⚠️ 本函数依赖 `functionBodies`，故与它**同文件**（放 `DrawingUndoSourceGuardTests.swift`，
+///    **不放** `SourceGuardScanner.swift`）—— 两个判据必须同生共死，分居两处必然漂移。
+func engineDrawingsWritesByFunction(_ code: String, functions: [String]) -> [String: Int] {
+    var out: [String: Int] = [:]
+    for name in functions {
+        let bodies = functionBodies(code, funcName: name)
+        guard !bodies.isEmpty else { continue }        // 缺席 = 锚点失效，让调用方红
+        out[name] = bodies.reduce(0) { $0 + engineDrawingsStructuralWrites($1) }
+    }
+    return out
+}
+
 final class DrawingUndoSourceGuardTests: XCTestCase {
 
     /// U-G1（N-S）：凡含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，
@@ -222,5 +244,68 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
         XCTAssertEqual(callCount(inSqueezed: squeezedText("applyUndoEntry(x)"), pattern: squeeze("applyUndoEntry(")), 1)
         XCTAssertEqual(callCount(inSqueezed: squeezedText("nothing here"), pattern: squeeze("applyUndoEntry(")), 0)
         XCTAssertTrue(try callSiteCount("injectDrawingUndoEntryForTestingZZZ(").isEmpty)
+    }
+
+    /// U-G4（D79 第一层，**穷尽性判据**）：`TrainingEngine.swift` 里 `drawings` 的结构性写入点，
+    /// **全部**落在下表这 6 个具名函数里，且每个函数的处数与表一致；表外**零处**。
+    ///
+    /// ⚠️ 这条比既有 L12b（只数总数）强一档：总数对不上会红，但「把一处写入从 appendDrawing
+    ///    挪到一个新的私有 helper 里」总数不变、L12b 全绿，而那个 helper 就是一条**没对栈表过态**
+    ///    的新写入面。本条按**判据本身**穷尽（每处写入必须归属于表里某个函数），不是按这次
+    ///    报告到的点位改。
+    ///
+    /// ⚠️ 作用域**只是 `TrainingEngine.swift`**，不是全 `Sources/` 的同名变量：
+    ///    `drawings` 是 `public private(set)`，setter 是**文件作用域**，别的文件根本写不了它。
+    func test_uG4_engineDrawingsWriteSitesAreExhaustivelyClassified() throws {
+        let code = try boundaryCodeOf(trainingEnginePath)        // ⚠️ 切函数体用保留边界的文本（R5）
+        let squeezed = try squeezedSource(trainingEnginePath)  // 全文件总数仍用 squeezed
+        let expected: [String: Int] = [
+            "deleteDrawing":           2,   // (at index:) 1 处 + (id:) 1 处 —— 两个重载同名，合并计数
+            "appendDrawing":           1,
+            "updateDrawingStyle":      1,
+            "setDrawingLocked":        1,
+            "applyUndoEntry":          3,   // remove + insert + 下标赋值
+            "injectDrawingsForTesting": 0,  // `drawings = ds` 是整体替换，不计入结构性写入
+        ]
+        let byFunc = engineDrawingsWritesByFunction(code, functions: Array(expected.keys))
+        for (name, want) in expected {
+            XCTAssertEqual(byFunc[name], want,
+                           "\(name) 的结构性写入处数应为 \(want)，实测 \(byFunc[name].map(String.init) ?? "锚点失效")")
+        }
+        // 表外零处：逐函数之和 == 全文件总数
+        let total = engineDrawingsStructuralWrites(squeezed)
+        XCTAssertEqual(byFunc.values.reduce(0, +), total,
+                       """
+                       有 \(total - byFunc.values.reduce(0, +)) 处 drawings 写入不在权威分类表里。
+                       新增写入面必须先归入 D79 第一层那张表（入栈 / 作废 / 都不做，三选一），
+                       再回来改本守卫 —— 不许直接改数字。
+                       """)
+        XCTAssertEqual(total, 8, "权威分类表的合计是 8（见计划 Task 4 那张表）")
+    }
+
+    /// U-G4 的**双向自检**：合成一段「写入落在表外函数里」的样本必须被判出来。
+    func test_uG4_scanner_is_not_vacuous() {
+        let good = codeTextPreservingBoundaries("func appendDrawing() { drawings.append(x) }")
+        XCTAssertEqual(engineDrawingsWritesByFunction(good, functions: ["appendDrawing"])["appendDrawing"], 1)
+
+        // ⭐R5 点名要的那条：写入只存在于**后面另一个函数**里，绝不能被算给前一个函数。
+        let leaked = codeTextPreservingBoundaries("""
+            func appendDrawing() { }
+            private func sneakyHelper() { drawings.append(x) }
+            """)
+        XCTAssertEqual(engineDrawingsWritesByFunction(leaked, functions: ["appendDrawing"])["appendDrawing"], 0,
+            "切片吃到了下一个函数 —— 这正是 codex plan-R5 报的缺陷（原稿用 `func ` 当边界，squeeze 后永不匹配）")
+        XCTAssertEqual(engineDrawingsStructuralWrites(squeeze(leaked)), 1,
+            "全文件总数仍是 1 → 逐函数之和 0 ≠ 1，穷尽性断言会红（表外写入因此暴露）")
+
+        // 同名重载必须**各切各的、累加**（`deleteDrawing` 就是两个重载）
+        let overloads = codeTextPreservingBoundaries("""
+            func deleteDrawing(at i: Int) { drawings.remove(at: i) }
+            func deleteDrawing(id x: String) { drawings.remove(at: 0) }
+            """)
+        XCTAssertEqual(engineDrawingsWritesByFunction(overloads, functions: ["deleteDrawing"])["deleteDrawing"], 2)
+
+        XCTAssertNil(engineDrawingsWritesByFunction(good, functions: ["noSuchFunc"])["noSuchFunc"],
+                     "锚点失效必须返回 nil（缺键），不得静默返回 0")
     }
 }
