@@ -1819,6 +1819,62 @@ struct DrawingUndoPairedRollbackTests {
                 "只改默认不入栈（D101）：栈顶不许多出一个 defaultDelta")
     }
 
+    // ── ⭐ 落盘往返：成对回滚必须**作为同一份状态**存下去、再一起读回来（codex plan-R9）──
+
+    @Test("⭐落盘往返（undo）：画线态改样式 → ↩ → 存档 → 续局 → 线与本局默认**双双**是改动前那一侧")
+    func pairedUndoSurvivesSaveAndResume() async throws {
+        let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
+            candles: TrainingSessionPersistenceTests.validCandles())
+        coord.now = { 222 }
+        let e = try await coord.startNewNormalSession()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 10)) == true)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.drawings[0].thickness == 3 && e.drawingSession.defaultStyle.thickness == 3)
+        #expect(e.undoDrawing() == true)
+
+        try await coord.saveProgress(engine: e)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+
+        // ⭐ 两半必须落在**同一侧**。只测 revision +1 证明不了这一条：
+        //    autosave 的排序 / 合并一旦出问题，完全可能把「已回滚的线」和「没回滚的默认」一起存下去，
+        //    于是被撤销掉的样式在续训之后、在下一笔新画的线上复活 —— 正是 D102 要防的那个高代价形态。
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 1, "线必须是改动前那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 1, "本局默认必须**同样**是改动前那一侧")
+        // 顺带钉住验收 #17：撤销栈不跨局（新引擎的栈按定义为空）
+        #expect(resumed.canUndoDrawing == false && resumed.canRedoDrawing == false)
+    }
+
+    @Test("⭐落盘往返（redo）：↩ 后再 ↪ → 存档 → 续局 → 线与本局默认**双双**是改动后那一侧")
+    func pairedRedoSurvivesSaveAndResume() async throws {
+        let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
+            candles: TrainingSessionPersistenceTests.validCandles())
+        coord.now = { 222 }
+        let e = try await coord.startNewNormalSession()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 10)) == true)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.undoDrawing() == true)
+        #expect(e.redoDrawing() == true)
+
+        try await coord.saveProgress(engine: e)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 3, "线必须是改动后那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 3, "本局默认必须**同样**是改动后那一侧")
+    }
+
     // ── ⭐ D101 不变量：默认分量过期必须丢掉（codex plan-R3 high）──
     //    两个方向各一条 —— codex 只报了 ↪ 那一半，↩ 同样会覆盖用户的新默认。
 
@@ -2114,7 +2170,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2 || e
 grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1938 + 8 = 1946**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 10。
+预期：swift-testing = **1938 + 10 = 1948**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 10。
 
 - [ ] **Step 5: 提交**
 
@@ -2136,6 +2192,8 @@ git commit -m "feat(drawing): D102 一次动作作用域 —— 画线态改样�
 | U-M29b | `if defaultChanged { drawingUndoEntry?.defaultDelta = nil }` 整行删掉 | **过期默认分量覆盖用户新选择**（codex plan-R3） | `staleDefaultDeltaDoesNotClobberOnRedo` + `staleDefaultDeltaDoesNotClobberOnUndo` |
 | U-M29c | 把那行改成 codex 原处方（`if entry.isUndone { clearDrawingUndoStack() }`） | 只堵了 ↪ 那一半 | `staleDefaultDeltaDoesNotClobberOnUndo`（**↪ 那条会绿** —— 这正是"处方需要加强"的证据，报告里点明） |
 | U-M30 | `applyUndoEntry` 里把 `dd.before` / `dd.after` 对调 | 方向反了 | `undoRollsBackBothLineAndSessionDefault` + `redoRestoresBothLineAndSessionDefault` |
+| U-M30b | 把 `TrainingSessionCoordinator.swift:331` 那句 `if let s = pending.drawingDefaultStyle { …setDefaultStyle(s) }` 注释掉（**关掉默认那一侧的读回**） | 落盘往返：两半落在**不同侧** | `pairedUndoSurvivesSaveAndResume` + `pairedRedoSurvivesSaveAndResume`（**引擎内的成对回滚三条仍全绿** —— 这正是 codex plan-R9 要的证据：只测 revision 证明不了落盘一致） |
+| U-M30c | 把 `applyUndoEntry` 里恢复默认那一句删掉（**关掉默认那一侧的写出**） | 同上，另一端 | 同上两条 + `undoRollsBackBothLineAndSessionDefault` |
 
 ---
 
@@ -2353,7 +2411,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2 || e
 grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1946 + 5 = 1951**；XCTest = 基线 + 13。
+预期：swift-testing = **1948 + 5 = 1953**；XCTest = 基线 + 13。
 
 - [ ] **Step 5: 提交**
 
@@ -2543,7 +2601,7 @@ echo "Catalyst 编译门：三条全过"
    （scheme 找不到、destination 不可用），只靠 ①② 仍会把「什么都没编译」读成绿。
    用**产物存在**而不是 `BUILD SUCCEEDED` 字样，理由同 G-6「判绿读实物，不读字样」。
 
-预期：swift-testing = **1951 + 1 = 1952**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
+预期：swift-testing = **1953 + 1 = 1954**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
 
 - [ ] **Step 5: 提交**
 
@@ -2762,7 +2820,9 @@ PR 描述**必须**包含：
 | §2.7 验收清单 | 本文件「非程序员验收清单」（19 条 + 新增 3 条） |
 | §3 契约零影响 | G-1 |
 
-**gap 1（已在计划里显式处置，不是遗漏）**：spec N-M 里「autosave 被触发 → **重新加载后结果正确**」这半条，本计划**不新写落盘往返测试**。理由：undo/redo 只改 `drawings` 与 `drawingSession.defaultStyle` 两个**已经**被 `DrawingAutosaveTriggersModifier` 盯住的量（`TrainingView.swift:49/52`），落盘路径与 1b-i / 持久化片逐字相同、本片零新增字段。本片补的证据是「`drawingsRevision` 严格 +1」（触发器的输入，Task 3）＋既有守卫 G6b（触发器真挂在 body 上）。**这是可执行化，不是打折** —— 但它是一条计划级裁决，**codex 评审必须正面审它**；若评审认为不足，正解是补一条走 `TrainingSessionCoordinator` 的往返测试，而不是删掉 N-M。
+**gap 1（R9 后已关闭）**：spec N-M 里「autosave 被触发 → **重新加载后结果正确**」这半条，原稿只用「`drawingsRevision` 严格 +1」＋既有守卫 G6b 顶替，并把它标成「codex 评审必须正面审」的计划级裁决。
+**codex plan-R9 判定不足，理由成立并已核实**：那两条只证明「保存被请求了」，证明不了**分别观察到的** `drawings` 与 `defaultStyle` 被序列化成**同一份连贯状态**、一起活过 coordinator 的落盘、再一起读回来。autosave 的排序 / 合并一旦出问题，完全可能把「已回滚的线」和「没回滚的默认」一起存下去 —— 被撤销掉的样式在续训之后复活，正是 D102 要防的高代价形态。
+**处置**：按当初写下的那条正解补齐 —— Task 5 增加两条走 `TrainingSessionCoordinator` 的落盘往返测试（undo / redo 各一），并配两条变异（分别关掉「默认那一侧的读回」与「写出」）证明它们真有判别力。**本 gap 关闭。**
 
 **gap 2（R3 后新增，已处置）**：D101 原稿只说「默认单独变化不入栈」，没说**栈里那条旧记录的默认分量会因此过期**。
 codex plan-R3 从 ↪ 方向报了这个缺陷，复核发现 ↩ 方向同样成立（它未报）。已把「默认分量两端必须与当前默认对得上」
