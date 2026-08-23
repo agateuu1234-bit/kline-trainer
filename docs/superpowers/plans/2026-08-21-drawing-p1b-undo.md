@@ -1254,20 +1254,22 @@ struct DrawingUndoStaleEntryTests {
         // 用**裸标识符**计数而不是子串计数：`injectDrawingUndoEntryForTesting` 里含的是
         // `DrawingUndoEntryForTesting`（大写 D），与属性名 `drawingUndoEntryForTesting`（小写 d）
         // 大小写不同、互不误计；属性体里的 `drawingUndoEntry` 也不会被算成它。
-        // ⚠️ **两个钩子要用两种不同的判据**（实施计划自查实测 `SourceGuardScanner.swift:252-278`）：
-        //    `bareIdentifierReferences` 的第 ③ 条明写「后面第一个非空格字符是 `(` 就不算」——
-        //    它数的是 **vend**（把方法当值传出去），**声明和调用都不计数**。
-        //    所以带括号的注入钩子必须用 `callCount` 数（声明本身占 1 处），
-        //    只有无括号的那个计算属性才用裸引用数。搞反了 = 守卫恒 0、永远抓不到非法调用。
-        let engineSqueezed = try squeezedSource(trainingEnginePath)
-        XCTAssertEqual(callCount(inSqueezed: engineSqueezed,
-                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
-            "应恰好 1 处 = `func injectDrawingUndoEntryForTesting(` 那行声明。多出来的就是引擎自己调了它。")
-        let code = try boundaryCode(trainingEnginePath)
-        XCTAssertEqual(bareIdentifierReferences(inCode: code,
-                                                identifier: "injectDrawingUndoEntryForTesting"), 0,
-            "注入钩子被 vend 出去了（`let f = injectDrawingUndoEntryForTesting`）—— 那会把调用挪到别处，绕过上面那条计数")
-        XCTAssertEqual(bareIdentifierReferences(inCode: code,
+        // ⚠️ **两个钩子要用两种不同的判据**（实施计划自查实测 `SourceGuardScanner.swift:171-186 / 252-278`）：
+        //    · `callCount` = **总出现数 − 定义处数**（定义按 `"func"+pattern` 扣）⇒ 只有声明时它是 **0**，
+        //      冒出一次真调用才变 1。所以带括号的注入钩子用它，期望 **0**；
+        //      **`callSiteCount` 对每个文件跑的就是它**，因此**根本不需要**把 `TrainingEngine.swift`
+        //      过滤掉 —— 当初那个过滤才是 codex plan-R4 报的盲区本身。
+        //    · `bareIdentifierReferences` 第 ③ 条明写「后面第一个非空格字符是 `(` 就不算」⇒ 它数的是
+        //      **vend**（把方法当值传出去），声明与调用都不计。无括号的那个计算属性只能用它。
+        //    两条判据搞反 = 守卫恒真、永远抓不到非法调用（本计划自查实测踩过一次）。
+        let injCalls = try callSiteCount("injectDrawingUndoEntryForTesting(")
+        XCTAssertTrue(injCalls.isEmpty,
+            "注入钩子被生产代码调用了：\(injCalls)。它绕过快照与全部前置校验，能种一条**任意**陈旧栈项去删改另一条线。")
+        // 第二层：vend 形式不出现调用 pattern，只数调用会放过它。
+        try expectIdentifierNeverVended("injectDrawingUndoEntryForTesting",
+                                        inFiles: try filesMentioning("injectDrawingUndoEntryForTesting"))
+        // 只读钩子（计算属性，无括号）：引擎之内恰好 1 处 = 那行声明；多出来就是引擎自己在读它。
+        XCTAssertEqual(bareIdentifierReferences(inCode: try boundaryCode(trainingEnginePath),
                                                 identifier: "drawingUndoEntryForTesting"), 1,
             "应恰好 1 处 = 那个只读计算属性的声明（它无括号，声明本身就算一次裸引用）。")
     }
@@ -1280,14 +1282,14 @@ struct DrawingUndoStaleEntryTests {
             func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
             """)
         XCTAssertEqual(callCount(inSqueezed: illicit,
-                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 2,
-            "同文件里的生产调用必须被数到（声明 1 + 非法调用 1）—— 数成 1 就退回 codex plan-R4 报的那个盲区了")
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
+            "callCount 会**自动扣掉声明**那一处 ⇒ 剩下的 1 就是那次非法调用。数成 0 = 判据坏了或又把整个文件过滤掉了。")
         let clean = squeezedText("""
             func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
             """)
         XCTAssertEqual(callCount(inSqueezed: clean,
-                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
-            "只有声明的样本必须数成 1（否则判据本身是坏的）")
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 0,
+            "只有声明的样本必须数成 0（声明被自动扣掉）—— 数成 1 说明扣除逻辑的理解又反了")
         // 第二层各管一半：vend 形式不出现调用 pattern，只能靠裸引用判据抓
         let vended = codeTextPreservingBoundaries("func f() { let g = injectDrawingUndoEntryForTesting }")
         XCTAssertEqual(callCount(inSqueezed: squeeze(vended),
