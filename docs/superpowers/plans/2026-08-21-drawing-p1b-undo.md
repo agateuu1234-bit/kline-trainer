@@ -227,8 +227,7 @@ grep -E "Test Case .*<本 task 新增的 XCTest 名>.* passed" /tmp/undo-gate.lo
 | `ios/Contracts/Tests/.../CoordinatorDefaultStyleSourceGuardTests.swift` | `setDefaultStyle` 调用点守卫 | Task 5：G1 期望值 **4 → 5** |
 | `ios/Contracts/Tests/.../Render/DrawingInteractionUISourceGuardTests.swift` | 底栏接线守卫 | Task 7：三键守卫 **3 → 5** + 两条 ↩↪ 否定断言**反转** |
 | `ios/Contracts/Tests/.../Render/DrawingBottomBarHeightTests.swift` | 底栏等高测试（**UIKit-gated**） | Task 7：`DrawingBottomBar(` 构造补 4 个参数（编译器逼的，**不是新增测试**） |
-| `ios/Contracts/Tests/.../SourceGuardScanner.swift` | 守卫扫描器 | Task 4：新增 `engineDrawingsWritesByFunction(_:)` |
-| `ios/Contracts/Tests/.../SourceGuardScannerTests.swift` | 扫描器自检 | Task 4：新扫描器的双向自检 |
+| `ios/Contracts/Tests/.../Drawing/DrawingUndoSourceGuardTests.swift`（同上一行） | 本片全部守卫**与它们的扫描器**（`functionBodies` / `engineDrawingsWritesByFunction`） | Task 2 建，Task 4 加逐函数扫描器 —— **不动** `SourceGuardScanner.swift` |
 | `.github/scripts/catalyst-*.txt` · `catalyst-gate.test.sh` · `fixtures/pass-main-current.log` | Catalyst 闸门基线 | Task 8 一并同步 |
 
 ⚠️ **为什么引擎侧的所有撤销代码必须写在 `TrainingEngine.swift` 里，不许拆到 extension 文件**：`drawings` 声明为 `public private(set) var`（`TrainingEngine.swift:25`），**setter 是文件作用域** —— 别的文件里的 extension 根本写不了 `drawings`（编译器直接拦）。而且 L12b / D79 第一层那条穷尽守卫**只扫 `TrainingEngine.swift`**，把写入面挪到别的文件就等于从守卫底下溜走。两条理由同向，不许讨价还价。
@@ -754,17 +753,65 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
 
     private func engineCode() throws -> String { try squeezedSource(trainingEnginePath) }
 
-    /// 取某个函数的函数体文本（从 `func <name>(` 到**下一个** `func ` 为止）。
-    /// ⚠️ 抓不到锚点必须 `XCTFail` 而不是返回空串 —— 空串会让所有"必须包含"断言恒假、
-    ///    所有"不得包含"断言恒真，守卫静默失效（G-5 的锚点纪律）。
-    func functionBody(_ squeezedCode: String, funcName: String,
-                      file: StaticString = #filePath, line: UInt = #line) -> String {
-        guard let start = squeezedCode.range(of: squeeze("func \(funcName)(")) else {
-            XCTFail("锚点失效：找不到 func \(funcName)(", file: file, line: line); return ""
+    /// 读某个源文件的**保留边界**代码文本（剥注释、剥字符串字面量，但**保留空白**）。
+    /// 函数体切片必须在它上面做，见 `functionBodies` 的说明。
+    func boundaryCode(_ path: String) throws -> String {
+        codeTextPreservingBoundaries(try String(contentsOfFile: path, encoding: .utf8))
+    }
+
+    /// 取某个函数（含同名重载，全部）的**函数体**，返回值已 `squeeze`，可直接与 squeeze 过的 needle 比对。
+    ///
+    /// ⚠️ **必须在"保留边界"的文本上切，且用大括号配对定边界**（codex plan-R5 high，**已核实为真**）。
+    ///    原稿是「在 `squeezedSource` 上切，从 `func <name>(` 到**下一个** `func ` 为止」——
+    ///    `squeezedSource` 把空白**全删了**，`func ` 这个带空格的边界**永远匹配不到**
+    ///    （`private func foo` 变成 `privatefuncfoo`），于是切出来的"函数体"一路吃到文件末尾。
+    ///    后果：「某个调用在不在这个函数里」退化成「在不在这个文件里」——
+    ///    U-G1 / U-G7 会在"要求的调用其实写在后面另一个函数里"时**假绿**，
+    ///    而 U-G4 的逐函数计数（每个先出现的函数都会把后面所有写入算进来）**根本无法满足**。
+    ///    也**不能**改成"在 squeezed 文本里找裸 `func` token"——`private`/`static` 前缀会让
+    ///    `func` 紧邻标识符字符，token 边界在 squeeze 之后已经不存在了。
+    ///
+    /// 空数组 = 锚点失效，**调用方必须当场 XCTFail**，不得当成"零处、很干净"。
+    func functionBodies(_ boundaryCode: String, funcName: String) -> [String] {
+        let chars = Array(boundaryCode)
+        func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+        let kw = Array("func ")
+        var out: [String] = []
+        var i = 0
+        while i + kw.count <= chars.count {
+            guard Array(chars[i ..< i + kw.count]) == kw else { i += 1; continue }
+            if i > 0, isIdentChar(chars[i - 1]) { i += 1; continue }   // `func` 必须是独立 token
+            var j = i + kw.count
+            while j < chars.count, chars[j] == " " { j += 1 }
+            var name = ""
+            while j < chars.count, isIdentChar(chars[j]) { name.append(chars[j]); j += 1 }
+            guard name == funcName else { i += 1; continue }
+            while j < chars.count, chars[j] != "{" { j += 1 }          // 走到函数体开头
+            guard j < chars.count else { break }
+            var depth = 0, k = j, body = ""
+            while k < chars.count {                                    // 大括号配对定结束
+                if chars[k] == "{" { depth += 1 }
+                else if chars[k] == "}" { depth -= 1; if depth == 0 { break } }
+                if depth >= 1 { body.append(chars[k]) }
+                k += 1
+            }
+            out.append(squeeze(body))
+            i = k
         }
-        let rest = squeezedCode[start.upperBound...]
-        if let next = rest.range(of: "func ") { return String(rest[..<next.lowerBound]) }
-        return String(rest)
+        return out
+    }
+
+    /// 单函数版（无重载时用）。抓不到 / 抓到多个都当场 `XCTFail` —— 返回空串会让所有
+    /// "必须包含"断言恒假、"不得包含"断言恒真，守卫静默失效（G-5 的锚点纪律）。
+    func functionBody(_ boundaryCode: String, funcName: String,
+                      file: StaticString = #filePath, line: UInt = #line) -> String {
+        let bodies = functionBodies(boundaryCode, funcName: funcName)
+        guard bodies.count == 1 else {
+            XCTFail("锚点失效：func \(funcName) 抓到 \(bodies.count) 个函数体（期望恰好 1）",
+                    file: file, line: line)
+            return ""
+        }
+        return bodies[0]
     }
 
     /// U-G1（N-S）：凡含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，
@@ -774,7 +821,7 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
     /// ⚠️ 本守卫**拦不住**「清栈写在函数入口无条件执行」—— 那种实现照样共处、却会在早退与
     ///    冗余调用上误清。那一半由**行为测试** N-Q4 / N-Q5 兜住，**两者缺一不可**。
     func test_uG1_sessionFlipFunctionsAllClearUndoStack() throws {
-        let code = try engineCode()
+        let code = try boundaryCode(trainingEnginePath)      // ⚠️ 切函数体必须用保留边界的文本（R5）
         let expected = ["cancelDrawingAllPanels", "beginDrawingSession", "endDrawingSessionIfActive"]
         var hit: [String] = []
         for name in expected {
@@ -793,13 +840,32 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
     /// U-G1 的**双向自检**：合成一段「含 deactivate 但不含清栈」的函数体必须被判出来，
     /// 合成一段「两者都含」的必须通过（防 pattern 打错字 → 恒真 → 守卫恒绿）。
     func test_uG1_scanner_is_not_vacuous() {
-        let bad  = squeezedText("func f() { drawingSession.deactivate() }")
-        let good = squeezedText("func f() { drawingSession.deactivate(); clearDrawingUndoStack() }")
-        XCTAssertTrue(bad.contains(squeeze("drawingSession.deactivate(")))
-        XCTAssertFalse(bad.contains(squeeze("clearDrawingUndoStack()")), "缺清栈的样本必须被判出来")
-        XCTAssertTrue(good.contains(squeeze("clearDrawingUndoStack()")))
-        // 锚点本身也要自检：不存在的函数名必须让 functionBody 走 XCTFail 路径 → 这里只验证 needle 拼写
-        XCTAssertNil(squeezedText("func g() {}").range(of: squeeze("func zzzNoSuchFunc(")))
+        let bad  = functionBodies(codeTextPreservingBoundaries(
+            "private func f() { drawingSession.deactivate() }"), funcName: "f")
+        let good = functionBodies(codeTextPreservingBoundaries(
+            "private func f() { drawingSession.deactivate(); clearDrawingUndoStack() }"), funcName: "f")
+        XCTAssertEqual(bad.count, 1, "`private func` 前缀不得让 func token 识别失败（R5 点名的坑）")
+        XCTAssertTrue(bad[0].contains(squeeze("drawingSession.deactivate(")))
+        XCTAssertFalse(bad[0].contains(squeeze("clearDrawingUndoStack()")), "缺清栈的样本必须被判出来")
+        XCTAssertTrue(good[0].contains(squeeze("clearDrawingUndoStack()")))
+
+        // ⭐R5 点名要的那条：要求的调用只存在于**后面另一个函数**里，绝不能被算给前一个函数。
+        let leaked = functionBodies(codeTextPreservingBoundaries("""
+            func a() { drawingSession.deactivate() }
+            func b() { clearDrawingUndoStack() }
+            """), funcName: "a")
+        XCTAssertEqual(leaked.count, 1)
+        XCTAssertFalse(leaked[0].contains(squeeze("clearDrawingUndoStack()")),
+            "函数体切片吃到了下一个函数 —— 这正是 R5 报的缺陷（原稿用 `func ` 当边界，squeeze 后永不匹配）")
+
+        // 嵌套大括号（闭包 / if 块）不得让配对提前收尾
+        let nested = functionBodies(codeTextPreservingBoundaries(
+            "func c() { if x { y() }; clearDrawingUndoStack() }"), funcName: "c")
+        XCTAssertTrue(nested[0].contains(squeeze("clearDrawingUndoStack()")), "嵌套块让函数体提前截断了")
+
+        // 锚点失效必须返回空数组（调用方据此 XCTFail），不得静默返回一个空函数体
+        XCTAssertTrue(functionBodies(codeTextPreservingBoundaries("func g() {}"),
+                                     funcName: "zzzNoSuchFunc").isEmpty)
     }
 }
 ```
@@ -1188,32 +1254,48 @@ struct DrawingUndoStaleEntryTests {
         // 用**裸标识符**计数而不是子串计数：`injectDrawingUndoEntryForTesting` 里含的是
         // `DrawingUndoEntryForTesting`（大写 D），与属性名 `drawingUndoEntryForTesting`（小写 d）
         // 大小写不同、互不误计；属性体里的 `drawingUndoEntry` 也不会被算成它。
-        let raw = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
-        let code = codeTextPreservingBoundaries(raw)      // 剥注释/字面量，但**保留标识符边界**
-        XCTAssertEqual(bareIdentifierReferences(inCode: code,
-                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+        // ⚠️ **两个钩子要用两种不同的判据**（实施计划自查实测 `SourceGuardScanner.swift:252-278`）：
+        //    `bareIdentifierReferences` 的第 ③ 条明写「后面第一个非空格字符是 `(` 就不算」——
+        //    它数的是 **vend**（把方法当值传出去），**声明和调用都不计数**。
+        //    所以带括号的注入钩子必须用 `callCount` 数（声明本身占 1 处），
+        //    只有无括号的那个计算属性才用裸引用数。搞反了 = 守卫恒 0、永远抓不到非法调用。
+        let engineSqueezed = try squeezedSource(trainingEnginePath)
+        XCTAssertEqual(callCount(inSqueezed: engineSqueezed,
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
             "应恰好 1 处 = `func injectDrawingUndoEntryForTesting(` 那行声明。多出来的就是引擎自己调了它。")
+        let code = try boundaryCode(trainingEnginePath)
+        XCTAssertEqual(bareIdentifierReferences(inCode: code,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 0,
+            "注入钩子被 vend 出去了（`let f = injectDrawingUndoEntryForTesting`）—— 那会把调用挪到别处，绕过上面那条计数")
         XCTAssertEqual(bareIdentifierReferences(inCode: code,
                                                 identifier: "drawingUndoEntryForTesting"), 1,
-            "应恰好 1 处 = 那个只读计算属性的声明。")
+            "应恰好 1 处 = 那个只读计算属性的声明（它无括号，声明本身就算一次裸引用）。")
     }
 
     /// U-G3 的**反向自检**（codex plan-R4 点名要的）：合成一段「同文件里的生产调用」，
     /// 判据必须数到 2（声明 + 那次非法调用）—— 这正是修正前那版守卫的盲区。
     func test_uG3_scanner_catches_same_file_production_call() {
-        let illicit = codeTextPreservingBoundaries("""
+        let illicit = squeezedText("""
             func undoDrawing() -> Bool { injectDrawingUndoEntryForTesting(nil); return false }
             func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
             """)
-        XCTAssertEqual(bareIdentifierReferences(inCode: illicit,
-                                                identifier: "injectDrawingUndoEntryForTesting"), 2,
-            "同文件里的生产调用必须被数到 —— 数成 1 说明又退回 R4 报的那个盲区了")
-        let clean = codeTextPreservingBoundaries("""
+        XCTAssertEqual(callCount(inSqueezed: illicit,
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 2,
+            "同文件里的生产调用必须被数到（声明 1 + 非法调用 1）—— 数成 1 就退回 codex plan-R4 报的那个盲区了")
+        let clean = squeezedText("""
             func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
             """)
-        XCTAssertEqual(bareIdentifierReferences(inCode: clean,
-                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+        XCTAssertEqual(callCount(inSqueezed: clean,
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
             "只有声明的样本必须数成 1（否则判据本身是坏的）")
+        // 第二层各管一半：vend 形式不出现调用 pattern，只能靠裸引用判据抓
+        let vended = codeTextPreservingBoundaries("func f() { let g = injectDrawingUndoEntryForTesting }")
+        XCTAssertEqual(callCount(inSqueezed: squeeze(vended),
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 0,
+            "vend 形式没有括号 → 调用计数抓不到它，这正是需要第二层的理由")
+        XCTAssertEqual(bareIdentifierReferences(inCode: vended,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+            "裸引用判据必须抓到 vend")
     }
 
     /// U-G2 / U-G3 的**双向自检**。
@@ -1364,14 +1446,13 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`
   （`deleteDrawing(at:):1089-1093` / `injectDrawingsForTesting:1492`）
-- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift`（新增 `engineDrawingsWritesByFunction`）
-- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScannerTests.swift`（新扫描器双向自检）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingUndoSourceGuardTests.swift`（新增 `engineDrawingsWritesByFunction`，**与 `functionBodies` 同文件**）
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift:1015-1030`（**L12b：5 → 8**）
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingUndoStackTests.swift`（N-N3a/b）
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingUndoSourceGuardTests.swift`（守卫 U-G4）
 
 **Interfaces:**
-- Consumes：Task 3 的 `applyUndoEntry`、既有 `engineDrawingsStructuralWrites(_:)`（`SourceGuardScanner.swift:299`）
+- Consumes：Task 3 的 `applyUndoEntry`、既有 `engineDrawingsStructuralWrites(_:)`（`SourceGuardScanner.swift:299`，**入参必须是 squeeze 过的文本**）、Task 2 的 `functionBodies` / `boundaryCode`
 - Produces：`func engineDrawingsWritesByFunction(_ squeezedCode: String, functions: [String]) -> [String: Int]`（测试模块顶层函数）
 
 **D79 第一层的权威分类表（本片实施后的最终状态，L12b 与 U-G4 都从这一张表派生）：**
@@ -1446,7 +1527,8 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
     /// ⚠️ 作用域**只是 `TrainingEngine.swift`**，不是全 `Sources/` 的同名变量：
     ///    `drawings` 是 `public private(set)`，setter 是**文件作用域**，别的文件根本写不了它。
     func test_uG4_engineDrawingsWriteSitesAreExhaustivelyClassified() throws {
-        let code = try engineCode()
+        let code = try boundaryCode(trainingEnginePath)        // ⚠️ 切函数体用保留边界的文本（R5）
+        let squeezed = try squeezedSource(trainingEnginePath)  // 全文件总数仍用 squeezed
         let expected: [String: Int] = [
             "deleteDrawing":           2,   // (at index:) 1 处 + (id:) 1 处 —— 两个重载同名，合并计数
             "appendDrawing":           1,
@@ -1461,7 +1543,7 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
                            "\(name) 的结构性写入处数应为 \(want)，实测 \(byFunc[name].map(String.init) ?? "锚点失效")")
         }
         // 表外零处：逐函数之和 == 全文件总数
-        let total = engineDrawingsStructuralWrites(code)
+        let total = engineDrawingsStructuralWrites(squeezed)
         XCTAssertEqual(byFunc.values.reduce(0, +), total,
                        """
                        有 \(total - byFunc.values.reduce(0, +)) 处 drawings 写入不在权威分类表里。
@@ -1473,30 +1555,34 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
 
     /// U-G4 的**双向自检**：合成一段「写入落在表外函数里」的样本必须被判出来。
     func test_uG4_scanner_is_not_vacuous() {
-        let good = squeezedText("func appendDrawing() { drawings.append(x) }")
+        let good = codeTextPreservingBoundaries("func appendDrawing() { drawings.append(x) }")
         XCTAssertEqual(engineDrawingsWritesByFunction(good, functions: ["appendDrawing"])["appendDrawing"], 1)
-        let leaked = squeezedText("func appendDrawing() { }\nfunc sneakyHelper() { drawings.append(x) }")
-        XCTAssertEqual(engineDrawingsWritesByFunction(leaked, functions: ["appendDrawing"])["appendDrawing"], 0)
-        XCTAssertEqual(engineDrawingsStructuralWrites(leaked), 1, "总数仍是 1 → 逐函数之和 0 ≠ 1，穷尽性断言会红")
+
+        // ⭐R5 点名要的那条：写入只存在于**后面另一个函数**里，绝不能被算给前一个函数。
+        let leaked = codeTextPreservingBoundaries("""
+            func appendDrawing() { }
+            private func sneakyHelper() { drawings.append(x) }
+            """)
+        XCTAssertEqual(engineDrawingsWritesByFunction(leaked, functions: ["appendDrawing"])["appendDrawing"], 0,
+            "切片吃到了下一个函数 —— 这正是 codex plan-R5 报的缺陷（原稿用 `func ` 当边界，squeeze 后永不匹配）")
+        XCTAssertEqual(engineDrawingsStructuralWrites(squeeze(leaked)), 1,
+            "全文件总数仍是 1 → 逐函数之和 0 ≠ 1，穷尽性断言会红（表外写入因此暴露）")
+
+        // 同名重载必须**各切各的、累加**（`deleteDrawing` 就是两个重载）
+        let overloads = codeTextPreservingBoundaries("""
+            func deleteDrawing(at i: Int) { drawings.remove(at: i) }
+            func deleteDrawing(id x: String) { drawings.remove(at: 0) }
+            """)
+        XCTAssertEqual(engineDrawingsWritesByFunction(overloads, functions: ["deleteDrawing"])["deleteDrawing"], 2)
+
         XCTAssertNil(engineDrawingsWritesByFunction(good, functions: ["noSuchFunc"])["noSuchFunc"],
                      "锚点失效必须返回 nil（缺键），不得静默返回 0")
     }
 ```
 
-追加到 `SourceGuardScannerTests.swift`：见上面 `test_uG4_scanner_is_not_vacuous` 已覆盖，**本文件只补一条**「函数切片边界」的自检：
-
-```swift
-    @Test("守卫自检 i：engineDrawingsWritesByFunction 的函数切片以下一个 `func ` 为界，不跨函数误计")
-    func writesByFunctionSlicesAtNextFunc() {
-        let src = squeezedText("""
-            func a() { drawings.append(x) }
-            func b() { drawings.remove(at: 0); drawings.insert(y, at: 0) }
-            """)
-        let m = engineDrawingsWritesByFunction(src, functions: ["a", "b"])
-        #expect(m["a"] == 1, "a 里只有 1 处，绝不能把 b 的两处算进来")
-        #expect(m["b"] == 2)
-    }
-```
+⚠️ **不再往 `SourceGuardScannerTests.swift` 加东西**（R5 后的调整）：逐函数扫描器与它的自检
+都留在 `DrawingUndoSourceGuardTests.swift` 里，与 `functionBodies` 同生共死。
+跨函数误计那一档已由上面的 `test_uG4_scanner_is_not_vacuous` 覆盖（`leaked` 与 `overloads` 两个合成样本）。
 
 - [ ] **Step 2: 跑测试确认它红**
 
@@ -1511,31 +1597,27 @@ grep -E "Test Case .*uG4.* failed|✘ Test .*(injectDrawings|deleteByIndex)" /tm
 
 - [ ] **Step 3: 写最小实现**
 
-**3a. `SourceGuardScanner.swift` 追加：**
+**3a. `DrawingUndoSourceGuardTests.swift` 追加（与 `functionBodies` 同文件）：**
 
 ```swift
 /// 按**具名函数**统计 `drawings` 的结构性写入处数（D79 第一层的穷尽性判据用）。
-/// 切片规则：从 `func <name>(` 起，到**下一个** `func ` 为止。同名重载（`deleteDrawing`
-/// 有 `(at:)` 与 `(id:)` 两个）会被**逐个**切片并累加 —— 这正是我们要的（两个重载都在表里）。
+///
+/// ⚠️ 入参是 **`codeTextPreservingBoundaries` 的输出**（保留空白），**不是** `squeezedSource`
+///    （codex plan-R5 high，**已核实为真**）：squeeze 之后 `func ` 这个边界永远匹配不到，
+///    每个先出现的函数都会把它后面所有函数的写入算到自己头上 —— 逐函数计数根本无法满足。
+///    切片改由本文件的 `functionBodies` 用**大括号配对**完成（它返回的 body 已 squeeze，
+///    正好是 `engineDrawingsStructuralWrites` 需要的形态）。
+/// 同名重载（`deleteDrawing` 有 `(at:)` 与 `(id:)` 两个）会被**逐个**切片并累加 —— 这正是我们要的。
 /// ⚠️ 找不到某个函数名 → 该键**缺席**（返回的字典里没有它），**不返回 0** ——
-///    调用方的 `XCTAssertEqual(byFunc[name], want)` 会因 `nil != 某数` 而红，锚点失效因此出声，
-///    不会静默变成「0 处写入，很干净」。
-func engineDrawingsWritesByFunction(_ squeezedCode: String, functions: [String]) -> [String: Int] {
+///    调用方的 `XCTAssertEqual(byFunc[name], want)` 会因 `nil != 某数` 而红，锚点失效因此出声。
+/// ⚠️ 本函数依赖 `functionBodies`，故与它**同文件**（放 `DrawingUndoSourceGuardTests.swift`，
+///    **不放** `SourceGuardScanner.swift`）—— 两个判据必须同生共死，分居两处必然漂移。
+func engineDrawingsWritesByFunction(_ boundaryCode: String, functions: [String]) -> [String: Int] {
     var out: [String: Int] = [:]
     for name in functions {
-        let needle = squeeze("func \(name)(")
-        var searchStart = squeezedCode.startIndex
-        var found = false
-        var sum = 0
-        while let r = squeezedCode.range(of: needle, range: searchStart ..< squeezedCode.endIndex) {
-            found = true
-            let rest = squeezedCode[r.upperBound...]
-            let body: Substring
-            if let next = rest.range(of: "func ") { body = rest[..<next.lowerBound] } else { body = rest }
-            sum += engineDrawingsStructuralWrites(String(body))
-            searchStart = r.upperBound
-        }
-        if found { out[name] = sum }
+        let bodies = functionBodies(boundaryCode, funcName: name)
+        guard !bodies.isEmpty else { continue }        // 缺席 = 锚点失效，让调用方红
+        out[name] = bodies.reduce(0) { $0 + engineDrawingsStructuralWrites($1) }
     }
     return out
 }
@@ -1602,7 +1684,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t4.log | tail -2 || e
 grep -E "Test Case .*uG4.* passed" /tmp/undo-t4.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1936 + 3 = 1939**（N-N3a / N-N3b / 扫描器自检 i）；XCTest = 基线 + 8。
+预期：swift-testing = **1936 + 2 = 1938**（N-N3a / N-N3b；扫描器自检已并入 XCTest 那边）；XCTest = 基线 + 8。
 
 - [ ] **Step 5: 提交**
 
@@ -2021,7 +2103,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2 || e
 grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1939 + 8 = 1947**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 10。
+预期：swift-testing = **1938 + 8 = 1946**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 10。
 
 - [ ] **Step 5: 提交**
 
@@ -2173,7 +2255,7 @@ struct DrawingUndoRouterTests {
     /// U-G7（D77）：路由的 `undo` / `redo` 必须带 `defer { syncSelectionByState(engine: engine) }`，
     /// 且**不得**出现 `commitPendingAndSelect`（交接 §10.1 第 2 条：恢复回来的线不自动选中）。
     func test_uG7_routerUndoRedoSyncSelectionAndNeverAutoSelect() throws {
-        let router = try squeezedSource(contractsDirForGuards
+        let router = try boundaryCode(contractsDirForGuards
             .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
         // ⚠️ `functionBody` 内部会自己拼上 `(`（needle = `func <name>(`），
         //    所以这里**只能传裸函数名** —— 传 "undo(engine" 会拼成 `func undo(engine(`，
@@ -2256,7 +2338,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2 || e
 grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1947 + 5 = 1952**；XCTest = 基线 + 13。
+预期：swift-testing = **1946 + 5 = 1951**；XCTest = 基线 + 13。
 
 - [ ] **Step 5: 提交**
 
@@ -2446,7 +2528,7 @@ echo "Catalyst 编译门：三条全过"
    （scheme 找不到、destination 不可用），只靠 ①② 仍会把「什么都没编译」读成绿。
    用**产物存在**而不是 `BUILD SUCCEEDED` 字样，理由同 G-6「判绿读实物，不读字样」。
 
-预期：swift-testing = **1952 + 1 = 1953**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
+预期：swift-testing = **1951 + 1 = 1952**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
 
 - [ ] **Step 5: 提交**
 
@@ -2676,7 +2758,8 @@ codex plan-R3 从 ↪ 方向报了这个缺陷，复核发现 ↩ 方向同样�
 - `applyUndoEntry(_:direction:)`（Task 3）→ Task 5 在其中加默认恢复 ✓
 - `performDrawingAction(_:)`（Task 5）→ 唯一调用点在 Task 5 的路由改动里 ✓
 - `functionBody(_:funcName:)` 在 Task 2 的守卫文件里定义 → Task 4/6 复用 ✓
-- `engineDrawingsWritesByFunction(_:functions:)`（Task 4 在 `SourceGuardScanner.swift` 定义）→ Task 4 的 U-G4 与 `SourceGuardScannerTests` 自检都用它 ✓
+- `functionBodies(_:funcName:)`（Task 2 定义，按**大括号配对**在**保留边界**的文本上切）→ Task 4 的 `engineDrawingsWritesByFunction`、Task 4/6 的守卫都用它；两者**同文件** ✓
+  （codex plan-R5 抓到的就是这里：原稿用 `func `（带空格）当函数体边界，而入参是空白已被删光的 squeezed 文本 ⇒ 边界永不匹配、函数体一路吃到文件末尾 ⇒ U-G1/U-G7 假绿、U-G4 无法满足。已核实为真并重写。）
 - 测试搭台 `DrawingPanelStyleSemanticsTests.drawModeWithSelected` / `.selectModeWithSelected` / `.mapper()` 均为同测试模块 internal `static` ✓
 
 **4. 事实核对（本计划写作期间实测，非推测）**：`TrainingEngine` / `DrawingSession` 均 `@Observable` ✓；`drawings` 是 `public private(set)`、setter 文件作用域 ✓；`deleteDrawing(at:)` 生产调用点 **0** ✓；`DrawingToolType` **不是** `CaseIterable`、`implemented == [.horizontal]` ✓；`PeriodDirection` 只有 `.toLarger`/`.toSmaller` ✓；`holdOrObserve(panel:)` 是不需要资金的推进路径 ✓；`injectDrawingsForTesting` 在 `#if DEBUG` extension（同文件）✓。
