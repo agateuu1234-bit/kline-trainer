@@ -1475,19 +1475,29 @@ extension TrainingEngine {
     // ⚠️ 存储属性 `drawingUndoEntry` 本身声明在类体里（`:30` 附近，extension 不能加存储属性）；
     //    本 extension 与它同文件，靠 `private` 的同文件可见性直接读写。
 
-    /// ④↩ 亮的条件（D78）：栈非空**且**栈顶尚未被撤销。
+    /// ④↩ 亮的条件（D78）：**不在复盘模式**、且栈非空**且**栈顶尚未被撤销。
     /// ⚠️ **与选中态无关、与几何无关** —— 撤销是会话级操作，不需要选中任何线，也不需要那条线
     ///    此刻看得见。这是本片唯一**不**共享 `selectionGeometryVisible` 的底栏判据，属**刻意不对称**，
     ///    后人不要"顺手统一"（D78 逐字）。
-    var canUndoDrawing: Bool { drawingUndoEntry.map { !$0.isUndone } ?? false }
+    /// ⚠️ 整支终审 Minor-2：`flow.mode != .review` 与动作入口 `undoDrawing()` 同口径（N-O，D34
+    ///    纵深防御）——**不要**以为「今天复盘态底栏被另一条与撤销无关的渲染条件挡住了」就把这句省掉。
+    ///    没有它，复盘模式下若栈非空，谓词会是 true 而动作恒 false = 按钮亮着但点了没反应，
+    ///    正是本仓反复强调「不 ship 未接线按钮」要防的形态；渲染条件一旦被改动就直接可达。
+    var canUndoDrawing: Bool { flow.mode != .review && (drawingUndoEntry.map { !$0.isUndone } ?? false) }
 
-    /// ⑤↪ 亮的条件（D78）：存在一个**已被撤销**的栈顶。理由同上，刻意不对称。
-    var canRedoDrawing: Bool { drawingUndoEntry?.isUndone ?? false }
+    /// ⑤↪ 亮的条件（D78）：**不在复盘模式**、且存在一个**已被撤销**的栈顶。理由同上，刻意不对称。
+    /// ⚠️ 同 `canUndoDrawing` 上方那条注释：纵深防御，不要因为渲染条件"挡住了"就省掉这句。
+    var canRedoDrawing: Bool { flow.mode != .review && (drawingUndoEntry?.isUndone ?? false) }
 
     /// 清空撤销栈。**两类调用者共用同一个函数**（语义都是"栈作废"）：
     ///   ① 会话状态**真翻转**时（D74 / D103，见 begin/end/cancel 三处）；
     ///   ② 有人绕过栈直接改了 `drawings`、让已存下标失准时（D79 第一层，Task 4）。
-    private func clearDrawingUndoStack() { drawingUndoEntry = nil }
+    /// ⚠️ 整支终审 Minor-3：第二句 `drawingActionScope?.aborted = true` 防的是「作废发生在一个
+    ///    **已打开的**『一次动作作用域』内部」这种情况——若不 abort，`performDrawingAction` 收尾时
+    ///    会无条件用它移位前捕获的 delta 建一条**新**记录，把这次作废原样推翻。今天不可达（生产代码
+    ///    里没有任何调用点会在作用域内部触发清栈），但这是根因作废（D79 第一层）与动作归并（D102）
+    ///    两层之间唯一一条没被组合验证过的缝，补一行堵死它。
+    private func clearDrawingUndoStack() { drawingUndoEntry = nil; drawingActionScope?.aborted = true }
 
     /// D102：把 `body` 里发生的写入合并成**一条**撤销记录。
     ///

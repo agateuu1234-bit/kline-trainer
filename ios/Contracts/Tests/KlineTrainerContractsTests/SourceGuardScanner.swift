@@ -296,6 +296,10 @@ func expectIdentifierNeverVended(_ identifier: String, inFiles files: [String],
 /// ⚠️ 下标扫描原先「扫到第一个 `]` 就停」，嵌套下标 `drawings[idx[k]] = x` 会在内层 `]` 处提前收尾，
 ///    `chars[j+1]` 落在外层 `]` 上（不是 `=`）→ 漏计；现改为**配对方括号**（`[` 加深、`]` 减深，
 ///    深度回零才是真正的下标收尾）。
+/// ⚠️ 整支终审②（Important-4）：上面那句「穷尽全部方法」漏了**整体赋值** `drawings = <表达式>`
+///    ——它才是最彻底打乱下标的那一种（`TrainingEngine.swift` 的 `init` 与
+///    `injectDrawingsForTesting` 各一处，`self.drawings = …` 这种带 `self.` 的写法同样要数到，
+///    因为 `self` 与 `.` 都不是标识符字符，不影响 `startsBare` 的前缀排除）。现已补上。
 func engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int {
     let chars = Array(squeezedCode)
     func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
@@ -326,6 +330,21 @@ func engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int {
             j += 1
         }
         // 循环退出时 j 已越过匹配的 `]`（嵌套下标也配对到最外层），紧接着看是不是赋值。
+        guard j < chars.count, chars[j] == "=" else { continue }
+        if j + 1 < chars.count, chars[j + 1] == "=" { continue }  // `==` 是比较不是赋值
+        count += 1
+    }
+    // ⚠️ 整支终审②（Important-4）：裸 `drawings` 紧跟 `=` —— **整体赋值**（`drawings = ds` /
+    //    `self.drawings = seededLossy.drawings`），穷尽性头注声称覆盖「全部打乱数组内容/顺序的方法」，
+    //    但整体赋值恰恰是最彻底打乱下标的那一种，漏了它 = 假穷尽。
+    //    排除法与上面 `drawings[` 那段判据同款：
+    //    · 前一个字符不是标识符字符（`startsBare` 已做，顺带排除 `reviewDrawings`）；
+    //    · `=` 后面不是第二个 `=`（排除 `==` 比较）。
+    //    与下标赋值 `drawings[i] = x` 互斥不双计：那种写法紧邻 `drawings` 的下一个字符是 `[`，
+    //    不是 `=`，两段判据各管各的字符位置，见 SourceGuardScannerTests「守卫自检 h」的双向自检。
+    let bareDrawings = Array("drawings")
+    for i in chars.indices where startsBare(at: i, bareDrawings) {
+        let j = i + bareDrawings.count
         guard j < chars.count, chars[j] == "=" else { continue }
         if j + 1 < chars.count, chars[j + 1] == "=" { continue }  // `==` 是比较不是赋值
         count += 1

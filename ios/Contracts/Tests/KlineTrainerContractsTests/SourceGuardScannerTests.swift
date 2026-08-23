@@ -256,5 +256,14 @@ struct SourceGuardScannerTests {
         // 紧邻的外层 `]` 而非 `=` 让赋值检查失败）——必须配对方括号才能算对。
         #expect(n("drawings[idx[k]] = z") == 1,
                 "嵌套下标必须配对方括号，不能扫到第一个 `]` 就当下标结束")
+
+        // 整支终审②（Important-4）新增：整体赋值 `drawings = <表达式>` 的双向自检。
+        #expect(n("drawings = x") == 1, "整体赋值必须被算作结构性写入 —— 它是最彻底打乱下标的那一种")
+        #expect(n("self.drawings = seededLossy.drawings") == 1,
+                "带 `self.` 前缀的整体赋值也必须数到（`self`/`.` 都不是标识符字符，不挡前缀排除）")
+        #expect(n("drawings == x") == 0, "`==` 是比较，不是赋值")
+        #expect(n("reviewDrawings = x") == 0, "reviewDrawings 是另一个属性，整体赋值判据不得跨对象误报")
+        // `drawings[i] = x` 已在上面断言为 1（非 2）：证明整体赋值判据与下标赋值判据不重叠、不双计
+        // ——下标写法紧邻 `drawings` 的下一个字符是 `[`，不是 `=`，两段判据各管各的字符位置。
     }
 }

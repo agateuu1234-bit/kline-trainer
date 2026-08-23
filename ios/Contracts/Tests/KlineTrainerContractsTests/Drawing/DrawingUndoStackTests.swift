@@ -300,8 +300,10 @@ struct DrawingUndoRoundTripTests {
         #expect(e.setDrawingLocked(id: "A", locked: true) == true)
         #expect(e.undoDrawing() == true)
         #expect(e.drawings[0].locked == false)
+        #expect(e.drawings[0].id == "A", "身份不能变（`DrawingObject.==` 排除 id，必须单独断言，同 roundTripStyle）")
         #expect(e.redoDrawing() == true)
         #expect(e.drawings[0].locked == true)
+        #expect(e.drawings[0].id == "A")
     }
 
     // ── N-I 保序（D25 / codex R25-high 专项，不可省） ──
@@ -360,6 +362,7 @@ struct DrawingUndoRoundTripTests {
         e.drawingSession.setDefaultStyle(green)
         #expect(e.redoDrawing() == true)
         #expect(e.drawings[0].locked == true)
+        #expect(e.drawings[0].id == "A", "身份不能变（`DrawingObject.==` 排除 id，必须单独断言，同 roundTripStyle）")
     }
 
     // ── N-K 深度 1 / N-N 空栈 / N-N4 不入栈 ──
@@ -420,6 +423,36 @@ struct DrawingUndoRoundTripTests {
         #expect(e.redoDrawing() == false)
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
+
+    /// 整支终审 Minor-2：两个动作入口 `undoDrawing()`/`redoDrawing()` 都有 `guard flow.mode != .review`，
+    /// 但 D78 的两个**置灰谓词** `canUndoDrawing`/`canRedoDrawing` 原先没有 —— 复盘模式下若栈非空，
+    /// 谓词会是 true、动作恒 false，就是「按钮亮着但点了没反应」那种要防的形态（今天不可达的唯一
+    /// 原因是整条底栏被一条与撤销无关的渲染条件挡住）。本条直接钉谓词本身，不依赖那条渲染条件。
+    @Test("D34 + Minor-2：复盘模式下即使栈非空，↩ / ↪ 两个置灰谓词也必须是 false（不止动作恒 false）")
+    func reviewModePredicatesAreFalseEvenWithNonEmptyStack() {
+        func stale(isUndone: Bool) -> DrawingUndoEntry {
+            DrawingUndoEntry(drawingsDelta: .replaced(before: makeStyledHLine(id: "A"),
+                                                      after: makeStyledHLine(id: "A", thickness: 3), at: 0),
+                             isUndone: isUndone)
+        }
+        // 对照组（防本条对「复盘门缺失」零判别力）：同样的栈项在**非**复盘引擎上必须真的让谓词亮起来，
+        // 否则下面复盘态的 false 断言证明不了任何事（可能谓词本来就恒 false）。
+        let normal = TrainingEngine.preview()
+        normal.injectDrawingsForTesting([makeStyledHLine(id: "A")])
+        normal.injectDrawingUndoEntryForTesting(stale(isUndone: false))
+        #expect(normal.canUndoDrawing == true, "对照：非复盘态下这条栈项确实会让 ↩ 亮起来")
+        normal.injectDrawingUndoEntryForTesting(stale(isUndone: true))
+        #expect(normal.canRedoDrawing == true, "对照：非复盘态下这条栈项确实会让 ↪ 亮起来")
+
+        let review = TrainingEngine.preview(mode: .review)
+        review.injectDrawingsForTesting([makeStyledHLine(id: "A")])
+        review.injectDrawingUndoEntryForTesting(stale(isUndone: false))
+        #expect(review.canUndoDrawing == false,
+                "复盘模式下 ↩ 谓词必须与动作入口同口径为 false —— 否则按钮亮着但点了没反应")
+        review.injectDrawingUndoEntryForTesting(stale(isUndone: true))
+        #expect(review.canRedoDrawing == false,
+                "复盘模式下 ↪ 谓词必须与动作入口同口径为 false —— 否则按钮亮着但点了没反应")
+    }
 }
 
 @Suite("1b-ii 撤销：陈旧栈项 fail-closed（D79 第二层）")
@@ -449,17 +482,34 @@ struct DrawingUndoStaleEntryTests {
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false, "fail-closed：整个栈必须作废")
     }
 
-    @Test("N-N2②：下标在界内但 id 对不上 → false、**那条无辜的线逐字段不变**、栈被作废")
+    /// ⚠️ 整支终审 Minor-1：本条（而不是另外五条）改用**三参构造器**，带上一个真的 `defaultDelta`
+    ///    （before/after 各取一个非出厂值），并在断言里加一句「本局默认逐字段未变」。
+    ///    理由——其余五条陈旧栈测试全用两参构造器种栈项（`defaultDelta` 因此恒为 `nil`），而
+    ///    `expectDrawingsUnchanged` 只查 `drawings` / `drawingsRevision`，**不查**
+    ///    `drawingSession.defaultStyle`。若将来有人把 `applyUndoEntry` 里
+    ///    `if let dd = entry.defaultDelta { drawingSession.setDefaultStyle(...) }` 那句
+    ///    挪到 switch 的 fail-closed guard **之前**，六条陈旧栈测试原本一条都不会变红——
+    ///    后果是一次被拒的撤销静默改写了「本局默认」并落盘，正是 D102 整套机制要防的那种
+    ///    「撤销掉的样式在下一笔新线上复活」。本条补上这道校验，堵住这个盲区。
+    @Test("N-N2②：下标在界内但 id 对不上 → false、**那条无辜的线逐字段不变**、栈被作废、**本局默认也逐字段不变**（Minor-1）")
     func identityMismatchFailsClosed() {
+        let staleDefaultDelta = DrawingDefaultStyleDelta(
+            before: { var s = DrawingDefaultStyle(); s.thickness = 2; s.colorToken = .blue; return s }(),
+            after: { var s = DrawingDefaultStyle(); s.thickness = 4; s.colorToken = .green; return s }())
         let e = Self.engineWithStaleEntry(
             .init(drawingsDelta: .replaced(before: makeStyledHLine(id: "GHOST"),
                                            after: makeStyledHLine(id: "GHOST", thickness: 3), at: 0),
-                  isUndone: false))
+                  isUndone: false, defaultDelta: staleDefaultDelta))
         let before = e.drawings, rev = e.drawingsRevision
+        let defaultBefore = e.drawingSession.defaultStyle
         #expect(e.undoDrawing() == false)
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
         #expect(e.drawings[0].id == "A", "下标 0 上那条无辜的 A 不许被改写")
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+        #expect(e.drawingSession.defaultStyle == defaultBefore, """
+                fail-closed 必须连本局默认都不碰（`DrawingDefaultStyle` 是 Equatable，== 即逐字段比较）\
+                —— 把恢复默认那句挪到校验之前就会静默写穿它
+                """)
     }
 
     @Test("N-N2③：insert 时 id 已存在（重复 id）→ false、条数不变、栈被作废")
@@ -562,6 +612,10 @@ struct DrawingUndoPairedRollbackTests {
 
     // ── ⭐ 交接 §10.1 点名的**必配回归**：一并回滚、一并重做 ──
 
+    /// ⚠️ 整支终审 Task 8（头注交叉引用）：本条的「改动前」值（thickness 1）与
+    ///    `DrawingDefaultStyle()` 出厂值相撞，对「undo 时把默认**重置成出厂值**」这类实现
+    ///    （而不是真的回滚到 before 快照）**没有判别力**——该族由 `pairedUndoSurvivesSaveAndResume`
+    ///    （用非出厂值 2/4，且落盘往返读回）兜住。**动这条测试之前先看那条。**
     @Test("⭐成对回滚：画线态改样式 → ↩ → 线与本局默认**双双**回到改动前")
     func undoRollsBackBothLineAndSessionDefault() {
         let e = Self.drawModeEngine()
@@ -696,10 +750,18 @@ struct DrawingUndoPairedRollbackTests {
         #expect(resumed.canUndoDrawing == false && resumed.canRedoDrawing == false)
     }
 
-    /// ⚠️ 本条对「删掉 `applyUndoEntry` 里恢复默认那一句」（U-M30c）**没有判别力** —— 那种实现下
-    ///    默认值全程没被 undo/redo 触碰、一直停在「改动后」的值，而本条期望的正是该值，恒绿。
-    ///    **该缺陷由 `pairedUndoSurvivesSaveAndResume` 捕获**（它期望的是「改动前」那一侧，
-    ///    且刻意取了非出厂值）。两条不是对称的强度，别被后人误读成两条都强。
+    /// ⚠️ 整支终审 Important-3（修复前的真实历史，别删——后人动这条测试之前先看这里）：
+    ///    本条原来起手用出厂值 1，且 ↩/↪ 之间没有任何中间态断言，对「删掉 `applyUndoEntry` 里
+    ///    恢复默认那一句」（U-M30c）乃至「把整套 D102 一次动作作用域机制（`defaultDelta` +
+    ///    `performDrawingAction`）全部删掉」都**零判别力**——根因是 **redo 方向上「正确回滚过
+    ///    再重做」与「default 从未被回滚过、一直停在改动后的值」终态恰好相同**（默认值全程只
+    ///    在最初那次 mutation 里被写过一次，undo/redo 有没有真的动过它，落盘往返测试只看
+    ///    终态是分不出来的）。
+    ///    **现已修复（两步都做了）**：① 起手值换成非出厂值（与 `pairedUndoSurvivesSaveAndResume`
+    ///    对齐：先用一次 no-op mutation 把本局默认从出厂值 1 挪到 2，再做真正的成对编辑）；
+    ///    ② 在 `undoDrawing()` 与 `redoDrawing()` 之间插一条中间态断言，把「↩ 之后线与默认
+    ///    真的都回到改动前那一侧」变成可观测——上面两种变异现在都会让这句中间态断言先红，
+    ///    不必等到落盘往返的终态才发现测试其实没在测任何东西。
     @Test("⭐落盘往返（redo）：↩ 后再 ↪ → 存档 → 续局 → 线与本局默认**双双**是改动后那一侧")
     func pairedRedoSurvivesSaveAndResume() async throws {
         let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
@@ -707,21 +769,36 @@ struct DrawingUndoPairedRollbackTests {
         coord.now = { 222 }
         let e = try await coord.startNewNormalSession()
         e.toggleDrawingMode()
-        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+        // ⚠️ 线起手是 2，**不是** 1 —— 与 `pairedUndoSurvivesSaveAndResume` 同款做法（1 恰好是
+        //    DrawingDefaultStyle() 出厂值，会让「改动前」与出厂值相撞，见上方头注）。
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 2, revealTick: 0,
                                                 period: e.upperPanel.period,
                                                 candleIndex: 0, price: 10)) == true)
         e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
         e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
 
-        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        // 先把本局默认从出厂值 1 挪到 2（线本来就是 2 → 这次 mutation 对线是 no-op）。
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 2 }, engine: e)
+        #expect(e.drawingSession.defaultStyle.thickness == 2, "前置：默认已离开出厂值 1")
+        #expect(e.drawings[0].thickness == 2, "前置：线对这次 mutation 是 no-op（本来就是 2）")
+
+        // 真正的成对编辑：默认 2→4、线 2→4。
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 4 }, engine: e)
+        #expect(e.drawings[0].thickness == 4 && e.drawingSession.defaultStyle.thickness == 4)
+
         #expect(e.undoDrawing() == true)
+        // ⭐整支评审 Important-3 的修复核心：把「↩ 真的回滚过」变成可观测。
+        //    缺这句，本条对「删掉恢复默认那一句」乃至「整套 D102 机制被删」都零判别力
+        //    ——redo 之后两种情况的终态恰好相同（见上方头注）。
+        #expect(e.drawings[0].thickness == 2 && e.drawingSession.defaultStyle.thickness == 2,
+                "↩ 之后两半必须都在「改动前」那一侧 —— 缺这句本条对 D102 零判别力（整支评审 Important-3）")
         #expect(e.redoDrawing() == true)
 
         try await coord.saveProgress(engine: e)
         await coord.endSession()
         let resumed = try #require(try await coord.resumePending())
-        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 3, "线必须是改动后那一侧")
-        #expect(resumed.drawingSession.defaultStyle.thickness == 3, "本局默认必须**同样**是改动后那一侧")
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 4, "线必须是改动后那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 4, "本局默认必须**同样**是改动后那一侧")
     }
 
     // ── ⭐ D101 不变量：默认分量过期必须丢掉（codex plan-R3 high）──
@@ -783,6 +860,40 @@ struct DrawingUndoPairedRollbackTests {
         #expect(e.undoDrawing() == true)
         #expect(e.drawings[0].colorToken == .orange, "必须回到**最初**那个色，不是回到紫")
         #expect(e.drawingSession.defaultStyle.colorToken == .orange, "默认也一并回到最初")
+    }
+
+    // ── 顺手补（整支评审强烈建议）：D102「一次动作作用域」两条 fail-closed 路径的回归网 ──
+    // ⚠️ 造台前必须先让栈非空，否则「作废」与「本来就空」分不开 —— 这正是本片已经踩过四次的那类
+    //    假绿（同一坑见上面 `lockedLineMeansDefaultOnlyChangeIsNotPushed` 的头注）。`drawModeEngine()`
+    //    内部 `toggleDrawingMode()` 会清空栈，故这里都补一次真实 `appendDrawing` 重新种一条栈顶。
+
+    @Test("顺手补：performDrawingAction 嵌套 → fail-closed，整个外层动作连同原栈顶一起作废")
+    func nestedActionScopeInvalidatesStack() {
+        let e = Self.drawModeEngine()
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 1, price: 60)) == true)
+        #expect(e.canUndoDrawing == true, "前置：栈必须先非空")
+        e.performDrawingAction { e.performDrawingAction { } }
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false,
+                "嵌套必须整栈作废，不是留着外层那条 inserted(B)")
+    }
+
+    @Test("顺手补：单作用域内二次 drawings 改动 → fail-closed，整个动作连同原栈顶一起作废")
+    func secondDrawingsMutationWithinOneScopeInvalidatesStack() {
+        let e = Self.drawModeEngine()
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 1, price: 60)) == true)
+        #expect(e.canUndoDrawing == true, "前置：栈必须先非空")
+        e.performDrawingAction {
+            _ = e.appendDrawing(makeStyledHLine(id: "C", revealTick: 0,
+                                                period: e.upperPanel.period, candleIndex: 2, price: 70))
+            _ = e.appendDrawing(makeStyledHLine(id: "D", revealTick: 0,
+                                                period: e.upperPanel.period, candleIndex: 3, price: 80))
+        }
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false,
+                "一个作用域内两次 drawings 改动必须整体作废，不是留着任何一条")
     }
 }
 

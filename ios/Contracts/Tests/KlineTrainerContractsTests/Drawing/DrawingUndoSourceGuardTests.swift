@@ -39,17 +39,46 @@ func boundaryCodeOf(_ path: String) throws -> String {
 func functionBodies(_ code: String, funcName: String) -> [String] {
     let chars = Array(code)
     func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
-    let kw = Array("func ")
+    // ⚠️ Important-4 补 `init` 分类：Swift 初始化器**没有** `func` 关键字，锚点必须换成裸 `init`
+    //    token 紧跟 `(`（中间允许空白）。两处额外排除，都是真实踩过的坑（实测 TrainingEngine.swift）：
+    //    · 排除 `initialDrawings` 这类以 init 开头的更长标识符——`init` 后面紧跟标识符字符就不算；
+    //    · 排除 `.init(` / `Type.init(`（隐式成员/显式构造**调用**，如默认参数值 `= .init()`）——
+    //      它们不是声明，前一个字符是 `.`；若不排除，扫描器会把它当成第二条 init 声明，
+    //      从那个 `(` 一路找到**下一个任意** `{`（不管是不是它的），切出一段完全不相干的"函数体"，
+    //      污染 `init` 的写入计数、也会让逐函数之和对不上全文件总数。
+    let isInit = (funcName == "init")
+    let kw = Array(isInit ? "init" : "func ")
     var out: [String] = []
     var i = 0
     while i + kw.count <= chars.count {
         guard Array(chars[i ..< i + kw.count]) == kw else { i += 1; continue }
-        if i > 0, isIdentChar(chars[i - 1]) { i += 1; continue }   // `func` 必须是独立 token
+        if i > 0, isIdentChar(chars[i - 1]) { i += 1; continue }   // `func`/`init` 必须是独立 token
+        if isInit, i > 0, chars[i - 1] == "." { i += 1; continue }        // `.init(` 调用，不是声明
         var j = i + kw.count
+        if isInit {
+            if j < chars.count, isIdentChar(chars[j]) { i += 1; continue }  // `initialDrawings` 这类要排除
+        } else {
+            var name = ""
+            while j < chars.count, isIdentChar(chars[j]) { name.append(chars[j]); j += 1 }
+            guard name == funcName else { i += 1; continue }
+        }
         while j < chars.count, chars[j] == " " { j += 1 }
-        var name = ""
-        while j < chars.count, isIdentChar(chars[j]) { name.append(chars[j]); j += 1 }
-        guard name == funcName else { i += 1; continue }
+        if isInit {
+            guard j < chars.count, chars[j] == "(" else { i += 1; continue }  // 必须紧跟参数列表
+        }
+        // ⚠️ 必须先**配对圆括号**跳过整段参数列表，再去找函数体的 `{`（实测 TrainingEngine.swift
+        //    的 `init` 踩过：参数列表里有个闭包默认值 `= { onTick in RealFrameDriver(onTick: onTick) }`，
+        //    这段默认值自己就带一对 `{ }`。原判据「见第一个 `{` 就当函数体开头」会在这里提前收尾，
+        //    把闭包默认值那几个字符错当成整个 init 的"函数体"，真身体一个字都进不来）。
+        //    只数圆括号、不理会中间任何 `{`/`}`，配对到深度回零即跳过整个参数列表。
+        if j < chars.count, chars[j] == "(" {
+            var pdepth = 0
+            while j < chars.count {
+                if chars[j] == "(" { pdepth += 1 }
+                else if chars[j] == ")" { pdepth -= 1; if pdepth == 0 { j += 1; break } }
+                j += 1
+            }
+        }
         while j < chars.count, chars[j] != "{" { j += 1 }          // 走到函数体开头
         guard j < chars.count else { break }
         var depth = 0, k = j, body = ""
@@ -247,7 +276,7 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
     }
 
     /// U-G4（D79 第一层，**穷尽性判据**）：`TrainingEngine.swift` 里 `drawings` 的结构性写入点，
-    /// **全部**落在下表这 6 个具名函数里，且每个函数的处数与表一致；表外**零处**。
+    /// **全部**落在下表这 7 个具名函数里，且每个函数的处数与表一致；表外**零处**。
     ///
     /// ⚠️ 这条比既有 L12b（只数总数）强一档：总数对不上会红，但「把一处写入从 appendDrawing
     ///    挪到一个新的私有 helper 里」总数不变、L12b 全绿，而那个 helper 就是一条**没对栈表过态**
@@ -265,7 +294,10 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
             "updateDrawingStyle":      1,
             "setDrawingLocked":        1,
             "applyUndoEntry":          3,   // remove + insert + 下标赋值
-            "injectDrawingsForTesting": 0,  // `drawings = ds` 是整体替换，不计入结构性写入
+            // 整支终审②（Important-4）：整体赋值 `drawings = <表达式>` 现已计入结构性写入
+            // （旧注释「不计入结构性写入」是本次要修的缺陷本身，不是既有事实）。
+            "init":                     1,  // `self.drawings = seededLossy.drawings`（resume 重新种子）
+            "injectDrawingsForTesting": 1,  // `drawings = ds`（测试专用换血口，同时是 U-N3a 的靶子）
         ]
         let byFunc = engineDrawingsWritesByFunction(code, functions: Array(expected.keys))
         for (name, want) in expected {
@@ -280,7 +312,7 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
                        新增写入面必须先归入 D79 第一层那张表（入栈 / 作废 / 都不做，三选一），
                        再回来改本守卫 —— 不许直接改数字。
                        """)
-        XCTAssertEqual(total, 8, "权威分类表的合计是 8（见计划 Task 4 那张表）")
+        XCTAssertEqual(total, 10, "权威分类表的合计是 10（见计划 Task 4 那张表 + 整支终审②补的整体赋值 2 处）")
     }
 
     /// U-G4 的**双向自检**：合成一段「写入落在表外函数里」的样本必须被判出来。
@@ -307,6 +339,29 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
 
         XCTAssertNil(engineDrawingsWritesByFunction(good, functions: ["noSuchFunc"])["noSuchFunc"],
                      "锚点失效必须返回 nil（缺键），不得静默返回 0")
+    }
+
+    /// U-G4 的 `init` 分类双向自检（整支终审②/Important-4）：`init` 没有 `func` 关键字，
+    /// 锚点换成裸 `init(`；必须排除 `.init(` 调用与 `initialFoo` 这类更长标识符，否则会把
+    /// 一段完全不相干的"函数体"错当成 init 的写入面（详见 `functionBodies` 里的承重注释）。
+    func test_uG4_initClassification_isNotVacuous() {
+        let real = codeTextPreservingBoundaries("""
+            init(flow: X, initialPosition: PositionManager = .init()) {
+                self.drawings = seededLossy.drawings
+            }
+            """)
+        XCTAssertEqual(engineDrawingsWritesByFunction(real, functions: ["init"])["init"], 1,
+            "真实 init 的整体赋值必须被数到，`.init()` 默认值与 `initialPosition` 参数名不得干扰锚点")
+
+        // 只有 `.init(` 调用、没有真实声明 → `init` 这个键必须锚点失效（缺席），不能凭空数出内容。
+        let onlyCall = codeTextPreservingBoundaries("""
+            func make() -> PositionManager {
+                let p: PositionManager = .init()
+                return p
+            }
+            """)
+        XCTAssertNil(engineDrawingsWritesByFunction(onlyCall, functions: ["init"])["init"],
+            "`.init(` 是调用不是声明，不得被误判成 init 函数体（否则会把 `make()` 的内容错记到 init 头上）")
     }
 
     /// U-G5（D102）：`performDrawingAction` 在 `Sources/` 中的调用点**恰好 1 处**，且在

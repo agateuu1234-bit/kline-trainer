@@ -1011,7 +1011,7 @@ struct TrainingEngineDrawingSessionTests {
     /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
     ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
     ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
-    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 8 处（穷尽性，多一处即红）")
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 10 处（穷尽性，多一处即红）")
     @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
         let code = try squeezedSource(trainingEnginePath)
         let n = engineDrawingsStructuralWrites(code)
@@ -1025,8 +1025,15 @@ struct TrainingEngineDrawingSessionTests {
         // ⚠️ 原注释曾预告"届时改为 6"——那是只数了 `insert(` 那一处的低估；D76 明令 applyUndoEntry
         //    不得复用四个写入 API，必然要**新增三处**自己的 remove/insert/subscript-assign，
         //    而不是复用已有的 5 处。实测 n=8 与三处新增逐一对得上号，故改基线为 8（非判据放宽）。
-        #expect(n == 8, """
-            drawings 结构性写入点应为 8，实际 \(n)。
+        // ⚠️ 整支终审②（Important-4）：判据补上**整体赋值** `drawings = <表达式>` 后，8 → 10——
+        //    新数到的两处**不是**放宽判据，是原判据的头注本就声称「穷尽全部会打乱数组内容/顺序的
+        //    方法」却漏了最彻底的那一种：
+        //   self.drawings = seededLossy.drawings ×1  → init（resume 场景重新种子）
+        //   drawings = ds                         ×1  → injectDrawingsForTesting（测试专用换血口，
+        //                                                会让栈里已存的下标必然错位，故它同时是 U-N3a 的靶子）
+        //    **不是**「整体赋值不计入」——那句旧注释本身就是本次要修的缺陷，别再抄。
+        #expect(n == 10, """
+            drawings 结构性写入点应为 10，实际 \(n)。
             多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
             少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
             """)
