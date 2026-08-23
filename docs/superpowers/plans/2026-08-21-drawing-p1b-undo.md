@@ -1906,15 +1906,32 @@ struct DrawingUndoPairedRollbackTests {
         coord.now = { 222 }
         let e = try await coord.startNewNormalSession()
         e.toggleDrawingMode()
-        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+        // ⚠️ 线起手是 2，**不是** 1 —— 见下方 resumed 断言旁的承重注释：1 恰好是
+        //    DrawingDefaultStyle() 的出厂值，用它会让这条测试对「读回被整个关掉」零判别力
+        //    （修复轮 1 实测踩过：U-M30b/U-M30c 曾各有一条方向巧合绿过）。
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 2, revealTick: 0,
                                                 period: e.upperPanel.period,
                                                 candleIndex: 0, price: 10)) == true)
         e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
         e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
 
-        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
-        #expect(e.drawings[0].thickness == 3 && e.drawingSession.defaultStyle.thickness == 3)
+        // 先把本局默认从出厂值 1 挪到 2（线本来就是 2 → 这次 mutation 对线是 no-op，
+        // 按 D101 不产生新的 drawings 入栈；下面确认这一点符合预期）。
+        let topShapeBeforeNoop = DrawingUndoPushTests.topShape(e)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 2 }, engine: e)
+        #expect(e.drawingSession.defaultStyle.thickness == 2, "前置：默认已离开出厂值 1")
+        #expect(e.drawings[0].thickness == 2, "前置：线对这次 mutation 是 no-op（本来就是 2）")
+        // D101：drawings 没变 → 不产生新记录；栈顶形状不得因为这次「只改默认」的 no-op 而改变。
+        #expect(DrawingUndoPushTests.topShape(e) == topShapeBeforeNoop, "no-op 动作不该改变栈顶形状")
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
+                "no-op 动作不该给栈顶带上 defaultDelta（无论栈顶是否存在）")
+
+        // 真正的成对编辑：默认 2→4、线 2→4。
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 4 }, engine: e)
+        #expect(e.drawings[0].thickness == 4 && e.drawingSession.defaultStyle.thickness == 4)
         #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 2 && e.drawingSession.defaultStyle.thickness == 2,
+                "↩ 之后线与默认都必须回到「改动前」= 2（不是出厂值 1）")
 
         try await coord.saveProgress(engine: e)
         await coord.endSession()
@@ -1923,12 +1940,23 @@ struct DrawingUndoPairedRollbackTests {
         // ⭐ 两半必须落在**同一侧**。只测 revision +1 证明不了这一条：
         //    autosave 的排序 / 合并一旦出问题，完全可能把「已回滚的线」和「没回滚的默认」一起存下去，
         //    于是被撤销掉的样式在续训之后、在下一笔新画的线上复活 —— 正是 D102 要防的那个高代价形态。
-        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 1, "线必须是改动前那一侧")
-        #expect(resumed.drawingSession.defaultStyle.thickness == 1, "本局默认必须**同样**是改动前那一侧")
+        // ⚠️ **这里刻意不用 1**：1 是 DrawingDefaultStyle() 的出厂值 —— 如果「读回」那一侧
+        //    （`TrainingSessionCoordinator` 里 `pending.drawingDefaultStyle` 那句 `setDefaultStyle`）
+        //    被整个关掉，续局引擎的默认样式会静默回落到出厂值 1，而「改动前」这个数字本身如果也
+        //    恰好是 1，这条断言就会对「读回被关掉」这类缺陷**零判别力**（修复轮 1 实测发现的真问题：
+        //    U-M30b/U-M30c 曾各让本条巧合放行一次）。改成 2 之后，出厂值 1 ≠ 期望值 2，
+        //    读回被关掉时会如实变红。
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 2, "线必须是改动前那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 2,
+                "本局默认必须**同样**是改动前那一侧（非出厂值 1，见上方注释）")
         // 顺带钉住验收 #17：撤销栈不跨局（新引擎的栈按定义为空）
         #expect(resumed.canUndoDrawing == false && resumed.canRedoDrawing == false)
     }
 
+    /// ⚠️ 本条对「删掉 `applyUndoEntry` 里恢复默认那一句」（U-M30c）**没有判别力** —— 那种实现下
+    ///    默认值全程没被 undo/redo 触碰、一直停在「改动后」的值，而本条期望的正是该值，恒绿。
+    ///    **该缺陷由 `pairedUndoSurvivesSaveAndResume` 捕获**（它期望的是「改动前」那一侧，
+    ///    且刻意取了非出厂值）。两条不是对称的强度，别被后人误读成两条都强。
     @Test("⭐落盘往返（redo）：↩ 后再 ↪ → 存档 → 续局 → 线与本局默认**双双**是改动后那一侧")
     func pairedRedoSurvivesSaveAndResume() async throws {
         let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
@@ -2290,8 +2318,8 @@ git commit -m "feat(drawing): D102 一次动作作用域 —— 画线态改样�
 | U-M29b | `if defaultChanged { drawingUndoEntry?.defaultDelta = nil }` 整行删掉 | **过期默认分量覆盖用户新选择**（codex plan-R3） | `staleDefaultDeltaDoesNotClobberOnRedo` + `staleDefaultDeltaDoesNotClobberOnUndo` |
 | U-M29c | 把那行改成 codex 原处方（`if entry.isUndone { clearDrawingUndoStack() }`） | 只堵了 ↪ 那一半 | `staleDefaultDeltaDoesNotClobberOnUndo`（**↪ 那条会绿** —— 这正是"处方需要加强"的证据，报告里点明） |
 | U-M30 | `applyUndoEntry` 里把 `dd.before` / `dd.after` 对调 | 方向反了 | `undoRollsBackBothLineAndSessionDefault` + `redoRestoresBothLineAndSessionDefault` |
-| U-M30b | 把 `TrainingSessionCoordinator.swift:331` 那句 `if let s = pending.drawingDefaultStyle { …setDefaultStyle(s) }` 注释掉（**关掉默认那一侧的读回**） | 落盘往返：两半落在**不同侧** | `pairedUndoSurvivesSaveAndResume` + `pairedRedoSurvivesSaveAndResume`（**引擎内的成对回滚三条仍全绿** —— 这正是 codex plan-R9 要的证据：只测 revision 证明不了落盘一致） |
-| U-M30c | 把 `applyUndoEntry` 里恢复默认那一句删掉（**关掉默认那一侧的写出**） | 同上，另一端 | 同上两条 + `undoRollsBackBothLineAndSessionDefault` |
+| U-M30b | 把 `TrainingSessionCoordinator.swift:331` 那句 `if let s = pending.drawingDefaultStyle { …setDefaultStyle(s) }` 注释掉（**关掉默认那一侧的读回**） | 落盘往返：两半落在**不同侧** | **修复轮 1 后**（`pairedUndoSurvivesSaveAndResume` 改用非出厂值 2 起手）：`pairedUndoSurvivesSaveAndResume` + `pairedRedoSurvivesSaveAndResume` **两条都红**（引擎内的成对回滚三条仍全绿 —— 这正是 codex plan-R9 要的证据：只测 revision 证明不了落盘一致）。⚠️ **修复轮 1 之前**这条曾用 `thickness == 1` 断言，恰好等于 `DrawingDefaultStyle()` 出厂值，`pairedUndoSurvivesSaveAndResume` 那一侧对本变异是巧合绿——该缺陷已堵住，改用非出厂值 2 后两条都能捕获。 |
+| U-M30c | 把 `applyUndoEntry` 里恢复默认那一句删掉（**关掉默认那一侧的写出**） | 同上，另一端 | `pairedUndoSurvivesSaveAndResume` + `undoRollsBackBothLineAndSessionDefault` 红；**`pairedRedoSurvivesSaveAndResume` 仍绿**（已接受的机制内在盲区——该实现下默认值全程未被 undo/redo 触碰、一直停在"改动后"的值，而这条期望的正是该值，见该测试上方承重注释；缺陷由 `pairedUndoSurvivesSaveAndResume` 单独捕获，两条不对称）。 |
 
 ---
 
