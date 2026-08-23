@@ -1,6 +1,7 @@
 // ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingUndoStackTests.swift
 // Spec: docs/superpowers/specs/2026-08-11-drawing-tools-P1b-1b-ii-lock-undo-design.md §2
 // 计划新增决策：D101（入栈条件）/ D102（一次动作作用域）/ D103（清栈绑真翻转）
+import CoreGraphics        // CGRect（periodSwitchKeepsStack 的 recordRenderBounds 需要）
 import Foundation
 import Testing
 @testable import KlineTrainerContracts
@@ -177,9 +178,29 @@ struct DrawingUndoSessionLifecycleTests {
 
     @Test("N-Q3 切周期必须**保留**栈 —— 切周期不结束会话（spec §2.1 的 ⛔ 段）")
     func periodSwitchKeepsStack() {
-        let e = Self.drawingModeWithNonEmptyStack()
+        // ⚠️ **必须**用 `engineMultiPeriod()`，**不能**用 `TrainingEngine.preview()`（fix-1 修复）：
+        //    preview 的 allCandles 只有 .m3/.m60/.daily（**没有 .m15**），当前组合 (.m60,.daily)
+        //    无论 toSmaller（→ 需 .m15）还是 toLarger（→ 需 .weekly）都会撞 switchPeriodCombo 的
+        //    「target 周期无数据 → no-op」守卫 → 切周期请求被挡回、什么都没发生，那三条断言在
+        //    「什么都没做」的情况下当然全过 —— 证明的不是「切周期不清栈」，而是「什么都不做时状态
+        //    不变」，测试恒真 = 假守卫，U-M9（切周期末尾塞一句无条件清栈）测不出来。
+        //    同一个坑已有先例：`TrainingEngineDrawingSessionTests.swift:76-80`。
+        //    `engineMultiPeriod()` 备了 .m15/.m60/.daily，(.m60,.daily) --toSmaller--> (.m15,.m60)
+        //    是能真切成功的。
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(e.canUndoDrawing == true, "前置：栈必须非空")
         let topBefore = e.drawingUndoEntryForTesting?.isUndone
-        e.switchPeriodCombo(direction: .toLarger)   // PeriodDirection 只有 .toLarger / .toSmaller
+
+        e.switchPeriodCombo(direction: .toSmaller)   // (.m60,.daily) → (.m15,.m60) 真的能切成功
+
+        #expect(e.upperPanel.period == .m15, "周期真的变了（防假绿：不是撞 no-op 守卫）")
+        #expect(e.lowerPanel.period == .m60)
         #expect(e.drawingSession.drawingModeActive == true,
                 "切周期后必须仍在画线模式（restoreDrawingSessionAfterPeriodChange 刻意保留会话）")
         #expect(e.canUndoDrawing == true, "同一个会话没结束 → 撤销记录必须留着")
