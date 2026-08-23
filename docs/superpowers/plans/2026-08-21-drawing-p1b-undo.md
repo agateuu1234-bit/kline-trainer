@@ -1169,13 +1169,51 @@ struct DrawingUndoStaleEntryTests {
         try expectEngineInternalOnly("redoDrawing()")
     }
 
-    /// U-G3：撤销栈的两个测试钩子在 `Sources/` 中调用点**恒为 0**。
-    /// 生产代码一旦调用 `injectDrawingUndoEntryForTesting`，就等于开了一条绕过全部入栈条件的后门。
-    func test_uG3_testOnlyHooksHaveZeroProductionCallSites() throws {
-        for hook in ["injectDrawingUndoEntryForTesting(", "drawingUndoEntryForTesting"] {
-            let sites = try callSiteCount(hook).filter { !$0.file.hasSuffix("/TrainingEngine.swift") }
-            XCTAssertTrue(sites.isEmpty, "\(hook) 在生产代码里被调用了：\(sites)")
+    /// U-G3：撤销栈的两个测试钩子**不得有任何生产使用**。
+    ///
+    /// ⚠️ **必须连 `TrainingEngine.swift` 一起扫**（codex plan-R4，**已核实为真**）：
+    ///    钩子的声明**和引擎侧全部撤销实现在同一个文件里**。把整个文件过滤掉 ⇒
+    ///    `undoDrawing` / `applyUndoEntry` 里真冒出一句 `injectDrawingUndoEntryForTesting(...)`
+    ///    会被整段丢掉、守卫照样全绿 —— 而那种调用绕过快照与全部前置校验，能种一条**任意的**
+    ///    陈旧栈项，随后删掉或改写**另一条**线（D79 要防的崩溃级 / 静默改写那一族）。
+    ///    **正确判据**：引擎之外零处；`TrainingEngine.swift` 里**恰好等于"声明本身"的处数**（各 1）。
+    ///    多出一处 = 引擎自己在用它。
+    func test_uG3_testOnlyHooksHaveNoProductionUse() throws {
+        // ── 引擎之外：两个钩子一处都不许出现 ──
+        for hook in ["injectDrawingUndoEntryForTesting", "drawingUndoEntryForTesting"] {
+            let outside = try filesMentioning(hook).filter { !$0.hasSuffix("/TrainingEngine.swift") }
+            XCTAssertTrue(outside.isEmpty, "\(hook) 被引擎之外的生产文件提到：\(outside)")
         }
+        // ── 引擎之内（R4 补上的关键那一半）──
+        // 用**裸标识符**计数而不是子串计数：`injectDrawingUndoEntryForTesting` 里含的是
+        // `DrawingUndoEntryForTesting`（大写 D），与属性名 `drawingUndoEntryForTesting`（小写 d）
+        // 大小写不同、互不误计；属性体里的 `drawingUndoEntry` 也不会被算成它。
+        let raw = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
+        let code = codeTextPreservingBoundaries(raw)      // 剥注释/字面量，但**保留标识符边界**
+        XCTAssertEqual(bareIdentifierReferences(inCode: code,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+            "应恰好 1 处 = `func injectDrawingUndoEntryForTesting(` 那行声明。多出来的就是引擎自己调了它。")
+        XCTAssertEqual(bareIdentifierReferences(inCode: code,
+                                                identifier: "drawingUndoEntryForTesting"), 1,
+            "应恰好 1 处 = 那个只读计算属性的声明。")
+    }
+
+    /// U-G3 的**反向自检**（codex plan-R4 点名要的）：合成一段「同文件里的生产调用」，
+    /// 判据必须数到 2（声明 + 那次非法调用）—— 这正是修正前那版守卫的盲区。
+    func test_uG3_scanner_catches_same_file_production_call() {
+        let illicit = codeTextPreservingBoundaries("""
+            func undoDrawing() -> Bool { injectDrawingUndoEntryForTesting(nil); return false }
+            func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
+            """)
+        XCTAssertEqual(bareIdentifierReferences(inCode: illicit,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 2,
+            "同文件里的生产调用必须被数到 —— 数成 1 说明又退回 R4 报的那个盲区了")
+        let clean = codeTextPreservingBoundaries("""
+            func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
+            """)
+        XCTAssertEqual(bareIdentifierReferences(inCode: clean,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+            "只有声明的样本必须数成 1（否则判据本身是坏的）")
     }
 
     /// U-G2 / U-G3 的**双向自检**。
@@ -1293,7 +1331,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t3.log | tail -2 || e
 grep -E "Test Case .*(uG2|uG3).* passed" /tmp/undo-t3.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1922 + 14 = 1936**；XCTest = 基线 + 5。
+预期：swift-testing = **1922 + 14 = 1936**；XCTest = 基线 + 6。
 
 - [ ] **Step 5: 提交**
 
@@ -1316,6 +1354,7 @@ git commit -m "feat(drawing): undoDrawing/redoDrawing + applyUndoEntry 三道前
 | U-M16 | `redo` 分支的 `target = after` 改成 `target = drawings[index]` | redo 从当前态重算 | `redoUsesAfterSnapshotNotCurrentDefault` |
 | U-M17 | `undoDrawing` 里补一句 `recordDrawingUndoDelta(...)` | 撤销自己入栈 | `undoDoesNotPushItself` |
 | U-M18 | `guard flow.mode != .review` 删掉 | 复盘门 | `reviewModeRejectsUndoRedo` |
+| U-M18b | 在 `undoDrawing` 里加一句 `injectDrawingUndoEntryForTesting(nil)`（**同文件**的非法生产调用） | R4 报的那个守卫盲区 | `test_uG3_testOnlyHooksHaveNoProductionUse`（修正前那版守卫**会全绿** —— 报告里点明这就是 R4 的价值） |
 | U-M19 | `drawingsRevision += 1` 删掉 | autosave 的输入没了 | `roundTripAppend` / `roundTripDelete` |
 
 ---
@@ -1563,7 +1602,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t4.log | tail -2 || e
 grep -E "Test Case .*uG4.* passed" /tmp/undo-t4.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1936 + 3 = 1939**（N-N3a / N-N3b / 扫描器自检 i）；XCTest = 基线 + 7。
+预期：swift-testing = **1936 + 3 = 1939**（N-N3a / N-N3b / 扫描器自检 i）；XCTest = 基线 + 8。
 
 - [ ] **Step 5: 提交**
 
@@ -1982,7 +2021,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2 || e
 grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1939 + 8 = 1947**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 9。
+预期：swift-testing = **1939 + 8 = 1947**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 10。
 
 - [ ] **Step 5: 提交**
 
@@ -2217,7 +2256,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2 || e
 grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1947 + 5 = 1952**；XCTest = 基线 + 12。
+预期：swift-testing = **1947 + 5 = 1952**；XCTest = 基线 + 13。
 
 - [ ] **Step 5: 提交**
 
