@@ -111,14 +111,24 @@ echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-p
 
 ```bash
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-gate.log | tail -3      # swift-testing 汇总
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-gate.log | tail -2   # XCTest 执行量
-grep -E "Test Case .*<本 task 新增的 XCTest 名>.* passed" /tmp/undo-gate.log    # 点名确认它真跑了
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-gate.log | tail -2 || exit 1   # XCTest 执行量
+grep -E "Test Case .*<本 task 新增的 XCTest 名>.* passed" /tmp/undo-gate.log || exit 1    # 点名确认它真跑了
 ```
 
 ⚠️ **基线日志不许再用 `| tail -N` 落盘**（本计划起点基线就是这么丢掉 XCTest 那一行的）——一律 `tee` 全量再 `tail` 显示。
 报告里**必须同时记录两个数字**（swift-testing 条数 / XCTest 条数）。
+⚠️ **上面每一条 grep 都必须带 `|| exit 1`**（本计划自查扩出来的整族，与 codex plan-R2 那条 high 同源）：
+不带的话，「XCTest 一条都没跑」与「跑了且全过」在脚本里长得**一模一样** —— 那行 grep 无输出、
+退出码 1，而没人读它 ⇒ 判绿照样通过。这正是本计划最怕的假绿形态。
 
 - ⭐ **多门连跑的块，每门单独 `|| exit 1`**，不许一门红了继续跑下一门然后报绿。
+- ⭐⭐ **`grep -c` 绝不能直接当门**（codex plan-R2 high，**已核实为真**）：计数为 0 时 `grep` 自己的
+  退出码是 **1**，拿它当判据方向正好反 —— 「日志干净」被读成失败、「日志有错」被读成通过。
+  一律写成 `test "$(grep -c '<pat>' <log>)" -eq 0 || exit 1`，把**数值比较**和**退出码**分开。
+- ⭐⭐ **`xcodebuild` 那一行必须自己带 `|| exit 1`**：`set -o pipefail` 只保证管道**传递**退出码，
+  不会让脚本停下来。且编译失败时**不一定**打出 `error:` 字样（scheme 找不到 / destination 不可用
+  都可能一行都不打）—— 只数 `error:` 会把这类失败整个读成绿。**退出码 + 日志内容 + 产物存在**
+  三条要各断各的，缺一条就有一种失败形态从门底下溜过去。
 - ⭐ **每个 task 收尾必须 `git status --short` 确认工作区干净**（输出为空）。非空 = 有改动没提交（脏树假绿）或变异没复原干净，**两者都必须当场查清再继续**。
 - ⭐ **改了 `Sources/` 就要重跑门，哪怕「只改注释」**。
 
@@ -570,7 +580,7 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t1.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t1.log | tail -2
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t1.log | tail -2 || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing 条数 = **1907 + 9 = 1916**（本 task 新增 9 条 `@Test`）；XCTest 条数**回填到本计划的基线行**（预期仍是 288，本 task 不加 XCTest）；`git status --short` 输出为空以外的内容只应是本 task 改的文件。
@@ -830,8 +840,8 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t2.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t2.log | tail -2
-grep -E "Test Case .*uG1.* passed" /tmp/undo-t2.log
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t2.log | tail -2 || exit 1
+grep -E "Test Case .*uG1.* passed" /tmp/undo-t2.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1916 + 6 = 1922**；XCTest = **基线 + 2**（U-G1 与它的自检）。
@@ -1256,8 +1266,8 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t3.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t3.log | tail -2
-grep -E "Test Case .*(uG2|uG3).* passed" /tmp/undo-t3.log
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t3.log | tail -2 || exit 1
+grep -E "Test Case .*(uG2|uG3).* passed" /tmp/undo-t3.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1922 + 14 = 1936**；XCTest = 基线 + 5。
@@ -1526,8 +1536,8 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t4.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t4.log | tail -2
-grep -E "Test Case .*uG4.* passed" /tmp/undo-t4.log
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t4.log | tail -2 || exit 1
+grep -E "Test Case .*uG4.* passed" /tmp/undo-t4.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1936 + 3 = 1939**（N-N3a / N-N3b / 扫描器自检 i）；XCTest = 基线 + 7。
@@ -1895,8 +1905,8 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t5.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2
-grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2 || exit 1
+grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1939 + 6 = 1945**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 9。
@@ -2128,8 +2138,8 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t6.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2
-grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2 || exit 1
+grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log || exit 1
 git -C "$repo" status --short
 ```
 预期：swift-testing = **1945 + 5 = 1950**；XCTest = 基线 + 12。
@@ -2297,17 +2307,32 @@ set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
 cd ios/Contracts && swift test 2>&1 | tee /tmp/undo-t7.log | tail -3 || exit 1
-grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t7.log | tail -2
+grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t7.log | tail -2 || exit 1
 ```
 ⚠️ **host 绿不代表 Catalyst 编译得过** —— `DrawingModeBar.swift` 与 `DrawingBottomBarHeightTests.swift` 都是 UIKit-gated，host 上**根本不编译**。本步必须**额外**跑一次 Catalyst 编译（不必跑全量测试，只要编译过）：
 
 ```bash
-rm -rf ~/Library/Developer/Xcode/DerivedData/KlineTrainerContracts-*
+set -o pipefail                                   # ⚠️ 本块必须自己再设一次（上一个块的设置不跨块）
+rm -rf /tmp/undo-t7-dd                            # 冷构建：只清本次专用的 DerivedData，不动共享那份
 xcodebuild build-for-testing -scheme KlineTrainerContracts-Package \
-  -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tee /tmp/undo-t7-cat.log | tail -5
-grep -c "error:" /tmp/undo-t7-cat.log        # 必须是 0
+  -destination 'platform=macOS,variant=Mac Catalyst' \
+  -derivedDataPath /tmp/undo-t7-dd 2>&1 | tee /tmp/undo-t7-cat.log | tail -5 || exit 1   # ① 退出码
+test "$(grep -c 'error:' /tmp/undo-t7-cat.log)" -eq 0 || { echo "GATE FAIL: 日志里有 error:"; exit 1; }   # ② 日志内容
+ls -d /tmp/undo-t7-dd/Build/Products/Debug-maccatalyst/*.xctest >/dev/null 2>&1 \
+  || { echo "GATE FAIL: 没产出任何 .xctest bundle（等于什么都没编译）"; exit 1; }                        # ③ 产物存在
+echo "Catalyst 编译门：三条全过"
 ```
-预期：swift-testing = **1950 + 1 = 1951**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst `error:` 计数 = 0。
+
+⚠️ **三条各断各的，一条都不能省**（codex plan-R2 high，**已核实为真**）：
+① `xcodebuild` 自己的退出码 —— `set -o pipefail` 只**传递**退出码、不会让脚本停下来，
+   所以那一行必须自带 `|| exit 1`，否则编译失败后照样往下跑；
+② 日志零条 `error:` —— **必须用 `test "$(grep -c …)" -eq 0` 包起来**，
+   直接拿 `grep -c` 当门方向是反的（计数 0 时 grep 退出码为 1）；
+③ 真的产出了 `.xctest` bundle —— 编译失败时**可能一行 `error:` 都不打**
+   （scheme 找不到、destination 不可用），只靠 ①② 仍会把「什么都没编译」读成绿。
+   用**产物存在**而不是 `BUILD SUCCEEDED` 字样，理由同 G-6「判绿读实物，不读字样」。
+
+预期：swift-testing = **1950 + 1 = 1951**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
 
 - [ ] **Step 5: 提交**
 
@@ -2347,9 +2372,14 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/KlineTrainerContracts-*        # �
 cd ios/Contracts
 xcodebuild test -scheme KlineTrainerContracts-Package \
   -destination 'platform=macOS,variant=Mac Catalyst' \
-  -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/undo-catalyst.log | tail -5
-grep -E "Executed [0-9]+ tests" /tmp/undo-catalyst.log | tail -2
+  -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/undo-catalyst.log | tail -5 || exit 1   # ① 退出码
+test "$(grep -c 'Executed [0-9]* tests' /tmp/undo-catalyst.log)" -ge 1 \
+  || { echo "GATE FAIL: 日志里没有任何执行量行（很可能根本没跑起来）"; exit 1; }                      # ② 有执行量
+grep -E "Executed [0-9]+ tests" /tmp/undo-catalyst.log | tail -2                                    # ③ 人读取数
 ```
+⚠️ **和 Task 7 同款的三条纪律**（codex plan-R2 在 Next steps 点名要审这一块，**已核实同样有问题**）：
+`xcodebuild` 那行必须自带 `|| exit 1`；「有没有执行量」要用 `test "$(grep -c …)" -ge 1` 断，
+**不能**把 `grep` 的退出码当门。
 ⚠️ **判绿读执行量，不读 `TEST SUCCEEDED` 字样**。记下 total 实测新值。
 
 - [ ] **Step 2: 同步四处**
