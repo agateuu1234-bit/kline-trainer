@@ -554,10 +554,20 @@ SELECT
           WHERE k.conrelid = to_regclass('public.pilot_database_registry')
             AND k.contype = 'p' AND array_length(k.conkey, 1) = 1
             AND a.attname = 'dbname')                   AS registry_dbname_unique,
-""" + _durable_tables_sql(("public.pilot_cluster_marker",
-                            "public.pilot_create_intent",
-                            "public.pilot_database_registry"),
-                           "maintenance_tables_durable")
+""" + ",\n".join(
+    # ⚠️ **每张表各一条，不能合成一个跨表的 count**：合成一条时它**归因不到具体哪张表**，
+    #    于是 `init_cluster_marker` 的预检只能「三张全在场才要求它」—— 而混合态
+    #    （一张在场但不耐久 + 另一张缺席）就此漏过：`malformed` 为空 →
+    #    `_needs_repair_ddl` 为真 → **DDL 先落地**建出缺的表，之后才由建库**后**的
+    #    形状检查拒绝，于是在一个最终被拒的维护库里留下了表。
+    #    那正是「① 零副作用预检 → ② 才允许动 DDL」这条契约要防的
+    #    （`--maintenance-dsn` 指错到生产库）。拆成每表一条之后，判据名的前缀
+    #    （marker_/intent_/registry_）自动接进 `_MAINTENANCE_SHAPE_OWNER` 的
+    #    「只对在场的表求值」机制，在场却不耐久的表在**预检阶段**就被点名。
+    _durable_tables_sql((f"public.{tbl}",), alias)
+    for tbl, alias in (("pilot_cluster_marker", "marker_durable"),
+                       ("pilot_create_intent", "intent_durable"),
+                       ("pilot_database_registry", "registry_durable")))
 
 MARKER_PURPOSE = "qmt_pilot_disposable_cluster"
 
@@ -1268,6 +1278,16 @@ REQUIRED_BUSINESS_TABLES = ("stocks", "klines", "stock_coverage", "training_sets
 #    `test_canonical_schema_hashes_match_the_repo_files` —— 改了 .sql 而没更新常量，它当场变红。
 CANONICAL_SCHEMA_SHA256 = "02c47d43b5bf64c8d61140f1d080c142f63e994679c69eff9142571568dbc28a"
 CANONICAL_PILOT_SCHEMA_SHA256 = "8d018f98c5a29583e4eea8204680ea09f570ab9b3acf5479fb01ea0745527d7a"
+# ⚠️ **`pilot_cluster_schema.sql` 同样必须钉字节**：4a-1 给 schema.sql 与
+#    pilot_schema.sql 各钉了规范哈希，唯独这份漏了 —— 而它是 `--init-cluster-marker`
+#    直接拿去在**维护库**上执行的 DDL。不钉的话，一份漂移/敌意的文件可以
+#    DROP/TRUNCATE 掉 marker / intent / registry 三张表，而随后的结构判据
+#    **只看形状不看行**，被删掉的 intent/登记行它一条都发现不了 ——
+#    于是恢复凭据与归属登记被静默清空，集群照样被判成「初始化成功」。
+#    （spec §4 P1r3-F9 删掉的是**存进集群里**的 `cluster_schema_sha256` —— 那是因为
+#      集群里没有地方存、无对照物；**模块常量**是另一回事，与上面两个同族。）
+CANONICAL_CLUSTER_SCHEMA_SHA256 = (
+    "d9167bcc3c8ebea784fc9ae8968f12e41614919947e5f601b500bbdd76db3985")
 
 # ⚠️ **规范指纹证明的是「递进来的字节」，不是「库现在长什么样」**（O4-R32-C2）：
 #    apply 之后到写 ready 之间，业务表仍可能被改（并发的手、残留对象、PG 侧异常）——
@@ -3029,3 +3049,455 @@ async def reset_pilot_database(
             f"会让随后以新 run_id 的重建撞 intent_row_conflict。"
             f"请人工删除 public.pilot_create_intent 中 dbname={db_name!r} 的行。") from exc
     return db_oid
+
+
+# ── --init-cluster-marker（spec §4「`--init-cluster-marker` 的幂等语义写死」+ O4-F7）──
+# ⚠️ `public.` 限定（O4-R4-C1）：不限定时由 search_path 决定写进哪个 schema。
+_WRITE_MARKER_SQL = ("INSERT INTO public.pilot_cluster_marker (purpose) VALUES ($1)"
+                     " ON CONFLICT (purpose) DO NOTHING")
+
+# ⚠️ **「表不存在」与「表在但坏了」必须分得开**：
+#    `cluster_schema_sql` 用的是 `CREATE TABLE IF NOT EXISTS` —— 它**修不好**一张已存在
+#    但结构损坏的表，只会跳过。而预检若只看「结构合不合规」，一张坏表会让判定落到
+#    「补建再验」那条路上：DDL 先把**其余缺的表**建出来，然后形状检查才失败 ——
+#    结果是在一个最终被拒绝的库里留下了表。
+#    故预检按表分别判：**在场的必须自己合规（否则零 DDL 拒绝），缺席的才交给 DDL 补建。**
+_MAINTENANCE_PRESENCE_SQL = """
+SELECT to_regclass('public.pilot_cluster_marker')    IS NOT NULL AS marker_present,
+       to_regclass('public.pilot_create_intent')     IS NOT NULL AS intent_present,
+       to_regclass('public.pilot_database_registry') IS NOT NULL AS registry_present
+"""
+
+# `_MAINTENANCE_SHAPE_SQL` 的判据名 → 它属于哪张表。
+# ⚠️ 耐久性判据是**每表一条**（`marker_durable` / `intent_durable` / `registry_durable`），
+#    故它和形状判据一样按前缀归属，**不需要**「三张全在场才要求」那条例外 ——
+#    那条例外正是混合态下「在场却不耐久的表漏过预检、让 DDL 先落地」的洞。
+_MAINTENANCE_SHAPE_OWNER = {"marker_": "marker_present",
+                            "intent_": "intent_present",
+                            "registry_": "registry_present"}
+
+
+async def _assert_disposable_cluster(maint_conn, *, connect,
+                                     registry_usable: bool = False) -> None:
+    """「这台集群整个可弃」的**免标记**证明 —— 首次初始化用的那一组闸 (ii)(iii)。
+
+    `registry_usable`：`pilot_database_registry` **在场且形状合规**、
+    **且已有合法标记**时才传 True。详见下面「两种同侪库判据」。
+
+    ⚠️ **调用方一律传「动 DDL 之前」的在场情况**，不要在 DDL 之后重新查一次：
+       补建刚造出来的登记表**必然是空的**，拿它去「证明」同侪库归属等于零证据。
+
+    **两种同侪库判据，由 `registry_usable` 选**：
+      · `registry_usable=False`（**首次初始化，或标记缺失**）：没有合法标记时，
+        登记表**不构成可信凭据** —— 标记才是「这个维护库是我们的」那句话的信任根，
+        闸 (ii) 之所以敢信登记表，正因为闸 (i) **先**验过标记。
+        故此时同侪库的外部凭据**取不到**，「证明不了」只能等价于「拒绝」，
+        要求同前缀库【绝对空】。
+      · `registry_usable=True`（**混合态修复**：marker + registry 在场、intent 缺失）：
+        外部归属凭据取得到 —— 此时仍要求【绝对空】会把一个**已登记的、装着真数据的
+        合法 pilot 库**判成外来物，把整台集群锁在修复路径之外，
+        而 O4-F7 引入修复路径的全部理由就是「修好旧版本初始化的集群」。
+      · 归属证明与闸 (ii) 用**同一组两个独立事实**：库自己的 `pilot_meta` 合规
+        （`_looks_like_our_pilot_db`）**且**这个库名在维护库的登记表里确实被声明过
+        （`_REGISTRY_HAS_SQL`，它 JOIN `pg_database` 绑实例）。
+
+    ⚠️ **零副作用**（只读），故可以在同一次运行里调用多次：
+      一次在动 DDL **之前**（不在别人的库里留下表），
+      一次在写标记**之前**（标记是不可回滚的信任写入）。
+    """
+    leftover = await _user_objects(maint_conn, exempt_maintenance=True)
+    if leftover:
+        raise PilotClusterBoundaryError(
+            "maintenance_db_not_empty",
+            f"维护库除 {MAINTENANCE_TABLES} 外还有用户对象 {leftover}"
+            f"——「没有别的数据库」不等于「这台集群没在用」。"
+            f"在证明它可弃之前，本工具不会在它上面建任何表")
+    _cluster_id = await cluster_identity(maint_conn)
+    for row in await maint_conn.fetch(_LIST_DATABASES_SQL):
+        name = row["datname"]
+        if PILOT_DB_NAME_RE.fullmatch(name) is None:
+            raise PilotClusterBoundaryError(
+                "unrelated_database",
+                f"集群里存在无关数据库 {name!r}，拒绝把它声明为 pilot 专用集群"
+                f"——在证明之前不会在它的维护库里建任何表")
+        try:
+            other = await connect(name)
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"连不进 {name!r}（{exc}）→ 无法证明它是可弃的残骸") from exc
+        try:
+            await adopt_connection(other, name, cluster_id=_cluster_id,
+                                   expected_oid=row["db_oid"])
+            if registry_usable:
+                # ⚠️ 与闸 (ii) **同一组两个独立事实**。读 meta 失败/形状不合规
+                #    **不在这里拒**：下面还有【绝对空】那一档豁免（与闸 (ii) 逐字一致
+                #    —— 否则一个合法的崩溃残骸会被判成外来物）。
+                try:
+                    meta = await read_pilot_meta_rows(other)
+                except Exception:
+                    meta = {}
+                if _looks_like_our_pilot_db(meta, name) and await maint_conn.fetchval(
+                        _REGISTRY_HAS_SQL, name, meta.get("seed")):
+                    continue              # 已登记的合法 pilot 库 → 放行
+            if not await _is_absolutely_empty(other):
+                raise PilotClusterBoundaryError(
+                    "unowned_pilot_database",
+                    f"{name!r} 名字匹配 kline_pilot_* 但非空"
+                    + ("，且它没有合法 pilot_meta / 没在维护库的登记表里登记过"
+                       if registry_usable else
+                       "，且这台集群还没有任何归属登记")
+                    + "——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
+        except PilotClusterBoundaryError:
+            raise
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"验 {name!r} 是否为空时失败（{exc}）→ 无法证明") from exc
+        finally:
+            await _close_quietly(other, name)
+
+
+# 孤儿清理要看**全部** intent 行（`_READ_INTENT_SQL` 只看本次库名那一行）。
+# 新鲜度同样只认库自己的时钟（O4-R23-C1）。
+# ⚠️ **时钟源必须是 `statement_timestamp()`，不是 `now()`**（codex S2a-R4-F2 立的族规，
+#    真 PG 15 实测；S3-R1 指出本函数漏了它）：`now()` 是**事务开始时刻**。
+#    `init_cluster_marker` 收的是一条**已经连好的**连接、不控制事务生命周期，
+#    4c 的 wrapper 很可能把整段维护操作包进事务 —— 那时 `now()` 冻在过去，
+#    一行**真实已过期**的孤儿会被量成「还新鲜」→ 预筛跳过 → 残骸永远清不掉。
+#    与 `_READ_INTENT_SQL` / `_INSERT_INTENT_SQL` 用**同一个**时钟源，不留漂移。
+# ⚠️ **不加 `::bigint`**：`::bigint` 是四舍五入不是截断（真 PG 15 实测
+#    `(-0.1)::bigint = 0`）。`_READ_INTENT_SQL` 已经把这个转换去掉了，这里跟同一口径。
+_LIST_ALL_INTENT_SQL = """
+SELECT dbname, seed, db_oid::text AS db_oid,
+       EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) AS age_seconds
+  FROM public.pilot_create_intent
+"""
+
+# ⚠️ **绝不能复用 `_DELETE_INTENT_SQL` / `_CLEAR_INTENT_SQL`**：
+#    · `_DELETE_INTENT_SQL` 带 `AND NOT create_confirmed`，而孤儿恰恰是**已确认**的行
+#      —— 它永远匹配 0 行，清理成了「命令发了、一行没删」的静默失败；
+#    · 两者都还带 `run_id = $2`，而清理孤儿的这次运行**不是**写下那一行的那次运行。
+#    孤儿的授权来自「取到了那一行 seed 的 advisory lock + 它超期或库已不存在」，
+#    不来自 run_id，故判据只按 dbname。
+# ⚠️ **判据必须写在这条 SQL 里、在锁内原子求值**：
+#    先 `SELECT` 出一批行、再逐行取锁、然后只按 dbname 删，中间的窗口里
+#    **同 seed 的另一次运行**可以启动、刷新/确认它自己的 intent 行、崩在写 pilot_meta 之前、
+#    并随连接断开释放会话锁 —— 此时本循环拿到锁，却按**快照时看到的陈旧状态**
+#    把那条**新鲜的恢复凭据**删掉，留下一个零对象例外再也授权不了的空残骸。
+#    故把「超期 OR 库不存在」两条判据下沉进 DELETE 的 WHERE 里。
+# ⚠️ 「库不存在」绑实例（`d.oid = db_oid`）而不是只比名字：一条指向已消失实例的行
+#    本来就该被清掉，哪怕现在有个同名的新库。
+# ⚠️ **`db_oid` 为空的行不许走「库不存在」那一支**（Kimi S3-WB-R3）：SQL 里
+#    `d.oid = NULL` 求值为 NULL → `NOT EXISTS` **恒真**，那一支对这类行退化成「恒可删」。
+#    而 `_INSERT_INTENT_SQL` **不写 `db_oid`** —— 它在建库确认那一步才写。于是
+#    「INSERT intent → `CREATE DATABASE` 成功 → 崩在确认之前」这个窗口
+#    （两阶段建库存在的全部理由）留下的正是一行**新鲜的、db_oid 为空**的行，
+#    而那个库**真的存在**。删掉它与本模块自己写下的
+#    「该行 create_confirmed=false，授权不了 DROP，**将由 INTENT_TTL 清理**」直接矛盾。
+#    铁律是「一切**证明不了**等价于**拒绝**」——证明不了那个库消失了，就不以此为由删。
+#    超期那一支不受影响：db_oid 为空的行照样会过期，不会永久占住库名。
+# ⚠️ 与 `_CLEAR_DROPPED_INTENT_SQL` 的不对称是**有意的**：那一条跑在
+#    「持着这一行 seed 的锁、且**刚刚成功 DROP 掉那个库**」之后，此刻「指不到活实例」
+#    本来就成立，且并发的建库被锁挡在外面 —— 它清的是自己刚制造的残骸。
+#    本条面对的是**来路不明、可能正处在建库窗口中**的行，故必须保守。
+# ⚠️ 时钟源同上：`statement_timestamp()`。这条尤其要紧 —— 它是**权威判据**
+#    （预筛只是省取锁）。长事务里用 `now()` 的话，取到锁之后这条 DELETE 会匹配 0 行，
+#    于是「命令发了、一行没删」的静默失败，正是 R9 那次回归的形态。
+# ⚠️ **必须同时绑 `seed`（codex S3-R2）**：这条 DELETE 的授权来自「本次持有的是
+#    **这一行 seed** 的 advisory lock」。只按 dbname 删的话，语句本身与它的授权
+#    对不上号 —— 它靠的是「dbname 恒为 `kline_pilot_<seed>`、seed 是它的函数」
+#    这条**跨列不变量**，而那条不变量**没有任何数据库约束在兜**
+#    （`pilot_create_intent` 既无 `CHECK (dbname = 'kline_pilot_' || seed)`、
+#     `dbname` 也不是生成列）。孤儿清理处理的恰恰是**来路不明的行**：旧版本写的、
+#    `pg_restore` 还原的、人工插的 —— 对它们那条不变量不成立。
+#    绑上 seed 之后，失配时**删 0 行**（fail-closed），而不是拿着 A 的锁删 B 的凭据。
+#    ⛔ **不在本片给 .sql 加 CHECK 约束**：那会改动被钉死的
+#       `CANONICAL_CLUSTER_SCHEMA_SHA256` 与闸 (i) 的形状判据，远超 S3 范围。
+_DELETE_ORPHAN_INTENT_SQL = """
+DELETE FROM public.pilot_create_intent
+ WHERE dbname = $1
+   AND seed = $2
+   AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $3
+        OR (public.pilot_create_intent.db_oid IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM pg_database d
+                             WHERE d.datname::text = public.pilot_create_intent.dbname
+                               AND d.oid = public.pilot_create_intent.db_oid)))
+"""
+
+
+async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
+                              try_seed_lock, release_seed_lock) -> None:
+    """`qmt_pilot --init-cluster-marker` 的**实现函数**：把一台干净集群声明为 pilot 专用。
+
+    ⛔ **那条命令本身此刻还不存在**（codex S3-WB-R1 据此报了一条 high，如实登记）：
+       本模块是**纯库**，全仓没有 `qmt_pilot` 可执行入口、没有 argparse、
+       `pyproject.toml` 里也没有 console_scripts。这不是本片的疏漏，是**既定的切分边界**：
+       spec 第 7 行写死「本文件的作用域 = PR 4a：护栏、集群闸、建/复用/reset 生命周期」，
+       §10「后续（不在本 PR）」把 **pilot 编排**整块划给 **4c**，命令行属于编排。
+       实测佐证：4a 的**四个**公开入口（`create_pilot_database` / `reset_pilot_database` /
+       `init_cluster_marker` / `try_empty_remnant_exception`）**全都**只被单测与真 PG
+       验收脚本调用，一个生产调用者都没有 —— 这个状态在本片之前就是如此，本片没有改变它。
+       ⚠️ 之所以要在这里写明：闸 (i) 的两条错误提示逐字写着「请跑 `qmt_pilot
+          --init-cluster-marker`」，读的人（包括一位认真的评审者）会据此以为命令已经能跑。
+          4c 落地之前，**这条路只能由 4c 的 wrapper 或验收脚本走**。
+
+    幂等语义（spec §4 + O4-F7）：
+      · 已存在合法单行标记 **且**【维护库专用表集合】形状合规 → 直接成功；
+      · 标记合法但 intent / registry 表缺失或形状不符 → **补建再成功**
+        （短路成功的实现修不好旧版本初始化的集群：旧版没有 intent 表 →
+         零对象例外第 6 条恒不成立 → 残骸永远清不掉）；
+      · 标记非法 / 多行 → **拒绝**，要求人工处理（绝不「顺手改成对的」）。
+
+    谁写／谁读／谁清（spec §4）：本函数写标记；闸 (i) 每次运行读；
+    **本工具从不清标记**（清除是人工动作）。孤儿 intent 行**只在本函数里清**。
+
+    `try_seed_lock` / `release_seed_lock`: `async (seed) -> bool` / `async (seed) -> None`
+    —— 由调用方注入。本模块**不自己取锁**（spec O1-F4：advisory lock 只在同一 session
+    内可重入，模块另开连接去取会自锁），但**取了就必须还**，且**取与还都要在活连接上验**。
+
+    ⚠️ **副作用严格排在证明之后**：`cluster_schema_sql` 是调用方递进来的 DDL，
+       且会直接作用在**维护库**上。故本函数分成两段：
+       **① 零副作用预检** → **② 才允许动 DDL**；
+       而唯一不可回滚的信任写入（写标记）是函数的**字面最后一句**。
+    """
+    # ── ① 零副作用预检：这一段结束之前，本函数不对任何库产生副作用 ──────────
+    # 1a. 递进来的 DDL 必须逐字节等于仓库里那份规范文件。
+    #     纯函数判定，排在最前 —— 连一次查询都不用发（连 pin 都在它之后）。
+    _actual = sha256_of_sql(cluster_schema_sql)
+    if _actual != CANONICAL_CLUSTER_SCHEMA_SHA256:
+        raise PilotClusterBoundaryError(
+            "cluster_schema_not_canonical",
+            f"pilot_cluster_schema.sql 与仓库里的规范文件不是同一份："
+            f"传入指纹 {_actual!r}，规范指纹 {CANONICAL_CLUSTER_SCHEMA_SHA256!r}。"
+            f"这份 DDL 会直接在**维护库**上执行；漂移的版本可以 DROP/TRUNCATE 掉 "
+            f"marker / intent / registry 三张表，而结构判据**只看形状不看行**，"
+            f"被删掉的恢复凭据与归属登记一条都发现不了。")
+
+    await pin_search_path(maint_conn)
+
+    # 1b. 在场的维护表必须**各自**结构合规。
+    #     ⚠️ 绝不把「读失败」一律当成「首次初始化」—— 权限问题、坏关系都会落到那条路上，
+    #        然后带着一个没被证明过的前提去动 DDL。是否首次由 **presence** 说了算。
+    try:
+        presence = await maint_conn.fetchrow(_MAINTENANCE_PRESENCE_SQL)
+        shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"读不出【维护库专用表集合】的在场情况/结构（{exc}）——"
+            f"在证明之前不会对这个库做任何 DDL") from exc
+    if presence is None or shape is None:
+        raise PilotClusterBoundaryError(
+            "no_marker", "【维护库专用表集合】的在场/结构查询没有返回行")
+    malformed = sorted(
+        k for k, v in dict(shape).items() if not v
+        and any(k.startswith(pre) and presence[owner]
+                for pre, owner in _MAINTENANCE_SHAPE_OWNER.items()))
+    if malformed:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"维护库里已存在的专用表结构不合规：{malformed}。"
+            f"`CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表，只会跳过 ——"
+            f"继续下去只会在一个最终要拒绝的库里留下别的表。请人工处理")
+
+    # 1c. 标记合法性（只读）。marker 表不在场 = 首次初始化，不是错误。
+    # ⚠️ 读失败必须转成**具名**的 boundary error（spec O1-F10；Kimi S3-WB-R3）：
+    #    闸 (i) 对这条查询早就包了，而这里漏了 —— 同一个函数里 1b 包了、1c 没包。
+    #    裸 asyncpg 异常逃出去，4c 会记成 FAIL_INFRASTRUCTURE 而不是「集群不合规」。
+    #    可达路径：表在目录里看得见（1b 过得了）但缺 SELECT 权限，
+    #    或 1b 与 1c 之间那张表被并发 DROP。方向本来就 fail-closed，坏的是**分类**。
+    try:
+        rows = await maint_conn.fetch(_READ_MARKER_SQL) if presence["marker_present"] else []
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"维护库读不出 pilot_cluster_marker：{exc}——在证明之前不会做任何 DDL") from exc
+    if len(rows) > 1 or (len(rows) == 1 and rows[0]["purpose"] != MARKER_PURPOSE):
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"pilot_cluster_marker 形状非法（{len(rows)} 行："
+            f"{[r['purpose'] for r in rows]}）——请人工处理")
+
+    # 1c-2. **登记表能不能当归属凭据用**。
+    #    ⚠️ **必须同时要求「已有合法标记」**，不能只看登记表在不在场：
+    #       登记表在闸 (ii) 里之所以可信，是因为闸 (i) **先**验过标记 ——
+    #       标记才是「这个维护库是我们的」那句话的**信任根**。
+    #       marker 缺失 / registry 在场且有行 这个组合是**真实可达**的：
+    #         · 契约明写「清除标记是**人工动作**」，人真的清过；
+    #         · 维护库被部分 pg_dump/还原；· 对手能写维护库。
+    #       只看 `registry_present` 的话，这三种情形下 registry 的行会被当成归属证明，
+    #       让一个**非空的、装成 pilot 样子的**同前缀库过关，然后**写下一个合法标记** ——
+    #       等于绕过首次初始化的【绝对空】证明，把人工清标记这个逃生阀也一并废掉。
+    #    ⚠️ 形状不合规的登记表走不到这里（1b 已零 DDL 拒），故「在场」即「形状可用」；
+    #       但**可用 ≠ 可信**，可信要由标记来背书。
+    _registry_usable = bool(rows) and presence["registry_present"]
+
+    # ⚠️ 「维护库除专用表外必须绝对空」这条**只留一份**，在 `_assert_disposable_cluster`
+    #    里（变异 M12 实测：此处再写一遍是纯冗余 —— 凡是会跑 DDL 的路径都会调那个助手，
+    #    而不跑 DDL 的路径由末尾的 `assert_cluster_allowed` 闸 (iii) 兜住）。
+    #    同一条判据在两处各写一遍是本仓反复踩的形态，故删。
+
+    # 1e. **凡是要动 DDL，同侪库都得先证明干净**。
+    #     ⚠️ 判据挂在「**这次会不会真的动 DDL**」上，不是「有没有标记」：
+    #        挂在 `if not rows`（首次初始化）会漏掉**混合态** —— 标记在、而
+    #        intent / registry 缺失（旧版本部分初始化，或标记随 pg_dump/卷拷贝被复制）。
+    #        那时 `rows` 非空 → 证明被跳过 → 补建 DDL 照跑 → 之后才拒。
+    _needs_repair_ddl = not all(presence.values())
+    if not rows or _needs_repair_ddl:
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+
+    # ── ② 到这里才第一次产生副作用 ──────────────────────────────────────
+    # ⚠️ **三张表都在场时根本不发这条语句**：`CREATE TABLE IF NOT EXISTS` 虽是空操作，
+    #    但「健康集群上一条 DDL 都不执行」是可断言的性质，比「发了但没效果」强 ——
+    #    也让那些 `executed == []` 的钉子真正咬得住。
+    if _needs_repair_ddl:
+        await maint_conn.execute(cluster_schema_sql)
+        # ⚠️ **调用方的 SQL 跑完必须重新钉 search_path**：事务里的普通 `SET search_path`
+        #    **提交之后仍留在会话上**（只有 `SET LOCAL` 不留）。一份漂移/敌意的 .sql
+        #    只要含一句 `SET search_path = evil, …`，其后**所有**守卫查询就都跑在
+        #    它选定的名字解析下，于是一台脏的维护库被判成干净并声明为 pilot 专用。
+        await pin_search_path(maint_conn)
+
+    # 2. 建完**再验一次结构**：「执行过 DDL」不等于「结构就对」（与闸 (i) 同一条纪律）。
+    # ⚠️ **健康集群上这一次是冗余的，而这份冗余是有意的 —— 别把它「优化」掉**
+    #    （合并前自评 Minor#1）：没跑 DDL 时 1b 刚验过一遍。留着它有两个理由：
+    #      ① 1b 的 `malformed` 只对**在场的表**求值（按 `_MAINTENANCE_SHAPE_OWNER`
+    #        的前缀归属）—— 将来新增一条前缀不在那张表里的判据，1b 会漏掉、这里抓得住；
+    #      ② `cluster_schema_sql` 是**调用方递进来的**文件，跑完必须无条件复验，
+    #        而「跑没跑」这个条件本身就来自调用方给的在场情况。
+    # ⚠️ 同 1c：读失败也要是具名 boundary error，不是裸异常。
+    try:
+        shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"补建之后读不出【维护库专用表集合】的结构：{exc}——请人工处理") from exc
+    if shape is None or not all(shape.values()):
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"补建之后【维护库专用表集合】的结构仍不合规"
+            f"（{dict(shape) if shape else 'None'}）——请人工处理")
+
+    # 3. **现查一遍集群仍然可弃**。
+    #    spec §4 R17-F1：「标记证明的是**有人曾声明过**，只有现查才证明**现在仍然成立**」，
+    #    点名两条现实路径：①当初为空的 pilot 集群后来装了真实数据库；
+    #    ②标记随 pg_dump / 卷拷贝被还原或复制到另一个集群。
+    if rows:
+        # 已有合法标记 → 用**完整的** `assert_cluster_allowed`：此刻标记与三张表
+        # 都已就位，(i) 过得了；而 (ii) 的完整版会认同侪 pilot 库的**归属登记**。
+        # 本条路**不写标记**，故没有次序问题。
+        await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    else:
+        # 首次初始化：标记还没写，闸 (i) 必然拒绝，故用**免标记**的等价现查。
+        # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
+        #    正是它把「预检通过之后、写标记之前」那个窗口关上。
+        # ⚠️ 这一次证明的是「**可以动这台集群的 intent 行**」——它授权下面第 5 段的
+        #    孤儿清理，**不**给标记背书。标记由第 6 段那次**紧贴**的复查背书。
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+
+    # 5. 孤儿 intent 行清理：超期 OR 库不存在，且取得到那一行 seed 的锁。
+    # ⚠️ **预筛也必须绑实例**：只按名字判「库还在不在」时，
+    #    「原实例被删掉、别人用同名重建」这一档会被判成「没消失」→ 直接 continue →
+    #    下面那条 OID-aware 的 DELETE **永远跑不到**，一条指向已消失实例的陈旧行
+    #    就一直赖着，把后续的建库/reset 卡到 TTL 为止。
+    #    预筛只是省掉不必要的取锁；真正的判据在锁内的 SQL 里，两者的口径必须一致。
+    live = {(r["datname"], r["db_oid"]) for r in await maint_conn.fetch(_LIST_DATABASES_SQL)}
+    for r in await maint_conn.fetch(_LIST_ALL_INTENT_SQL):
+        # ⚠️ **不取整**（codex S2a-R3-F1 立的族规）：`int()` 与 `::bigint` 都会把
+        #    符号抹掉（`int(-0.1) == 0`），而 `_READ_INTENT_SQL` 那侧已经两层都去掉了。
+        #    这里是预筛，取整不致命，但口径必须与锁内那条 DELETE 一致。
+        stale = float(r["age_seconds"]) >= INTENT_TTL_SECONDS
+        # ⚠️ 与锁内那条 DELETE **同口径**：`db_oid` 为空 = 证明不了那个库消失了，
+        #    不以此为由删（Kimi S3-WB-R3）。两处口径必须一致 —— 否则预筛放过去的行
+        #    会在锁内匹配 0 行，成为「命令发了、一行没删」的静默失败。
+        vanished = (r["db_oid"] is not None
+                    and (r["dbname"], r["db_oid"]) not in live)
+        if not (stale or vanished):
+            continue
+        # ⚠️ **取锁之前先证明本连接还没持有它**（codex S3-R2，真 PG 15.12 实测坐实）：
+        #    advisory lock 在同一 session 内**可重入** —— 实测 `pg_try_advisory_lock`
+        #    对一把本连接已持有的锁**照样返回 true**（计数器 1→2），而
+        #    `_SEED_LOCK_HELD_SQL` 在调用之前**就已经是 true**。于是下面那道复核
+        #    证明不了任何**新**的互斥，等于对这一行没有锁。
+        #    危险的是**自己**这一档：本连接正在为该 seed 干别的事（4c 的 wrapper 把
+        #    init 套进一次 create/reset、或连接池里漏回来一把锁），而这里把它
+        #    **进行中的**恢复凭据删掉 —— 正是「不加锁会删掉一次正在进行的运行的行」
+        #    那条要防的后果，只是换成了同连接的形态。
+        #    （对**别的 session** 的互斥仍然成立：我们持有时别人取不到。）
+        #    判据 fail-closed：已持有 → 跳过，不删、也不 release（那是别处的锁）。
+        if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+            continue
+        if not await try_seed_lock(r["seed"]):
+            continue                       # 有运行正在用这个 seed —— 跳过，绝不删
+        try:
+            # ⚠️ **回调返回真不算证明**：`_SEED_LOCK_HELD_SQL` 在本模块有四个使用点
+            #    （建库 / reset 授权 / DROP / 零对象例外），而这里做的是
+            #    **DELETE 恢复凭据**。两种现实情形会让布尔为真却毫无互斥：
+            #      · 调用方回调接错线（本模块**不取锁**，取锁完全在调用方那侧）；
+            #      · advisory lock 在同一 session 内**可重入** —— 这条连接若早已因别的
+            #        原因持有同一把锁，`pg_try_advisory_lock` 照样返回真。
+            #    删错的后果是抹掉一次进行中/崩溃中的建库**唯一的恢复凭据**，
+            #    留下一个零对象例外再也授权不了的空残骸。
+            # ⚠️ 判据要求锁在 **`maint_conn` 这条连接上**（`_SEED_LOCK_HELD_SQL` 绑
+            #    `pg_backend_pid()`）—— DELETE 正是在它上面跑的。调用方若在别的连接上取锁，
+            #    这里判假、跳过，是**正确**的 fail-closed。
+            if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                continue                   # `finally` 仍会把回调取的那把还回去
+            # ⚠️ 上面那两条 Python 判据只是**省掉不必要的取锁**；真正的删除判据在 SQL 里，
+            #    在锁内按**当下**的 inserted_at 与 pg_database 求值。
+            await maint_conn.execute(_DELETE_ORPHAN_INTENT_SQL, r["dbname"],
+                                     r["seed"], INTENT_TTL_SECONDS)
+        finally:
+            # ⚠️ **取了就必须还**：会话级锁不还会一直挂在维护连接上，挡住后续同 seed
+            #    的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把
+            #    **本次操作从未刻意取过**的锁。
+            # ⚠️ **复核必须放在嵌套 `finally` 里**（codex S3-WB-R2）：上一版把它写在
+            #    `await release_seed_lock(...)` 之后的**同一层**，于是回调**自己抛**时
+            #    整条复核被跳过 —— 而「回调抛异常」恰恰是**锁最可能没还掉**的那一档
+            #    （连接断了 / 只释放了一层可重入计数 / release 打在了另一条连接上）。
+            #    后果：裸异常逃出（不是具名 boundary error）、泄漏静默发生，
+            #    再被取锁前那条 fail-closed 判据放大成「这条连接从此清不掉该 seed 的孤儿」。
+            # ⚠️ 回调抛了、但锁**确实**还掉了那一档：原样让回调的异常抛出去 ——
+            #    那是调用方自己的接线问题，报成 `seed_lock_not_released` 会指错方向。
+            try:
+                await release_seed_lock(r["seed"])
+            finally:
+                # ⚠️ **还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律，
+                #    上一版只验了取、没验还。`release_seed_lock` 和 `try_seed_lock` 一样是
+                #    **调用方递进来的回调**：空实现、连错连接、只释放一层可重入计数，
+                #    都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
+                #    这条泄漏尤其毒，因为上面那条「事前已持有就跳过」的 fail-closed 判据
+                #    会把它放大成**这条连接从此再也清不掉该 seed 的孤儿**（静默跳过，
+                #    而且理由看起来完全合理）。
+                # ⚠️ 只对**本次确实取到**的那把锁作此要求：走到这里就说明
+                #    「事前未持有 + 回调授予 + 活连接复核为真」三条都成立过。
+                if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                    raise PilotClusterBoundaryError(
+                        "seed_lock_not_released",
+                        f"孤儿清理为 seed={r['seed']!r} 取了 advisory lock，"
+                        f"调用方的 release 回调已经跑过（正常返回**或自己抛了**），"
+                        f"但这把锁**仍挂在维护连接上**。"
+                        f"它是会话级的：不还会挡住后续同 seed 的建库/reset，"
+                        f"也会让本函数以后把该 seed 的孤儿静默跳过。"
+                        f"请检查 release_seed_lock 的接线（是否空实现／是否作用在另一条连接／"
+                        f"是否只释放了一层可重入计数），或重开维护连接。")
+            # ⚠️ 在 `finally` 里 raise 会**接替**正在传播的异常，但原异常仍保留在
+            #    `__context__` 里（Python 语义），信息不丢。
+            # ⛔ **不在这里关闭/毒化 `maint_conn`**（codex 建议过）：连接是调用方的，
+            #    本模块通篇不拥有它、也从不关它；关掉会让调用方拿到一个它没预料到的
+            #    死连接，且掩盖真正的接线错误。抛一个点名的 code 更诚实。
+
+    # 6. 首次初始化：**紧贴着**再证一次，然后写标记。
+    if not rows:
+        # ⚠️ **「紧贴」是 spec 立过的纪律**（§4：「DROP 前须**紧贴着**重查一次【绝对空】」）：
+        #    上面那次证明与这里之间隔着整个清理循环 —— 取锁、DELETE、释放，
+        #    每一步都要时间，窗口里集群可以变脏。信任写入必须由**紧挨着它**的证明背书。
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+        # ⚠️ **本函数的最后一句，之后不许再有任何会抛的语句。**
+        #    它是唯一不可回滚的信任写入（契约：本工具从不清标记），
+        #    而「副作用次序」这条原则在本函数内**再没有新的落点**可以移动。
+        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
