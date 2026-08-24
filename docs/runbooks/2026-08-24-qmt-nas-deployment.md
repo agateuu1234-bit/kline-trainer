@@ -144,6 +144,28 @@ rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql" "$WT
 rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-expose.sh" $NAS:$DIR/ && ssh $NAS "chmod +x $DIR/2026-08-24-qmt-nas-expose.sh && echo CHMOD_OK"
 ```
 
+**跑一次它自带的判据自检**（不碰任何真实端点）：
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh selftest"
+```
+
+- ✅ 通过：五条全 `pass`，最后一行 `SELFTEST_PASS`
+
+**装开机守卫**（一次性；P12 会检查它在不在，不在就拒绝开端点）：
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh install-boot-guard"
+```
+
+- ✅ 通过：打印那条 `@reboot …` 计划任务，最后一行 `BOOT_GUARD_OK`
+
+> ⚠️ **为什么要它**（codex 评审 R7）：超时看门狗是 `/tmp` 里的状态文件加一个进程，
+> 而 tailscale 的 serve 配置是**持久**的。NAS 一重启，守卫没了、端点却回来了 ——
+> 正好回到「零认证端点无人看管地一直开着」这个本来要防的状态。
+> 这条计划任务让**开机时无条件关闭**。真在验收中途重启，重新跑一次 `open` 即可。
+> 收尾时可以用 `remove-boot-guard` 卸掉。
+
 **判据**：两侧对同一批文件算校验和并比对
 
 ```
@@ -694,14 +716,20 @@ print('GATE', 'PASS' if not bad else 'FAIL')
 ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh open 7200"
 ```
 
-- ✅ 通过：先打印 `WATCHDOG_ARMED 到期时刻=…`，最后一行是 `EXPOSE_OK`
-- ❌ 打印 `SERVE_FAILED` / `REFUSING_TO_OPEN`：**没有开出任何端点**，按提示回去补 P1 的两个开关
+- ✅ 通过：先打印 `WATCHDOG_ARMED 到期时刻=…`，然后打印 serve 配置，最后一行是 `EXPOSE_OK`
+- ❌ 打印 `REFUSING_TO_OPEN`：**没有开出任何端点** —— 要么开机守卫没装（回 P4 装），要么看门狗没装上
+- ❌ 打印 `SERVE_FAILED`：**没有开出任何端点**，按提示回去补 P1 的两个开关
+- ❌ 打印 `STATUS_UNVERIFIABLE` / `FUNNEL_DETECTED` / `SERVE_TARGET_UNCONFIRMED`：脚本已**自动关闭并撤销**，按提示排查
 
 > ⚠️ **为什么不直接敲 `tailscale serve`**（codex 评审 R6 的 high finding）：`serve --bg` 是**持久**配置，跟开它的那个终端无关。而这个 API **零认证** —— spec 里「本次不加认证」这个决定的四个前提，第四条就是「暴露窗口只限验收期间、用完即关」。把关闭交给一条人工嘱咐，等于断线/临时有事/某步失败就一直开着。
 >
-> `expose.sh open` 做了两件手动敲做不到的事：① **先装超时自动关闭的看门狗，装不上就拒绝开端点**；② 开完立刻自检配置里没有 funnel。`7200` = 2 小时窗口，到点自动关。
+> `expose.sh open` 做了手动敲做不到的四件事：
+> ① **两道关闭保证都装好才肯开端点** —— 超时看门狗（进程级）+ 开机守卫（重启级），少一道就拒绝；
+> ② 到点后**关到确认为止** —— 带超时地重试、退避，**只有读到 `No serve config` 才算数**，确认前保持 armed，绝不谎报成功；
+> ③ 开完**分开取输出与退出码**再判断：读不到状态、出现 funnel、反代目标不是预期端口 —— 三种情况都**自动关闭并撤销**，不会走到 `EXPOSE_OK`；
+> ④ `7200` = 2 小时窗口，到点自动关。
 >
-> **判别力已实测**（2026-08-24，NAS 真机）：不撤销 → 到点真的执行了关闭并记进日志；`open` 时前置没满足 → 打印精确诊断、撤掉看门狗、**未开出任何端点**；撤销后 → 到点不触发（日志记 `WATCHDOG_DISARMED`）。
+> **判别力已在 NAS 真机逐档实测**（2026-08-24）：不撤销 → 到点真的执行关闭并记日志；撤销后 → 到点不触发（记 `WATCHDOG_DISARMED`）；**关不掉时 → 连续重试、退避、状态文件保持在、从不打印 `WATCHDOG_FIRED`**；没装开机守卫 → `REFUSING_TO_OPEN`；前置开关没开 → 精确诊断 + 撤销 + 未开出任何端点。配置判据另有 `selftest` 五档合成用例（正常 / 有 funnel / 空输出 / 端口不对 / 尚未开启），两个方向都有判别力。
 
 **验收时间不够怎么办**（别让它在你正用着的时候关掉）：
 
@@ -826,7 +854,15 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh close"
 - ✅ 通过：打印 `No serve config`，最后一行是 `CLOSE_OK`
 - ❌ 打印 `CLOSE_FAILED`：按提示处理，**不要当成已关**
 
-（`close` 是幂等的：本来就没开也会直接 `CLOSE_OK`。它同时撤掉看门狗，避免陈旧看门狗在下一个窗口里乱关。）
+（`close` 是幂等的：本来就没开也会直接 `CLOSE_OK`。它同时撤掉看门狗，避免陈旧看门狗在下一个窗口里乱关。若读不到 serve 状态，它会报 `CLOSE_FAILED` 而**不是**当成已关。）
+
+**整件事彻底收尾后**（不打算再验收了），把开机守卫也卸掉：
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh remove-boot-guard"
+```
+
+- ✅ 通过：打印 `BOOT_GUARD_REMOVED`
 
 **什么时候必须执行**：
 
