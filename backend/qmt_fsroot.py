@@ -389,8 +389,20 @@ def full_fsync(fd: int) -> None:
     **回滚时那道顺序屏障**两处用本函数（每股 1~2 次，400 股量级完全可接受），
     其余落地点保留 `fsync_dir` / `os.fsync`。
     （实测：`fsync(dirfd)` 在本机 APFS 上返回 0，**不会有任何报错提示这层保证并不存在**。）
+
+    ⚠️ **`F_FULLFSYNC` 是 macOS 独有的**（CI 的 ubuntu-latest 上 `fcntl` 根本没有这个常量）。
+    本工具按设计只在操作者的 Mac 上跑（挂 SMB 要 `mount_smbfs`），但**测试套件要在
+    Linux CI 上全绿**。故取「该平台最强的那个原语」：
+    · macOS → `F_FULLFSYNC`（因为它的 `fsync` 明写不保证断电耐久）；
+    · 其他平台 → `os.fsync`（Linux 的 `fsync` 本身就承诺刷到设备，不需要额外原语）。
+    **这不是降级**：两边都取到了各自平台能给的最强保证；把 macOS 独有的常量写死，
+    才是把一个平台专属事实当成了普遍事实。
     """
-    fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+    cmd = getattr(fcntl, "F_FULLFSYNC", None)
+    if cmd is None:
+        os.fsync(fd)
+        return
+    fcntl.fcntl(fd, cmd)
 
 
 def _open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600):

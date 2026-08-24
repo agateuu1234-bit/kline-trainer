@@ -366,17 +366,39 @@ def test_fsync_dir_accepts_directory_fd(tmp_path: Path):
         os.close(root)
 
 
+def test_full_fsync_falls_back_to_fsync_where_F_FULLFSYNC_is_absent(tmp_path: Path, monkeypatch):
+    # F_FULLFSYNC 是 macOS 独有的；CI 跑在 ubuntu-latest 上，那里没有这个常量。
+    # 本档在**任何平台**上都跑：把常量藏掉，断言退回 os.fsync 而不是抛 AttributeError。
+    monkeypatch.delattr(fcntl, "F_FULLFSYNC", raising=False)
+    called = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (called.append(fd), real_fsync(fd))[1])
+    p = tmp_path / "f"
+    p.write_text("x")
+    fd = os.open(str(p), os.O_RDONLY)
+    try:
+        full_fsync(fd)          # 不得抛 AttributeError
+    finally:
+        os.close(fd)
+    assert called == [fd]
+
+
 def test_full_fsync_uses_F_FULLFSYNC_not_plain_fsync(tmp_path: Path, monkeypatch):
     # macOS `man 2 fsync` 明写 fsync **既不保证断电耐久、也不保证跨设备写序**
     # （"This is not a theoretical edge case."）。断电在威胁模型之内（O4-F11），
     # 故 manifest 提交与顺序屏障两处必须真的走 F_FULLFSYNC——
     # 用 fsync 写出来的「目录项丢失注入测试」绿灯**证明不了任何东西**。
+    # ⚠️ 按平台分支，**绝不 skip** —— 本仓 CI 把任何 skip 都当失败
+    #（backend-tests.yml「Run full backend suite (fail on any skip)」）。
     calls = []
     real_fcntl = fcntl.fcntl
     monkeypatch.setattr(
         fcntl, "fcntl",
         lambda fd, cmd, *a: (calls.append(cmd), real_fcntl(fd, cmd, *a))[1],
     )
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
     p = tmp_path / "f"
     p.write_text("x")
     fd = os.open(str(p), os.O_RDONLY)
@@ -384,11 +406,11 @@ def test_full_fsync_uses_F_FULLFSYNC_not_plain_fsync(tmp_path: Path, monkeypatch
         full_fsync(fd)
     finally:
         os.close(fd)
-    assert calls == [fcntl.F_FULLFSYNC]
-
-
-def test_full_fsync_command_constant_exists():
-    assert hasattr(fcntl, "F_FULLFSYNC")     # 本机实测值 51
+    if hasattr(fcntl, "F_FULLFSYNC"):        # macOS：必须真的走 F_FULLFSYNC
+        assert calls == [fcntl.F_FULLFSYNC]
+        assert fsynced == []
+    else:                                    # Linux：fsync 就是该平台最强的那个
+        assert fsynced == [fd]
 
 
 # ------------------------------------------------------------- Task 7: acquire_lock
@@ -788,16 +810,22 @@ def test_assert_readonly_fd_rejects_writable_dir(tmp_path: Path):
         os.close(rw)
 
 
-@pytest.mark.skipif(not (os.statvfs("/").f_flag & os.ST_RDONLY),
-                    reason="本机根卷不是只读挂载（macOS SSV 之外的平台）")
-def test_assert_readonly_fd_accepts_readonly_volume():
-    # ⚠️ 本判据只证明「这是某个只读目录」：本机根卷 / 自己就是 apfs … read-only，
-    # 「只读」在 macOS 上**区分不出网络共享与本地卷**（R19-F2，已实测）
-    ro = open_root("/")
+def test_assert_readonly_fd_accepts_readonly_fd(tmp_path: Path, monkeypatch):
+    # ⚠️ 原先这一档用「本机根卷 / 是只读的」做真实证据 + skipif —— 但 CI 跑在
+    # ubuntu-latest 上，那里 / 可写 → skip → 而本仓 CI **把任何 skip 都当失败**。
+    # 改为注入 f_flag，**任何平台都跑**。真实侧的证据由
+    # test_assert_readonly_fd_rejects_writable_dir（真目录、无注入）承担，
+    # 「macOS 根卷自身即只读」这条实测记录在 PR 正文与提交信息里。
+    # ⚠️ 本判据只证明「这是某个只读目录」：「只读」在 macOS 上**区分不出
+    # 网络共享与本地卷**（R19-F2，已实测），绑住共享身份要靠挂载身份闸（S5）。
+    import types
+    monkeypatch.setattr(os, "fstatvfs",
+                        lambda fd: types.SimpleNamespace(f_flag=os.ST_RDONLY))
+    fd = open_root(str(tmp_path))
     try:
-        assert_readonly_fd(ro, label="--source")
+        assert_readonly_fd(fd, label="--source")     # 不得抛
     finally:
-        os.close(ro)
+        os.close(fd)
 
 
 def test_assert_no_path_overlap_rejects_equal_and_subtree(tmp_path: Path):
