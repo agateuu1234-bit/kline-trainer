@@ -144,6 +144,25 @@ close_loop() {
     done
 }
 
+# 把当前窗口**立即到期**，交给看门狗去「关到确认为止」。
+# ⚠️ 必须**保留归属令牌**（codex plan-R10，且这是 R9 修法自己长出来的回归）：
+#    STATE 的格式是 "<到期时间> <令牌>"。三条失败路径原先只写时间戳 ——
+#    看门狗读到的令牌对不上（`cut` 在没有分隔符时会把整行当第 2 字段返回，
+#    于是令牌 == 时间戳），它判定「已被新一代接管」→ **安静退出、什么都不关**，
+#    而脚本还在告诉人「已把关闭交还看门狗」。
+#    写不成或写完归属对不上 → **同步关闭**，绝不假装交出去了。
+expire_to_watchdog() {
+    _tok=$(state_token)
+    if [ -n "$_tok" ] && write_state "$(now)" "$_tok" && watchdog_owns_state; then
+        echo "已把关闭交还看门狗（归属令牌已保留；它会重试直到确认 No serve config）"
+        return 0
+    fi
+    echo "EXPIRE_FAILED: 交不出去（令牌缺失或归属对不上）—— 改为同步关闭"
+    if close_loop 120; then echo "已确认关闭"; return 0; fi
+    echo "⚠️ 未能确认关闭，请立刻查 $LOG 并手动跑 expose.sh close"
+    return 1
+}
+
 disarm() {
     rm -f "$STATE"
     if [ -f "$STATE" ]; then echo "DISARM_FAILED: 删不掉 $STATE"; return 1; fi
@@ -244,8 +263,8 @@ open)
         # ⚠️ **绝不在这里直接 disarm**（codex plan-R8 F1）：`serve --bg` 有可能
         #    **先落了配置再超时/非零退出** —— 此刻端点是否存在并不确定。
         #    正确做法是把到期时间设成「现在」，让看门狗接手「关到确认为止」。
-        printf '%s\n' "$(now)" > "$STATE"
-        echo "已把关闭交还看门狗（它会重试直到确认 No serve config）；请随后跑 expose.sh status 复核"
+        expire_to_watchdog
+        echo "请随后跑 expose.sh status 复核"
         exit 1
     fi
 
@@ -256,15 +275,15 @@ open)
     if [ "$_strc" -ne 0 ]; then
         echo "STATUS_UNVERIFIABLE: 开完之后读不到 serve 状态（rc=$_strc）—— 失败关闭"
         printf '%s\n' "$_st"
-        printf '%s\n' "$(now)" > "$STATE"
-        echo "已把关闭交还看门狗（关到确认为止）；请随后跑 expose.sh status 复核"
+        expire_to_watchdog
+        echo "请随后跑 expose.sh status 复核"
         exit 1
     fi
     if ! _why=$(serve_status_is_expected "$_st"); then
         echo "$_why: serve 配置不是预期形态 —— 失败关闭"
         printf '%s\n' "$_st"
-        printf '%s\n' "$(now)" > "$STATE"
-        echo "已把关闭交还看门狗（关到确认为止）；请随后跑 expose.sh status 复核"
+        expire_to_watchdog
+        echo "请随后跑 expose.sh status 复核"
         exit 1
     fi
     printf '%s\n' "$_st"
@@ -381,6 +400,33 @@ selftest)
         "https://fnos.tail9dc815.ts.net (tailnet only)
 |-- / proxy http://127.0.0.1:9999"
     _chk SERVE_TARGET_UNCONFIRMED  "No serve config（还没开，必须拒）" "No serve config"
+    echo "状态文件读写自检（守住 R10 那个令牌丢失回归）："
+    (
+        STATE=/tmp/kline-trainer-expose.selftest.$$
+        _tok="TOKEN-XYZ"
+        write_state 1234567890 "$_tok" || true
+        _d1=$(state_deadline); _t1=$(state_token)
+        # 模拟「立即到期」那一步：必须把令牌原样带过去
+        write_state 999 "$(state_token)" || true
+        _d2=$(state_deadline); _t2=$(state_token)
+        rm -f "$STATE" "${STATE}.tmp"
+        _ok=1
+        [ "$_d1" = "1234567890" ] && [ "$_t1" = "$_tok" ] || _ok=0
+        [ "$_d2" = "999" ] && [ "$_t2" = "$_tok" ] || _ok=0
+        if [ "$_ok" -eq 1 ]; then echo "  pass  写入/读回两字段，且立即到期后令牌不丢"; else
+            echo "  FAIL  两字段读写不正确（d1=$_d1 t1=$_t1 d2=$_d2 t2=$_t2）"; exit 1; fi
+    ) || _fail=1
+    echo "cut 陷阱自检："
+    (
+        STATE=/tmp/kline-trainer-expose.selftest2.$$
+        printf '%s\n' "1234567890" > "$STATE"       # 只写一个字段（就是那个 bug 的形状）
+        _t=$(state_token); rm -f "$STATE"
+        if [ "$_t" = "1234567890" ]; then
+            echo "  pass  确认 cut 在无分隔符时返回整行 —— 所以「只写时间戳」会让令牌变成时间戳"
+        else
+            echo "  FAIL  cut 行为与预期不符（拿到 [$_t]）"; exit 1
+        fi
+    ) || _fail=1
     if [ "$_fail" -eq 0 ]; then echo "SELFTEST_PASS"; else echo "SELFTEST_FAIL"; exit 1; fi
     ;;
 *)
