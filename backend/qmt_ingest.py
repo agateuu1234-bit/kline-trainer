@@ -17,7 +17,11 @@ from qmt_resample import (build_intraday, period_boundaries,
                           reconcile_sources, resample_calendar)
 
 _STOCK_COL_CANDIDATES = ("stock", "code", "stock_code", "file", "filename")
-_LABEL_TO_PERIOD = {"1分钟K线": "1m", "日K线": "daily", "1m": "1m", "daily": "daily"}
+# ⚠️ `1d` 是**真实导出**写的日线取值（export_all_front_ratio_stocks_only.py:515
+# 写死 `"period": "1d"`）。此前表里没有它 → 5607 条日线记录被 `continue` **静默丢弃**，
+# 而测试造的样本用的是想象出来的 `daily`，所以三年没暴露（2026-08-23 挂载实测坐实）。
+_LABEL_TO_PERIOD = {"1分钟K线": "1m", "日K线": "daily",
+                    "1m": "1m", "1d": "daily", "daily": "daily"}
 _REQUIRED_LOG_COLS = ("period", "status", "rows", "first_time", "last_time")
 
 
@@ -31,8 +35,10 @@ class ExportLogEntry:
     period: str
     status: str
     rows: int
-    first_time: int
-    last_time: int
+    # ⚠️ `status != "ok"` 的行没有有效时间戳（真实导出里它们是空的），故为可空。
+    # 这种行仍然保留成条目，交给 build_stock_import 门 4 的 status 门拒绝。
+    first_time: int | None
+    last_time: int | None
     source: str
 
 
@@ -60,21 +66,43 @@ def parse_export_log(path) -> dict[tuple[str, str], ExportLogEntry]:
         raise QmtSchemaError(f"export_log 无股票标识列（候选 {_STOCK_COL_CANDIDATES}）")
     out: dict[tuple[str, str], ExportLogEntry] = {}
     for _, row in df.iterrows():
-        period = _LABEL_TO_PERIOD.get(str(row["period"]).strip())
+        raw_period = str(row["period"]).strip()
+        period = _LABEL_TO_PERIOD.get(raw_period)
         if period is None:
-            continue
+            # ⚠️ **绝不静默 continue**：原先这里跳过时不报错、不计数，于是
+            # 「整批数据没进来」与「这批数据本来就没有」在外部完全不可区分。
+            raise QmtSchemaError(
+                f"export_log 的 period 列出现认不出的取值 {raw_period!r}"
+                f"（已知：{sorted(_LABEL_TO_PERIOD)}）。"
+                f"若 QMT 新增了导出周期，请先把它补进 _LABEL_TO_PERIOD 再跑。"
+            )
         code = _norm_code(row[id_col])
         key = (code, period)
         if key in out:
             raise QmtSchemaError(f"export_log_duplicate: {key} 出现多行")
-        # first_time/last_time 用同一套 QMT 打包整数解析（解析不出 → 报错停下）
-        try:
-            ft = int(parse_qmt_datetime(pd.Series([row["first_time"]]), period).iloc[0])
-            lt = int(parse_qmt_datetime(pd.Series([row["last_time"]]), period).iloc[0])
-            rows_n = int(row["rows"])
-        except (ValueError, TypeError) as e:
-            raise QmtSchemaError(f"export_log 行解析失败 {key}（{e}），源={row[id_col]!r}") from e
-        out[key] = ExportLogEntry(code=code, period=period, status=str(row["status"]).strip(),
+        status = str(row["status"]).strip()
+        if status == "ok":
+            # first_time/last_time 用同一套 QMT 打包整数解析（解析不出 → 报错停下）
+            try:
+                ft = int(parse_qmt_datetime(pd.Series([row["first_time"]]), period).iloc[0])
+                lt = int(parse_qmt_datetime(pd.Series([row["last_time"]]), period).iloc[0])
+                rows_n = int(row["rows"])
+            except (ValueError, TypeError) as e:
+                raise QmtSchemaError(f"export_log 行解析失败 {key}（{e}），源={row[id_col]!r}") from e
+        else:
+            # ⚠️ **先看 status，再解析时间戳**（顺序原先是反的）。
+            # `status != "ok"` 的行（如退市股 301583.SZ）rows=0、first_time/last_time 为空
+            # → 原先 parse_qmt_datetime 抛 ValueError → **整份 log 崩掉**，
+            # 5607 只好股一只都导不进来。而 build_stock_import 门 4 本来就有一道
+            # status 门专门拒这种行 —— 解析阶段先死了，那道门**根本够不到**：
+            # 「想支持的路径实现上够不到」。
+            # 保留条目、时间戳置 None，让那道门真正够得着；数值字段对这种行本就无意义。
+            ft = lt = None
+            try:
+                rows_n = int(row["rows"])
+            except (ValueError, TypeError):
+                rows_n = 0
+        out[key] = ExportLogEntry(code=code, period=period, status=status,
                                   rows=rows_n, first_time=ft, last_time=lt,
                                   source=str(row[id_col]))
     return out
