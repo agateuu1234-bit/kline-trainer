@@ -129,6 +129,30 @@ crontab_snapshot() {   # $1 = 输出文件；成功 0 / 读失败 1
 # 用 $2 生成的新表替换 crontab，并断言「无关条目一条不少」
 crontab_apply_verified() {  # $1=改前快照 $2=待写入文件
     _before=$1; _new=$2; _after="${_new}.after"
+    # ⚠️ 写之前**再读一次**并要求与最初快照逐字一致（codex plan-R14）：
+    #    本脚本的 flock 只串行化**自己**。若另一个人/工具在「拍快照」与「写回」之间
+    #    改了计划任务表，这次整表替换会把对方的改动抹掉 —— 而写后的比对是拿
+    #    **过期的快照**做参照，照样会通过。这是典型的丢失更新（lost update）。
+    #    检测到就中止，什么都不写；重跑一次即可（重跑会拿到新的快照）。
+    #
+    # ⚠️ **已接受的残留：这条竞态关不掉**（实测确认，不是没试）。
+    #    复读只能把窗口从「整个编辑过程」缩到「几微秒」，缩不到零 ——
+    #    crontab 没有「比对并交换」这种原子写入。而且方向不对称：
+    #    「别人覆盖我」写后比对能发现，**「我覆盖别人」从本侧无法检测**
+    #    （实测：把并发修改注入在复读之后、写入之前，那条无关任务确实丢了，
+    #     脚本仍打印 BOOT_GUARD_OK）。
+    #    处置 = 接受并声明，不假装修好：本操作是部署中的一次性手动步骤、
+    #    本机单人管理；runbook 明写「跑 P4 期间别同时编辑计划任务表」；
+    #    装/卸前后都会打印整张表供肉眼核对。
+    #    真要根治需所有 crontab 写入方共用同一把锁 —— 不在本次可约束的范围内。
+    _recheck="${_new}.recheck"
+    crontab_snapshot "$_recheck" || { rm -f "$_recheck"; return 1; }
+    if ! cmp -s "$_before" "$_recheck"; then
+        echo "CRONTAB_CHANGED_CONCURRENTLY: 拍快照之后计划任务表被别的进程改过了 —— **本次什么都没写**，请重跑一次"
+        rm -f "$_recheck"
+        return 1
+    fi
+    rm -f "$_recheck"
     crontab "$_new" || { echo "CRONTAB_WRITE_FAILED"; return 1; }
     crontab_snapshot "$_after" || return 1
     # 无关条目 = 不含守卫标记的行；改前改后必须完全一致
