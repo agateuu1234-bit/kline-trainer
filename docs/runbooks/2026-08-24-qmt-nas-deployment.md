@@ -238,23 +238,56 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -
 ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -U kline -d kline_trainer -f - < sql/2026-08-24-qmt-nas-p6b-schema-shape-check.sql"
 ```
 
-- ✅ 通过：表格里 **16 行**（6 个列 + 10 条约束）`verdict` **全部**是 `pass`，末尾出现 `NOTICE: P6b GATE PASS: 6 列 + 10 约束全部逐条吻合，且无预期外约束`
-- ❌ 任一行不是 `pass`：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止，销毁卷重来**（`docker compose down -v` 后回 P6），**不得**往下插数据
+- ✅ 通过：命令**只打印不合格项**，所以健康库上表格是 `(0 rows)`，末尾出现 `NOTICE: P6b GATE PASS: 38 列 + 15 约束（含主键/外键）+ 9 索引，逐条吻合且无多余项`
+- ❌ 有任何一行被打出来：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止，销毁卷重来**（`docker compose down -v` 后回 P6），**不得**往下插数据
 
-四种失败标签各自的含义：
+**它查的是「完整形状契约」，三类各自双向比对**（缺、多、改都会红）：
+
+| 类别 | 查什么 |
+|---|---|
+| 列（38 个） | 每张表每一列的**类型**（含长度精度）、**能不能为空**、**默认值** |
+| 约束（15 条） | **主键 / 外键 / 唯一 / CHECK 全四类**，按「所属表 + 名字」匹配，比对**完整定义原文** |
+| 索引（9 条） | 完整索引定义，**含部分索引的 `WHERE` 条件与列的顺序** |
+
+六种失败标签各自的含义：
 
 | 标签 | 意思 |
 |---|---|
-| `FAIL-missing` | 该列 / 该约束在这个库里**不存在** |
+| `FAIL-missing` | 该列 / 约束 / 索引在这个库里**不存在** |
 | `FAIL-type-mismatch` | 列存在但**类型不对** |
-| `FAIL-definition-drift` | 约束名字还在、但**定义被改过**（最阴险的一种：名字看着没变） |
-| `FAIL-unexpected` | 库里有**预期之外**的约束（多半是上一版 schema 留下的） |
+| `FAIL-nullability-drift` | 列的「能不能为空」被改过 |
+| `FAIL-default-drift` | 列的**默认值**被改过 |
+| `FAIL-definition-drift` | 约束/索引名字还在、但**定义被改过**（最阴险的一种：名字看着没变） |
+| `FAIL-unexpected` | 库里有**预期之外**的列 / 约束 / 索引（多半是上一版 schema 留下的） |
 
 ⚠️ **如果是在一个全新空卷上本门也红**：那说明 `backend/sql/schema.sql` 改过了，而这份闸门文件是它的形状快照（文件头记着 schema.sql 的 md5）。这时要**重新生成闸门文件**，不是怀疑部署。
 
-**判别力已实测**（2026-08-24，本机真 PostgreSQL 15.12）：健康库退出码 0；五种破坏各自退出码 3 并给出对应标签 —— ① 删掉一条约束 → `FAIL-missing`；② **同名但把定义改宽** → `FAIL-definition-drift`；③ **把同名约束挪到别的表** → `FAIL-missing` + `FAIL-unexpected`；④ 多加一条约束 → `FAIL-unexpected`；⑤ 改列类型 → `FAIL-type-mismatch`。每档复原后都回到退出码 0。
+⚠️ **一个已知且刻意保留的行为**：如果这个库是被**就地改造**出来的（比如跑过 `ALTER COLUMN ... TYPE` 之类的迁移），PostgreSQL 会把依赖那一列的约束**重新渲染一遍** —— 语义完全一样、文字不一样，本门会报 `FAIL-definition-drift`。**这是想要的结果**，不是误报：P6 的前提本来就是「必须是全新空卷」，库不是新的就该停下来重建，而不是把闸门放宽。
 
-> ⚠️ **本门的上一版（R1）在 ② 和 ③ 两档上是放行的**（codex 评审 R1 的 high finding，实测坐实）。原因是它只比对约束**名字**，不看所属表也不看定义 —— ③ 那种漂移会让 `klines` 的价格排序约束整个消失，`high < low` 的脏数据可以直接进库。
+**判别力已逐档实测**（2026-08-24，本机真 PostgreSQL 15.12。⚠️ **每一档都在一个全新建的库上跑**，不用「就地复原」—— 因为 `ALTER COLUMN TYPE` 会顺带改写约束文字，就地复原会把后面几档的结果污染成假的）：
+
+| 破坏 | 结果 |
+|---|---|
+| 删掉一条 CHECK | `FAIL-missing` |
+| **同名 CHECK 定义被改宽** | `FAIL-definition-drift` |
+| **同名 CHECK 挪到别的表** | `FAIL-missing` + `FAIL-unexpected` |
+| 多出一条约束 | `FAIL-unexpected` |
+| 改列类型（`file_path`） | `FAIL-type-mismatch` |
+| **删掉 `klines`→`stocks` 外键** | `FAIL-missing` |
+| **删掉 `training_sets` 主键** | `FAIL-missing` |
+| **删掉 lease 部分索引** | `FAIL-missing` |
+| **部分索引丢掉 `WHERE` 条件（名字不变）** | `FAIL-definition-drift` |
+| **lease 列类型 `timestamptz`→`timestamp`** | `FAIL-definition-drift` + `FAIL-type-mismatch` |
+| **默认值被改（`schema_version`）** | `FAIL-default-drift` |
+| **可空性被改（`file_path`）** | `FAIL-nullability-drift` |
+| 多出一列 / 删掉一列 | `FAIL-unexpected` / `FAIL-missing` |
+| **唯一约束的列集合被改** | `FAIL-definition-drift` |
+
+健康库退出码 0，上述 15 档全部退出码 3。
+
+> ⚠️ **本门前两版都被 codex 评审打回过，两条都实测坐实**：
+> **R1** 只比对约束**名字**，不看所属表也不看定义 → 「同名改定义」与「同名换表」两档实测**放行**；后者会让 `klines` 的价格排序约束整个消失，`high < low` 的脏数据可以直接进库。
+> **R2** 只查 6 个选定列、只看 CHECK/UNIQUE 两类 → **主键、外键、索引、可空性、默认值、其余列类型全部不查**；少了那个外键会产生孤儿行，少了两条 lease 部分索引会让预占查询退化，而闸门照样说「健康」。
 
 ---
 
