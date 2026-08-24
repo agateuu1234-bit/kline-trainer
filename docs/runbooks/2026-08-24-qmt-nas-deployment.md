@@ -85,16 +85,32 @@ ssh $NAS 'docker exec tailscale tailscale status' | grep iphone
 **执行者：Claude**
 
 ```
-ssh $NAS "mkdir -p $DIR/app $DIR/sql $DIR/training-sets && ls -la $DIR"
+ssh $NAS "mkdir -p $DIR/app $DIR/sql $DIR/training-sets && printf 'kline-trainer-deploy\n' > $DIR/.kline-trainer-deploy && ls -la $DIR"
 ```
 
-- ✅ 通过：列出 `app` / `sql` / `training-sets` 三个子目录
+- ✅ 通过：列出 `app` / `sql` / `training-sets` 三个子目录，以及一个 `.kline-trainer-deploy` 标记文件
+
+> 这个标记文件不是装饰：后面每一步**动这个目录之前**都会先确认它在，防止 `$DIR` 打错时把命令作用到别的目录上（`rsync --delete` 和销毁卷都会因此变成破坏别人的东西）。
+
+**判据 —— 后面每次动 `$DIR` 前先跑这一条**（下文称「目录身份门」）：
+
+```
+ssh $NAS "grep -qx kline-trainer-deploy $DIR/.kline-trainer-deploy && echo DIR_OK || echo DIR_WRONG"
+```
+
+- ✅ 通过：打印 `DIR_OK`。打印 `DIR_WRONG` 或报错 → **立刻停**，先查 `$DIR`。
 
 ---
 
 ## P4 · 把后端文件同步到 NAS
 
 **执行者：Claude**（`WT` = 本机仓库里 `backend` 目录的绝对路径）
+
+⚠️ **先过一遍「目录身份门」**（见 P3）—— 下面第二条带 `--delete`，`$DIR` 打错会**删掉别的目录里的文件**。
+
+```
+ssh $NAS "grep -qx kline-trainer-deploy $DIR/.kline-trainer-deploy && echo DIR_OK || echo DIR_WRONG"
+```
 
 ```
 rsync -av "$WT/backend/Dockerfile" "$WT/backend/requirements-api.txt" "$WT/backend/docker-compose.yml" $NAS:$DIR/
@@ -109,7 +125,7 @@ rsync -av "$WT/backend/sql/schema.sql" $NAS:$DIR/sql/
 ```
 
 ```
-rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p11-insert-training-sets.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p15-reset-training-sets.sql" $NAS:$DIR/sql/
+rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p11-insert-training-sets.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p15-reset-training-sets.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p10-cleanup-smoke-rows.sql" $NAS:$DIR/sql/
 ```
 
 **判据**：两侧对同一批文件算校验和并比对
@@ -189,17 +205,89 @@ ssh $NAS "cd $DIR && sed 's/=.*/=<hidden>/' .env"
 ssh $NAS 'docker volume ls | grep -E "kline-trainer_pgdata|backend_pgdata" || echo "(两个都不存在)"'
 ```
 
-- ✅ 通过：**看不到** `kline-trainer_pgdata`。（看到 `backend_pgdata` 是正常的 —— 那是四月遗留，我们不碰它。）
-- ❌ 若已存在 `kline-trainer_pgdata`：说明之前部署过。**必须先销毁**再继续：
-  ```
-  ssh $NAS "cd $DIR && docker compose down -v"
-  ```
+- ✅ 通过：**看不到** `kline-trainer_pgdata` → 直接进第二步。（看到 `backend_pgdata` 是正常的 —— 那是四月遗留，我们不碰它。）
+- 🛑 **若已存在 `kline-trainer_pgdata`：停在这里**，不要自动往下走。转「**P6-RESET**」那一节。
+
+> ⚠️ **这里刻意不写 `docker compose down -v`**（codex 评审 R3 的 high finding）。原来的写法是「看到卷存在 = 授权销毁」，问题有三个：
+> ① 卷存在**不等于**它可以丢 —— 上一轮可能已经装进了真数据；
+> ② `down -v` 作用于「当前目录解析出来的那个项目」，`$DIR` 写错就会**销毁 NAS 上别的项目的卷**（这台 NAS 上还跑着 `iyuuplus`）；
+> ③ 销毁前既不看内容也不留备份，出错不可逆。
 
 **第二步，起数据库**：
 
 ```
 ssh $NAS "cd $DIR && docker compose up -d db"
 ```
+
+---
+
+### P6-RESET · 销毁旧数据卷（**破坏性，需要你明确点头**）
+
+只有第一步发现 `kline-trainer_pgdata` 已存在时才走这一节。**四道门全过 + 你明确说「销毁」之后**才执行最后一步。
+
+**门 1 · 确认要动的确实是我们的项目**（防 `$DIR` 写错打到别的项目）
+
+```
+ssh $NAS "grep -qx kline-trainer-deploy $DIR/.kline-trainer-deploy && echo DIR_OK || echo DIR_WRONG"
+```
+
+- ✅ 通过：打印 `DIR_OK`
+
+```
+ssh $NAS "docker compose -f $DIR/docker-compose.yml config" | head -1
+```
+
+- ✅ 通过：输出**恰好**是 `name: kline-trainer`。不是的话**立刻停**，先查 `$DIR`。
+
+**门 2 · 看清楚这个卷里到底有什么**
+
+```
+ssh $NAS "cd $DIR && docker compose up -d db"
+```
+
+```
+ssh $NAS "docker inspect kline-trainer-db-1 --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}'"
+```
+
+- ✅ 通过：输出是 `kline-trainer_pgdata -> /var/lib/postgresql/data`（确认待销毁的就是这一个）
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c 'SELECT count(*) AS 训练组行数 FROM training_sets;' -c 'SELECT id, stock_code, status FROM training_sets ORDER BY id;'"
+```
+
+**门 3 · 先备份，并验证备份能用**
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 pg_dump -U kline -d kline_trainer | gzip > $DIR/backup-before-reset-\$(date +%Y%m%d-%H%M%S).sql.gz"
+```
+
+```
+ssh $NAS "ls -la $DIR/backup-before-reset-*.sql.gz && gzip -t $DIR/backup-before-reset-*.sql.gz && echo BACKUP_OK"
+```
+
+- ✅ 通过：文件大小**不是 0**，且最后一行打印 `BACKUP_OK`
+
+**门 4 · 报给你，等你明确点头**
+
+我会把门 2 看到的行数与内容、门 3 的备份文件名报给你。⛔ **在你明确回复「销毁」之前，下面两条不执行。**
+
+**执行销毁**（⚠️ 不可逆；**显式指名那一个卷**，不用 `down -v`）
+
+```
+ssh $NAS "docker compose -f $DIR/docker-compose.yml down"
+```
+
+```
+ssh $NAS "docker volume rm kline-trainer_pgdata"
+```
+
+```
+ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -x kline-trainer_pgdata || echo "已销毁"'
+```
+
+- ✅ 通过：最后一条打印 `已销毁`；并且 `backend_pgdata` 等**别的卷仍在**（可用 `docker volume ls` 复核）
+
+销毁后回到 P6 第二步。
 
 **第三步，等它健康**：
 
@@ -239,7 +327,7 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -U kline -d kline_tr
 ```
 
 - ✅ 通过：命令**只打印不合格项**，所以健康库上表格是 `(0 rows)`，末尾出现 `NOTICE: P6b GATE PASS: 38 列 + 15 约束（含主键/外键）+ 9 索引，逐条吻合且无多余项`
-- ❌ 有任何一行被打出来：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止，销毁卷重来**（`docker compose down -v` 后回 P6），**不得**往下插数据
+- ❌ 有任何一行被打出来：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止**，走 **P6-RESET** 那一节（⛔ 不要直接 `docker compose down -v` —— 理由见 P6），销毁后回 P6 第二步，**不得**往下插数据
 
 **它查的是「完整形状契约」，三类各自双向比对**（缺、多、改都会红）：
 
@@ -294,6 +382,12 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -U kline -d kline_tr
 ## P7 · 把 3 个训练组压缩包放到 NAS，并**重算指纹**
 
 **执行者：Claude**
+
+⚠️ 先过一遍「目录身份门」（见 P3）：
+
+```
+ssh $NAS "grep -qx kline-trainer-deploy $DIR/.kline-trainer-deploy && echo DIR_OK || echo DIR_WRONG"
+```
 
 NAS 上本来就有一份备份（2026-08-24 复核过指纹三个全对），直接从那里复制最省事：
 
@@ -449,11 +543,17 @@ ssh $NAS "curl -s --max-time 10 'http://127.0.0.1:8010/training-sets/meta?count=
 **执行者：Claude**
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -U kline -d kline_trainer -c \"DELETE FROM training_sets;\" -c \"DO \\\$\\\$ DECLARE n int; BEGIN SELECT count(*) INTO n FROM training_sets; IF n <> 0 THEN RAISE EXCEPTION 'P10 GATE FAIL: 表里还有 % 行', n; END IF; RAISE NOTICE 'P10 GATE PASS: 表已清空'; END \\\$\\\$;\""
+ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -U kline -d kline_trainer -f - < sql/2026-08-24-qmt-nas-p10-cleanup-smoke-rows.sql"
 ```
 
-- ✅ 通过：打印 `P10 GATE PASS: 表已清空`
+- ✅ 通过：打印 `P10 GATE PASS: 表已清空，可以执行 P11`（表本来就空时打印 `P10 GATE PASS（幂等）`）
 - ❌ 非零退出：**停止**，不得往下插真数据
+
+> ⚠️ **这一步刻意不做无条件全表删除**（codex 评审 R3 的 high finding）。原来写的是 `DELETE FROM training_sets;` —— 安全性**完全**靠操作者按 P9→P10→P11 的次序执行。实测过后果：如果 P10 在 P11 之后被重跑一次，**3 行真数据被删光、退出码 0、闸门打印 `P10 GATE PASS`**。一边毁数据一边报成功，是最难发现的一种错。
+>
+> 现在的脚本：整段在**一个事务**里；先断言表里**没有任何非烟测行**（有就拒绝、一行都不动）；只删带 `SMOKE-A` / `SMOKE-B` 标记的行；删完再断言表为空；表本来就空时幂等通过。
+>
+> **判别力已实测**（2026-08-24，本机真 PostgreSQL）：只有烟测行 → 删净通过；空表 → 幂等通过；**只有 3 行真数据 → 拒绝，3 行一行不少**；**烟测行与真数据混合 → 拒绝，4 行一行不少**（事务回滚）。
 
 ---
 
@@ -595,7 +695,11 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -
 
 - ✅ 通过：打印 `P15 GATE PASS: 3 行全部 unsent 且 lease 三列全 NULL`
 
-（该脚本是**无条件**更新，重复执行安全；已在本机验过幂等，也验过「只改状态不清租约列」会被数据库的完整性约束拒绝。）
+> ⚠️ **这一步同样不做无条件全表更新**。R1 版是「无条件 UPDATE + 事后数行数」—— 与 codex 打回 P10 的是同一类缺陷，按本仓守则「改判据要按判据本身穷尽全仓」一并收紧了（评审只点名了 P6 和 P10 两处）。
+>
+> 现在：整段在一个事务里；**先**断言表里恰好是本次那 3 行（按 `content_hash` 认），不是就拒绝、一行都不动；`UPDATE` 也带 `WHERE` 限定这三个指纹（与前置门互为双保险）；最后再断言 3 行全部回到未发送且租约三列全空。
+>
+> **判别力已实测**（2026-08-24，本机真 PostgreSQL）：3 行已发送 → 复位成功；再跑一次 → 幂等通过；**混进第 4 行（非本次数据）→ 拒绝，4 行原样不动**；**少了一行（只剩 2 行）→ 拒绝，2 行原样不动**。另已验「只改状态不清租约列」会被数据库完整性约束拒绝。
 
 **设备侧**：手机上**长按图标 → 删除 App**，然后回到 P13 重装。
 
