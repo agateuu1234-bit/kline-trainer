@@ -292,6 +292,10 @@ def open_root(abs_path, *, create_leaf=False):
               "reason": "fetch_missing_file", "attempts": 1}]
 ```
 
+> **全文约定（S2-F3）**：本文件凡写 `universe[market]`，一律指 **`source_snapshot.universe[market]`**
+> ——如上方示例，名单**只存在于 `source_snapshot` 之内**，manifest 顶层**没有**同名键。
+> 读侧校验与形状校验那几条**判据**已就地写全层级，不依赖本约定。
+
 补拉时**不重新计算宇宙**，直接从冻结的 `universe[market]` 里取该层下一段。并在启动时对源 `export_log.csv` 重算 sha256：
 
 - **与 manifest 记录不等 → 拒绝启动**，提示「源导出已变化，请换新 staging + 新 seed 重新开始」。
@@ -393,7 +397,11 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 ### 4.5 幂等拷贝（按股事务 + 崩溃恢复 + manifest）
 
 - 每只股拷两个文件：`{code}_{name}_1分钟K线_前复权.csv` 与 `{code}_{name}_日K线_前复权.csv`（`qmt_normalize._FILENAME_RE` 的字面格式）。
-- **保留源端目录结构**（`front_ratio_cn_stocks_ab_bj/{1分钟K线_前复权,日K线_前复权}/`）——`import_csv._amain_qmt_import` 用 `input_dir.rglob(...)` **递归**定位，保留结构即可直接被复用。
+- **保留源端目录结构**（**源根之下**的 `{1分钟K线_前复权,日K线_前复权}/` 两个周期目录，S2-F1）——`import_csv._amain_qmt_import` 用 `input_dir.rglob(...)` **递归**定位，保留结构即可直接被复用。
+  **staging 因此是源根的逐层镜像**：同一条 `relative_path` 在源侧与 staging 侧**逐字相同**。
+  ⚠️ **已实测（2026-08-24，纯 `tmp_path`）**：staging 保留或不保留 `front_ratio_cn_stocks_ab_bj/`
+  这一层，`rglob` 两种布局都**恰好命中 1 个**文件、`.part` 残留都不被误命中——
+  **导入侧对这一层的有无零依赖**（此前只有推理，无证据）。
 - **拷贝时流式算 sha256**（R2-F3）：边读源边算，写完对**落地文件**重算一遍并与源哈希比对，不等即判拷贝失败（删**该股的两个** `.part`、记 `fetch_copy_hash_mismatch`、继续下一只；R37-F1：清理的粒度是股不是文件）。字节反正要过一遍内存，哈希是顺带的。
 - **幂等判据 = 字节数 + 内容哈希**（R2-F3），按「manifest 有无记录 × 目标在不在」四象限判（R7-F3 + R26-F2）：
 
@@ -419,7 +427,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
   5. 删除 `.inflight.json`。
 
   **崩溃恢复**（取得 `.staging.lock`、读完并校验 manifest 之后，**任何拷贝之前**）：若 `.inflight.json` 存在 →
-  - **先校验标记自身的形状**（同 R21-F3 的纪律：一个能授权删文件的结构，自己必须先被校验）：`code` 匹配 `^\d+\.(SH|SZ|BJ)$`；`universe_idx` 在界内且 `universe[market][universe_idx] == code`；`targets` / `parts` 各 2 条、`resolve()` 后落在 staging 之内、由文件名解析出的 code 与 `code` 一致且 period 恰为 `1m` / `daily` 各一。**任一不符 → 拒绝启动、一个文件都不删**，提示人工处理。
+  - **先校验标记自身的形状**（同 R21-F3 的纪律：一个能授权删文件的结构，自己必须先被校验）：`code` 匹配 `^\d+\.(SH|SZ|BJ)$`；`universe_idx` 在界内且 `source_snapshot.universe[market][universe_idx] == code`；`targets` / `parts` 各 2 条、`resolve()` 后落在 staging 之内、由文件名解析出的 code 与 `code` 一致且 period 恰为 `1m` / `daily` 各一。**任一不符 → 拒绝启动、一个文件都不删**，提示人工处理。
   - 校验通过后分**三档**（O4-F5：原文的两分法在「manifest 已提交但文件校验不过」这一档会把状态改坏）：
     **①manifest 里该股无记录** → 崩在第 4 步之前 → 走下面的回滚（cursor 未推进，原地重试同一槽位）；
     **②有记录且 final 文件字节数与 sha256 都相符** → 崩在第 4 步之后 → **只删标记**，文件保留；
@@ -598,10 +606,10 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
          #   · qmt_pilot：整轮 FAIL_STAGING_INTEGRITY + staging_error.kind = "staging_path_escape"、rc=1，
          #     且**在任何 DB 动作与任何股的导入之前**。
      ```
-     - **`qmt_fetch` 的每一次写**（含建 `front_ratio_.../1分钟K线_前复权/` 各级子目录，`create_dirs=True`）；
+     - **`qmt_fetch` 的每一次写**（含建 `1分钟K线_前复权/` / `日K线_前复权/` 这一级子目录，`create_dirs=True`）；
      - **`qmt_pilot` 的每一次读**（`create_dirs=False`——pilot 从不创建 staging 目录）。
 
-     > **为什么「相对 `stg_fd` 的 `openat`」本身不够（R74-F2 修正）**：staging 保留源的分层结构（`front_ratio_cn_stocks_ab_bj/1分钟K线_前复权/<code>_..._前复权.csv`），所以每次读写都要**穿过若干中间目录分量**。`os.open("a/b/c.csv", dir_fd=stg_fd)` 只保证**起点**是 `stg_fd`，`O_NOFOLLOW` 也**只作用于最后一段**——**中间的 `a` 或 `b` 是符号链接时，内核照样跟随**。于是一棵被复用的 staging 里，只要 `1分钟K线_前复权` 被换成指向 staging 之外的链接，`qmt_fetch` 就会把 `.part`/CSV **写到 staging 树外面**，随后 pilot 又会**从树外面读**，而全套 `staging_intact` 哈希校验查的是「同一条路径读回来的字节」——**换过的分量对它完全透明**。
+     > **为什么「相对 `stg_fd` 的 `openat`」本身不够（R74-F2 修正）**：staging 保留源的分层结构（`1分钟K线_前复权/<code>_..._前复权.csv`——S2-F1 定源根之后为**一级**中间目录；**逐段无跟随的全部论证照旧成立**，本条要挡的正是这一级被换成符号链接），所以每次读写都要**穿过若干中间目录分量**。`os.open("a/b/c.csv", dir_fd=stg_fd)` 只保证**起点**是 `stg_fd`，`O_NOFOLLOW` 也**只作用于最后一段**——**中间的 `a` 或 `b` 是符号链接时，内核照样跟随**。于是一棵被复用的 staging 里，只要 `1分钟K线_前复权` 被换成指向 staging 之外的链接，`qmt_fetch` 就会把 `.part`/CSV **写到 staging 树外面**，随后 pilot 又会**从树外面读**，而全套 `staging_intact` 哈希校验查的是「同一条路径读回来的字节」——**换过的分量对它完全透明**。
      >
      > 这正是输出侧 `ensure_owned_dir` 逐段校验要挡的那条逃逸，**只是换到了 staging 侧**：R13-F2 立规矩时只把它落在 `--output` 上，`--dest` 这一支再一次没跟上（与 R36-F2、R51-F1 同一处盲区的**第三次**）。**「两个目录」这条同类对象清单，此后必须连「逐段无跟随」一起核，而不只是核「有没有归属标记」。**
 
@@ -632,7 +640,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 
    适用点逐条列举（**这是一份闭合清单；新增任何落地动作，先回到本清单登记**）：
    - `.part` → final 的两次 `os.replace`（每只股）→ 之后 `fsync(staging 子目录)`
-   - **`open_under(..., create_dirs=True)` 新建的每一级 staging 子目录**（`front_ratio_.../`、`1分钟K线_前复权/` 等）→ **每新建一级，`fsync` 它的父目录**（R84-F2）
+   - **`open_under(..., create_dirs=True)` 新建的每一级 staging 子目录**（`1分钟K线_前复权/`、`日K线_前复权/`）→ **每新建一级，`fsync` 它的父目录**（R84-F2）
    - **崩溃回滚删除两条 final target** → **先 `fsync` 各自所在子目录，才允许删 `.inflight.json`**（O2-F1）：
      `.inflight.json` 是**授权删除那四条路径的唯一凭据**，**它必须比被它授权的动作后消失**。
      否则断电后可能「标记的删除已持久、manifest 提交已持久，而两条 final 的 unlink 丢失」→
@@ -656,20 +664,34 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
    >
    > 崩溃注入测试也要跟着分层：不只测「文件内容截断」，还要测**「目录项丢失」**（rename 或 unlink 未持久化）。
    >
-   > **子目录创建也在其中（R84-F2 补）**：staging 保留源的分层结构，那些中间目录是 `open_under(create_dirs=True)` 建的，**却没进这份清单**。后果与 R45-F2 论证的完全同构、只是层级更高一层：manifest 已经提交了「某只股的两个文件在 `front_ratio_.../1分钟K线_前复权/` 下」这条记录，而**那个目录的目录项没落地** → 重启后记录在、文件不在、目录也不在。此时既不是 `untracked_target_file`（那要求文件存在），也不会被在途标记回收（标记早删了）——**它会表现为一只被静默记成「已拉过」却读不到的股**，最终以假的 `staging_integrity_mismatch` 或假的池穷尽收场。**「入选判据 = 它的丢失会改变后续运行的判断」这条判据是对的，我只是没把 `mkdir` 当成一次命名空间改动。**
+   > **子目录创建也在其中（R84-F2 补）**：staging 保留源的分层结构，那些中间目录是 `open_under(create_dirs=True)` 建的，**却没进这份清单**。后果与 R45-F2 论证的完全同构、只是层级更高一层：manifest 已经提交了「某只股的两个文件在 `1分钟K线_前复权/` 下」这条记录，而**那个目录的目录项没落地** → 重启后记录在、文件不在、目录也不在。此时既不是 `untracked_target_file`（那要求文件存在），也不会被在途标记回收（标记早删了）——**它会表现为一只被静默记成「已拉过」却读不到的股**，最终以假的 `staging_integrity_mismatch` 或假的池穷尽收场。**「入选判据 = 它的丢失会改变后续运行的判断」这条判据是对的，我只是没把 `mkdir` 当成一次命名空间改动。**
 3. **读侧校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过形状校验，任一不满足即 **fail-closed 拒绝**，不做「尽力而为地解析」：
    - 必需键齐全（**外延写死**：`manifest_version` / `seed` / `source_snapshot` / **`source_mount`** /
-     `universe` / `pool_order` / `cursor` / `files` / `staged_export_log` / `source_verification` /
+     `pool_order` / `cursor` / `files` / `staged_export_log` / `source_verification` /
      `source_verification_evidence`；O4-F7 + O4-F10：`source_mount` 此前只在散文里被声称「已进必需键」，
      实际逐条枚举里没有它）；`seed` 非空；`source_snapshot.universe` 三层皆为 list
-   - **`source_mount` 的形状**：`{fstype, device, source_root_relative}` 三子键齐全且均为非空 str
+     > **顶层 `universe` 是笔误，已删（S2-F3）**：原枚举把 `universe` 列为**顶层**必需键，而**同一句话
+     > 末尾**校验的却是 `source_snapshot.universe`；写侧（本节「写 `fetch_manifest.json`」那一条）与
+     > §4.4 的结构示例也**只产出 `source_snapshot.universe`，从不产出顶层 `universe`**。
+     > 照原文实现的后果是：**本工具诚实产出的每一份 manifest 都被本工具自己的读侧判
+     > `FAIL_MANIFEST_INVALID`**，一次都跑不通。
+     > **这是「写侧形状与读侧要求不配对」的第三次**（前两次：R94-F2 的 `fetch_fatal_error`
+     > 三字段 vs 四字段、O4-F13 的 `files_verified` 是 `2N` 还是 `2N+1`）——三次都由同一条纪律
+     > 拦得住：**每新增一个持久化字段，必须同时在写侧枚举与读侧枚举里各出现一次，且层级逐字相同**。
+     > 名单的唯一位置是 **`source_snapshot.universe`**。
+   - **`source_mount` 的形状**：`{fstype, device, source_root_relative}` 三子键齐全且均为 str；
+     **`fstype` / `device` 非空；`source_root_relative` 允许为空串（S2-F2 更正）**
+     > **原文的「三者均为非空」与 §4.6 (ii-a) 直接冲突**：(ii-a) 用实测论证了「共享本身就是导出根」
+     > 时 `source_root_relative` **就是空串**，并规定拼接走 `posixpath.normpath` 以免撞空分量。
+     > 两条并存时，一次完全合法的部署会**先过 (ii-a) 的拼接、再被读侧的「非空」判死**——
+     > 而操作者收到的指引指向一个不存在的问题。保留 (ii-a)（它有实测支撑），读侧放宽为「必须是 str」。
    - **读到不认识的顶层键必须原样保留回写，不得丢弃**（O4-F10：旧工具消费新版 manifest 后回写会把
      不认识的字段丢掉 → 再用新工具打开时缺必需字段 → 一棵 400 只股的 staging 被一次「用错版本跑补拉」永久毁掉）
    - **`pool_order` 三层皆为 list，每个元素是对象 `{code: str, universe_idx: int}`**（R13-F1：R12-F1 把元素从裸字符串改成了带锚点的对象，本校验必须同步，否则实现要么拒绝合法 manifest、要么退回字符串而丢掉 `universe_idx`，把 R12-F1 那个「产出取决于网络抖动」的口子重新打开）
    - `code` 匹配 `^\d+\.(SH|SZ|BJ)$` **且后缀与所在层一致**
-   - `universe_idx` 在 `[0, len(universe[market]))` 范围内，**且 `universe[market][universe_idx] == code`**（交叉核对锚点真的指向它自称的那只股）
+   - `universe_idx` 在 `[0, len(source_snapshot.universe[market]))` 范围内，**且 `source_snapshot.universe[market][universe_idx] == code`**（交叉核对锚点真的指向它自称的那只股）
    - 层内 `code` 与 `universe_idx` **各自唯一**
-   - `cursor[market]` 为整数且在 `[0, len(universe[market])]` 内
+   - `cursor[market]` 为整数且在 `[0, len(source_snapshot.universe[market])]` 内
    - **实拷清单（`files`）必须逐项合规（R21-F3）**——它是 `staging_intact`、`pilot_stock_source`、三方源校验**共同的真相基准**，却一直不在本校验的枚举里：
      - `pool_order` 里的**每一只**股恰好对应 **2 条**记录，`period` 分别为 `1m` 与 `daily`；**不得缺、不得重、不得有不属于任何 `pool_order` 股的多余活跃记录**
      - 每条的 `relative_path` 经 `resolve()` 后**必须落在 staging 之内**（禁 `..` 逃逸），且其**文件名解析出的 code/period 与该记录的 `stock_code`/`period` 一致**（用 `qmt_normalize.parse_qmt_filename` 的同一套规则）
@@ -742,6 +764,21 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
      }
      ```
      `aggregate_sha256` = 对「全部已校验文件的 `(相对路径, 文件 sha256)` 排序列表」取 sha256。
+     **序列化方式写死（S2-F4）——两个工具必须算出同一个数，故拼法不许各写各的**：
+
+     ```python
+     pairs = sorted(members)          # members = [(relative_path, sha256), ...]；相对路径在全集内唯一
+     blob  = json.dumps([[r, s] for r, s in pairs],
+                        ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+     aggregate_sha256 = hashlib.sha256(blob).hexdigest()
+     ```
+
+     `ensure_ascii=False` 与 `separators` **都是判据的一部分**（周期目录名是中文，两个取值会产出
+     完全不同的字节）。**本算法由 4b 提供唯一实现，4c 直接调用，不得各自重写。**
+     > **为什么必须写死（S2-F4）**：原文只说「排序列表取 sha256」，**没定义这个列表怎么拼成字节**。
+     > 而写这个数的是 `qmt_fetch`（4b）、拿它比对的是 `qmt_pilot`（4c）——两个切片、两份 plan、
+     > 不同时间实施。拼法差一个空格或一个 `\uXXXX` 转义，**每一份诚实产出的 manifest 都会被读侧
+     > 判非法**。与 S2-F3 / R94-F2 / O4-F13 同族，只是这次跨的是**两个工具**而不是**读写两侧**。
      **成员集合写死（O2-F12）：`files` 的每一条 + `staged_export_log` 一条；`files_verified` 是同一集合的基数
      （故它恒为奇数 `2N+1`，N = 已拷股数）。**
 
@@ -862,16 +899,30 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
        (i) `source_root_relative` **只在第 0 步钉住的那一刻**从当时的路径算出一次；
        (ii) 它必须与 manifest 的 `source_mount.source_root_relative` **逐字相等**；
        **(ii-a) `source_root_relative` 允许为空串（O2-F6，已实测）**：本文件给的挂载示例把共享挂在
-             `/Volumes/QMT_Export`，而 K 线躺在**根之下**的 `front_ratio_cn_stocks_ab_bj/…` —— 即
-             **`--source` 就是挂载点本身、`source_root_relative` 为空串**。此时若按 `mountpoint + "/" + rel`
+             `/Volumes/QMT_Export`；**当那个共享本身就是导出根**（`export_log.csv` 与两个 K 线目录
+             直接躺在共享根下）时，**`--source` 就是挂载点本身、`source_root_relative` 为空串**。
+             （真实的那台机器不是这个形态——它的导出根是共享内的 `front_ratio_cn_stocks_ab_bj/`，
+             故 `source_root_relative` 非空；但「共享直接挂在导出根这一层」是**完全合法的部署**，
+             不得因此被拒，S2-F2。）此时若按 `mountpoint + "/" + rel`
              拼接，得到 `/Volumes/QMT_Export/`，`split('/')` 产生**尾部空分量** → 撞 `open_root` 的
              「拒绝空分量」判据 → **一次完全合法的部署被 `FAIL_SOURCE_BOUNDARY` + `source_root_mismatch` 拒掉**，
              把配置正确的操作者引向不存在的问题。
              > **⚠️ 实测坐实（2026-07-27）**：`"/Volumes/QMT_Export" + "/" + ""` → `'/Volumes/QMT_Export/'`；
              > `.split('/')` → `['', 'Volumes', 'QMT_Export', '']`，末位空分量确实存在。
              **规定**：拼接一律走 `posixpath.normpath(posixpath.join(mountpoint, rel))`（空串时得 `mountpoint` 本身）。
-       **(ii-b) 源根的定义写死（O2-F6）**：**`--source` = 包含 `front_ratio_cn_stocks_ab_bj/` 与 `export_log.csv` 的那一层**。
+       **(ii-b) 源根的定义写死（O2-F6；判据经真实导出实测后由 S2-F1 更正）**：
+             **`--source` = 包含 `export_log.csv` 的那一层**，**不认目录名字**。
              它决定 manifest 里每条 `relative_path` 的形状与 `open_under` 要走几段，**必须唯一**。
+             > **⚠️ O2-F6 的原判据在真实导出上无解（S2-F1，2026-08-23 挂载实测）**：原文写「包含
+             > `front_ratio_cn_stocks_ab_bj/` **与** `export_log.csv` 的那一层」，而真实布局里
+             > **这两样不在同一层**——`export_log.csv` 在 `front_ratio_cn_stocks_ab_bj/` **里面**，
+             > 与两个 K 线目录并列。照原判据取上一层（共享根），则 `<source>/export_log.csv` **不存在**
+             > → **源边界闸第 3 条当场判死**，一次完全合法的部署永远过不了闸。
+             > 改用「含 `export_log.csv` 的那一层」后：闸 3 天然满足；源根在真实布局里就是
+             > `front_ratio_cn_stocks_ab_bj/` 本身；且**不写死目录名**——那个名字是 QMT 导出脚本的
+             > 产物名，把它钉进代码等于让一次导出脚本改名就废掉整个工具。
+             > **唯一性**由操作者传的 `--source` 保证，**同一性**由 (ii) 逐字相等 + (iii) 反向验证保证
+             > ——正是第 4 闸「绑得住共享、绑不住共享内哪个目录」那条论证要覆盖的场景。
        (iii) **反向验证**：`open_root(<第 4 条按 `st_dev` 定位到的 mountpoint> + "/" + source_root_relative)`
              得到的 `(st_dev, st_ino)` 必须**等于** `os.fstat(src_fd)`。
        任一不满足 → `FAIL_SOURCE_BOUNDARY` + `source_root_mismatch`。
@@ -897,7 +948,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 
   > **为什么第 4/4b 条挡不住这一档（R82-F1 修正）**：第 4 条绑的是**挂载/共享**，第 4b 条绑的是
   > **导出根相对于挂载点的那条路径**——**两条都只管「根」**。而 K 线 CSV 躺在根之下的
-  > `front_ratio_cn_stocks_ab_bj/1分钟K线_前复权/` 里：**只要把这个中间目录换成指向同一共享内
+  > **源根之下**的 `1分钟K线_前复权/` 里：**只要把这个中间目录换成指向同一共享内
   > 某个陈旧备份目录的符号链接**，第 1/2/3/4/4b 条**全部照过**（挂载没变、导出根相对路径没变、
   > `export_log.csv` 就是那一份），而 `qmt_fetch` 与 `qmt_pilot` **读到的都是逃逸后的字节** ——
   > 于是 source / staging / manifest **三方哈希完全一致**，一路走到 `SUCCESS`。
@@ -962,7 +1013,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 | `--dest` 有 `.staging_owner.json`（`seed` 相符）但**没有** `fetch_manifest.json`（崩在标记落盘与首份 manifest 之间） | **判为引导态，允许从头继续初始化**：锁内只清理已知引导产物（`export_log.csv` / `*.part` / `.inflight.json`）后照首次使用流程走（R60-F3）。**但若目录里有任何完整 K 线 CSV → 拒绝并要求人工**：按「首份 manifest 先于任何 K 线拷贝」的提交顺序那不可能出现，现场已超出本工具理解范围 |
 | `--source` 在**挂载身份闸**前后被来回改指（先换成只读本地克隆让 `open_root` 钉住它，再换回真 SMB 路径让挂载表查到真身份，然后换回克隆） | **不可发生**：挂载点由 **`os.fstat(src_fd).st_dev`** 逐条比对挂载表定位（**不是**按 `--source` 字符串查），且 `source_root_relative` 须**反向验证** `open_root(mountpoint + "/" + rel)` 的 `(st_dev, st_ino)` 等于 `src_fd`（R91-F1）。按路径定位挂载点的实现会**哈希克隆的字节、却在报告里写 SMB 导出的身份**——一份彻头彻尾的假出货凭据 |
 | `--source` 在源边界闸各条之间被改名/改指 | **第 0 步就已 `open_root` 钉住 `src_fd`，其后全部闸对着 fd 跑**（R84-F1），故改指不影响判定；另有 `(st_dev, st_ino)` 分叉检查会抓到并判 `FAIL_SOURCE_BOUNDARY` + `source_path_escape`。**闸的顺序在这里是安全性的一部分**：R82-F1 把 `open_root` 排在四条按路径做的检查**之后**，等于让真 SMB 源过闸、却钉住随后换上来的本地克隆 |
-| staging 子目录（`front_ratio_.../`、`1分钟K线_前复权/`）的 `mkdir` 目录项在崩溃中丢失 | **不可发生**：每新建一级子目录都须 `fsync` 其父目录（R84-F2，已进耐久提交协议的闭合清单）。否则 manifest 已提交「文件在该目录下」而目录本身没落地 → 重启后**记录在、文件与目录都不在**，既不是 `untracked_target_file` 也回收不了，最终以假的 `staging_integrity_mismatch` 或假的池穷尽收场 |
+| staging 子目录（`1分钟K线_前复权/`、`日K线_前复权/`）的 `mkdir` 目录项在崩溃中丢失 | **不可发生**：每新建一级子目录都须 `fsync` 其父目录（R84-F2，已进耐久提交协议的闭合清单）。否则 manifest 已提交「文件在该目录下」而目录本身没落地 → 重启后**记录在、文件与目录都不在**，既不是 `untracked_target_file` 也回收不了，最终以假的 `staging_integrity_mismatch` 或假的池穷尽收场 |
 | manifest 顶层带 `stopped_reason ∈ {source_path_escape, staging_path_escape}`（上一次 fetch 被信任边界破坏终止） | **pilot 在步骤 ② 内立即 fail-closed**（R93-F1）：`source_path_escape` → `FAIL_SOURCE_BOUNDARY`；`staging_path_escape` → `FAIL_STAGING_INTEGRITY`；rc=1，**在 ②b、任何 DB 动作与任何股的消费之前**。**读侧校验清单不含它的实现会照常消费此前拉到的那批股**——那份 manifest 形状上完全合法——把一次信任边界破坏报成「候选不够」甚至走到 `SUCCESS` |
 | 操作者修好源树/staging 树后重跑 `qmt_fetch`，上一次的 `stopped_reason`/`fetch_fatal_error` 何时消失 | **只在「收尾提交」那一次原子提交里清除**（R95-F2）：启动时不清；本次干净跑完（或干净 `max_bytes` 触顶）→ 同一次提交内写入本次 `stopped_reason` 并删除 `fetch_fatal_error`；本次又撞 escape → 覆盖为本次的。**崩在收尾提交之前 → 旧记录仍在，pilot 继续 fail-closed（安全侧）**。**就地合并式更新会让陈旧 fatal 永远留着、pilot 永远拒绝启动；启动即清除则会在重试崩溃时抹掉唯一证据** |
 | manifest 顶层 `stopped_reason` 不在闭合枚举内，或 `source_path_escape`/`staging_path_escape` 缺形状合规的顶层 `fetch_fatal_error` | **拒绝整个 manifest** → `FAIL_MANIFEST_INVALID`（R93-F1） |
@@ -972,7 +1023,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 | `staging_path_escape` 修好后重跑，全量存在性 + sha256 复校不过 | **`stopped_reason: "staging_recheck_failed"`**、rc≠0、**保留 fatal**，且**本次不得推进 `cursor`、不得新增 `files`/`pool_order`**（P2-F3；否则每次重跑继续消耗冻结宇宙与 `--max-bytes` 预算却永远清不掉 fatal）。出路与 O2-F8 同规格：「该 staging 已被证明动过且无法自证完整，请换新 staging + 新 seed 重拉」 |
 | staged `export_log.csv` 的字节怎么计入 `--max-bytes` | **它是唯一的非股级计账对象**（O2-F2），与 K 线 CSV 同规格逐块扣减 + 事前 `stat` 早拒。**它触顶发生在第一份 manifest 之前**，故不提交任何 manifest，只删 `.part` 并 rc≠0（目录停在引导态，下次按引导态清理重来）——触顶协议里「记 `stopped_reason` + 所在层/下标」两步**仅适用于股级对象** |
 | `qmt_fetch` 在源树内撞 `source_path_escape` | **整次 fetch 致命，不是一只股的失败**（R87-F1）：删当前股两个 `.part`、**不记 failure / 不加 `attempts` / 不推进 `cursor`**、manifest 记 `stopped_reason: "source_path_escape"` + 顶层 `fetch_fatal_error{kind, relative_path, component, errno}`（**四字段，与 本文件 §4.5 读侧要求逐字相同**，R94-F2）后提交、rc≠0。**pilot 读到该 `stopped_reason` → 拒绝启动**，判 `FAIL_SOURCE_BOUNDARY` + `source_path_escape`、rc=1。**记成普通 fetch failure 的实现会让一次源树逃逸伪装成池缩水**，剩下的股照样凑够 100 只走到 `SUCCESS` |
-| **`--source` 树内**任一路径分量（含从 `/` 到 `--source` 的根路径、以及根之下 `front_ratio_.../1分钟K线_前复权/` 这些中间目录）是符号链接或非目录（**⚠️ 实测（macOS 25.4 / APFS）：目录分量为符号链接时得 `ENOTDIR`，不是 `ELOOP`；只有不带 `O_DIRECTORY` 的叶子文件 `O_NOFOLLOW` 才得 `ELOOP`。且 `ENOTDIR` 与「这里放了个普通文件」**不可区分**。两者一律按逃逸处置；若确需区分，须撞错后补一次 `os.lstat(component, dir_fd=parent)` 判 `S_ISLNK` 再落进 `fetch_fatal_error`（O4-F12）**）| **`FAIL_SOURCE_BOUNDARY`（rc=1）+ `source_boundary_error: "source_path_escape"`**（R82-F1）。**源边界闸第 1/2/3/4/4b 条只管根**——把根之下一个中间目录换成指向同一共享内陈旧备份的符号链接，那五条全部照过，而 fetch 与 pilot 读到的都是逃逸后的字节，**三方哈希因此完全一致、一路走到 `SUCCESS`**。**`qmt_fetch` 侧一律整次致命**（R87-F1 + R88-F2 更正：此处原写「拒绝启动/**记该股失败**」，与 R87-F1「不是候选失败」直接冲突；照它实现会让源树逃逸伪装成普通池缩水，后续股照拉、甚至走到 `SUCCESS`）——见上一行的 `stopped_reason` / 顶层 `fetch_fatal_error` / 不推进 cursor 三条 |
+| **`--source` 树内**任一路径分量（含从 `/` 到 `--source` 的根路径、以及根之下 `1分钟K线_前复权/` / `日K线_前复权/` 这些中间目录）是符号链接或非目录（**⚠️ 实测（macOS 25.4 / APFS）：目录分量为符号链接时得 `ENOTDIR`，不是 `ELOOP`；只有不带 `O_DIRECTORY` 的叶子文件 `O_NOFOLLOW` 才得 `ELOOP`。且 `ENOTDIR` 与「这里放了个普通文件」**不可区分**。两者一律按逃逸处置；若确需区分，须撞错后补一次 `os.lstat(component, dir_fd=parent)` 判 `S_ISLNK` 再落进 `fetch_fatal_error`（O4-F12）**）| **`FAIL_SOURCE_BOUNDARY`（rc=1）+ `source_boundary_error: "source_path_escape"`**（R82-F1）。**源边界闸第 1/2/3/4/4b 条只管根**——把根之下一个中间目录换成指向同一共享内陈旧备份的符号链接，那五条全部照过，而 fetch 与 pilot 读到的都是逃逸后的字节，**三方哈希因此完全一致、一路走到 `SUCCESS`**。**`qmt_fetch` 侧一律整次致命**（R87-F1 + R88-F2 更正：此处原写「拒绝启动/**记该股失败**」，与 R87-F1「不是候选失败」直接冲突；照它实现会让源树逃逸伪装成普通池缩水，后续股照拉、甚至走到 `SUCCESS`）——见上一行的 `stopped_reason` / 顶层 `fetch_fatal_error` / 不推进 cursor 三条 |
 | `--output` / `--staging` / `--dest` 的**任一路径分量**（从 `/` 起）是符号链接或非目录（`open_root` 逐段撞 `ELOOP`/`ENOTDIR`） | **拒绝启动，一个字节都不写**，stderr 提示改传完全解析后的绝对路径（R75-F2：裸 `os.open(root, O_NOFOLLOW)` 只保护最后一段，被换掉的父分量会让 pin 钉在另一棵树上，此后所有 `*at` 纪律忠实地作用在错的目录上）。**本工具不替操作者 `realpath()`**——那正是「跟随」 |
 | `<output>/.superseded` 是符号链接、或存在但不是真目录 | **拒绝**（`ensure_owned_dir` 先 `lstat`）——`os.replace` 会**穿过路径分量**解析，否则这条破坏性恢复路径会把 zip 挪出归属目录或覆盖外部同名文件（R13-F2） |
 | 拷贝时目标文件已存在但 manifest 无其记录 | **拒绝覆盖**，记 `untracked_target_file` 跳过该股（R7-F3）。**前提是崩溃恢复已先跑过**（R37-F1）——上一次运行留下的半成品由在途标记回收，不到这条规则 |
@@ -981,7 +1032,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 | 拷贝中断 | `.part` 残留不会被误判为完整（原子 rename + 字节数 + sha256 三保险）；**一只股的两个文件按事务提交，半成品由 `.inflight.json` 回收后重试**（R37-F1）；重跑续传 |
 | 触到 `--max-bytes` 硬上限（流式逐块扣减时越界，或事前 `stat` 早拒） | **终止条件，不是这只股的失败**（R44-F2 + R48-F3：越界的那一块**根本不写出去**，不是写完再核账）：删当前股的两个 `.part`、**不记 failure / 不加 `attempts` / 不推进 `cursor`**，manifest 记 `stopped_reason: "max_bytes"` 后提交，**立即停止、非零码退出**，绝不继续下一只（若按普通失败处理，一次触顶会把剩余整个宇宙记成假失败并把 cursor 冲到末尾，pilot 随后报出的池穷尽/地板不可达全是假的） |
 | `--staging` 不是一棵合法 staging 树（缺 `.staging_owner.json` / `tool`·`dest`·`seed` 任一不符）；**或 `.staging.lock` 是符号链接 / 非普通文件**（`O_NOFOLLOW` 撞 `ELOOP` 或 `fstat` 类型不符，R72-F2）；或与 `--output`/`--source` 路径重叠；**或运行中途 `--staging` 被改名/改指**（`stg_fd` 与当前路径的 `(st_dev, st_ino)` 不符） | **拒绝启动，一个字节都不写**——**该闸排在取 `.staging.lock` 之前**（R65-F1：取锁要写文件，打错字的 `--staging` 会先在未经证明的目录里落下锁文件） |
-| staging 内任一**中间路径分量**（如 `front_ratio_.../`、`1分钟K线_前复权/`）是符号链接或非目录（`open_under` 逐段 `O_DIRECTORY\|O_NOFOLLOW` 撞 `ELOOP`/`ENOTDIR`） | **整次致命，不分「某只股」还是「全局对象」**（R89 自查补更正——原写「记 `staging_path_escape` 跳过该股」，与 R87-F1 对 `source_path_escape` 定的判据直接冲突：**路径分量被换是树布局本身被动过，不是这只股拉不到**）：`qmt_fetch` → `stopped_reason: "staging_path_escape"` + 顶层 `fetch_fatal_error{kind, relative_path, component, errno}`（四字段，R94-F2）、不记 failure、不推进 cursor、rc≠0；`qmt_pilot` → **`FAIL_STAGING_INTEGRITY`（rc=1）+ `staging_error{kind: "staging_path_escape", relative_path, component, errno}`**（判别式形状，R90-F1），在任何 DB 动作与任何导入之前。**`2026-07-27-qmt-plan4c-pilot-shipment-design.md` §4.3 的 verdict 唯一权威表已补入这一支**——它此前只定义了 `hash_mismatch` 那一支，照它实现的人没有分支可走，只能退回逐股 skip（R90-F1）（R74-F2：`dir_fd=stg_fd` 只钉住起点、`O_NOFOLLOW` 只管末段，中间分量被换掉时 fetch 会写到 staging 树外、pilot 又会从树外读，而 `staging_intact` 哈希对此完全透明） |
+| staging 内任一**中间路径分量**（如 `1分钟K线_前复权/`、`日K线_前复权/`）是符号链接或非目录（`open_under` 逐段 `O_DIRECTORY\|O_NOFOLLOW` 撞 `ELOOP`/`ENOTDIR`） | **整次致命，不分「某只股」还是「全局对象」**（R89 自查补更正——原写「记 `staging_path_escape` 跳过该股」，与 R87-F1 对 `source_path_escape` 定的判据直接冲突：**路径分量被换是树布局本身被动过，不是这只股拉不到**）：`qmt_fetch` → `stopped_reason: "staging_path_escape"` + 顶层 `fetch_fatal_error{kind, relative_path, component, errno}`（四字段，R94-F2）、不记 failure、不推进 cursor、rc≠0；`qmt_pilot` → **`FAIL_STAGING_INTEGRITY`（rc=1）+ `staging_error{kind: "staging_path_escape", relative_path, component, errno}`**（判别式形状，R90-F1），在任何 DB 动作与任何导入之前。**`2026-07-27-qmt-plan4c-pilot-shipment-design.md` §4.3 的 verdict 唯一权威表已补入这一支**——它此前只定义了 `hash_mismatch` 那一支，照它实现的人没有分支可走，只能退回逐股 skip（R90-F1）（R74-F2：`dir_fd=stg_fd` 只钉住起点、`O_NOFOLLOW` 只管末段，中间分量被换掉时 fetch 会写到 staging 树外、pilot 又会从树外读，而 `staging_intact` 哈希对此完全透明） |
 | `<dest>/.staging.lock` **被另一进程真正持有**（`flock` 取不到） | **两个工具都拒绝启动**，非零码（R1-F4 + R32-F2）。**锁文件残留不算被持有**——锁由内核持有、进程死亡即释放，**不需要也不应提示人工删锁**（R48-F2：存在性锁会把「执行阶段中途崩溃」锁死成永久状态，每次重跑都卡在 ①b）。**pilot 侧取锁排在任何输出目录写入之前（R39-F1）→ 拿不到锁时什么都没被改动：一个字节都不写**（此时尚未证明 staging 是我的，也未取得输出锁） |
 | staged `<staging>/export_log.csv` 的字节数或 sha256 与 manifest `staged_export_log` 不符 | **`FAIL_STAGING_INTEGRITY`（rc=1）+ `staging_error`**，在任何 DB 动作与任何股的导入之前（R38-F1：它是所有股共用的元数据基准，漂了就没有一只股的判定还可信——**不能像逐股 `staging_integrity_mismatch` 那样只 skip 一只**） |
 | manifest 形状校验不过（截断/缺键/层内重复/坏 code） | `qmt_fetch` 与 `qmt_pilot` 双方均 fail-closed 拒绝，**不做尽力而为解析**（R1-F4） |
@@ -1070,7 +1121,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 | 5b | manifest 抗崩溃/抗并发（R1-F4 + R32-F2）：**staging 生命周期锁 `.staging.lock`（fetch 与 pilot 共用；pilot 须**持到报告落盘之后**，R39-F1）** + tmp→`fsync`→`os.replace` 原子写 + 读侧形状校验 fail-closed（截断的 manifest **不得**被尽力而为地解析成「候选就这么多」） |
 | 5c | 源快照绑定（R2-F2）：manifest 冻结 `export_log_sha256` + 完整分层 `universe`；补拉的偏移量落在**冻结的** universe 上；源 `export_log.csv` 变了即拒绝启动且不覆盖 staging 副本（禁止两个 QMT 快照混进同一份报告） |
 | 5d | 游标独立于成功列表（R3-F2）：`cursor[market]` 对**每个尝试过的槽位**推进，`pool_order` 只收成功项；拷贝失败进 `failures` 且有界重试（`attempts<2` 补拉时重试一次）。**「U5 失败 / U6–U121 成功」场景下不得重拷 U121、不得永久丢失 U5** |
-| 5i | **manifest 校验与 `pool_order` 新 schema 同步（R13-F1）**：读侧必须要求元素为 `{code, universe_idx}` 对象并交叉核对 `universe[market][idx] == code`、后缀与层一致、`idx` 在界内、层内二者各自唯一；**裸字符串元素的旧式 manifest 必须被拒**（否则锚点丢失，R12-F1 的口子重开） |
+| 5i | **manifest 校验与 `pool_order` 新 schema 同步（R13-F1）**：读侧必须要求元素为 `{code, universe_idx}` 对象并交叉核对 `source_snapshot.universe[market][idx] == code`、后缀与层一致、`idx` 在界内、层内二者各自唯一；**裸字符串元素的旧式 manifest 必须被拒**（否则锚点丢失，R12-F1 的口子重开） |
 | 5f | 收尾复校覆盖**每一次** fetch（R4-F2）：给 `source_verification` **定级之前**必须对 `export_log.csv` + 全部已成功拷贝文件跑全集复校，**首次 fetch 不例外**（否则「拷到一半源被重导出」会让整批混代次而标签仍写得很好看）。任何级别的标签都必须由真正覆盖全集的校验支撑 |
 | 5g | 源不可写 + 路径不重叠（R4-F4 + R5-F3）：挂载命令文档为 `mount_smbfs -o rdonly`；`qmt_fetch` 对 `--dest` 与 `--source` 相等/互为子树、以及 `statvfs` 判出源非只读，均**拒绝启动**；只读检测**必须非写入式**（`os.statvfs().f_flag & os.ST_RDONLY`），**禁止用试写临时文件的方式探测**——那会在恰恰要防的场景里由本工具亲手污染权威导出共享 |
 | 8e | **换代恢复先证后毁（R7-F2 + R9-F2）**：`source_generation_changed` 分支必须先过 `staging_intact` → **旧 zip 原子改名挪进 `<output>/.superseded/`** → 「删行 + 重导入」包进同一外层事务（失败自动回滚复原旧行并把 zip 挪回）→ 生成成功才删掉挪走的那份，失败则**保留**并在报告记 `preserved_superseded`。新 staging 损坏时旧行与旧 zip 必须原封不动；**重生成选中同一 `start_datetime` 时也绝不能截断旧产物**（候选起点只有 3~4 个，同名是常态而非例外） |
@@ -1094,6 +1145,11 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 > **O4 之后不再跑 spec 评审轮次**（user 2026-07-29 定案）：四轮 44→41→25→47 未收敛，
 > 且约 22/47 是上一轮修改自身引入的损坏或未传播完的改动；剩余的真设计缺口交由实现期的
 > **测试**证伪（本轮 4b 的 3 条平台事实就是评审**真跑代码**才发现的，散文推不出来）。
+>
+> **⚠️ 实施期修正另立一节，不计评审轮次**：见文末 **「S2 实施轮」**（2026-08-24，4 条）。
+> 它们**不是**新一轮 spec 评审，正是上面这句预言的那种东西——**由真实数据与逐字核原文证伪的
+> 设计缺口**：一条由挂载真实导出量出来（原判据在真实布局上无解），三条由把读侧枚举与写侧枚举
+> **逐字对表**查出来（照原文实现会 100% 全红或跨工具算不出同一个数）。
 
 ### O4 轮（2026-07-29，Opus 5 对抗性评审）
 
@@ -1153,3 +1209,27 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
 fetch/储备池占 4 条、路径·锁占 8 条。**共享地基（§4.1）是三份 spec 里被 codex 挖得最狠的部分之一**
 （`open_root` / `open_under` / 先钉后校 / 取锁早于发布归属，分别来自 R74-F2 / R75-F2 / R84-F1 / R97-F2），
 实施时对它的每一条都要按「对象 × 维度矩阵」逐格核过。
+
+
+---
+
+## S2 实施轮（2026-08-24，4b 切片 S2 实施前的核实）
+
+> **不是评审轮次。** 依据两类硬证据：①2026-08-23 `mount_smbfs -o rdonly` 挂载真实 QMT 导出量到的
+> 目录布局；②把 §4.4 写侧枚举、§4.5 读侧枚举、§4.6 边界闸三处**逐字对表**。
+> **凡「已实测」均为本机真跑，非推理**；凡「逐字核」均给出原文行位。
+
+| 编号 | 级别 | 结论 | 核实 | 处置 |
+|---|---|---|---|---|
+| S2-F1 | **high** | **O2-F6 的源根判据在真实导出上无解** —— 它写死「包含 `front_ratio_cn_stocks_ab_bj/` **与** `export_log.csv` 的那一层」，而真实布局里 `export_log.csv` 在 `front_ratio_cn_stocks_ab_bj/` **里面**、与两个 K 线目录并列。照原判据取上一层则 `<source>/export_log.csv` 不存在 → **源边界闸第 3 条当场判死一次完全合法的部署** | 真实挂载实测（见 `project_qmt_real_source_measurements`）；闸 3 原文（§9-1j ③）逐字核 | 改判据为「**包含 `export_log.csv` 的那一层，不认目录名**」。连带：staging 由**两级**中间目录变**一级**（`1分钟K线_前复权/`），staging 成为源根的逐层镜像；§4.5/§4.6/§5 共 **9 处**举例同步更新。**已实测**：`import_csv` 的 `rglob` 对这一层的有无**零依赖**（两种布局都恰好命中 1 个、`.part` 不误命中） |
+| S2-F2 | medium | **读侧「三子键均为非空 str」与 §4.6 (ii-a) 直接冲突** —— (ii-a) 用实测论证 `source_root_relative` **就是空串**（共享本身即导出根时），读侧却要求它非空 → 该部署先过 (ii-a) 的拼接、再被读侧判死，操作者被指向一个不存在的问题 | §4.5 读侧枚举 vs §4.6 (ii-a) 逐字对照 | 读侧放宽为「三子键均为 str；`fstype`/`device` 非空，`source_root_relative` 允许空串」。(ii-a) 原样保留（它有实测支撑），其举例改为一个在新源根定义下真正成立的形态 |
+| S2-F3 | **high** | **读侧必需键里的顶层 `universe` 是笔误** —— 同一句话末尾校验的是 `source_snapshot.universe`，写侧枚举与 §4.4 结构示例也**只产出后者**。照原文实现：**本工具诚实产出的每一份 manifest 都被本工具自己的读侧判 `FAIL_MANIFEST_INVALID`**，一次都跑不通 | §4.5:662 顶层枚举 vs §4.5:664 校验句 vs §4.5:533 写侧枚举 vs §4.4:295 示例，四处逐字核 | 删掉顶层 `universe`；名单唯一位置定为 `source_snapshot.universe`。**这是「写侧形状与读侧要求不配对」的第三次**（R94-F2 四字段、O4-F13 `2N+1`）→ 立纪律：**每新增一个持久化字段，必须同时在写侧枚举与读侧枚举各出现一次且层级逐字相同** |
+| S2-F4 | medium | **`aggregate_sha256` 的序列化方式从未定义** —— 只说「排序列表取 sha256」，没说列表怎么拼成字节。而**写它的是 4b、读它比对的是 4c**（两个切片、两份 plan、不同时间实施），拼法差一个空格或一个 `\uXXXX` 转义就让每一份诚实产出的 manifest 被判非法 | §4.5 存根定义处逐字核：无任何字节级规定 | 写死为 `json.dumps(sorted(pairs), ensure_ascii=False, separators=(",", ":")).encode("utf-8")` 后取 sha256；`ensure_ascii=False` 与 `separators` **都是判据的一部分**（周期目录名是中文）。**由 4b 提供唯一实现，4c 直接调用，不得各自重写** |
+
+**本轮由真跑（非推理）坐实的两条**：S2-F1 的真实目录布局（挂载实测）、以及「`rglob` 对
+`front_ratio_cn_stocks_ab_bj/` 这一层零依赖」（纯 `tmp_path` 实测）。其余两条为逐字核原文。
+
+**S2-F3 与 S2-F4 同属一个家族，且这是该家族第三、第四次**：一个持久化字段的
+**写侧形状**与**读侧要求**、或**两个工具各自的算法**，只要没有被逐字对过表，就会产出
+「谁都按规矩写、却谁也读不了对方」的死局。四条里有三条是对表对出来的——
+**对表本身就是最便宜的评审**。
