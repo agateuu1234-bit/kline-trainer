@@ -25,7 +25,12 @@
 # - 所有 `docker exec` 一律 `timeout` + `</dev/null`：Serve 功能没启用时
 #   `tailscale serve` **不快速失败而是等交互**，没超时会整条挂死。
 # - 读状态一律**分开取输出与退出码**：`... | grep -q funnel` 在命令失败时
-#   「没匹配到」会被当成「没有 funnet」，那是把失败读成成功（codex plan-R7）。
+#   「没匹配到」会被当成「没有 funnel」，那是把失败读成成功（codex plan-R7）。
+# - **「关闭」只有一份实现**（codex plan-R8）：早先看门狗到期那条路径是「关到确认为止」，
+#   而 open 的失败路径和开机守卫却各写了一份「试一次就算」的关闭 —— 同一件事三份
+#   能力不同的实现，弱的那两份就是失败开放的入口。现在全部走 `close-loop`：
+#   反复 reset 并读 status，**只有确认 `No serve config` 才算关上**，确认前不撤看门狗。
+#   open 的失败路径不再自己关，而是把到期时间设成「现在」，**把关闭交还给看门狗**。
 #
 # 用法：
 #   expose.sh install-boot-guard   装开机守卫（幂等），open 的前置
@@ -35,6 +40,8 @@
 #   expose.sh renew <秒>           验收超时前续期
 #   expose.sh close                关端点 + 撤看门狗（幂等，任何路径都该跑）
 #   expose.sh selftest             判据自检（不碰真实端点）
+#   expose.sh close-loop <秒>      内部：反复关闭直到确认（0=不限时）
+#   expose.sh boot-close           内部：开机守卫用，先等 docker/tailscale 就绪再 close-loop
 
 set -u
 
@@ -74,6 +81,48 @@ watchdog_running() {
 
 boot_guard_installed() { crontab -l 2>/dev/null | grep -q "$BOOT_TAG"; }
 
+stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# 等 docker 与 tailscale 容器就绪（开机时 cron 可能跑在它们起来之前）。
+# 返回 0 = 就绪；非 0 = 等到超时仍不就绪。
+wait_ready() {
+    _limit=$1; _t=0
+    while [ "$_t" -lt "$_limit" ]; do
+        if timeout 15 docker exec -i "$TS_CTR" tailscale version </dev/null >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 10; _t=$((_t + 10))
+    done
+    return 1
+}
+
+# ⭐ **唯一**的关闭实现（codex plan-R8）：反复 reset 并读 status，
+#    只有确认 `No serve config` 才返回 0。`$1` = 最长秒数，0 表示不限时。
+#    确认成功时顺手删掉看门狗状态文件（此时才算真的可以撤）。
+close_loop() {
+    _limit=$1; _t=0; _try=0
+    while : ; do
+        _try=$((_try + 1))
+        timeout 30 docker exec -i "$TS_CTR" tailscale serve reset </dev/null >>"$LOG" 2>&1
+        _s=$(timeout 30 docker exec -i "$TS_CTR" tailscale serve status </dev/null 2>&1); _rc=$?
+        if [ "$_rc" -eq 0 ] && printf '%s' "$_s" | grep -q 'No serve config'; then
+            echo "$(stamp) CLOSE_CONFIRMED: No serve config（第 ${_try} 次尝试）" >>"$LOG"
+            rm -f "$STATE"
+            return 0
+        fi
+        echo "$(stamp) CLOSE_RETRY: 第 ${_try} 次未确认（rc=${_rc}）—— 保持 armed 继续重试" >>"$LOG"
+        _back=$((_try * 10)); [ "$_back" -gt 60 ] && _back=60
+        if [ "$_limit" -ne 0 ]; then
+            _t=$((_t + _back))
+            if [ "$_t" -ge "$_limit" ]; then
+                echo "$(stamp) CLOSE_GIVE_UP: ${_limit} 秒内未能确认关闭 —— 端点可能仍开着，需人工处理" >>"$LOG"
+                return 1
+            fi
+        fi
+        sleep "$_back"
+    done
+}
+
 disarm() {
     rm -f "$STATE"
     if [ -f "$STATE" ]; then echo "DISARM_FAILED: 删不掉 $STATE"; return 1; fi
@@ -91,34 +140,22 @@ arm() {
     #    端点仍开着而看门狗已经没了。现在：带超时地重试，退避，**只有 status 确认
     #    `No serve config` 才算数**；确认前绝不删状态文件、绝不退出。
     nohup sh -c '
-        STATE="$1"; LOG="$2"; CTR="$3"; POLL="$4"; PIDFILE="$5"
+        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"
         echo $$ > "$PIDFILE"
         trap "rm -f \"$PIDFILE\"" EXIT
-        stamp() { date "+%Y-%m-%d %H:%M:%S"; }
         while [ -f "$STATE" ]; do
             _d=$(cat "$STATE" 2>/dev/null)
             [ -n "$_d" ] || break
             if [ "$(date +%s)" -ge "$_d" ]; then
-                _try=0
-                while : ; do
-                    _try=$((_try + 1))
-                    timeout 30 docker exec -i "$CTR" tailscale serve reset </dev/null >>"$LOG" 2>&1
-                    _st=$(timeout 30 docker exec -i "$CTR" tailscale serve status </dev/null 2>&1)
-                    _rc=$?
-                    if [ "$_rc" -eq 0 ] && printf "%s" "$_st" | grep -q "No serve config"; then
-                        echo "$(stamp) WATCHDOG_FIRED: 已确认 No serve config（第 ${_try} 次尝试）" >>"$LOG"
-                        rm -f "$STATE"
-                        exit 0
-                    fi
-                    echo "$(stamp) WATCHDOG_RETRY: 第 ${_try} 次关闭未确认（rc=${_rc}）—— 保持 armed 继续重试" >>"$LOG"
-                    _back=$((_try * 10)); [ "$_back" -gt 60 ] && _back=60
-                    sleep "$_back"
-                done
+                # 到期 → 交给**唯一**的关闭实现，不限时、关到确认为止。
+                # 它确认成功时会自己删掉状态文件，本循环随即退出。
+                "$SELF" close-loop 0
+                exit $?
             fi
             sleep "$POLL"
         done
-        echo "$(stamp) WATCHDOG_DISARMED: 状态文件已移除，未执行关闭" >>"$LOG"
-    ' _ "$STATE" "$LOG" "$TS_CTR" "$POLL" "$PIDFILE" >/dev/null 2>&1 &
+        echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_DISARMED: 状态文件已移除，未执行关闭" >>"$LOG"
+    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" >/dev/null 2>&1 &
 
     sleep 1
     if [ ! -f "$STATE" ]; then echo "ARM_FAILED: 状态文件不见了"; return 1; fi
@@ -137,7 +174,7 @@ install-boot-guard)
     if boot_guard_installed; then
         echo "BOOT_GUARD_ALREADY_INSTALLED"
     else
-        ( crontab -l 2>/dev/null; printf '@reboot %s close >>%s 2>&1  # %s\n' "$SELF" "$LOG" "$BOOT_TAG" ) | crontab -
+        ( crontab -l 2>/dev/null; printf '@reboot %s boot-close >>%s 2>&1 &  # %s\n' "$SELF" "$LOG" "$BOOT_TAG" ) | crontab -
     fi
     if boot_guard_installed; then
         crontab -l 2>/dev/null | grep "$BOOT_TAG"
@@ -172,7 +209,11 @@ open)
         else
             echo "SERVE_FAILED: 端点没开成（rc=$_rc）"
         fi
-        if disarm; then echo "已撤掉看门狗，未开出任何端点"; else echo "⚠️ 看门狗未撤干净，请手动跑 expose.sh close"; fi
+        # ⚠️ **绝不在这里直接 disarm**（codex plan-R8 F1）：`serve --bg` 有可能
+        #    **先落了配置再超时/非零退出** —— 此刻端点是否存在并不确定。
+        #    正确做法是把到期时间设成「现在」，让看门狗接手「关到确认为止」。
+        printf '%s\n' "$(now)" > "$STATE"
+        echo "已把关闭交还看门狗（它会重试直到确认 No serve config）；请随后跑 expose.sh status 复核"
         exit 1
     fi
 
@@ -183,15 +224,15 @@ open)
     if [ "$_strc" -ne 0 ]; then
         echo "STATUS_UNVERIFIABLE: 开完之后读不到 serve 状态（rc=$_strc）—— 失败关闭"
         printf '%s\n' "$_st"
-        ts serve reset >/dev/null 2>&1
-        disarm
+        printf '%s\n' "$(now)" > "$STATE"
+        echo "已把关闭交还看门狗（关到确认为止）；请随后跑 expose.sh status 复核"
         exit 1
     fi
     if ! _why=$(serve_status_is_expected "$_st"); then
         echo "$_why: serve 配置不是预期形态 —— 失败关闭"
         printf '%s\n' "$_st"
-        ts serve reset >/dev/null 2>&1
-        disarm
+        printf '%s\n' "$(now)" > "$STATE"
+        echo "已把关闭交还看门狗（关到确认为止）；请随后跑 expose.sh status 复核"
         exit 1
     fi
     printf '%s\n' "$_st"
@@ -226,23 +267,36 @@ renew)
     echo "RENEW_OK"
     ;;
 close)
-    _dis=0
-    disarm || _dis=1
-    ts serve reset >/dev/null 2>&1 || true
-    _s=$(ts serve status 2>&1); _srrc=$?
-    printf '%s\n' "$_s"
-    if [ "$_dis" -ne 0 ]; then
-        echo "CLOSE_FAILED: 端点可能已关，但看门狗状态文件没删掉"
-        exit 1
-    fi
-    if [ "$_srrc" -ne 0 ]; then
-        echo "CLOSE_FAILED: 读不到 serve 状态，**无法确认**已关闭（rc=$_srrc）"
-        exit 1
-    fi
-    if printf '%s' "$_s" | grep -q 'No serve config'; then
+    # 走**唯一**的关闭实现：最多重试 120 秒，只有确认 No serve config 才算成功。
+    # ⚠️ 刻意不再「先 disarm 再关」—— 确认关上之前撤掉看门狗，就是把最后一道保证
+    #    在最需要它的时候拆掉（codex plan-R8）。close_loop 确认成功时才删状态文件。
+    if close_loop 120; then
         echo "CLOSE_OK"
     else
-        echo "CLOSE_FAILED: serve 配置没有回到 No serve config"
+        echo "CLOSE_FAILED: 120 秒内未能确认 No serve config —— 看门狗仍 armed 并继续重试；请查 $LOG"
+        exit 1
+    fi
+    ;;
+close-loop)
+    _lim=${2:-0}
+    case "$_lim" in ''|*[!0-9]*) echo "USAGE: expose.sh close-loop <秒|0>"; exit 2 ;; esac
+    if close_loop "$_lim"; then echo "CLOSE_CONFIRMED"; else echo "CLOSE_UNCONFIRMED"; exit 1; fi
+    ;;
+boot-close)
+    # ⚠️ 开机守卫不能「跑一次 close 就完事」（codex plan-R8 F2）：cron 的 @reboot
+    #    可能跑在 docker / tailscale 容器起来**之前**，那次必然失败而 serve 配置是持久的，
+    #    端点随后就自己回来了、却已经没人管。
+    #    故：先等就绪（最多 15 分钟），再走 close_loop（最多 24 小时，退避封顶 60 秒）。
+    echo "$(stamp) BOOT_GUARD: 开机守卫启动，等待 docker/tailscale 就绪" >>"$LOG"
+    if wait_ready 900; then
+        echo "$(stamp) BOOT_GUARD: 依赖已就绪，开始关闭" >>"$LOG"
+    else
+        echo "$(stamp) BOOT_GUARD: 等待 15 分钟仍未就绪，仍然进入关闭重试" >>"$LOG"
+    fi
+    if close_loop 86400; then
+        echo "$(stamp) BOOT_GUARD_DONE: 已确认 No serve config" >>"$LOG"
+    else
+        echo "$(stamp) BOOT_GUARD_FAILED: 24 小时内未能确认关闭 —— 需人工处理" >>"$LOG"
         exit 1
     fi
     ;;
@@ -270,7 +324,7 @@ selftest)
     if [ "$_fail" -eq 0 ]; then echo "SELFTEST_PASS"; else echo "SELFTEST_FAIL"; exit 1; fi
     ;;
 *)
-    echo "USAGE: expose.sh {install-boot-guard|remove-boot-guard|open <秒>|status|renew <秒>|close|selftest}"
+    echo "USAGE: expose.sh {install-boot-guard|remove-boot-guard|open <秒>|status|renew <秒>|close|selftest|close-loop <秒>|boot-close}"
     exit 2
     ;;
 esac

@@ -165,6 +165,11 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh install-boot-guard"
 > 正好回到「零认证端点无人看管地一直开着」这个本来要防的状态。
 > 这条计划任务让**开机时无条件关闭**。真在验收中途重启，重新跑一次 `open` 即可。
 > 收尾时可以用 `remove-boot-guard` 卸掉。
+>
+> ⚠️ 它**不是「开机跑一次关闭就完事」**（codex 评审 R8）：`@reboot` 很可能跑在 docker /
+> tailscale 容器起来**之前**，那一次必然失败，而端点配置是持久的、随后就自己回来了。
+> 所以它先**等依赖就绪**（最多 15 分钟），再进入「关到确认为止」的重试（最多 24 小时，
+> 退避封顶 60 秒），全过程写进 `/tmp/kline-trainer-expose.log`。
 
 **判据**：两侧对同一批文件算校验和并比对
 
@@ -851,8 +856,8 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -
 ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh close"
 ```
 
-- ✅ 通过：打印 `No serve config`，最后一行是 `CLOSE_OK`
-- ❌ 打印 `CLOSE_FAILED`：按提示处理，**不要当成已关**
+- ✅ 通过：最后一行是 `CLOSE_OK`（它内部会反复重试并**读状态确认**，只有读到 `No serve config` 才算数）
+- ❌ 打印 `CLOSE_FAILED`：**不要当成已关**。此时看门狗**仍然 armed 并在后台继续重试**（这是有意的），查 `/tmp/kline-trainer-expose.log` 看重试记录，处理好依赖后再跑一次 `close`
 
 （`close` 是幂等的：本来就没开也会直接 `CLOSE_OK`。它同时撤掉看门狗，避免陈旧看门狗在下一个窗口里乱关。若读不到 serve 状态，它会报 `CLOSE_FAILED` 而**不是**当成已关。）
 
