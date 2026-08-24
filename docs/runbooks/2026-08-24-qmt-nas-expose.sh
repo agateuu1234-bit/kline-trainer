@@ -204,8 +204,20 @@ arm() {
                 exit 0
             }
             if [ "$(date +%s)" -ge "$_d" ]; then
+                # ⚠️ 只有**确认关闭成功**才退出（codex plan-R12）。
+                #    close-loop 外面包着 flock 等待，并发的 close 完全可能持锁超过
+                #    LOCK_WAIT（它每轮 reset 30 秒 + status 30 秒，而限时只算退避）。
+                #    早先写成 `exit $?` —— 拿不到锁就退出、EXIT 陷阱顺手清掉 PID 文件，
+                #    于是「状态还 armed、端点可能还开着，却没有看门狗再去重试」，
+                #    正好推翻手册里「关闭失败时看门狗仍在重试」那句话。
+                #    现在：任何非 0 都不退出，只要 STATE 还在且归属仍是自己就继续重试
+                #    （循环条件与令牌检查负责真正的退出）。
                 "$SELF" close-loop 0
-                exit $?
+                _rc=$?
+                [ "$_rc" -eq 0 ] && exit 0
+                echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_KEEPS_TRYING: close-loop rc=${_rc}（锁被占或归属有变）—— 仍持有归属，不退出" >>"$LOG"
+                sleep "$POLL"
+                continue
             fi
             sleep "$POLL"
         done
@@ -225,7 +237,7 @@ arm() {
 # 需要串行化的子命令：若还没持锁，就先拿锁再把自己重跑一遍。
 # EXPOSE_LOCK_HELD 由持锁的那一层设置，避免自己等自己（重入死锁）。
 case "${1:-}" in
-open|renew|close|close-loop|boot-close)
+open|renew|close|close-loop|boot-close|install-boot-guard|remove-boot-guard)
     if [ "${EXPOSE_LOCK_HELD:-0}" != "1" ]; then
         # ⚠️ 不要写成 `if ! cmd; then _rc=$?` —— 在 `!` 取反之后 `$?` 是**取反的结果**（0），
         #    不是命令本身的退出码。锁超时会因此被吞成 exit 0（又一次「把失败读成成功」，
@@ -234,7 +246,7 @@ open|renew|close|close-loop|boot-close)
         EXPOSE_LOCK_HELD=1 flock -w "$LOCK_WAIT" -E 99 "$LOCKFILE" "$SELF" "$@"
         _rc=$?
         if [ "$_rc" -eq 99 ]; then
-            echo "LOCK_TIMEOUT: ${LOCK_WAIT} 秒内没拿到互斥锁（另有一个 open/close/boot-close 在跑）—— 本次什么都没做"
+            echo "LOCK_TIMEOUT: ${LOCK_WAIT} 秒内没拿到互斥锁（另有一个 open/close/boot-close/守卫装卸 在跑）—— 本次什么都没做"
         fi
         exit "$_rc"
     fi
