@@ -222,3 +222,100 @@ def test_dropped_day_blocks_training_window_rejects(gen):
         build_stock_import(s1b, sdb, stock_code="000001.SZ", stock_name="x",
                            entry_1m=e1b, entry_daily=edb)
     assert "no_eligible_training_window" in str(ei.value)
+
+
+# ============ 真实 QMT 导出格式的回归钉（2026-08-23 挂载实测坐实）============
+# ⚠️ 上面那些用例造的 export_log 里 period 列写的是 "1m"/"daily" —— 那是**想象出来的
+# 格式**。真实导出脚本（export_all_front_ratio_stocks_only.py:507/515）写死的是
+# "1m"/"1d"，5608 只股 × 2 周期。测试测的格式与生产格式不一致，是这两个缺陷
+# 三年没被发现的直接原因。
+
+def _write_real_format_log(tmp_path, rows):
+    """按**真实导出**的列与取值造 export_log（12 列、带 BOM、period 用 1m/1d）。"""
+    import csv
+    p = tmp_path / "export_log.csv"
+    cols = ["dividend_type", "exchange", "file_path", "first_time", "label",
+            "last_time", "name", "period", "rows", "status", "stock", "time"]
+    with open(p, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    return p
+
+
+def _real_row(stock, period, status="ok", rows="100",
+              first="20250704101200", last="20260703150000"):
+    label = "1分钟K线" if period == "1m" else "日K线"
+    return {"dividend_type": "front_ratio", "exchange": "SZSE",
+            "file_path": f"D:\\qmt_export\\x\\{stock}_名_{label}_前复权.csv",
+            "first_time": first, "label": label, "last_time": last,
+            "name": "名", "period": period, "rows": rows, "status": status,
+            "stock": stock, "time": "2026-07-05 21:28:47"}
+
+
+def test_real_format_daily_period_1d_is_not_silently_dropped(tmp_path):
+    """缺陷①：真实 period 列的日线值是 `1d`，而 _LABEL_TO_PERIOD 里没有它 →
+    `continue` **静默**跳过。实测后果：真实文件里 5607 条日线记录，解析结果 0 条。
+    下游 build_stock_import 拿不到 entry_daily，每只股都导不进来 ——
+    而且不报错、不计数，是本仓最讨厌的形态。"""
+    p = _write_real_format_log(tmp_path, [
+        _real_row("000001.SZ", "1m"),
+        _real_row("000001.SZ", "1d", first="20201223", last="20260703"),
+    ])
+    d = parse_export_log(p)
+    assert ("000001.SZ", "1m") in d, "1m 条目丢了"
+    assert ("000001.SZ", "daily") in d, "日线条目被静默丢弃（缺陷①）"
+    assert d[("000001.SZ", "daily")].status == "ok"
+
+
+def test_real_format_bad_status_row_does_not_kill_the_whole_log(tmp_path):
+    """缺陷②：status='empty' 的行 rows=0、first_time/last_time 为空 →
+    parse_qmt_datetime 抛 ValueError → **整份 log 崩掉**，5607 只好股一只都导不进来。
+    设计上本来就有一道 status 门要拒这种行，但解析阶段就死了、那道门根本够不到。"""
+    p = _write_real_format_log(tmp_path, [
+        _real_row("000001.SZ", "1m"),
+        _real_row("000001.SZ", "1d", first="20201223", last="20260703"),
+        _real_row("301583.SZ", "1m", status="empty", rows="0", first="", last=""),
+        _real_row("301583.SZ", "1d", status="empty", rows="0", first="", last=""),
+    ])
+    d = parse_export_log(p)          # ← 不得抛异常
+    # 好股必须一只不少
+    assert ("000001.SZ", "1m") in d and ("000001.SZ", "daily") in d
+
+
+def test_unknown_period_value_raises_instead_of_silently_skipping(tmp_path):
+    """认不出的 period 取值必须**报错并点名那个值**，不许静默 continue。
+    静默跳过时，「整批数据没进来」与「这批数据本来就没有」在外部完全不可区分
+    —— 缺陷①能潜伏三年，病根就是这个静默。"""
+    p = _write_real_format_log(tmp_path, [
+        _real_row("000001.SZ", "1m"),
+        _real_row("000001.SZ", "5m"),          # QMT 将来新增的周期
+    ])
+    with pytest.raises(QmtSchemaError, match="5m"):
+        parse_export_log(p)
+
+
+def test_bad_status_entry_is_kept_with_null_timestamps(tmp_path):
+    """`status != ok` 的行保留成条目、时间戳为 None —— 让 build_stock_import
+    门 4 的 status 门真正够得着（它本来就是为这种行设计的）。
+    调用方 import_csv 是直接按键取值的，跳过会变成裸 KeyError。"""
+    p = _write_real_format_log(tmp_path, [
+        _real_row("301583.SZ", "1m", status="empty", rows="0", first="", last=""),
+        _real_row("301583.SZ", "1d", status="empty", rows="0", first="", last=""),
+    ])
+    d = parse_export_log(p)
+    e = d[("301583.SZ", "daily")]
+    assert e.status == "empty"
+    assert e.first_time is None and e.last_time is None
+    assert e.rows == 0
+
+
+def test_ok_row_with_missing_timestamp_still_raises(tmp_path):
+    """反向档：status 说 ok 却缺时间戳，那是**真的** schema 异常，必须照旧报错。
+    防止「宽容坏行」退化成「什么都宽容」。"""
+    p = _write_real_format_log(tmp_path, [
+        _real_row("000001.SZ", "1m", status="ok", first="", last=""),
+    ])
+    with pytest.raises(QmtSchemaError):
+        parse_export_log(p)
