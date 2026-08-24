@@ -283,6 +283,19 @@ ssh $NAS "cd $DIR && docker compose build" 2>&1 | tail -5
 
 - ✅ 通过：出现 `Built`，且**没有** `failed to solve`
 
+**如果这一步失败（spec §11-R4 的退路）**：NAS 上构建需要它能连到 PyPI 和 Docker Hub（2026-08-14 实测都通，但网络会变）。若构建卡在下载上，改成**在 Mac 上构建好再送过去**：
+
+```
+docker build --platform linux/amd64 -t kline-trainer-api:latest "$WT/backend"
+```
+
+```
+docker save kline-trainer-api:latest | ssh $NAS 'docker load'
+```
+
+⚠️ `--platform linux/amd64` 不能省 —— 你的 Mac 是 ARM 芯片，NAS 是 Intel，不指定会造出一个 NAS 跑不了的镜像。
+送过去之后，编排里的 `api` 服务要临时改成用 `image: kline-trainer-api:latest` 代替 `build:`（⚠️ 那个 `image:` **不得**带 `@sha256:` digest，否则 compose 会直接报错）。这条退路属于应急，走了要在 PR 里记一笔。
+
 ```
 ssh $NAS "cd $DIR && docker compose up -d api"
 ```
@@ -512,6 +525,11 @@ G3 的命令（我跑）：
 ```
 ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c 'SELECT id, stock_code, status FROM training_sets ORDER BY id;'"
 ```
+
+### 验收时会看到、但**不是** bug 的两件事
+
+1. **训练组显示的名字是股票代码（`000001.SZ` / `600519.SH`），不是中文名**（spec §11-R5）。真实 QMT 导出的数据本身就没带中文名，不是程序错。本次不修。
+2. **列表里有两条都是 `000001.SZ`**，只是时间区间不同（一条 2025-09-01 → 2026-05-05，一条 2025-11-03 → 2026-06-30；均为北京时间，由库里的时间戳换算，2026-08-24 实算）。这是对的 —— 3 个片段本来就是 2 只股票、3 个区间（另一条是 `600519.SH`，区间同后者）。
 
 ⚠️ **G1 只是快速前置检查，不是决定性证据**。决定性的是 **G3**：内存假库里一行都没有，如果真走了假库，预占会返回空列表、手机一个压缩包都拉不到、库里三行也不会变 `sent`。G2 + G3 同时成立就排除了假库那条路。
 
