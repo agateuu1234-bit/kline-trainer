@@ -427,7 +427,7 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | **P4b** | **构建前校验每个 pin 的 digest 是多架构 index**（codex spec-R4 F2，判据见 T6-7）：对 compose 的 `db` image 与 Dockerfile `FROM` 各跑一次 `docker buildx imagetools inspect` | Claude 可跑 | 两者 `MediaType` 均为 OCI image index，且 `Platform` 同时含 `linux/amd64` 与 `linux/arm64/v8` |
 | P5 | 写 `.env`（真密码，不入库；`DATABASE_URL` 指向 compose 内网 `db:5432`） | Claude 可跑 | `.env` 不进 git |
 | P6 | `docker compose up -d db`（**必须是全新空卷**，见下方 R5-F2 说明），等就绪后灌 `backend/sql/schema.sql` | Claude 可跑 | ⚠️ `\dt` 出 4 张表**不是充分判据**，见 P6b |
-| **P6b** | **schema 形状硬门**（codex spec-R5 F2）：直接查 NAS 库的实际形状，逐条比对关键列类型 / 索引 / CHECK 约束 | Claude 可跑 | `klines.open/high/low/close` 为 `double precision`；`training_sets.file_path` 为 `text`、`content_hash` 为 `bpchar(8)`；四条 CHECK（`ck_content_hash_crc32_lowercase` / `ck_status_enum` / `ck_lease_state_invariant` / `ck_klines_price_finite_positive`）**全部存在**；`stock_coverage` 三条 CHECK 存在。**任一不符 → 停止，销毁卷重来**，不得往下插数据 |
+| **P6b** | **schema 形状硬门**（codex spec-R5 F2；⚠️ **判据于 2026-08-24 收紧，见下方 P6b 补强**）：直接查 NAS 库的实际形状，逐条比对关键列类型与**约束的完整定义** | Claude 可跑 | 见下方「P6b 补强」——⛔ 原判据写的是「四条 CHECK 全部**存在**」，**存在性判据不够**，已作废 |
 | P7 | scp 3 个 zip 到宿主训练组目录 | Claude 可跑 | **NAS 上重算 CRC32 = `851f9444` / `32892a5f` / `150d8d6c`** |
 | P8 | `docker compose up -d api`（在 NAS 上构建镜像） | Claude 可跑 | `curl 127.0.0.1:8010/health` → `repository == "asyncpg"` |
 | **P9** | **§9.2 的 NAS-A/B 真 PG 烟测 8 条（此刻 `training_sets` 表为空，只有烟测自己插的临时行）** | Claude 可跑 | 8 条全过；含 NAS-A.3 的 10 分钟等待 |
@@ -461,6 +461,27 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 **⚠️ 为什么 `\dt` 出 4 张表不算数**（codex spec-R5 F2）：`backend/sql/schema.sql` 建表全部用 **`CREATE TABLE IF NOT EXISTS`**（已实测：`schema.sql:8/13/57/69` 四处建表全带该子句，全文件共 7 处 `IF NOT EXISTS`）。这意味着——如果 PG 卷不是全新的（比如上一次部署留下的、或者列类型/CHECK 约束跟当前 DDL 有漂移的旧卷），**`schema.sql` 会静默跳过所有建表、什么都不修**，而 `\dt` 照样输出 4 张表、P6 照样「通过」。随后插入的数据和真机验收就跑在一个**没被校验过的 schema** 上，故障现象会跟数据 bug / App bug 混在一起，极难区分。
 
 故 P6 追加两条硬约束：① **卷必须是全新的**（部署前确认 compose 项目 `kline-trainer` 无既有 `pgdata` 卷，有则先销毁）；② **P6b 直接查实际形状**，不看建表语句的返回值。
+
+**⚠️ P6b 补强：存在性判据不够，必须比对完整定义**（codex plan-R1 high finding，2026-08-24，**实测坐实**）
+
+P6b 的初版判据是「这几条 CHECK 全部**存在**」。按这条判据写出来的闸门只比对约束**名字**——不看它属于哪张表，也不看定义是什么。**两种漂移实测都被放行（退出码 0）**：
+
+- **同名但定义被改宽**：`ck_status_enum` 被改成多允许一个非法取值，闸门照样通过；
+- **同名约束被挪到别的表**：`klines` 上的 `ck_klines_price_ordering` 被整个删掉、同名约束建到 `stocks` 上，闸门照样通过 —— 此时 `high < low` 的脏数据可以直接进库。
+
+而 P6b 的**全部存在理由**就是「旧卷/漂移卷会让 `schema.sql` 静默什么都不修」。一个连定义漂移都看不见的闸门，在它唯一要防的场景上是失效的。
+
+**收紧后的判据**（`docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql` 已按此实现并逐档验过判别力）：
+
+1. 约束按 **(所属表, 约束名)** 匹配，且限定 `connamespace = 'public'`；
+2. 比对 `pg_get_constraintdef()` 的**完整定义字符串**，不是存在性；
+3. UNIQUE 约束（`uq_stock_start`）靠定义里的**有序列集合**判定，不再只看名字；
+4. **反向**断言：`public` 里不得有预期之外的 check/unique 约束（旧卷可能带着上一版的）；
+5. 期望表自身配计数自检（判据被改坏时直接失败）。
+
+五档破坏各配一次实测：缺约束 → `FAIL-missing`；同名改定义 → `FAIL-definition-drift`；同名换表 → `FAIL-missing` + `FAIL-unexpected`；多出约束 → `FAIL-unexpected`；改列类型 → `FAIL-type-mismatch`。健康库退出码 0，每档复原后回绿。
+
+**接受的残留**：该闸门是 `backend/sql/schema.sql` 在 PostgreSQL 15.12 上产出形状的**快照**（文件头记着 schema.sql 的 md5）。`schema.sql` 若变更而闸门未重生成，会在**全新空卷**上误红。现在只靠文件头注释与 runbook 里的一句说明提示操作者，**没有机械守卫**。把它接进 `schema-smoke.yml`（那条 workflow 已有真 PostgreSQL 服务）可以让它自维护，但那属于 CI 闸门改动、超出本次范围 → 记为 residual，不在本次收。
 
 **⚠️ 2026-08-24 复核发现这颗地雷已经埋在 NAS 上了**（§2.5-c）：NAS 现存卷 **`backend_pgdata`**（4 个月前的遗留）。compose 默认用目录名当项目名——部署目录若叫 `backend/` 且漏了显式项目名，就会正好挂上这个旧卷。故 P6 的「全新空卷」判据必须**同时**核实：`kline-trainer_pgdata` 不存在（或已销毁）**且**实际启动后挂载的卷名确实是 `kline-trainer_pgdata` 而不是 `backend_pgdata`。
 

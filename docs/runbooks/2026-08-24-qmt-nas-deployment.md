@@ -238,10 +238,23 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -
 ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -U kline -d kline_trainer -f - < sql/2026-08-24-qmt-nas-p6b-schema-shape-check.sql"
 ```
 
-- ✅ 通过：表格里 15 行 `verdict` **全部**是 `pass`，末尾出现 `NOTICE: P6b GATE PASS: 15/15 全部符合`
-- ❌ 任一行是 `FAIL-missing` / `FAIL-type-mismatch`：命令会以非零码退出并打印 `P6b GATE FAIL`。**停止，销毁卷重来**（`docker compose down -v` 后回 P6），**不得**往下插数据
+- ✅ 通过：表格里 **16 行**（6 个列 + 10 条约束）`verdict` **全部**是 `pass`，末尾出现 `NOTICE: P6b GATE PASS: 6 列 + 10 约束全部逐条吻合，且无预期外约束`
+- ❌ 任一行不是 `pass`：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止，销毁卷重来**（`docker compose down -v` 后回 P6），**不得**往下插数据
 
-（这段 SQL 与它的判别力已于 2026-08-24 在本机真 PostgreSQL 上验过：15/15 通过、退出码 0；故意删掉一条约束后退出码变 3 并打印 `P6b GATE FAIL: 1 条不符`。）
+四种失败标签各自的含义：
+
+| 标签 | 意思 |
+|---|---|
+| `FAIL-missing` | 该列 / 该约束在这个库里**不存在** |
+| `FAIL-type-mismatch` | 列存在但**类型不对** |
+| `FAIL-definition-drift` | 约束名字还在、但**定义被改过**（最阴险的一种：名字看着没变） |
+| `FAIL-unexpected` | 库里有**预期之外**的约束（多半是上一版 schema 留下的） |
+
+⚠️ **如果是在一个全新空卷上本门也红**：那说明 `backend/sql/schema.sql` 改过了，而这份闸门文件是它的形状快照（文件头记着 schema.sql 的 md5）。这时要**重新生成闸门文件**，不是怀疑部署。
+
+**判别力已实测**（2026-08-24，本机真 PostgreSQL 15.12）：健康库退出码 0；五种破坏各自退出码 3 并给出对应标签 —— ① 删掉一条约束 → `FAIL-missing`；② **同名但把定义改宽** → `FAIL-definition-drift`；③ **把同名约束挪到别的表** → `FAIL-missing` + `FAIL-unexpected`；④ 多加一条约束 → `FAIL-unexpected`；⑤ 改列类型 → `FAIL-type-mismatch`。每档复原后都回到退出码 0。
+
+> ⚠️ **本门的上一版（R1）在 ② 和 ③ 两档上是放行的**（codex 评审 R1 的 high finding，实测坐实）。原因是它只比对约束**名字**，不看所属表也不看定义 —— ③ 那种漂移会让 `klines` 的价格排序约束整个消失，`high < low` 的脏数据可以直接进库。
 
 ---
 
