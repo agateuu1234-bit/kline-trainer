@@ -70,11 +70,13 @@ ssh $NAS 'docker exec tailscale tailscale status --json' | /usr/bin/python3 -c "
 **判据（我来核）**：
 
 ```
-ssh $NAS 'docker exec tailscale tailscale status' | grep iphone
+ssh $NAS 'L=$(docker exec tailscale tailscale status | grep iphone); [ -n "$L" ] || { echo QUERY_FAILED; exit 1; }; echo "$L"; echo "$L" | grep -q offline && echo IPHONE_OFFLINE || echo IPHONE_ONLINE'
 ```
 
-- ✅ 通过：那一行**不含** `offline`
-- ❌ 不通过：仍显示 `offline, last seen ...`
+- ✅ 通过：最后一行是 `IPHONE_ONLINE`
+- ❌ 不通过：最后一行是 `IPHONE_OFFLINE`（手机没连上）或 `QUERY_FAILED`（这条命令自己没跑成，别当成通过）
+
+> ⚠️ 这里刻意让命令**必须**打印一个明确结论。写成 `... | grep iphone` 的话，命令跑失败时**什么都不打印**，而「没看到 offline」很容易被当成「通过」。
 
 （2026-08-24 实测：离线，最后上线 17 天前。）
 
@@ -202,13 +204,17 @@ ssh $NAS "cd $DIR && sed 's/=.*/=<hidden>/' .env"
 **第一步，确认没有会被误用的旧卷**：
 
 ```
-ssh $NAS 'docker volume ls | grep -E "kline-trainer_pgdata|backend_pgdata" || echo "(两个都不存在)"'
+ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -qx kline-trainer_pgdata && echo VOLUME_EXISTS || echo VOLUME_ABSENT; echo QUERY_OK'
 ```
 
-- ✅ 通过：**看不到** `kline-trainer_pgdata` → 直接进第二步。（看到 `backend_pgdata` 是正常的 —— 那是四月遗留，我们不碰它。）
-- 🛑 **若已存在 `kline-trainer_pgdata`：停在这里**，不要自动往下走。转「**P6-RESET**」那一节。
+- ✅ 通过：打印 `VOLUME_ABSENT` **且**紧接着打印 `QUERY_OK` → 直接进第二步
+- 🛑 打印 `VOLUME_EXISTS`：转 P6-RESET
+- ❌ 没看到 `QUERY_OK`：这条命令自己没跑成，**别当成「卷不存在」**，先查 ssh
 
-> ⚠️ **这里刻意不写 `docker compose down -v`**（codex 评审 R3 的 high finding）。原来的写法是「看到卷存在 = 授权销毁」，问题有三个：
+> ⚠️ 必须有 `QUERY_OK` 这个哨兵。原来写成 `... || echo "(两个都不存在)"`，命令失败时整条什么都不打印，而「没看到那个卷名」正好会被读成「通过」。
+> （`backend_pgdata` 是四月遗留，我们不碰它，所以这里不再把它列进来干扰判断。）
+
+> ⚠️ **看到 `VOLUME_EXISTS` 时刻意不写 `docker compose down -v`**（codex 评审 R3 的 high finding）。原来的写法是「看到卷存在 = 授权销毁」，问题有三个：
 > ① 卷存在**不等于**它可以丢 —— 上一轮可能已经装进了真数据；
 > ② `down -v` 作用于「当前目录解析出来的那个项目」，`$DIR` 写错就会**销毁 NAS 上别的项目的卷**（这台 NAS 上还跑着 `iyuuplus`）；
 > ③ 销毁前既不看内容也不留备份，出错不可逆。
@@ -255,17 +261,63 @@ ssh $NAS "docker inspect kline-trainer-db-1 --format '{{range .Mounts}}{{.Name}}
 ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c 'SELECT count(*) AS 训练组行数 FROM training_sets;' -c 'SELECT id, stock_code, status FROM training_sets ORDER BY id;'"
 ```
 
-**门 3 · 先备份，并验证备份能用**
+**门 3 · 先备份，并且把备份**真恢复一遍**来验证它能用**
+
+> ⚠️ **刻意不用 `pg_dump ... | gzip > 文件` 这种写法**（codex 评审 R4 的 high finding，**已实测**）。
+> 那条管道没开 `pipefail`，`pg_dump` 失败时 —— 比如连不上、认证失败、库名写错 ——
+> **整条管道的退出码仍然是 0**，`gzip` 会产出一个 **20 字节、`gzip -t` 能通过、内容 0 行**的
+> 空文件。原来的判据「大小不是 0 + `gzip -t` 通过」会打印 `BACKUP_OK`，紧接着卷就被销毁 ——
+> 这是一条真实的、不可逆的数据丢失路径。
+>
+> 现在：用**自定义格式**（`-Fc`，本身就压缩）**完全去掉管道**，退出码直接就是 `pg_dump` 的；
+> 先写临时名，**只有成功才改名**（失败时连最终文件都不会存在）；再用三道递进的校验。
+
+**3a · 先给这次备份定一个带时间戳的名字**（在你自己的终端里跑，只设一个变量）
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 pg_dump -U kline -d kline_trainer | gzip > $DIR/backup-before-reset-\$(date +%Y%m%d-%H%M%S).sql.gz"
+BK=$DIR/backup-before-reset-$(date +%Y%m%d-%H%M%S).dump
+```
+
+**3b · 备份（无管道；失败就不改名）**
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 pg_dump -U kline -d kline_trainer -Fc > $BK.tmp && mv $BK.tmp $BK && echo DUMP_OK"
+```
+
+- ✅ 通过：打印 `DUMP_OK`
+- ❌ 没打印 `DUMP_OK`：备份失败，**立刻停**，绝不往下走
+
+**3c · 结构校验：备份里必须含 4 张表的数据**
+
+```
+ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore --list < $BK" | grep -c 'TABLE DATA'
+```
+
+- ✅ 通过：打印 `4`
+（实测：空文件与截断文件在这一步都会被拒，退出码 1。）
+
+**3d · 语义校验：把备份真恢复到一个临时库，比对行数**
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE IF EXISTS restore_check;' -c 'CREATE DATABASE restore_check;'"
 ```
 
 ```
-ssh $NAS "ls -la $DIR/backup-before-reset-*.sql.gz && gzip -t $DIR/backup-before-reset-*.sql.gz && echo BACKUP_OK"
+ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore -U kline -d restore_check --no-owner < $BK && echo RESTORE_OK"
 ```
 
-- ✅ 通过：文件大小**不是 0**，且最后一行打印 `BACKUP_OK`
+```
+ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d restore_check -c \"SELECT count(*) FROM pg_tables WHERE schemaname='public';\" -c 'SELECT count(*) FROM training_sets;'"
+```
+
+- ✅ 通过：上一条打印 `RESTORE_OK`；这一条打印**两行** —— 第一行是 `4`（表数），第二行的行数与**门 2 看到的行数一模一样**
+- ❌ 任一条不符：**立刻停**，备份不可信，绝不销毁卷
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE restore_check;'"
+```
+
+（校验用的临时库清掉。它本来就在马上要销毁的那个卷里，但保持干净便于后面读日志。）
 
 **门 4 · 报给你，等你明确点头**
 
@@ -282,10 +334,16 @@ ssh $NAS "docker volume rm kline-trainer_pgdata"
 ```
 
 ```
-ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -x kline-trainer_pgdata || echo "已销毁"'
+ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -qx kline-trainer_pgdata && echo STILL_THERE || echo GONE; echo QUERY_OK'
 ```
 
-- ✅ 通过：最后一条打印 `已销毁`；并且 `backend_pgdata` 等**别的卷仍在**（可用 `docker volume ls` 复核）
+- ✅ 通过：打印 `GONE` **且**紧接着打印 `QUERY_OK`
+
+```
+ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -c . ; echo QUERY_OK'
+```
+
+- ✅ 通过：卷总数比销毁前**恰好少 1**（销毁前先跑一次这条记下数字），且打印 `QUERY_OK` —— 证明只删掉了那一个，没误伤别的项目
 
 销毁后回到 P6 第二步。
 
@@ -309,10 +367,17 @@ ssh $NAS "docker inspect kline-trainer-db-1 --format '{{range .Mounts}}{{.Name}}
 **第五步，灌建表脚本**：
 
 ```
-ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -U kline -d kline_trainer -f - < sql/schema.sql" | tail -5
+ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -U kline -d kline_trainer -f - < sql/schema.sql > /tmp/schema-load.log 2>&1 && echo SCHEMA_LOAD_OK || echo SCHEMA_LOAD_FAILED"
 ```
 
-- ✅ 通过：最后一行是 `COMMIT`，且**没有** `ERROR`
+```
+ssh $NAS "grep -c ERROR /tmp/schema-load.log; echo GREP_DONE"
+```
+
+- ✅ 通过：第一条打印 `SCHEMA_LOAD_OK`，第二条打印 `0` 且随后打印 `GREP_DONE`
+- ❌ 任一条不符：**停止**
+
+> ⚠️ 刻意不用 `| tail -5` 判断。日志前面出现的 `ERROR` 会被 `tail` 整个截掉 —— 那正是最需要看到的那一行。
 
 ⚠️ `\dt` 能列出 4 张表**不算通过** —— 建表脚本全是「已存在就跳过」，旧卷会让它什么都不改却报成功。真正的判据是下一步 P6b。
 
@@ -418,10 +483,17 @@ ssh $NAS "cd $DIR/training-sets && for f in *.zip; do printf '%s  %s\n' \"\$(pyt
 **执行者：Claude**
 
 ```
-ssh $NAS "cd $DIR && docker compose build" 2>&1 | tail -5
+ssh $NAS "cd $DIR && docker compose build > /tmp/build.log 2>&1 && echo BUILD_OK || echo BUILD_FAILED"
 ```
 
-- ✅ 通过：出现 `Built`，且**没有** `failed to solve`
+```
+ssh $NAS "grep -c 'failed to solve' /tmp/build.log; echo GREP_DONE"
+```
+
+- ✅ 通过：第一条打印 `BUILD_OK`，第二条打印 `0` 且随后打印 `GREP_DONE`
+- ❌ 任一条不符：**停止**
+
+> ⚠️ 同样刻意不用 `| tail -5`：`failed to solve` 往往出现在很长的构建日志中间，会被 `tail` 截掉。
 
 **如果这一步失败（spec §11-R4 的退路）**：NAS 上构建需要它能连到 PyPI 和 Docker Hub（2026-08-14 实测都通，但网络会变）。若构建卡在下载上，改成**在 Mac 上构建好再送过去**：
 
