@@ -44,10 +44,18 @@ DIR=/vol1/1000/agate1234/kline-trainer
 
 **执行者：你**（网页操作，我做不了）
 
+⚠️ **是两个开关，不是一个**（2026-08-24 实测发现 —— 原来这里只写了证书那一个）：
+
+**开关 A · HTTPS 证书**
+
 1. 浏览器打开 <https://login.tailscale.com/admin/dns>
 2. 找到 **HTTPS Certificates**，把开关打开（它会让你确认一次）
 
-**判据（我来核）**：
+**开关 B · Serve 功能**
+
+3. 浏览器打开 <https://login.tailscale.com/f/serve?node=nyF6Fsm4hi11CNTRL>（这个链接是 NAS 上的 tailscale 自己吐出来的，直接点开即可），按提示启用 **Serve**
+
+**判据一（我来核，对应开关 A）**：
 
 ```
 ssh $NAS 'docker exec tailscale tailscale status --json' | /usr/bin/python3 -c "import json,sys;print('CertDomains =', json.load(sys.stdin).get('CertDomains'))"
@@ -56,7 +64,9 @@ ssh $NAS 'docker exec tailscale tailscale status --json' | /usr/bin/python3 -c "
 - ✅ 通过：打印出一个含 `fnos.tail9dc815.ts.net` 的列表
 - ❌ 不通过：打印 `CertDomains = None` → 开关没生效，**整条链路不要往下走**
 
-（2026-08-24 实测仍是 `None`，所以这一步确实还没做。）
+**判据二（我来核，对应开关 B）**：直接在 P12 那一步验 —— 若 Serve 没启用，`expose.sh open` 会明确打印 `SERVE_FAILED: tailnet 还没开启 **Serve 功能**` 并且**不会开出任何端点**。
+
+（2026-08-24 实测：`CertDomains` 仍是 `None`；且真跑了一次 `tailscale serve` 得到 `Serve is not enabled on your tailnet` —— 两个开关**都**还没开。）
 
 ---
 
@@ -128,6 +138,10 @@ rsync -av "$WT/backend/sql/schema.sql" $NAS:$DIR/sql/
 
 ```
 rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p11-insert-training-sets.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p15-reset-training-sets.sql" "$WT/docs/runbooks/2026-08-24-qmt-nas-p10-cleanup-smoke-rows.sql" $NAS:$DIR/sql/
+```
+
+```
+rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-expose.sh" $NAS:$DIR/ && ssh $NAS "chmod +x $DIR/2026-08-24-qmt-nas-expose.sh && echo CHMOD_OK"
 ```
 
 **判据**：两侧对同一批文件算校验和并比对
@@ -677,16 +691,31 @@ print('GATE', 'PASS' if not bad else 'FAIL')
 **执行者：Claude**
 
 ```
-ssh $NAS "docker exec tailscale tailscale serve --bg --https=443 http://127.0.0.1:8010"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh open 7200"
 ```
 
-**判据一 —— 配置里不得含 funnel**：
+- ✅ 通过：先打印 `WATCHDOG_ARMED 到期时刻=…`，最后一行是 `EXPOSE_OK`
+- ❌ 打印 `SERVE_FAILED` / `REFUSING_TO_OPEN`：**没有开出任何端点**，按提示回去补 P1 的两个开关
+
+> ⚠️ **为什么不直接敲 `tailscale serve`**（codex 评审 R6 的 high finding）：`serve --bg` 是**持久**配置，跟开它的那个终端无关。而这个 API **零认证** —— spec 里「本次不加认证」这个决定的四个前提，第四条就是「暴露窗口只限验收期间、用完即关」。把关闭交给一条人工嘱咐，等于断线/临时有事/某步失败就一直开着。
+>
+> `expose.sh open` 做了两件手动敲做不到的事：① **先装超时自动关闭的看门狗，装不上就拒绝开端点**；② 开完立刻自检配置里没有 funnel。`7200` = 2 小时窗口，到点自动关。
+>
+> **判别力已实测**（2026-08-24，NAS 真机）：不撤销 → 到点真的执行了关闭并记进日志；`open` 时前置没满足 → 打印精确诊断、撤掉看门狗、**未开出任何端点**；撤销后 → 到点不触发（日志记 `WATCHDOG_DISARMED`）。
+
+**验收时间不够怎么办**（别让它在你正用着的时候关掉）：
 
 ```
-ssh $NAS "docker exec tailscale tailscale serve status"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh status"
 ```
 
-- ✅ 通过：显示把 443 反代到 `http://127.0.0.1:8010`，且输出里**没有** `funnel` 字样
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh renew 7200"
+```
+
+- `status` 会打印剩余秒数；剩得不多就 `renew` 续 2 小时
+
+⚠️ **NAS 如果重启过**：看门狗进程会被杀掉，而 tailscale 的 serve 配置是持久的 —— 端点会自己回来却没人看着。`status` 会把这种情况明确报成 `WATCHDOG_PROCESS_MISSING`。看到它就立刻跑 `close`。
 
 **判据二 —— 从你的 Mac 经 tailnet 真的连得上，且证书可验**：
 
@@ -791,14 +820,13 @@ ssh $NAS "cd $DIR && docker exec -i kline-trainer-db-1 psql -v ON_ERROR_STOP=1 -
 **执行者：Claude**
 
 ```
-ssh $NAS "docker exec tailscale tailscale serve reset"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh close"
 ```
 
-```
-ssh $NAS "docker exec tailscale tailscale serve status"
-```
+- ✅ 通过：打印 `No serve config`，最后一行是 `CLOSE_OK`
+- ❌ 打印 `CLOSE_FAILED`：按提示处理，**不要当成已关**
 
-- ✅ 通过：输出**恰好**是 `No serve config`
+（`close` 是幂等的：本来就没开也会直接 `CLOSE_OK`。它同时撤掉看门狗，避免陈旧看门狗在下一个窗口里乱关。）
 
 **什么时候必须执行**：
 
