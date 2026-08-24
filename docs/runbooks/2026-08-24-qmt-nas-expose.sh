@@ -53,12 +53,43 @@ UPSTREAM_HOST=127.0.0.1
 UPSTREAM_PORT=8010
 UPSTREAM="http://${UPSTREAM_HOST}:${UPSTREAM_PORT}"
 POLL=5
+# ⚠️ 最短窗口（codex plan-R9 F1）：`open 0` 或极短窗口会让看门狗在 `serve --bg`
+#    真正落配置**之前**就到期 —— 它此刻读到的确实是 `No serve config`，于是「确认关闭
+#    成功」、删掉状态文件、退出；随后端点才被开出来，却已经没有看门狗看着它了。
+MIN_SECS=300
 BOOT_TAG="kline-trainer-boot-guard"
 
 SELF=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
 
 ts() { timeout 30 docker exec -i "$TS_CTR" tailscale "$@" </dev/null; }
 now() { date +%s; }
+stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# ── 归属令牌（codex plan-R9 F2）──────────────────────────────────────────
+# 早先 STATE 只存到期时间、PIDFILE 只存 PID，新旧两代看门狗**共用同一个 PIDFILE**，
+# 而每一代退出时都无条件 `rm -f PIDFILE` → 旧的退出会删掉**新的** PID 文件，
+# 于是续期后的存活检查失败 → arm 认为装失败 → disarm 删掉刚续上的状态 →
+# 新看门狗也退出，最终「端点开着、一个看门狗都没有」。
+# 现在：STATE = "<到期时间> <令牌>"，PIDFILE = "<PID> <令牌>"。
+# 看门狗只在「STATE 里的令牌 == 自己的令牌」时行动；退出时也只在令牌仍是自己的
+# 情况下才删 PIDFILE。续期**不再重启进程**，只原子替换到期时间、令牌不变。
+new_token() { printf '%s-%s' "$(date +%s%N)" "$$"; }
+state_deadline() { [ -f "$STATE" ] && cut -d' ' -f1 "$STATE" 2>/dev/null || echo ""; }
+state_token()    { [ -f "$STATE" ] && cut -d' ' -f2 "$STATE" 2>/dev/null || echo ""; }
+pid_of()         { [ -f "$PIDFILE" ] && cut -d' ' -f1 "$PIDFILE" 2>/dev/null || echo ""; }
+pid_token()      { [ -f "$PIDFILE" ] && cut -d' ' -f2 "$PIDFILE" 2>/dev/null || echo ""; }
+
+write_state() {   # <到期时间> <令牌>  —— 原子替换（先写临时文件再 mv）
+    printf '%s %s\n' "$1" "$2" > "${STATE}.tmp" && mv -f "${STATE}.tmp" "$STATE"
+}
+
+# 「当前确实有一个活着的看门狗，且它就是当前状态的归属者」
+watchdog_owns_state() {
+    _p=$(pid_of); _pt=$(pid_token); _st=$(state_token)
+    [ -n "$_p" ] && [ -n "$_pt" ] && [ -n "$_st" ] || return 1
+    [ "$_pt" = "$_st" ] || return 1
+    kill -0 "$_p" 2>/dev/null
+}
 
 # ── 判据（抽成函数，selftest 直接喂合成文本，无需碰真实端点）────────────────
 # 返回 0 = 这份 serve 状态是「我们要的、且安全的」
@@ -73,18 +104,9 @@ serve_status_is_expected() {
     return 0
 }
 
-watchdog_running() {
-    [ -f "$PIDFILE" ] || return 1
-    _wp=$(cat "$PIDFILE" 2>/dev/null)
-    [ -n "$_wp" ] && kill -0 "$_wp" 2>/dev/null
-}
-
 boot_guard_installed() { crontab -l 2>/dev/null | grep -q "$BOOT_TAG"; }
 
-stamp() { date '+%Y-%m-%d %H:%M:%S'; }
-
 # 等 docker 与 tailscale 容器就绪（开机时 cron 可能跑在它们起来之前）。
-# 返回 0 = 就绪；非 0 = 等到超时仍不就绪。
 wait_ready() {
     _limit=$1; _t=0
     while [ "$_t" -lt "$_limit" ]; do
@@ -98,7 +120,6 @@ wait_ready() {
 
 # ⭐ **唯一**的关闭实现（codex plan-R8）：反复 reset 并读 status，
 #    只有确认 `No serve config` 才返回 0。`$1` = 最长秒数，0 表示不限时。
-#    确认成功时顺手删掉看门狗状态文件（此时才算真的可以撤）。
 close_loop() {
     _limit=$1; _t=0; _try=0
     while : ; do
@@ -129,38 +150,42 @@ disarm() {
     return 0
 }
 
+# 装一个**新一代**看门狗（只有 open 用；renew 不走这里）
 arm() {
     _secs=$1
-    disarm || return 1
-    printf '%s\n' "$(( $(now) + _secs ))" > "$STATE"
-    [ -f "$STATE" ] || { echo "ARM_FAILED: 写不了 $STATE"; return 1; }
+    _tok=$(new_token)
+    write_state "$(( $(now) + _secs ))" "$_tok" || { echo "ARM_FAILED: 写不了 $STATE"; return 1; }
 
-    # ⚠️ 到点后**关到确认为止**（codex plan-R7 F1）：原来是「跑一次 reset 就宣告成功、
-    #    删状态文件、退出」——若 docker/tailscale 当时不可用、reset 非零退出、或命令挂住，
-    #    端点仍开着而看门狗已经没了。现在：带超时地重试，退避，**只有 status 确认
-    #    `No serve config` 才算数**；确认前绝不删状态文件、绝不退出。
     nohup sh -c '
-        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"
-        echo $$ > "$PIDFILE"
-        trap "rm -f \"$PIDFILE\"" EXIT
+        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"; MYTOK="$6"
+        printf "%s %s\n" "$$" "$MYTOK" > "$PIDFILE"
+        # 只在 PID 文件仍归自己时才删（否则会删掉新一代的）
+        trap "[ \"$(cut -d\" \" -f2 \"$PIDFILE\" 2>/dev/null)\" = \"$MYTOK\" ] && rm -f \"$PIDFILE\"" EXIT
         while [ -f "$STATE" ]; do
-            _d=$(cat "$STATE" 2>/dev/null)
+            _d=$(cut -d" " -f1 "$STATE" 2>/dev/null)
+            _t=$(cut -d" " -f2 "$STATE" 2>/dev/null)
             [ -n "$_d" ] || break
+            # 状态已归别人（有更新一代接管）→ 安静退出，不关任何东西
+            [ "$_t" = "$MYTOK" ] || {
+                echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_SUPERSEDED: 状态已归新一代，本代退出" >>"$LOG"
+                exit 0
+            }
             if [ "$(date +%s)" -ge "$_d" ]; then
-                # 到期 → 交给**唯一**的关闭实现，不限时、关到确认为止。
-                # 它确认成功时会自己删掉状态文件，本循环随即退出。
                 "$SELF" close-loop 0
                 exit $?
             fi
             sleep "$POLL"
         done
         echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_DISARMED: 状态文件已移除，未执行关闭" >>"$LOG"
-    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" >/dev/null 2>&1 &
+    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" "$_tok" >/dev/null 2>&1 &
 
     sleep 1
-    if [ ! -f "$STATE" ]; then echo "ARM_FAILED: 状态文件不见了"; return 1; fi
-    if ! watchdog_running; then echo "ARM_FAILED: 看门狗进程没起来"; disarm; return 1; fi
-    echo "WATCHDOG_ARMED 到期时刻=$(date -d "@$(cat "$STATE")" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || cat "$STATE")"
+    if ! watchdog_owns_state; then
+        echo "ARM_FAILED: 看门狗没起来或归属对不上"
+        disarm
+        return 1
+    fi
+    echo "WATCHDOG_ARMED 到期时刻=$(date -d "@$(state_deadline)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || state_deadline)"
     return 0
 }
 
@@ -192,6 +217,13 @@ remove-boot-guard)
 open)
     _secs=${2:-}
     case "$_secs" in ''|*[!0-9]*) echo "USAGE: expose.sh open <秒>"; exit 2 ;; esac
+    # ⚠️ 拒绝 0 与过短窗口（codex plan-R9 F1）：看门狗会在 serve 真正落配置**之前**
+    #    就到期，此刻读到的确实是 No serve config → 它「确认关闭成功」、删状态、退出；
+    #    随后端点才被开出来，却已经没有看门狗看着。
+    if [ "$_secs" -lt "$MIN_SECS" ]; then
+        echo "REFUSING_TO_OPEN: 窗口至少 ${MIN_SECS} 秒（给的是 ${_secs}）"
+        exit 2
+    fi
     # ⚠️ 次序是判据的一部分：两道关闭保证都装好，才允许开端点。
     if ! boot_guard_installed; then
         echo "REFUSING_TO_OPEN: 开机守卫没装（先跑 install-boot-guard）"
@@ -236,6 +268,17 @@ open)
         exit 1
     fi
     printf '%s\n' "$_st"
+    # ⚠️ 打印成功之前**再复核一次归属**（codex plan-R9 F1）：端点已经开出来了，
+    #    此刻必须证明「确实有一个活着的看门狗，且它就是当前状态的归属者」。
+    if ! watchdog_owns_state; then
+        echo "WATCHDOG_LOST: 端点已开但看门狗不在（或归属对不上）—— 立即关闭"
+        if close_loop 120; then
+            echo "已确认关闭；请重跑 open"
+        else
+            echo "⚠️ 未能确认关闭，请立刻查 $LOG 并手动跑 expose.sh close"
+        fi
+        exit 1
+    fi
     echo "EXPOSE_OK"
     ;;
 status)
@@ -245,11 +288,11 @@ status)
     [ "$_strc" -ne 0 ] && echo "⚠️ STATUS_UNVERIFIABLE: 读不到 serve 状态（rc=$_strc）—— 别当成「没开」"
     echo "--- watchdog ---"
     if [ -f "$STATE" ]; then
-        echo "WATCHDOG_ARMED 剩余秒数=$(( $(cat "$STATE") - $(now) ))"
-        if watchdog_running; then
-            echo "WATCHDOG_PROCESS_ALIVE"
+        echo "WATCHDOG_ARMED 剩余秒数=$(( $(state_deadline) - $(now) ))"
+        if watchdog_owns_state; then
+            echo "WATCHDOG_OWNS_STATE pid=$(pid_of)"
         else
-            echo "WATCHDOG_PROCESS_MISSING: 状态文件在但进程没了 —— 立刻跑 expose.sh close"
+            echo "WATCHDOG_OWNERSHIP_LOST: 状态文件在但没有归属明确的活看门狗 —— 立刻跑 expose.sh close"
         fi
     else
         echo "WATCHDOG_ABSENT"
@@ -263,8 +306,25 @@ status)
 renew)
     _secs=${2:-}
     case "$_secs" in ''|*[!0-9]*) echo "USAGE: expose.sh renew <秒>"; exit 2 ;; esac
-    arm "$_secs" || { echo "RENEW_FAILED"; exit 1; }
-    echo "RENEW_OK"
+    if [ "$_secs" -lt "$MIN_SECS" ]; then echo "RENEW_REFUSED: 窗口至少 ${MIN_SECS} 秒"; exit 2; fi
+    # ⚠️ 续期**不重启看门狗**（codex plan-R9 F2）：早先 renew 走 arm —— 删状态 + 起新进程，
+    #    新旧两代共用一个 PID 文件且各自无条件删它，旧的退出会删掉新的，
+    #    连锁导致「端点开着、一个看门狗都没有」。
+    #    现在只**原子替换到期时间**，令牌不变，进程不动。
+    if watchdog_owns_state; then
+        _tok=$(state_token)
+        write_state "$(( $(now) + _secs ))" "$_tok" || { echo "RENEW_FAILED: 写不了状态"; exit 1; }
+        if watchdog_owns_state; then
+            echo "RENEW_OK 新到期时刻=$(date -d "@$(state_deadline)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || state_deadline)"
+        else
+            echo "RENEW_FAILED: 写完之后归属对不上"; exit 1
+        fi
+    else
+        # 证明不了归属 = 端点可能开着却没人管 → **同步关闭**，不能只报个失败就走
+        echo "RENEW_FAILED: 当前没有归属明确的看门狗 —— 立即关闭以免端点无人看管"
+        if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
+        exit 1
+    fi
     ;;
 close)
     # 走**唯一**的关闭实现：最多重试 120 秒，只有确认 No serve config 才算成功。
