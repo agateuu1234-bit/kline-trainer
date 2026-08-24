@@ -58,6 +58,12 @@ POLL=5
 #    成功」、删掉状态文件、退出；随后端点才被开出来，却已经没有看门狗看着它了。
 MIN_SECS=300
 BOOT_TAG="kline-trainer-boot-guard"
+# ⚠️ 所有会改动「端点状态 / 看门狗状态」的子命令都必须**串行化**（codex plan-R11）：
+#    close_loop 确认「No serve config」之后才去删状态文件，这中间若有并发的 open
+#    装好新看门狗并开出端点，那一删就把新守卫拆了；若开的那一方随后被打断
+#    （Ctrl-C / ssh 断），端点就留在开着、没人看管的状态。
+LOCKFILE=/tmp/kline-trainer-expose.lock
+LOCK_WAIT=120
 
 SELF=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
 
@@ -122,11 +128,19 @@ wait_ready() {
 #    只有确认 `No serve config` 才返回 0。`$1` = 最长秒数，0 表示不限时。
 close_loop() {
     _limit=$1; _t=0; _try=0
+    _tok0=$(state_token)   # 进入时的归属，删状态文件前要比对（codex plan-R11）
     while : ; do
         _try=$((_try + 1))
         timeout 30 docker exec -i "$TS_CTR" tailscale serve reset </dev/null >>"$LOG" 2>&1
         _s=$(timeout 30 docker exec -i "$TS_CTR" tailscale serve status </dev/null 2>&1); _rc=$?
         if [ "$_rc" -eq 0 ] && printf '%s' "$_s" | grep -q 'No serve config'; then
+            _tok1=$(state_token)
+            if [ "$_tok1" != "$_tok0" ]; then
+                # 归属在本次关闭期间变了 = 有并发方开了新窗口。**绝不删新一代的状态**，
+                # 也不谎称关闭成功（此刻端点很可能已经被对方重新开出来了）。
+                echo "$(stamp) CLOSE_ABORTED_OWNERSHIP_CHANGED: 归属从 [${_tok0}] 变成 [${_tok1}]，不删状态、不宣告成功" >>"$LOG"
+                return 1
+            fi
             echo "$(stamp) CLOSE_CONFIRMED: No serve config（第 ${_try} 次尝试）" >>"$LOG"
             rm -f "$STATE"
             return 0
@@ -207,6 +221,25 @@ arm() {
     echo "WATCHDOG_ARMED 到期时刻=$(date -d "@$(state_deadline)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || state_deadline)"
     return 0
 }
+
+# 需要串行化的子命令：若还没持锁，就先拿锁再把自己重跑一遍。
+# EXPOSE_LOCK_HELD 由持锁的那一层设置，避免自己等自己（重入死锁）。
+case "${1:-}" in
+open|renew|close|close-loop|boot-close)
+    if [ "${EXPOSE_LOCK_HELD:-0}" != "1" ]; then
+        # ⚠️ 不要写成 `if ! cmd; then _rc=$?` —— 在 `!` 取反之后 `$?` 是**取反的结果**（0），
+        #    不是命令本身的退出码。锁超时会因此被吞成 exit 0（又一次「把失败读成成功」，
+        #    自测时抓到的）。故：先无条件跑、立刻取 $?、再判断。
+        # `-E 99` 让「没拿到锁」有一个**专属**退出码，不与子命令自身的 1 混淆。
+        EXPOSE_LOCK_HELD=1 flock -w "$LOCK_WAIT" -E 99 "$LOCKFILE" "$SELF" "$@"
+        _rc=$?
+        if [ "$_rc" -eq 99 ]; then
+            echo "LOCK_TIMEOUT: ${LOCK_WAIT} 秒内没拿到互斥锁（另有一个 open/close/boot-close 在跑）—— 本次什么都没做"
+        fi
+        exit "$_rc"
+    fi
+    ;;
+esac
 
 case "${1:-}" in
 install-boot-guard)

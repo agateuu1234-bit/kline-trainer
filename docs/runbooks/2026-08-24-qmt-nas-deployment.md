@@ -749,6 +749,7 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh renew 7200"
 - `status` 会打印剩余秒数与 `WATCHDOG_OWNS_STATE`；剩得不多就 `renew` 续 2 小时
 - ⚠️ 窗口**最短 300 秒**，小于这个数（含 `0`）会被拒绝 —— 太短的话看门狗会在端点真正开出来**之前**就到期、误判成「已经关好了」并退出，端点随后开出来却没人看着（codex 评审 R9）
 - ⚠️ 若 `status` 报 `WATCHDOG_OWNERSHIP_LOST`，或 `renew` 报 `RENEW_FAILED` —— 说明端点可能开着却没有看门狗，脚本会**当场同步关闭**；按提示重跑 `open`
+- ⚠️ 若任何一条命令打印 `LOCK_TIMEOUT` —— 说明**另有一个 open / close / 开机守卫正在跑**，本次**什么都没做**（不是失败，也不是成功）。等它跑完再重试。这把互斥锁是为了防止「一边在关、一边在开」互相拆台（codex 评审 R11）
 
 ⚠️ **NAS 如果重启过**：看门狗进程会被杀掉，而 tailscale 的 serve 配置是持久的 —— 端点会自己回来却没人看着。`status` 会把这种情况明确报成 `WATCHDOG_PROCESS_MISSING`。看到它就立刻跑 `close`。
 
