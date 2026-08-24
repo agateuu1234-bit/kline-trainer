@@ -112,6 +112,37 @@ serve_status_is_expected() {
 
 boot_guard_installed() { crontab -l 2>/dev/null | grep -q "$BOOT_TAG"; }
 
+# ⚠️ crontab 的「读—改—写」必须防住「读失败但写成功」（codex plan-R13 F1）：
+#    早先写的是 `crontab -l 2>/dev/null | grep -v TAG | crontab -` ——
+#    `crontab -l` 若偶发失败，**空输出会覆盖掉整张表**，把用户无关的定时任务全删掉；
+#    而校验「标记不在了」反而会报成功，把这次丢失藏起来。
+#    故：先把现表读进临时文件并**区分「读失败」与「本来就没有 crontab」**，
+#    改快照 → 写回 → 再回读，**逐条确认无关条目一条不少**。
+crontab_snapshot() {   # $1 = 输出文件；成功 0 / 读失败 1
+    _snap=$1; _err="${_snap}.err"
+    if crontab -l > "$_snap" 2>"$_err"; then rm -f "$_err"; return 0; fi
+    if grep -qi 'no crontab for' "$_err"; then : > "$_snap"; rm -f "$_err"; return 0; fi
+    echo "CRONTAB_READ_FAILED: 读不到现有计划任务表，**拒绝写入**（避免覆盖）"
+    cat "$_err" 2>/dev/null; rm -f "$_err"; return 1
+}
+
+# 用 $2 生成的新表替换 crontab，并断言「无关条目一条不少」
+crontab_apply_verified() {  # $1=改前快照 $2=待写入文件
+    _before=$1; _new=$2; _after="${_new}.after"
+    crontab "$_new" || { echo "CRONTAB_WRITE_FAILED"; return 1; }
+    crontab_snapshot "$_after" || return 1
+    # 无关条目 = 不含守卫标记的行；改前改后必须完全一致
+    grep -v "$BOOT_TAG" "$_before" | sed '/^[[:space:]]*$/d' | sort > "${_before}.other"
+    grep -v "$BOOT_TAG" "$_after"  | sed '/^[[:space:]]*$/d' | sort > "${_after}.other"
+    if ! cmp -s "${_before}.other" "${_after}.other"; then
+        echo "CRONTAB_UNRELATED_ENTRIES_CHANGED: 无关计划任务被改动了！改前 $(grep -c . "${_before}.other") 条，改后 $(grep -c . "${_after}.other") 条"
+        rm -f "$_after" "${_before}.other" "${_after}.other"
+        return 1
+    fi
+    rm -f "$_after" "${_before}.other" "${_after}.other"
+    return 0
+}
+
 # 等 docker 与 tailscale 容器就绪（开机时 cron 可能跑在它们起来之前）。
 wait_ready() {
     _limit=$1; _t=0
@@ -260,11 +291,16 @@ install-boot-guard)
     #    正好回到「零认证端点无人看管地一直开着」这个本要防的状态。
     #    这条 @reboot 让开机时**无条件关闭**（失败关闭）：真在验收中途重启，
     #    重新跑一次 open 即可。
-    if boot_guard_installed; then
+    _b=/tmp/kline-trainer-crontab.before.$$; _n=/tmp/kline-trainer-crontab.new.$$
+    crontab_snapshot "$_b" || exit 1
+    if grep -q "$BOOT_TAG" "$_b"; then
         echo "BOOT_GUARD_ALREADY_INSTALLED"
     else
-        ( crontab -l 2>/dev/null; printf '@reboot %s boot-close >>%s 2>&1 &  # %s\n' "$SELF" "$LOG" "$BOOT_TAG" ) | crontab -
+        cp "$_b" "$_n"
+        printf '@reboot %s boot-close >>%s 2>&1 &  # %s\n' "$SELF" "$LOG" "$BOOT_TAG" >> "$_n"
+        crontab_apply_verified "$_b" "$_n" || { rm -f "$_b" "$_n"; exit 1; }
     fi
+    rm -f "$_b" "$_n"
     if boot_guard_installed; then
         crontab -l 2>/dev/null | grep "$BOOT_TAG"
         echo "BOOT_GUARD_OK"
@@ -274,7 +310,11 @@ install-boot-guard)
     fi
     ;;
 remove-boot-guard)
-    crontab -l 2>/dev/null | grep -v "$BOOT_TAG" | crontab - 2>/dev/null || crontab -r 2>/dev/null || true
+    _b=/tmp/kline-trainer-crontab.before.$$; _n=/tmp/kline-trainer-crontab.new.$$
+    crontab_snapshot "$_b" || exit 1
+    grep -v "$BOOT_TAG" "$_b" > "$_n" || true
+    crontab_apply_verified "$_b" "$_n" || { rm -f "$_b" "$_n"; exit 1; }
+    rm -f "$_b" "$_n"
     if boot_guard_installed; then echo "BOOT_GUARD_REMOVE_FAILED"; exit 1; fi
     echo "BOOT_GUARD_REMOVED"
     ;;

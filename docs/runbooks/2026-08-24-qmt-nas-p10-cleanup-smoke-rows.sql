@@ -21,6 +21,13 @@
 
 BEGIN;
 
+-- ⚠️ 表级排他锁（codex plan-R13 F2）：本脚本「先校验、后写」，而 PostgreSQL 默认
+--    READ COMMITTED 下，校验之后、写之前提交的一次预占会被**悄悄覆盖** ——
+--    客户端手里还攥着它以为有效的租约，同一批数据却又变成可下载了（重复投递 +
+--    随后 confirm 失效）。关掉对外端点**并不能**排空「已经被接受的请求」，
+--    也挡不住 NAS 本机直连后端的流量。故在第一条校验之前就把表锁住。
+LOCK TABLE training_sets IN ACCESS EXCLUSIVE MODE;
+
 DO $$
 DECLARE n_total int; n_smoke int; n_other int;
 BEGIN
