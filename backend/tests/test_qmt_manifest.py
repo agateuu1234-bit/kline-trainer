@@ -111,6 +111,23 @@ def test_invalid_error_keeps_the_raw_detail_separately():
     assert e.detail == "缺少必需字段 'seed'"
 
 
+def test_invalid_error_survives_a_serialization_round_trip():
+    """⭐ 指引只能出现一次——哪怕异常被序列化后重建。
+
+    上一轮把指引拼进了 `args`，而反序列化用 `cls(*args)` 重建 → 指引被追加两遍
+    （2026-08-25 控制者实测确认）。改为 `args` 保持原文、`__str__` 负责追加之后，
+    往返才幂等。4c 将来可能跨进程传这个异常。
+
+    判别力：把 `super().__init__(detail)` 改回拼接串，本条必红。
+    """
+    import pickle
+    e = ManifestInvalidError("缺少必需字段 'seed'")
+    back = pickle.loads(pickle.dumps(e))
+    assert str(back).count("该怎么办") == 1
+    assert back.detail == "缺少必需字段 'seed'"
+    assert str(back) == str(e)
+
+
 from qmt_manifest import check_version
 
 
@@ -437,3 +454,110 @@ def test_non_string_seed_is_rejected():
     for bad in (1, None, ["s"]):
         with pytest.raises(ManifestInvalidError):
             validate_manifest(_valid_manifest(seed=bad))
+
+
+def test_source_snapshot_universe_must_have_all_three_markets_as_lists():
+    for bad in (
+        {"SH": [], "SZ": []},                       # 缺 BJ
+        {"SH": [], "SZ": [], "BJ": {}},             # BJ 不是 list
+        {"SH": [], "SZ": [], "BJ": [], "HK": []},   # 多一层
+    ):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_with_universe(
+                bad, pool_order={"SH": [], "SZ": [], "BJ": []},
+                cursor={"SH": 0, "SZ": 0, "BJ": 0}, files=[]))
+
+
+def test_source_snapshot_universe_entries_must_be_valid_codes():
+    """池与清单一并清空，好让 pool_order 的交叉核对（与本判据重叠）够不着
+    ——否则变异掉本判据后交叉核对会顶上来，测试仍绿而变异表显示「零红」。"""
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_with_universe(
+            {"SH": ["../escape"], "SZ": [], "BJ": []},
+            pool_order={"SH": [], "SZ": [], "BJ": []},
+            cursor={"SH": 0, "SZ": 0, "BJ": 0}, files=[]))
+
+
+def test_universe_code_suffix_must_match_its_layer():
+    """⭐ 只有本条够得到：代码本身合法，但被放进了**错的层**。
+
+    池与清单清空的理由同上：pool_order 的交叉核对与本判据重叠。
+    （对比 Task 7 的同名判据——那一条**造不出**专属档，已登记为等价变异。）
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_with_universe(
+            {"SH": ["000001.SZ"], "SZ": [], "BJ": []},
+            pool_order={"SH": [], "SZ": [], "BJ": []},
+            cursor={"SH": 0, "SZ": 0, "BJ": 0}, files=[]))
+
+
+def test_source_snapshot_export_log_sha256_must_be_hex64():
+    """⚠️ **两处 sha 同时设成同一个坏值**，好让「两处必须相等」那条判据够不着。
+
+    只改 source_snapshot 那一处的话，相等判据会掩盖格式判据：把格式判据
+    变异掉（例如放宽成允许大写）之后，"A"*64 那一档仍会被相等判据拒 →
+    测试仍绿 → 变异表显示「零红」，被误读成「测试没判别力」。
+    """
+    base = _valid_manifest()
+    for bad in ("", "XYZ", "A" * 64, "a" * 63, 1, None):
+        m = _valid_manifest(
+            source_snapshot={"export_log_sha256": bad,
+                             "universe": base["source_snapshot"]["universe"]})
+        m["staged_export_log"]["sha256"] = bad
+        _recompute_evidence(m)
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_source_mount_requires_three_subkeys():
+    base = {"fstype": "smbfs", "device": "//h/s", "source_root_relative": "d"}
+    for drop in ("fstype", "device", "source_root_relative"):
+        bad = dict(base)
+        del bad[drop]
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(source_mount=bad))
+
+
+def test_source_mount_fstype_and_device_must_be_nonempty():
+    for key in ("fstype", "device"):
+        bad = {"fstype": "smbfs", "device": "//h/s", "source_root_relative": "d"}
+        bad[key] = ""
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(source_mount=bad))
+
+
+def test_source_root_relative_may_be_empty_string():
+    """⭐ S2-F2：`source_root_relative` **允许空串**。
+
+    §4.6 (ii-a) 用实测论证了「共享本身就是导出根」时它就是空串，并规定拼接
+    走 posixpath.normpath 以免撞空分量。而读侧原文写「三子键均为非空 str」——
+    两条并存时，一次**完全合法的部署**会先过 (ii-a) 的拼接、再被读侧判死，
+    操作者被指向一个不存在的问题。
+
+    判别力：把 source_root_relative 也按「非空」校验，本条必红。
+    """
+    m = _valid_manifest(source_mount={
+        "fstype": "smbfs", "device": "//h/s", "source_root_relative": "",
+    })
+    assert validate_manifest(m) == m
+
+
+def test_source_root_relative_must_still_be_a_string():
+    """允许空串 ≠ 允许任意类型。"""
+    for bad in (None, 0, [], {}):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(source_mount={
+                "fstype": "smbfs", "device": "//h/s", "source_root_relative": bad,
+            }))
+
+
+def test_source_mount_may_carry_extra_trace_only_keys():
+    """mountpoint / source_root 只留痕、不参与判定（R25-F2），
+    带着它们必须照样通过——否则一个诚实产出的 manifest 会被拒。"""
+    m = _valid_manifest(source_mount={
+        "fstype": "smbfs", "device": "//h/s",
+        "source_root_relative": "front_ratio_cn_stocks_ab_bj",
+        "mountpoint": "/Users/agate/qmt_mnt",
+        "source_root": "/Users/agate/qmt_mnt/front_ratio_cn_stocks_ab_bj",
+    })
+    assert validate_manifest(m) == m

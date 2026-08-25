@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Iterable
 
 # ── 版本 ─────────────────────────────────────────────────────
@@ -64,6 +65,9 @@ LIFECYCLE_KEYS = frozenset({
     "stopped_reason", "stopped_reason_secondary", "fetch_fatal_error",
 })
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)$")
+
 
 class ManifestInvalidError(Exception):
     """manifest 形状/自洽性不过 → `FAIL_MANIFEST_INVALID`。
@@ -86,7 +90,10 @@ class ManifestInvalidError(Exception):
 
     def __init__(self, detail: str):
         self.detail = detail
-        super().__init__(f"{detail}\n{self.GUIDANCE}")
+        super().__init__(detail)          # args 保持原文，序列化往返才不会重复追加
+
+    def __str__(self) -> str:
+        return f"{self.detail}\n{self.GUIDANCE}"
 
 
 class ManifestVersionError(Exception):
@@ -193,6 +200,67 @@ def _require_nonempty_str(value: object, where: str) -> None:
              f"{where} 必须是非空文字，读到 {value!r}")
 
 
+def _require_sha256(value: object, where: str) -> None:
+    """sha256 必须是 **64 位小写十六进制**。大写不放行——同一份字节两种写法
+    会让「逐字相符」这条判据静默失效。"""
+    _require(isinstance(value, str) and _SHA256_RE.match(value) is not None,
+             f"{where} 必须是 64 位小写十六进制的 sha256，读到 {value!r}")
+
+
+def _require_market_map(value: object, where: str, kind: str) -> dict:
+    """三层字典：键恰为 SH/SZ/BJ，不多不少。"""
+    _require(isinstance(value, dict), f"{where} 必须是对象，读到 {type(value).__name__}")
+    _require(set(value.keys()) == set(MARKETS),
+             f"{where} 的键必须恰为 {list(MARKETS)}，读到 {sorted(value.keys())}")
+    for mk in MARKETS:
+        if kind == "list":
+            _require(isinstance(value[mk], list), f"{where}[{mk}] 必须是列表")
+        elif kind == "int":
+            _require(isinstance(value[mk], int) and not isinstance(value[mk], bool),
+                     f"{where}[{mk}] 必须是整数，读到 {value[mk]!r}")
+    return value
+
+
+def _validate_source_snapshot(snap: object) -> None:
+    _require(isinstance(snap, dict), "source_snapshot 必须是对象")
+    _require("export_log_sha256" in snap, "source_snapshot 缺 export_log_sha256")
+    _require_sha256(snap["export_log_sha256"], "source_snapshot.export_log_sha256")
+    _require("universe" in snap,
+             "source_snapshot 缺 universe —— 冻结的候选名单是补拉游标的唯一锚点，"
+             "缺了它整棵 staging 无法续跑")
+    uni = _require_market_map(snap["universe"], "source_snapshot.universe", "list")
+    for mk in MARKETS:
+        for i, code in enumerate(uni[mk]):
+            _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+                     f"source_snapshot.universe[{mk}][{i}] 不是合法股票代码：{code!r}")
+            _require(code.endswith("." + mk),
+                     f"source_snapshot.universe[{mk}][{i}] = {code!r} 的后缀与所在层不符")
+
+
+def _validate_source_mount(mount: object) -> None:
+    """`source_mount` 的形状（S2-F2 更正）。
+
+    ⚠️ **`source_root_relative` 允许空串**：§4.6 (ii-a) 用实测论证了
+    「共享本身就是导出根」时它就是空串。读侧原文的「三子键均为非空 str」
+    会让那种**完全合法的部署**先过 (ii-a) 的拼接、再被读侧判死，
+    并把操作者指向一个不存在的问题。
+
+    `mountpoint` / `source_root` 是 fetch 那次的**绝对形态，仅供留痕、
+    不参与判定**（R25-F2：把偶然的挂载点形态写进身份判据，会让同一共享重挂到
+    `/Volumes/QMT_Export-1` 时否决掉一次完全合法的出货）——故本函数不校验它们，
+    但也不拒绝它们的存在。
+    """
+    _require(isinstance(mount, dict), "source_mount 必须是对象")
+    for key in ("fstype", "device", "source_root_relative"):
+        _require(key in mount, f"source_mount 缺 {key}")
+    _require_nonempty_str(mount["fstype"], "source_mount.fstype")
+    _require_nonempty_str(mount["device"], "source_mount.device")
+    _require(isinstance(mount["source_root_relative"], str),
+             "source_mount.source_root_relative 必须是文字"
+             f"（允许空串——共享本身即导出根时就是空的），读到 "
+             f"{mount['source_root_relative']!r}")
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -216,4 +284,6 @@ def validate_manifest(payload: object) -> dict:
                  "这通常意味着文件被截断，或由不兼容的版本写出。")
 
     _require_nonempty_str(payload["seed"], "seed")
+    _validate_source_snapshot(payload["source_snapshot"])
+    _validate_source_mount(payload["source_mount"])
     return payload
