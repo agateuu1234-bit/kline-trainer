@@ -13,7 +13,7 @@
 #    脚本一退出陷阱就触发，会在正用着的时候把端点关掉。
 #    可实现的等价保护 = 两道独立的关闭保证：
 #      ① **超时看门狗**（进程级）：到点自动关，且**关到确认为止**；
-#      ② **开机守卫**（crontab @reboot）：NAS 一重启就无条件关闭。
+#      ② **开机守卫**（/etc/cron.d 里的 @reboot 独立文件）：NAS 一重启就无条件关闭。
 #    两道都必须先装好，`open` 才肯开端点。
 #
 # 设计要点（每一条都对应一次实测踩到的坑）：
@@ -33,8 +33,9 @@
 #   open 的失败路径不再自己关，而是把到期时间设成「现在」，**把关闭交还给看门狗**。
 #
 # 用法：
-#   expose.sh install-boot-guard   装开机守卫（幂等），open 的前置
-#   expose.sh remove-boot-guard    卸开机守卫
+#   expose.sh boot-guard-status        查开机守卫在不在（open 的前置）
+#   expose.sh show-boot-guard-install  打印「装守卫」要 user 跑的那条命令
+#   expose.sh show-boot-guard-remove   打印「卸守卫」要 user 跑的那条命令
 #   expose.sh open <秒>            两道保证都在才开端点；否则拒绝
 #   expose.sh status               端点状态 + 看门狗 + 开机守卫
 #   expose.sh renew <秒>           验收超时前续期
@@ -57,7 +58,7 @@ POLL=5
 #    真正落配置**之前**就到期 —— 它此刻读到的确实是 `No serve config`，于是「确认关闭
 #    成功」、删掉状态文件、退出；随后端点才被开出来，却已经没有看门狗看着它了。
 MIN_SECS=300
-BOOT_TAG="kline-trainer-boot-guard"
+BOOT_GUARD_FILE=/etc/cron.d/kline-trainer-boot-guard
 # ⚠️ 所有会改动「端点状态 / 看门狗状态」的子命令都必须**串行化**（codex plan-R11）：
 #    close_loop 确认「No serve config」之后才去删状态文件，这中间若有并发的 open
 #    装好新看门狗并开出端点，那一删就把新守卫拆了；若开的那一方随后被打断
@@ -110,61 +111,45 @@ serve_status_is_expected() {
     return 0
 }
 
-boot_guard_installed() { crontab -l 2>/dev/null | grep -q "$BOOT_TAG"; }
-
-# ⚠️ crontab 的「读—改—写」必须防住「读失败但写成功」（codex plan-R13 F1）：
-#    早先写的是 `crontab -l 2>/dev/null | grep -v TAG | crontab -` ——
-#    `crontab -l` 若偶发失败，**空输出会覆盖掉整张表**，把用户无关的定时任务全删掉；
-#    而校验「标记不在了」反而会报成功，把这次丢失藏起来。
-#    故：先把现表读进临时文件并**区分「读失败」与「本来就没有 crontab」**，
-#    改快照 → 写回 → 再回读，**逐条确认无关条目一条不少**。
-crontab_snapshot() {   # $1 = 输出文件；成功 0 / 读失败 1
-    _snap=$1; _err="${_snap}.err"
-    if crontab -l > "$_snap" 2>"$_err"; then rm -f "$_err"; return 0; fi
-    if grep -qi 'no crontab for' "$_err"; then : > "$_snap"; rm -f "$_err"; return 0; fi
-    echo "CRONTAB_READ_FAILED: 读不到现有计划任务表，**拒绝写入**（避免覆盖）"
-    cat "$_err" 2>/dev/null; rm -f "$_err"; return 1
+# ⚠️ 开机守卫**不再动用户的 crontab**（codex plan-R13/R14/R15 连提三轮）。
+#    早先是「整表读—改—写」：`crontab -l | 改 | crontab -`。两个层次的问题 ——
+#    ① 读失败时空输出会覆盖整张表，把无关定时任务全删掉（R13，当时修了）；
+#    ② 更根本的是**丢失更新关不掉**（R14/R15）：本脚本的锁只串行化自己，
+#       别的管理员或自动化任务在「读」与「写」之间的改动会被整表替换抹掉，
+#       而且**「我覆盖了别人」这个方向从本侧无法检测**（已实测确认）。
+#       我一度把它记成「接受的残留 + 操作时别同时改」——**那个处置站不住**：
+#       口头约束挡不住自动化任务，而 NAS 上丢掉的很可能是备份任务。
+#    现在改用 **/etc/cron.d 下的独立文件**：创建/删除互不影响，不读也不改任何
+#    共享表，那一整类竞态**根本不存在**（不是把窗口缩小，是消灭）。
+#    代价：写 /etc/cron.d 需要 root，本机 agate1234 无免密 sudo →
+#    装/卸变成**由 user 跑一条命令**（与 P1/P5 同类），脚本负责生成命令并核验。
+boot_guard_installed() {
+    [ -f "$BOOT_GUARD_FILE" ] && grep -q 'boot-close' "$BOOT_GUARD_FILE" 2>/dev/null
 }
 
-# 用 $2 生成的新表替换 crontab，并断言「无关条目一条不少」
-crontab_apply_verified() {  # $1=改前快照 $2=待写入文件
-    _before=$1; _new=$2; _after="${_new}.after"
-    # ⚠️ 写之前**再读一次**并要求与最初快照逐字一致（codex plan-R14）：
-    #    本脚本的 flock 只串行化**自己**。若另一个人/工具在「拍快照」与「写回」之间
-    #    改了计划任务表，这次整表替换会把对方的改动抹掉 —— 而写后的比对是拿
-    #    **过期的快照**做参照，照样会通过。这是典型的丢失更新（lost update）。
-    #    检测到就中止，什么都不写；重跑一次即可（重跑会拿到新的快照）。
-    #
-    # ⚠️ **已接受的残留：这条竞态关不掉**（实测确认，不是没试）。
-    #    复读只能把窗口从「整个编辑过程」缩到「几微秒」，缩不到零 ——
-    #    crontab 没有「比对并交换」这种原子写入。而且方向不对称：
-    #    「别人覆盖我」写后比对能发现，**「我覆盖别人」从本侧无法检测**
-    #    （实测：把并发修改注入在复读之后、写入之前，那条无关任务确实丢了，
-    #     脚本仍打印 BOOT_GUARD_OK）。
-    #    处置 = 接受并声明，不假装修好：本操作是部署中的一次性手动步骤、
-    #    本机单人管理；runbook 明写「跑 P4 期间别同时编辑计划任务表」；
-    #    装/卸前后都会打印整张表供肉眼核对。
-    #    真要根治需所有 crontab 写入方共用同一把锁 —— 不在本次可约束的范围内。
-    _recheck="${_new}.recheck"
-    crontab_snapshot "$_recheck" || { rm -f "$_recheck"; return 1; }
-    if ! cmp -s "$_before" "$_recheck"; then
-        echo "CRONTAB_CHANGED_CONCURRENTLY: 拍快照之后计划任务表被别的进程改过了 —— **本次什么都没写**，请重跑一次"
-        rm -f "$_recheck"
-        return 1
-    fi
-    rm -f "$_recheck"
-    crontab "$_new" || { echo "CRONTAB_WRITE_FAILED"; return 1; }
-    crontab_snapshot "$_after" || return 1
-    # 无关条目 = 不含守卫标记的行；改前改后必须完全一致
-    grep -v "$BOOT_TAG" "$_before" | sed '/^[[:space:]]*$/d' | sort > "${_before}.other"
-    grep -v "$BOOT_TAG" "$_after"  | sed '/^[[:space:]]*$/d' | sort > "${_after}.other"
-    if ! cmp -s "${_before}.other" "${_after}.other"; then
-        echo "CRONTAB_UNRELATED_ENTRIES_CHANGED: 无关计划任务被改动了！改前 $(grep -c . "${_before}.other") 条，改后 $(grep -c . "${_after}.other") 条"
-        rm -f "$_after" "${_before}.other" "${_after}.other"
-        return 1
-    fi
-    rm -f "$_after" "${_before}.other" "${_after}.other"
-    return 0
+# /etc/cron.d 的行格式比用户 crontab 多一个「以哪个用户身份跑」的字段。
+boot_guard_line() {
+    printf '@reboot %s %s boot-close >>%s 2>&1' "$(id -un)" "$SELF" "$LOG"
+}
+
+# ⚠️ 这两个函数一律用 printf 输出，**不用 echo**（本机 /bin/sh 是 dash，
+#    dash 的 echo 会解释 `\n` 之类的转义 —— 实测把给 user 的那条安装命令
+#    从中间打断成了两行，粘贴过去是坏的）。printf 的 %s 不解释参数里的转义。
+print_boot_guard_install() {
+    printf '%s\n' "开机守卫要写到：$BOOT_GUARD_FILE"
+    printf '%s\n' "这个文件属于 root，所以**这一步得你自己跑**（会问 NAS 密码）。"
+    printf '\n'
+    printf '%s\n' "在你自己的终端里，把下面这一整行粘贴进去（把 <NAS地址> 换成 NAS 的 IP）："
+    printf '\n'
+    printf '%s\n' "  ssh $(id -un)@<NAS地址> \"printf '%s\\n' '$(boot_guard_line)' | sudo tee $BOOT_GUARD_FILE >/dev/null && sudo chmod 644 $BOOT_GUARD_FILE && echo INSTALLED\""
+    printf '\n'
+    printf '%s\n' "看到 INSTALLED 之后，回来跑：$SELF boot-guard-status"
+}
+
+print_boot_guard_remove() {
+    printf '%s\n' "在你自己的终端里跑（会问 NAS 密码，把 <NAS地址> 换成 NAS 的 IP）："
+    printf '\n'
+    printf '%s\n' "  ssh $(id -un)@<NAS地址> \"sudo rm -f $BOOT_GUARD_FILE && echo REMOVED\""
 }
 
 # 等 docker 与 tailscale 容器就绪（开机时 cron 可能跑在它们起来之前）。
@@ -292,7 +277,7 @@ arm() {
 # 需要串行化的子命令：若还没持锁，就先拿锁再把自己重跑一遍。
 # EXPOSE_LOCK_HELD 由持锁的那一层设置，避免自己等自己（重入死锁）。
 case "${1:-}" in
-open|renew|close|close-loop|boot-close|install-boot-guard|remove-boot-guard)
+open|renew|close|close-loop|boot-close)
     if [ "${EXPOSE_LOCK_HELD:-0}" != "1" ]; then
         # ⚠️ 不要写成 `if ! cmd; then _rc=$?` —— 在 `!` 取反之后 `$?` 是**取反的结果**（0），
         #    不是命令本身的退出码。锁超时会因此被吞成 exit 0（又一次「把失败读成成功」，
@@ -301,7 +286,7 @@ open|renew|close|close-loop|boot-close|install-boot-guard|remove-boot-guard)
         EXPOSE_LOCK_HELD=1 flock -w "$LOCK_WAIT" -E 99 "$LOCKFILE" "$SELF" "$@"
         _rc=$?
         if [ "$_rc" -eq 99 ]; then
-            echo "LOCK_TIMEOUT: ${LOCK_WAIT} 秒内没拿到互斥锁（另有一个 open/close/boot-close/守卫装卸 在跑）—— 本次什么都没做"
+            echo "LOCK_TIMEOUT: ${LOCK_WAIT} 秒内没拿到互斥锁（另有一个 open/close/boot-close 在跑）—— 本次什么都没做"
         fi
         exit "$_rc"
     fi
@@ -309,39 +294,29 @@ open|renew|close|close-loop|boot-close|install-boot-guard|remove-boot-guard)
 esac
 
 case "${1:-}" in
-install-boot-guard)
-    # ⚠️ 为什么必须有它（codex plan-R7 F2）：看门狗是 /tmp 里的状态文件 + 一个进程，
-    #    而 tailscale 的 serve 配置是**持久**的。NAS 一重启，守卫没了、端点却回来了 ——
-    #    正好回到「零认证端点无人看管地一直开着」这个本要防的状态。
-    #    这条 @reboot 让开机时**无条件关闭**（失败关闭）：真在验收中途重启，
-    #    重新跑一次 open 即可。
-    _b=/tmp/kline-trainer-crontab.before.$$; _n=/tmp/kline-trainer-crontab.new.$$
-    crontab_snapshot "$_b" || exit 1
-    if grep -q "$BOOT_TAG" "$_b"; then
-        echo "BOOT_GUARD_ALREADY_INSTALLED"
-    else
-        cp "$_b" "$_n"
-        printf '@reboot %s boot-close >>%s 2>&1 &  # %s\n' "$SELF" "$LOG" "$BOOT_TAG" >> "$_n"
-        crontab_apply_verified "$_b" "$_n" || { rm -f "$_b" "$_n"; exit 1; }
-    fi
-    rm -f "$_b" "$_n"
+boot-guard-status)
+    # ⚠️ 为什么必须有开机守卫（codex plan-R7 F2）：超时看门狗是 /tmp 里的状态文件
+    #    加一个进程，而 tailscale 的 serve 配置是**持久**的。NAS 一重启，守卫没了、
+    #    端点却回来了 —— 正好回到「零认证端点无人看管地一直开着」这个本要防的状态。
+    #    这条 @reboot 让开机时**无条件关闭**：真在验收中途重启，重跑一次 open 即可。
     if boot_guard_installed; then
-        crontab -l 2>/dev/null | grep "$BOOT_TAG"
+        echo "守卫文件: $BOOT_GUARD_FILE"
+        sed 's/^/  /' "$BOOT_GUARD_FILE"
         echo "BOOT_GUARD_OK"
     else
-        echo "BOOT_GUARD_INSTALL_FAILED"
+        echo "BOOT_GUARD_MISSING: $BOOT_GUARD_FILE 不存在，或内容里没有 boot-close"
+        echo
+        print_boot_guard_install
         exit 1
     fi
     ;;
-remove-boot-guard)
-    _b=/tmp/kline-trainer-crontab.before.$$; _n=/tmp/kline-trainer-crontab.new.$$
-    crontab_snapshot "$_b" || exit 1
-    grep -v "$BOOT_TAG" "$_b" > "$_n" || true
-    crontab_apply_verified "$_b" "$_n" || { rm -f "$_b" "$_n"; exit 1; }
-    rm -f "$_b" "$_n"
-    if boot_guard_installed; then echo "BOOT_GUARD_REMOVE_FAILED"; exit 1; fi
-    echo "BOOT_GUARD_REMOVED"
+show-boot-guard-install)
+    print_boot_guard_install
     ;;
+show-boot-guard-remove)
+    print_boot_guard_remove
+    ;;
+
 open)
     _secs=${2:-}
     case "$_secs" in ''|*[!0-9]*) echo "USAGE: expose.sh open <秒>"; exit 2 ;; esac
@@ -354,7 +329,7 @@ open)
     fi
     # ⚠️ 次序是判据的一部分：两道关闭保证都装好，才允许开端点。
     if ! boot_guard_installed; then
-        echo "REFUSING_TO_OPEN: 开机守卫没装（先跑 install-boot-guard）"
+        echo "REFUSING_TO_OPEN: 开机守卫没装 —— 先跑 '$SELF show-boot-guard-install' 按提示装好再来"
         exit 1
     fi
     arm "$_secs" || { echo "REFUSING_TO_OPEN: 看门狗没装上，不开端点"; exit 1; }
@@ -426,7 +401,7 @@ status)
         echo "WATCHDOG_ABSENT"
     fi
     echo "--- boot guard ---"
-    if boot_guard_installed; then echo "BOOT_GUARD_INSTALLED"; else echo "BOOT_GUARD_MISSING"; fi
+    if boot_guard_installed; then echo "BOOT_GUARD_INSTALLED ($BOOT_GUARD_FILE)"; else echo "BOOT_GUARD_MISSING: 跑 show-boot-guard-install 看怎么装"; fi
     echo "--- 日志 ---"
     if [ -f "$LOG" ]; then tail -3 "$LOG"; else echo "(无)"; fi
     echo "STATUS_DONE"
@@ -539,7 +514,7 @@ selftest)
     if [ "$_fail" -eq 0 ]; then echo "SELFTEST_PASS"; else echo "SELFTEST_FAIL"; exit 1; fi
     ;;
 *)
-    echo "USAGE: expose.sh {install-boot-guard|remove-boot-guard|open <秒>|status|renew <秒>|close|selftest|close-loop <秒>|boot-close}"
+    echo "USAGE: expose.sh {boot-guard-status|show-boot-guard-install|show-boot-guard-remove|open <秒>|status|renew <秒>|close|selftest|close-loop <秒>|boot-close}"
     exit 2
     ;;
 esac

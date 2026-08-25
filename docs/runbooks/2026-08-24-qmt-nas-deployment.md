@@ -152,52 +152,35 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh selftest"
 
 - ✅ 通过：五条全 `pass`，最后一行 `SELFTEST_PASS`
 
-**装开机守卫**（一次性；P12 会检查它在不在，不在就拒绝开端点）：
+**装开机守卫**（一次性；P12 会检查它在不在，不在就拒绝开端点）
+
+⚠️ 这一步**要你自己跑**（守卫文件在 `/etc/cron.d/`，属于 root，需要输密码），和 P1 / P5 一样。
+
+先让脚本把命令生成出来：
 
 ```
-ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh install-boot-guard"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh show-boot-guard-install"
 ```
 
-- ✅ 通过：打印那条 `@reboot …` 计划任务，最后一行 `BOOT_GUARD_OK`
-- ❌ 打印 `CRONTAB_READ_FAILED` / `CRONTAB_UNRELATED_ENTRIES_CHANGED`：**它什么都没写**（或写完发现动到了别的任务）。这是刻意的 —— 见下
+它会打印**一整行** `ssh …` 命令。把那一行复制到**你自己的终端**里跑（把 `<NAS地址>` 换成 `192.168.5.229`），看到 `INSTALLED` 即可。
 
-> ⚠️ 装卸守卫会**动到 NAS 的计划任务表**，所以它按「先完整读出来 → 改副本 → 写回 → 再回读逐条核对无关条目一条不少」的方式做（codex 评审 R13）。
-> 原来写成 `crontab -l | grep -v 标记 | crontab -` —— 列举那一步若偶发失败，**空输出会覆盖掉整张表**，把你其它的定时任务全删掉，而「标记不在了」这个校验反而会报成功、把丢失藏起来。
-> **实测**：放一条无关任务当诱饵，装守卫、卸守卫后它都还在；把列举命令换成必然失败的假件时，脚本**拒绝写入**，真实计划任务表一动没动。
+然后回来核验：
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh boot-guard-status"
+```
+
+- ✅ 通过：打印守卫文件内容，最后一行 `BOOT_GUARD_OK`
+- ❌ 打印 `BOOT_GUARD_MISSING`：没装上，按它给的指引重来
+
+> ⚠️ **守卫为什么用 `/etc/cron.d/` 下的独立文件，而不是改你的计划任务表**（codex 评审 R13/R14/R15 连提三轮）：
+> 早先的写法是「把你的整张计划任务表读出来 → 加一行 → 整张写回去」。这有两个层次的问题 ——
+> ① 读取那一步若偶发失败，**空输出会覆盖整张表**，把你其它的定时任务全删掉；
+> ② 更根本的是**丢失更新关不掉**：脚本的锁只管得住它自己，别的管理员或自动化任务在「读」和「写」之间的改动会被整表替换抹掉，而且**「我覆盖了别人」这个方向脚本这一侧检测不到**（已实测确认）。我一度想用「操作时别同时改」这句话兜住 —— **那不算数**，口头约束挡不住自动化任务，而 NAS 上丢掉的很可能是备份任务。
 >
-> ⛔ **跑这两步时，不要同时在别处编辑 NAS 的计划任务表。**
-> 这是一条**已接受的残留、没有被修好**（codex 评审 R14）：脚本的锁只管得住它自己。如果在「读出来」和「写回去」之间有别人改了这张表，这次整表替换会抹掉对方的改动。已经把窗口缩到几微秒，但**缩不到零** —— 计划任务表没有「比对并交换」这种原子写入；而且**「我覆盖了别人」这个方向，脚本这一侧检测不到**（已实测确认）。
-> 缓解就是上面那句话，外加：装/卸前后脚本都会把整张表打印出来，**你可以肉眼核一遍**。
-
-> ⚠️ **为什么要它**（codex 评审 R7）：超时看门狗是 `/tmp` 里的状态文件加一个进程，
-> 而 tailscale 的 serve 配置是**持久**的。NAS 一重启，守卫没了、端点却回来了 ——
-> 正好回到「零认证端点无人看管地一直开着」这个本来要防的状态。
-> 这条计划任务让**开机时无条件关闭**。真在验收中途重启，重新跑一次 `open` 即可。
-> 收尾时可以用 `remove-boot-guard` 卸掉。
+> 现在改成往 `/etc/cron.d/` 放一个**独立文件**：创建和删除互不影响，不读也不改任何共享的东西，**那一整类问题根本不存在**（不是把窗口缩小，是消灭）。代价就是它需要 root，所以这一步由你来跑。
 >
-> ⚠️ 它**不是「开机跑一次关闭就完事」**（codex 评审 R8）：`@reboot` 很可能跑在 docker /
-> tailscale 容器起来**之前**，那一次必然失败，而端点配置是持久的、随后就自己回来了。
-> 所以它先**等依赖就绪**（最多 15 分钟），再进入「关到确认为止」的重试（最多 24 小时，
-> 退避封顶 60 秒），全过程写进 `/tmp/kline-trainer-expose.log`。
-
-**判据**：两侧对同一批文件算校验和并比对
-
-```
-ssh $NAS "cd $DIR && find . -type f \( -name '*.py' -o -name '*.txt' -o -name '*.yml' -o -name '*.sql' -o -name 'Dockerfile' \) | sort | xargs md5sum | md5sum"
-```
-
-```
-cd "$WT/backend" && find ./app ./Dockerfile ./requirements-api.txt ./docker-compose.yml -type f -name '*' | sort | xargs md5sum | md5sum
-```
-
-- ✅ 通过：`app/` 下的文件个数与内容一致（逐文件比对更稳，见下）
-- 更稳的判据（推荐）：
-
-```
-ssh $NAS "cd $DIR && md5sum Dockerfile requirements-api.txt docker-compose.yml sql/schema.sql \$(find app -name '*.py' | sort)"
-```
-
-把输出与本机 `cd "$WT/backend" && md5sum Dockerfile requirements-api.txt docker-compose.yml sql/schema.sql $(find app -name '*.py' | sort)` **逐行比对**，必须**全部相同**。
+> **判别力已实测**：文件不存在 → 报缺失；文件在但内容不对 → 报缺失；内容正确 → 通过。三个方向都对。
 
 ---
 
@@ -879,10 +862,18 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh close"
 **整件事彻底收尾后**（不打算再验收了），把开机守卫也卸掉：
 
 ```
-ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh remove-boot-guard"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh show-boot-guard-remove"
 ```
 
-- ✅ 通过：打印 `BOOT_GUARD_REMOVED`
+它会打印一行 `ssh … sudo rm -f …` 命令，**复制到你自己的终端**里跑（要密码），看到 `REMOVED` 即可。
+
+核验：
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh boot-guard-status"
+```
+
+- ✅ 已卸掉：打印 `BOOT_GUARD_MISSING`
 
 **什么时候必须执行**：
 
