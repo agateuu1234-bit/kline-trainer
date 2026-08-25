@@ -298,7 +298,7 @@ def test_main_app_startup_without_dsn_keeps_inmemory(monkeypatch):
     from fastapi.testclient import TestClient
     import app.main as main
     with TestClient(main.app) as client:
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}
 
 
 def _install_fake_asyncpg(monkeypatch, closed, *, lock_result=True):

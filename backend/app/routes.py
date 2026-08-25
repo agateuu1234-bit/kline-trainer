@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import JSONResponse
 
 from app.lease_logic import LEASE_TTL, ConfirmOutcome, format_expires_at
-from app.lease_repo import LeaseRepository
+from app.lease_repo import AsyncpgLeaseRepository, LeaseRepository
 
 router = APIRouter()
 
@@ -33,6 +33,21 @@ def get_repository() -> LeaseRepository:
         # 503 非契约覆盖状态码；用 JSONResponse 形状无所谓，这里抛运行期错即可
         raise RuntimeError("repository_not_configured")
     return _default_repo
+
+
+def current_repository_kind() -> str:
+    """当前进程装配的 repository 种类，取值**恰好**两个字面量（spec §4-D5）。
+
+    - 请求时求值：lifespan 会在 startup 把 _default_repo 换成 Asyncpg 版本。
+    - 固定字面量而非类名派生：类名派生会得到 "asyncpgleaserepository" 这种。
+    - 不写第三个取值：_default_repo 未设的第三态在组合根不可达
+      （app/main.py 模块 import 即 set_default_repo(InMemoryLeaseRepository())），
+      按 CLAUDE.md §2 不为不可达场景写分支；isinstance 对 None 自然落到 "inmemory"。
+    - 刻意读模块全局而非经 Depends(get_repository)：后者在 _default_repo is None 时
+      抛 RuntimeError，会让健康检查端点变成 500。代价是测试里的 dependency_overrides
+      不会反映到 /health —— 生产路径不用 overrides，无分歧。
+    """
+    return "asyncpg" if isinstance(_default_repo, AsyncpgLeaseRepository) else "inmemory"
 
 
 @router.get("/training-sets/meta")

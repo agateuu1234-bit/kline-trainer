@@ -36,4 +36,6 @@ app.include_router(routes.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    # repository 字段（spec §4-D5）：DATABASE_URL 缺失时后端会静默回落 InMemory，
+    # 这个字段让「有没有真连上 PG」变成一条可 curl 的判据。
+    return {"status": "ok", "repository": routes.current_repository_kind()}

@@ -172,4 +172,4 @@ def test_download_unknown_id_returns_404():
 # ---- /health 回归 ----
 def test_health_still_ok():
     client, _ = _client([])
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}
