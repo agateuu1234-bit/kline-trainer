@@ -646,4 +646,10 @@ def validate_manifest(payload: object) -> dict:
     _validate_lifecycle(payload)
     level = _validate_verification_inputs(payload)
     _validate_verification_evidence(payload, level)
+
+    # ⚠️ **原样返回，绝不做白名单投影**（O4-F10）：读到不认识的顶层键必须原样
+    # 保留回写。旧工具消费新版 manifest 后若把不认识的字段丢掉 → 再用新工具
+    # 打开时缺必需字段 → **一棵 400 只股的 staging 被一次「用错版本跑补拉」
+    # 永久毁掉**。S3/S4 的 failures / batches / inflight_rollbacks / quota
+    # 正是靠这条通道流转，因此它们**不需要 bump manifest_version**。
     return payload

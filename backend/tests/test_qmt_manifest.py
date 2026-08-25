@@ -1321,3 +1321,36 @@ def test_partial_with_nonempty_passes_is_rejected():
     m.pop("operator_attestation", None)
     with pytest.raises(ManifestInvalidError):
         validate_manifest(m)
+
+
+def test_unknown_top_level_keys_are_preserved_not_dropped():
+    """⭐ O4-F10：读侧不认识的顶层键必须原样保留。
+
+    这里用的正是 S3/S4 将要定义、而本片**不认识**的那些键——它们靠这条
+    通道流转，因此**不需要 bump manifest_version**。
+
+    判别力：把 validate_manifest 写成「只返回认识的键」（白名单投影），
+    本条必红。
+    """
+    extras = {
+        "failures": [{"stock_code": "600004.SH", "market": "SH",
+                      "universe_idx": 1, "reason": "fetch_missing_file",
+                      "attempts": 1}],
+        "batches": [{"seed": "s-2026-08-24", "quota": {"SH": 120},
+                     "added": ["600000.SH"]}],
+        "inflight_rollbacks": {"1": 2},
+        "quota": {"SH": 120, "SZ": 160, "BJ": 120},
+        "committed_bytes": 4600000,
+        "一个将来才会有的字段": {"任意": "结构"},
+    }
+    m = _valid_manifest(**extras)
+    out = validate_manifest(m)
+    for k, v in extras.items():
+        assert out[k] == v, f"未知顶层键 {k!r} 被丢掉或改动了"
+
+
+def test_validate_returns_the_same_object_not_a_copy():
+    """返回的就是传进去的那个对象——避免调用方以为拿到了净化过的副本，
+    转头把原对象写回磁盘。"""
+    m = _valid_manifest()
+    assert validate_manifest(m) is m
