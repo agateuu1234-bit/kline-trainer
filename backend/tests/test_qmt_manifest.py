@@ -787,6 +787,35 @@ def test_file_relative_path_must_stay_inside_staging():
             validate_manifest(m)
 
 
+@pytest.mark.parametrize("escaping", [
+    "../1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",      # 上跳
+    "/1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",       # 绝对路径
+    "a/../../1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",  # 中段上跳
+    "./1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",       # 当前目录
+    "1分钟K线_前复权//600000.SH_浦发银行_1分钟K线_前复权.csv",        # 空分量
+])
+def test_escaping_path_with_a_valid_filename_is_still_rejected(escaping):
+    """⭐⭐ 只有**路径判据**够得到的档：路径逃出 staging，但**末段文件名完全合规**。
+
+    ⚠️ **为什么需要这一组**（2026-08-25 控制者变异时发现）：
+    `test_file_relative_path_must_stay_inside_staging` 的五个坏路径，其**末段本身
+    也不合规**（`outside.csv` / `passwd` / `x.csv` / `""`），于是它们统统在
+    `parse_qmt_filename(parts[-1])` 那一步被**文件名判据**拒了——
+    **路径判据从未被求值**。变异证实：把分量规则换成裸 `split("/")`，那五条**全绿**。
+
+    ⚠️ **这条判据是防逃逸的防线**：绕过它，`../` 路径会被接受 → 下游按这个相对路径
+    读文件 → **读到 staging 之外**；而全套指纹校验查的是「同一条路径读回来的字节」，
+    **逃逸对它完全透明**，指纹会完美吻合。
+
+    判别力：把 `split_relative_components(relpath)` 换成 `relpath.split("/")`，本组必红。
+    """
+    m = _valid_manifest()
+    m["files"][0]["relative_path"] = escaping
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
 def test_file_name_must_parse_to_the_same_code_and_period():
     """⭐ 文件名解析出的 code/period 必须与记录里写的一致。
 
