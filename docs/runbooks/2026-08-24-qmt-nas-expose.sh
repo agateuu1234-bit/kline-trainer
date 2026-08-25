@@ -495,6 +495,24 @@ renew)
     #    连锁导致「端点开着、一个看门狗都没有」。
     #    现在只**原子替换到期时间**，令牌不变，进程不动。
     if watchdog_owns_state; then
+        # ⚠️ 延期之前**必须重新核实端点本身**（codex plan-R19）。
+        #    tailscale 的 serve 配置**不受本脚本这把锁保护** —— open 之后
+        #    有人改了反代目标、或开了 funnel（暴露到公网），renew 若只看
+        #    「看门狗归属还在」，就会打印 RENEW_OK 把这个不安全的暴露**再延长两小时**。
+        #    读不到状态、或形态不是预期 → 一律**失败关闭**，绝不延期。
+        _st=$(ts serve status 2>&1); _strc=$?
+        if [ "$_strc" -ne 0 ]; then
+            echo "RENEW_REFUSED: 读不到 serve 状态（rc=$_strc）—— 不延期，改为关闭"
+            printf '%s\n' "$_st"
+            if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
+            exit 1
+        fi
+        if ! _why=$(serve_status_is_expected "$_st"); then
+            echo "RENEW_REFUSED: $_why —— 端点形态已经不是我们开的那个，不延期，改为关闭"
+            printf '%s\n' "$_st"
+            if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
+            exit 1
+        fi
         _tok=$(state_token)
         write_state "$(( $(now) + _secs ))" "$_tok" || { echo "RENEW_FAILED: 写不了状态"; exit 1; }
         if watchdog_owns_state; then
