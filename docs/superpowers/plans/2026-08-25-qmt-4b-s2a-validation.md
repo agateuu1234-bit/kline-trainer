@@ -30,6 +30,21 @@
 - `manifest_version` 本片定为 **1**。**新增任何必需字段必须 bump 版本**（spec O2-F8）。
 - **每新增一个持久化字段，必须同时在写侧枚举与读侧枚举各出现一次，且层级逐字相同**（spec S2-F3 立的纪律；该家族已复发四次：R94-F2 / O4-F13 / S2-F3 / S2-F4）。
 
+### ⚠️⚠️ 否定档的构造纪律：**只让被测判据不满足，其余全部满足**
+
+本片同一形态**已复发四次**（假次序钉 / 负数下标被交叉核对掩盖 / 周期集合被文件名判据掩盖 /
+路径逃逸被文件名判据掩盖），共同点都是：**上游判据先拒，被测判据从未被求值**——
+而测试是红的，看起来一切正常。**只有把被测判据本身弄坏、看它红不红，才照得出来。**
+
+**构造否定档时必须逐条自问**：
+
+1. 我改坏的这一处，会不会**顺带**让别的判据也不满足？（例如改路径时把文件名也弄坏了）
+2. 被测判据在校验流程里排第几？**它之前的每一条判据，我的输入都满足吗？**
+3. 写完后，**把被测判据本身弄坏跑一次**——不红就说明它没被验到。
+
+**尤其危险的是「路径/文件名」这一族**：改路径往往连带改了末段文件名，
+而文件名判据排在路径判据之后、却更容易被触发。
+
 ### ⚠️ 关于各步 `Expected: NNN passed` 里的数字
 
 那些**绝对条数是估算**（`parametrize` 的展开数可能与我数的有出入），
@@ -1869,6 +1884,35 @@ def test_file_relative_path_must_stay_inside_staging():
             validate_manifest(m)
 
 
+@pytest.mark.parametrize("escaping", [
+    "../1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",      # 上跳
+    "/1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",       # 绝对路径
+    "a/../../1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",  # 中段上跳
+    "./1分钟K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv",       # 当前目录
+    "1分钟K线_前复权//600000.SH_浦发银行_1分钟K线_前复权.csv",        # 空分量
+])
+def test_escaping_path_with_a_valid_filename_is_still_rejected(escaping):
+    """⭐⭐ 只有**路径判据**够得到的档：路径逃出 staging，但**末段文件名完全合规**。
+
+    ⚠️ **为什么需要这一组**（2026-08-25 控制者变异时发现）：
+    `test_file_relative_path_must_stay_inside_staging` 的五个坏路径，其**末段本身
+    也不合规**（`outside.csv` / `passwd` / `x.csv` / `""`），于是它们统统在
+    `parse_qmt_filename(parts[-1])` 那一步被**文件名判据**拒了——
+    **路径判据从未被求值**。变异证实：把分量规则换成裸 `split("/")`，那五条**全绿**。
+
+    ⚠️ **这条判据是防逃逸的防线**：绕过它，`../` 路径会被接受 → 下游按这个相对路径
+    读文件 → **读到 staging 之外**；而全套指纹校验查的是「同一条路径读回来的字节」，
+    **逃逸对它完全透明**，指纹会完美吻合。
+
+    判别力：把 `split_relative_components(relpath)` 换成 `relpath.split("/")`，本组必红。
+    """
+    m = _valid_manifest()
+    m["files"][0]["relative_path"] = escaping
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
 def test_file_name_must_parse_to_the_same_code_and_period():
     """⭐ 文件名解析出的 code/period 必须与记录里写的一致。
 
@@ -2055,7 +2099,13 @@ Expected: 约 62 passed（数字是估算，**判据是没有 failed / error / s
 > **这是「测试测不到它声称的判据」在本片的第三次**（前两次：假次序钉、负数下标被交叉核对掩盖）。
 | M28 | 删 `code in pooled` 那条 | `..._extra_file_record_not_belonging...` |
 | M29 | `rec["bytes"] >= 0` → `rec["bytes"] > 0` | `test_zero_byte_file_record_is_allowed` |
-| M30 | `_require_relative_inside` 直接 `return relpath.split("/")` | 5 条 `..._must_stay_inside_staging` |
+| M30 | `_require_relative_inside` 直接 `return relpath.split("/")` | 5 条 `..._escaping_path_with_a_valid_filename_is_still_rejected`（**不是** `..._must_stay_inside_staging`，见下） |
+
+> ⚠️⚠️ **M30 的归因已纠正**（2026-08-25 实测）：原写它会让 `..._must_stay_inside_staging`
+> 那五条红——**那是错的**。那五个坏路径的**末段文件名本身也不合规**，于是统统在
+> `parse_qmt_filename` 就被**文件名判据**拒了，**路径判据从未被求值** → 变异后**全绿**。
+> 真正只有路径判据够得到的，是「路径逃逸 + 末段文件名完全合规」那一组（新补）。
+> **这条判据是防逃逸的防线**，此前零覆盖。
 
 > ⚠️ **本组每一条否定档都调了 `_recompute_evidence(m)`**——不调的话聚合判据会
 > **掩盖**被测判据：否定档照样红，但红的是聚合、不是被测的那条，于是变异掉
