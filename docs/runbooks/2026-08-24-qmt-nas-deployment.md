@@ -281,86 +281,94 @@ ssh $NAS "docker compose -f $DIR/docker-compose.yml config" | head -1
 
 - ✅ 通过：输出**恰好**是 `name: kline-trainer`。不是的话**立刻停**，先查 `$DIR`。
 
-**门 2 · 先把写入停住，再看这个卷里有什么**
+**门 2 · 建立写入屏障，然后才看这个卷里有什么**
 
-先停掉后端（它是唯一的常规写入方），只留数据库：
+> ⚠️ **这道屏障必须从这里一直保持到卷被删掉**（codex 评审 R23）。
+> 上一版只做了两件不够的事：停掉后端、然后查一次 `pg_stat_activity`。可是那是**一次性快照，不是屏障** —— 查完之后任何人都还能连进来写，那笔写入既不在备份里、又会随卷一起消失；甚至可能在某张表的指纹算完之后才提交，于是校验还报「一致」。
+> 现在的做法：**把整套服务停掉，改用一个不发布任何端口的临时容器挂那个卷**。没有端口发布 = 网络上根本连不进来，这是**能证明**的屏障，而不是一句约定。
 
-```
-ssh $NAS "cd $DIR && docker compose stop api 2>/dev/null; docker compose up -d db && docker compose ps --format '{{.Service}} {{.State}}'"
-```
-
-- ✅ 通过：`db running`，且**看不到** `api running`
-
-确认待销毁的确实是那一个卷：
+**2a · 停掉整套服务**（连数据库一起停，才能把卷交给临时容器）
 
 ```
-ssh $NAS "docker inspect kline-trainer-db-1 --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}'"
+ssh $NAS "cd $DIR && docker compose down && docker compose ps --format '{{.Service}} {{.State}}'"
 ```
 
-- ✅ 通过：输出是 `kline-trainer_pgdata -> /var/lib/postgresql/data`
+- ✅ 通过：`ps` 输出为空（没有任何服务在跑）
 
-看清楚里面有什么（这些数字等下要给你看）：
+**2b · 用「不发布端口」的临时容器挂上那个卷**
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d kline_trainer -c \"SELECT tablename || ' = ' || (xpath('/row/c/text()', query_to_xml('SELECT count(*) c FROM ' || quote_ident(tablename), false, true, '')))[1]::text || ' 行' FROM pg_tables WHERE schemaname='public' ORDER BY tablename;\""
+ssh $NAS "docker run -d --name kline-trainer-reset-db -v kline-trainer_pgdata:/var/lib/postgresql/data postgres:15.12@sha256:8f6fbd24a12304d2adc332a2162ee9ff9d6044045a0b07f94d6e53e73125e11c && echo STARTED"
+```
+
+```
+ssh $NAS "for i in \$(seq 1 30); do docker exec kline-trainer-reset-db pg_isready -U kline >/dev/null 2>&1 && break; sleep 1; done; docker exec kline-trainer-reset-db pg_isready -U kline"
+```
+
+- ✅ 通过：打印 `accepting connections`
+
+**2c · 证明屏障成立（这一条是判据，不是走过场）**
+
+```
+ssh $NAS "echo \"发布的端口: [\$(docker port kline-trainer-reset-db 2>&1)]\"; docker exec kline-trainer-reset-db psql -tA -U kline -d kline_trainer -c \"SELECT count(*) FROM pg_stat_activity WHERE datname='kline_trainer' AND pid <> pg_backend_pid();\""
+```
+
+- ✅ 通过：端口列表是**空的** `[]`（网络上不可达），且连接数打印 `0`
+- ❌ 端口不为空、或连接数不是 0：**立刻停**，屏障没建立起来
+
+**2d · 看清楚里面有什么**（这些数字等下要给你看）
+
+```
+ssh $NAS "docker exec kline-trainer-reset-db psql -tA -U kline -d kline_trainer -c \"SELECT tablename || ' = ' || (xpath('/row/c/text()', query_to_xml('SELECT count(*) c FROM ' || quote_ident(tablename), false, true, '')))[1]::text || ' 行' FROM pg_tables WHERE schemaname='public' ORDER BY tablename;\""
 ```
 
 - ✅ 通过：打印 4 张表各自的行数
 
 **门 3 · 报给你，等你明确点头**
 
-我会把门 2 看到的**每张表的行数**报给你。⛔ **在你明确回复「销毁」之前，下面的步骤一律不执行。**
+我会把门 2d 看到的**每张表的行数**报给你。⛔ **在你明确回复「销毁」之前，下面的步骤一律不执行。**
 
-**门 4 · 点头之后才做：证明没有写入方 → 备份 → 校验 → 立刻销毁**
+⚠️ 等待期间**屏障一直保持着**（那个临时容器没有端口发布，网络上连不进来），所以这段等待**不再产生写入丢失窗口**。
 
-⚠️ 从这里开始**一气做完，中间不要停**。
+**门 4 · 点头之后：备份 → 校验 → 立刻销毁**（屏障全程不撤）
 
-**4a · 证明现在没有别的连接在写**
-
-```
-ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d kline_trainer -c \"SELECT count(*) FROM pg_stat_activity WHERE datname='kline_trainer' AND pid <> pg_backend_pid();\""
-```
-
-- ✅ 通过：打印 `0`
-- ❌ 不是 0：有别的连接，**先查清楚是谁**（`SELECT pid, application_name, client_addr, state FROM pg_stat_activity WHERE datname='kline_trainer'`），不要继续
-
-**4b · 定备份文件名**（在你自己的终端里跑，只设一个变量）
+**4a · 定备份文件名**（在你自己的终端里跑，只设一个变量）
 
 ```
 BK=$DIR/backup-before-reset-$(date +%Y%m%d-%H%M%S).dump
 ```
 
-**4c · 备份（无管道；失败就不改名）**
+**4b · 备份（无管道；失败就不改名）**
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 pg_dump -U kline -d kline_trainer -Fc > $BK.tmp && mv $BK.tmp $BK && echo DUMP_OK"
+ssh $NAS "docker exec kline-trainer-reset-db pg_dump -U kline -d kline_trainer -Fc > $BK.tmp && mv $BK.tmp $BK && echo DUMP_OK"
 ```
 
 - ✅ 通过：打印 `DUMP_OK`
 - ❌ 没打印 `DUMP_OK`：备份失败，**立刻停**
 
-> ⚠️ **刻意不用 `pg_dump ... | gzip > 文件`**（codex 评审 R4，**已实测**）。那条管道没开 `pipefail`，`pg_dump` 失败时**整条管道的退出码仍然是 0**，`gzip` 会产出一个 **20 字节、`gzip -t` 能通过、内容 0 行**的空文件 —— 判据会打印「备份没问题」，紧接着卷就被销毁。这是一条真实的、不可逆的数据丢失路径。
+> ⚠️ **刻意不用 `pg_dump ... | gzip > 文件`**（codex 评审 R4，**已实测**）：那条管道没开 `pipefail`，`pg_dump` 失败时**整条管道的退出码仍然是 0**，`gzip` 会产出一个 **20 字节、`gzip -t` 能通过、内容 0 行**的空文件 —— 判据会打印「备份没问题」，紧接着卷就被销毁。
 
-**4d · 结构校验：备份里必须含 4 张表的数据**
+**4c · 结构校验：备份里必须含 4 张表的数据**
 
 ```
-ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore --list < $BK" | grep -c 'TABLE DATA'
+ssh $NAS "docker exec -i kline-trainer-reset-db pg_restore --list < $BK" | grep -c 'TABLE DATA'
 ```
 
 - ✅ 通过：打印 `4`（实测：空文件与截断文件在这一步都会被拒）
 
-**4e · 语义校验：把备份真恢复到临时库，逐表比对**
+**4d · 语义校验：把备份真恢复到临时库，逐表比对**
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE IF EXISTS restore_check;' -c 'CREATE DATABASE restore_check;'"
-```
-
-```
-ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore -U kline -d restore_check --no-owner < $BK && echo RESTORE_OK"
+ssh $NAS "docker exec kline-trainer-reset-db psql -q -U kline -d postgres -c 'DROP DATABASE IF EXISTS restore_check;' -c 'CREATE DATABASE restore_check;'"
 ```
 
 ```
-ssh $NAS "$DIR/2026-08-24-qmt-nas-verify-backup.sh kline-trainer-db-1 kline_trainer restore_check"
+ssh $NAS "docker exec -i kline-trainer-reset-db pg_restore -U kline -d restore_check --no-owner < $BK && echo RESTORE_OK"
+```
+
+```
+ssh $NAS "$DIR/2026-08-24-qmt-nas-verify-backup.sh kline-trainer-reset-db kline_trainer restore_check"
 ```
 
 - ✅ 通过：上一条打印 `RESTORE_OK`；这一条最后一行是 `VERIFY_OK: 4 张表的行数与内容指纹逐表一致，备份可恢复`
@@ -371,20 +379,16 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-verify-backup.sh kline-trainer-db-1 kline_trai
 > 现在这个脚本逐表比对**行数 + 内容 md5 指纹**（按主键排序后整行拼接），并断言两边**恰好**都是那 4 张表。
 > **判别力已实测**（四档）：完整备份 → `VERIFY_OK`；**恢复库少了一半 `klines` 行而 `training_sets` 正常** → 抓出并列出差异；**行数相同但内容被改** → 指纹抓出；**恢复库少一张表** → 表清单判据抓出。退出码直验：不一致 1、一致 0。
 
-```
-ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE restore_check;'"
-```
+**4e · 拆掉临时容器并销毁卷**（⚠️ 不可逆；**显式指名那一个卷**）
 
-**4f · 立刻销毁**（⚠️ 不可逆；**显式指名那一个卷**，不用 `down -v`）
-
-⚠️ 4e 通过之后**马上做这一步**。中间若又过了很久、或有人动过数据库，请回到 4a 重来。
+先记下销毁前的卷总数（用来证明只删掉了一个）：
 
 ```
-ssh $NAS "docker compose -f $DIR/docker-compose.yml down"
+ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -c . ; echo QUERY_OK'
 ```
 
 ```
-ssh $NAS "docker volume rm kline-trainer_pgdata"
+ssh $NAS "docker rm -f kline-trainer-reset-db && docker volume rm kline-trainer_pgdata && echo REMOVED"
 ```
 
 ```
@@ -397,7 +401,13 @@ ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -qx kline-trainer_pgdata 
 ssh $NAS 'docker volume ls --format "{{.Name}}" | grep -c . ; echo QUERY_OK'
 ```
 
-- ✅ 通过：卷总数比销毁前**恰好少 1**（销毁前先跑一次这条记下数字），且打印 `QUERY_OK` —— 证明只删掉了那一个，没误伤别的项目
+- ✅ 通过：卷总数比刚才记下的**恰好少 1**，且打印 `QUERY_OK` —— 证明只删掉了那一个，没误伤别的项目
+
+**⚠️ 中途放弃怎么办**：如果在门 3 或门 4 中途决定不销毁了，**必须把临时容器拆掉**，否则它会一直占着那个卷、compose 起不来：
+
+```
+ssh $NAS "docker rm -f kline-trainer-reset-db && echo CLEANED"
+```
 
 销毁后回到 P6 第二步。
 
