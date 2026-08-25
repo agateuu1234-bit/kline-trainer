@@ -716,7 +716,11 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-expose.sh open 7200"
 - ✅ 通过：先打印 `WATCHDOG_ARMED 到期时刻=…`，然后打印 serve 配置，最后一行是 `EXPOSE_OK`
 - ❌ 打印 `REFUSING_TO_OPEN`：**没有开出任何端点** —— 要么开机守卫没装（回 P4 装），要么看门狗没装上
 - ❌ 打印 `SERVE_FAILED`：**没有开出任何端点**，按提示回去补 P1 的两个开关
-- ❌ 打印 `STATUS_UNVERIFIABLE` / `FUNNEL_DETECTED` / `SERVE_TARGET_UNCONFIRMED`：脚本已**自动关闭并撤销**，按提示排查
+- ❌ 打印 `STATUS_UNVERIFIABLE` 或任何 `SERVE_*` / `FUNNEL_DETECTED`：脚本已**自动关闭并撤销**，按提示排查
+
+> ⚠️ **端点形态是解析 `serve status --json` 逐项比对的**（codex 评审 R20）：不得有 funnel、TCP 监听有且仅有 443 且为 HTTPS、Web 只有一个主机名、其下路由**有且仅有** `/` 且反代目标恰为 `http://127.0.0.1:8010`、不得有多余顶层键。旧判据是「文本里不含 funnel 且含 8010」—— `18010` 能过、「改了端点但另有一条到 8010 的无关路由」也能过。
+>
+> ⚠️ **第一次真跑 P12 时如果报 `SERVE_*`**：有可能是这台机器上 tailscale 的 JSON 字段名与我预期的不同（这套判据是照 tailscale 的配置结构写的，但**没有在真开过的端点上验证过** —— 本次全程没有开过端点）。这时把它打印出来的那段 JSON 原文发我，我按实际字段调整。**它宁可错拒也不错放**，方向是安全的。
 
 > ⚠️ **为什么不直接敲 `tailscale serve`**（codex 评审 R6 的 high finding）：`serve --bg` 是**持久**配置，跟开它的那个终端无关。而这个 API **零认证** —— spec 里「本次不加认证」这个决定的四个前提，第四条就是「暴露窗口只限验收期间、用完即关」。把关闭交给一条人工嘱咐，等于断线/临时有事/某步失败就一直开着。
 >

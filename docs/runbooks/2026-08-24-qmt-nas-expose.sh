@@ -74,6 +74,7 @@ SELF=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
 STATE_DIR="${SELF%/*}/.expose-state"
 STATE="$STATE_DIR/deadline"
 PIDFILE="$STATE_DIR/watchdog.pid"
+HEARTBEAT="$STATE_DIR/heartbeat"
 
 mkdir -p "$STATE_DIR" 2>/dev/null; chmod 700 "$STATE_DIR" 2>/dev/null
 
@@ -94,30 +95,86 @@ state_deadline() { [ -f "$STATE" ] && cut -d' ' -f1 "$STATE" 2>/dev/null || echo
 state_token()    { [ -f "$STATE" ] && cut -d' ' -f2 "$STATE" 2>/dev/null || echo ""; }
 pid_of()         { [ -f "$PIDFILE" ] && cut -d' ' -f1 "$PIDFILE" 2>/dev/null || echo ""; }
 pid_token()      { [ -f "$PIDFILE" ] && cut -d' ' -f2 "$PIDFILE" 2>/dev/null || echo ""; }
+pid_starttime()  { [ -f "$PIDFILE" ] && cut -d' ' -f3 "$PIDFILE" 2>/dev/null || echo ""; }
+
+# 进程的**启动时刻**（/proc/<pid>/stat 第 22 字段，单位是内核 tick）。
+# 它与 PID 一起构成**不可复用**的身份：PID 会被回收重用，(PID, 启动时刻) 不会。
+proc_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null || echo ""; }
 
 write_state() {   # <到期时间> <令牌>  —— 原子替换（先写临时文件再 mv）
     printf '%s %s\n' "$1" "$2" > "${STATE}.tmp" && mv -f "${STATE}.tmp" "$STATE"
 }
 
 # 「当前确实有一个活着的看门狗，且它就是当前状态的归属者」
+# ⚠️ 光看 `kill -0 <PID>` 会被 **PID 复用**骗过（codex plan-R20 F1）：
+#    看门狗若被强杀（SIGKILL / OOM，不走 EXIT 陷阱），PID 文件会留着；
+#    等这个 PID 被**别的无关进程**复用，kill -0 就成功了 —— status 和
+#    尤其是 renew 会把它当成「看门狗还活着」，于是给一个**其实没有看门狗**
+#    的零认证暴露延期。（这不是空想：本次调试里就多次留下过陈旧 PID 文件。）
+#    现在三重判据：① 令牌一致 ② (PID, 进程启动时刻) 与登记的完全一致
+#    ③ 心跳新鲜（看门狗与它派出的 close-loop 每轮都会刷新）。
 watchdog_owns_state() {
-    _p=$(pid_of); _pt=$(pid_token); _st=$(state_token)
-    [ -n "$_p" ] && [ -n "$_pt" ] && [ -n "$_st" ] || return 1
+    _p=$(pid_of); _pt=$(pid_token); _pst=$(pid_starttime); _st=$(state_token)
+    [ -n "$_p" ] && [ -n "$_pt" ] && [ -n "$_pst" ] && [ -n "$_st" ] || return 1
     [ "$_pt" = "$_st" ] || return 1
-    kill -0 "$_p" 2>/dev/null
+    kill -0 "$_p" 2>/dev/null || return 1
+    # PID 复用防护：启动时刻必须与登记时一致
+    [ "$(proc_starttime "$_p")" = "$_pst" ] || return 1
+    # 心跳新鲜度：允许 3 个轮询周期 + 关闭重试的最大退避（60 秒）
+    _hb=$(cat "$HEARTBEAT" 2>/dev/null)
+    [ -n "$_hb" ] || return 1
+    [ $(( $(now) - _hb )) -le $(( POLL * 3 + 60 )) ]
 }
 
 # ── 判据（抽成函数，selftest 直接喂合成文本，无需碰真实端点）────────────────
 # 返回 0 = 这份 serve 状态是「我们要的、且安全的」
-serve_status_is_expected() {
-    _txt=$1
-    # ⛔ funnel 硬禁令（spec §4-D1）：serve 只对本 tailnet 内部暴露，funnel 会暴露到公网
-    if printf '%s' "$_txt" | grep -qi 'funnel'; then echo "FUNNEL_DETECTED"; return 1; fi
-    # 正向验证：必须看得到我们期望的反代目标端口，而不是「没看到坏东西」就算过
-    if ! printf '%s' "$_txt" | grep -q "${UPSTREAM_PORT}"; then
-        echo "SERVE_TARGET_UNCONFIRMED"; return 1
-    fi
-    return 0
+# ⚠️ 形态校验解析 **JSON**，不做文本子串匹配（codex plan-R20 F2）。
+#    旧判据是「输出里不含 funnel 且含 8010」—— `18010` 能过、
+#    「改了端点但另有一条到 8010 的无关路由」也能过。
+#    tailscale serve status --json 给的是机器可读的完整配置，逐项比对：
+#      · 不得有 AllowFunnel（funnel 会暴露到公网，spec §4-D1 硬禁令）
+#      · TCP 监听**有且仅有** 443，且是 HTTPS
+#      · Web 只有**一个**主机名、端口 443
+#      · 该主机名下 Handlers **有且仅有** "/"，Proxy 恰为 http://127.0.0.1:8010
+#      · 不得有其它顶层键（Services / 额外监听等）
+#    ⚠️ 空的 {} = 根本没开，也算不合格。
+#    $1 = `serve status --json` 的原始输出；返回 0 = 形态正确。
+serve_json_is_expected() {
+    printf '%s' "$1" | python3 -c '
+import json, sys
+want_proxy = "http://" + sys.argv[1] + ":" + sys.argv[2]
+want_port = "443"
+try:
+    cfg = json.load(sys.stdin)
+except Exception as ex:
+    print("SERVE_JSON_UNPARSABLE"); sys.exit(1)
+if not isinstance(cfg, dict) or not cfg:
+    print("SERVE_NOT_CONFIGURED"); sys.exit(1)
+if cfg.get("AllowFunnel"):
+    print("FUNNEL_DETECTED"); sys.exit(1)
+allowed_top = {"TCP", "Web", "AllowFunnel"}
+extra = set(cfg) - allowed_top
+if extra:
+    print("SERVE_UNEXPECTED_TOPLEVEL:" + ",".join(sorted(extra))); sys.exit(1)
+tcp = cfg.get("TCP") or {}
+if list(tcp) != [want_port] or not (tcp.get(want_port) or {}).get("HTTPS"):
+    print("SERVE_TCP_UNEXPECTED"); sys.exit(1)
+web = cfg.get("Web") or {}
+if len(web) != 1:
+    print("SERVE_WEB_HOST_COUNT"); sys.exit(1)
+host = next(iter(web))
+if not host.endswith(":" + want_port):
+    print("SERVE_WEB_HOST_PORT"); sys.exit(1)
+handlers = (web[host] or {}).get("Handlers") or {}
+if list(handlers) != ["/"]:
+    print("SERVE_HANDLERS_UNEXPECTED"); sys.exit(1)
+h = handlers["/"] or {}
+if h.get("Proxy") != want_proxy:
+    print("SERVE_PROXY_MISMATCH:" + str(h.get("Proxy"))); sys.exit(1)
+if set(h) - {"Proxy", "Path", "Text"}:
+    print("SERVE_HANDLER_EXTRA_KEYS"); sys.exit(1)
+sys.exit(0)
+' "$UPSTREAM_HOST" "$UPSTREAM_PORT"
 }
 
 # ⚠️ 开机守卫**不再动用户的 crontab**（codex plan-R13/R14/R15 连提三轮）。
@@ -235,6 +292,7 @@ close_loop() {
     _tok0=$(state_token)   # 进入时的归属，删状态文件前要比对（codex plan-R11）
     while : ; do
         _try=$((_try + 1))
+        date +%s > "$HEARTBEAT" 2>/dev/null
         timeout 30 docker exec -i "$TS_CTR" tailscale serve reset </dev/null >>"$LOG" 2>&1
         _s=$(timeout 30 docker exec -i "$TS_CTR" tailscale serve status </dev/null 2>&1); _rc=$?
         if [ "$_rc" -eq 0 ] && printf '%s' "$_s" | grep -q 'No serve config'; then
@@ -294,8 +352,9 @@ arm() {
     write_state "$(( $(now) + _secs ))" "$_tok" || { echo "ARM_FAILED: 写不了 $STATE"; return 1; }
 
     nohup sh -c '
-        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"; MYTOK="$6"; CTR="$7"
-        printf "%s %s\n" "$$" "$MYTOK" > "$PIDFILE"
+        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"; MYTOK="$6"; CTR="$7"; HEARTBEAT="$8"
+        printf "%s %s %s\n" "$$" "$MYTOK" "$(awk "{print \$22}" /proc/$$/stat 2>/dev/null)" > "$PIDFILE"
+        date +%s > "$HEARTBEAT"
         trap "[ \"$(cut -d\" \" -f2 \"$PIDFILE\" 2>/dev/null)\" = \"$MYTOK\" ] && rm -f \"$PIDFILE\"" EXIT
         stamp() { date "+%Y-%m-%d %H:%M:%S"; }
 
@@ -316,6 +375,7 @@ arm() {
         }
 
         while : ; do
+            date +%s > "$HEARTBEAT"
             if [ ! -f "$STATE" ]; then exit_only_if_closed; fi
             _d=$(cut -d" " -f1 "$STATE" 2>/dev/null)
             _t=$(cut -d" " -f2 "$STATE" 2>/dev/null)
@@ -334,7 +394,7 @@ arm() {
             fi
             sleep "$POLL"
         done
-    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" "$_tok" "$TS_CTR" >/dev/null 2>&1 &
+    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" "$_tok" "$TS_CTR" "$HEARTBEAT" >/dev/null 2>&1 &
 
     sleep 1
     if ! watchdog_owns_state; then
@@ -435,7 +495,7 @@ open)
     # ⚠️ 分开取输出与退出码（codex plan-R7 F3）：原来是 `ts serve status | grep -qi funnel`，
     #    status 命令本身失败时「没匹配到 funnel」会被当成「没有 funnel」，于是一路走到
     #    EXPOSE_OK —— 把失败读成了成功。零认证的端点上这尤其危险。
-    _st=$(ts serve status 2>&1); _strc=$?
+    _st=$(ts serve status --json 2>&1); _strc=$?
     if [ "$_strc" -ne 0 ]; then
         echo "STATUS_UNVERIFIABLE: 开完之后读不到 serve 状态（rc=$_strc）—— 失败关闭"
         printf '%s\n' "$_st"
@@ -443,7 +503,7 @@ open)
         echo "请随后跑 expose.sh status 复核"
         exit 1
     fi
-    if ! _why=$(serve_status_is_expected "$_st"); then
+    if ! _why=$(serve_json_is_expected "$_st"); then
         echo "$_why: serve 配置不是预期形态 —— 失败关闭"
         printf '%s\n' "$_st"
         expire_to_watchdog
@@ -500,14 +560,14 @@ renew)
         #    有人改了反代目标、或开了 funnel（暴露到公网），renew 若只看
         #    「看门狗归属还在」，就会打印 RENEW_OK 把这个不安全的暴露**再延长两小时**。
         #    读不到状态、或形态不是预期 → 一律**失败关闭**，绝不延期。
-        _st=$(ts serve status 2>&1); _strc=$?
+        _st=$(ts serve status --json 2>&1); _strc=$?
         if [ "$_strc" -ne 0 ]; then
             echo "RENEW_REFUSED: 读不到 serve 状态（rc=$_strc）—— 不延期，改为关闭"
             printf '%s\n' "$_st"
             if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
             exit 1
         fi
-        if ! _why=$(serve_status_is_expected "$_st"); then
+        if ! _why=$(serve_json_is_expected "$_st"); then
             echo "RENEW_REFUSED: $_why —— 端点形态已经不是我们开的那个，不延期，改为关闭"
             printf '%s\n' "$_st"
             if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
@@ -562,26 +622,25 @@ boot-close)
     fi
     ;;
 selftest)
-    # 判据自检：喂合成文本，证明 serve_status_is_expected 两个方向都有判别力。
-    # 不碰真实端点，可随时跑。
+    # 判据自检：喂**合成 JSON**，证明形态校验两个方向都有判别力。不碰真实端点。
     _fail=0
-    _chk() { # 期望结果 描述 文本
-        _want=$1; _desc=$2; _txt=$3
-        if _got=$(serve_status_is_expected "$_txt"); then _got=OK; fi
-        if [ "$_got" = "$_want" ]; then echo "  pass  $_desc"; else echo "  FAIL  $_desc（期望 $_want，实际 $_got）"; _fail=1; fi
+    _chk() { # 期望结果 描述 JSON
+        _want=$1; _desc=$2; _j=$3
+        if _got=$(serve_json_is_expected "$_j"); then _got=OK; fi
+        case "$_got" in "$_want"*) echo "  pass  $_desc" ;;
+                        *) echo "  FAIL  $_desc（期望 $_want，实际 $_got）"; _fail=1 ;; esac
     }
-    echo "serve_status_is_expected 自检："
-    _chk OK                        "正常 serve 配置（含 8010）" \
-        "https://fnos.tail9dc815.ts.net (tailnet only)
-|-- / proxy http://127.0.0.1:8010"
-    _chk FUNNEL_DETECTED           "出现 funnel（必须拒）" \
-        "https://fnos.tail9dc815.ts.net (Funnel on)
-|-- / proxy http://127.0.0.1:8010"
-    _chk SERVE_TARGET_UNCONFIRMED  "空输出（命令失败的典型形态，必须拒）" ""
-    _chk SERVE_TARGET_UNCONFIRMED  "反代到了别的端口（必须拒）" \
-        "https://fnos.tail9dc815.ts.net (tailnet only)
-|-- / proxy http://127.0.0.1:9999"
-    _chk SERVE_TARGET_UNCONFIRMED  "No serve config（还没开，必须拒）" "No serve config"
+    _OK='{"TCP":{"443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}}}}'
+    echo "端点形态判据自检（解析 JSON，codex plan-R20 F2）："
+    _chk OK                       "标准形态"                     "$_OK"
+    _chk SERVE_NOT_CONFIGURED     "空配置 {}（根本没开）"        '{}'
+    _chk SERVE_JSON_UNPARSABLE    "不是 JSON（命令失败的形态）"  'No serve config'
+    _chk FUNNEL_DETECTED          "开了 funnel（暴露到公网）"    '{"TCP":{"443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}}},"AllowFunnel":{"fnos.tail9dc815.ts.net:443":true}}'
+    _chk SERVE_PROXY_MISMATCH     "端口 18010（旧的子串判据会放过）" '{"TCP":{"443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18010"}}}}}'
+    _chk SERVE_HANDLERS_UNEXPECTED "多一条无关路由（旧判据会放过）" '{"TCP":{"443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9999"},"/x":{"Proxy":"http://127.0.0.1:8010"}}}}}'
+    _chk SERVE_TCP_UNEXPECTED     "多一个 TCP 监听"              '{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}}}}'
+    _chk SERVE_WEB_HOST_COUNT     "多一个 Web 主机"              '{"TCP":{"443":{"HTTPS":true}},"Web":{"a:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}},"b:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}}}}'
+    _chk SERVE_UNEXPECTED_TOPLEVEL "多了顶层键（如 Services）"    '{"TCP":{"443":{"HTTPS":true}},"Web":{"fnos.tail9dc815.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8010"}}}},"Services":{"x":1}}'
     echo "状态文件读写自检（守住 R10 那个令牌丢失回归）："
     (
         STATE=/tmp/kline-trainer-expose.selftest.$$
