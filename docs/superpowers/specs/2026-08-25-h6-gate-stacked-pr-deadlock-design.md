@@ -3,7 +3,7 @@
 **日期**：2026-08-25
 **基线**：`origin/main` `a018a7f`（#172 合并后）
 **分支**：`fix/h6-gate-stacked-pr`，worktree `.dev/worktree/fix-h6-gate-stacked-pr`
-**改动面**：`.github/workflows/hardening_6_gate.yml` 单文件，**净删 2 行 + 加 1 段头注释**
+**改动面**：`.github/workflows/hardening_6_gate.yml` 单文件，**删 2 行 + 加 1 行 `types:` + 加 1 段头注释**
 
 > **本文出现的所有行号均指基线 `a018a7f` 上的 `.github/workflows/hardening_6_gate.yml`**
 > （121 行）。改动落地后行号会位移，届时以文件内容为准，不以本文行号为准。
@@ -18,9 +18,11 @@
 
 ## 0. 一句话
 
-`hardening_6_gate.yml` 的 `pull_request.branches: [main]` 触发过滤器，
-让叠罗汉 PR（stacked PR）拿不到它必需的 `acceptance` 状态检查而永久 BLOCKED；
-删掉该过滤器，并顺带删掉同文件里一条把仓库重新浅化、能造成同一症状第二种形态的冗余 `git fetch`。
+`hardening_6_gate.yml` 的 `pull_request.branches: [main]` 过滤器**加上**「默认活动类型不含 `edited`」，
+两者合取使叠罗汉 PR（stacked PR）**自始至终没有任何一次上报机会**，
+必需检查 `acceptance` 永不出现 ⇒ 永久 BLOCKED。
+修法：删掉该过滤器（让它一开 PR 就跑）**并**显式订阅 `edited`（让 retarget 时刻针对新 base 重跑一次）；
+顺带删掉同文件里一条把仓库重新浅化、能造成同一症状第二种形态的冗余 `git fetch`。
 
 ---
 
@@ -55,11 +57,22 @@ on:
 base 是上游分支（例如 `feat/drawing-session-default-persistence`），不是 `main`
 ⇒ 条件不匹配 ⇒ **这个 workflow 从来没有为它跑过一次**。
 
-上游合并后 GitHub 会自动把下游 PR 的 base 重定向（retarget）到 `main`，
-**但 retarget 不重新触发 workflow**（`pull_request` 的默认活动类型只有
-`opened` / `synchronize` / `reopened`，不含 `edited`）。
+上游合并（且其分支被删除）后，GitHub 会自动把下游 PR 的 base 重定向（retarget）到 `main`。
 
-于是构成闭环：**required 检查 + 从未上报 = 无法满足的条件 = 永久 BLOCKED**。
+> ⚠️ **本 spec 初稿在此处写错过，已按 codex R1 更正**（轮次记录见 §11）。
+> 初稿原文是「**retarget 不重新触发 workflow**」。**这是错的。**
+> retarget 会发出 `pull_request` 事件、动作为 **`edited`**（F18 / F19 已用两次生产数据实证）。
+> 真相是：**`pull_request` 的默认活动类型只有 `opened` / `synchronize` / `reopened`，不含 `edited`，
+> 所以没有显式 opt-in 的 workflow 收不到这个事件** —— 事件发了，只是没人订阅。
+
+于是死锁是**两个条件的合取**，缺任何一条都不会死锁：
+
+| | 条件 | 它挡掉了什么 | 单独去掉会怎样 |
+|---|---|---|---|
+| **(a)** | `branches: [main]` | retarget **之前**的全部运行（base 是上游分支，不匹配） | PR 一开出就跑 ⇒ 检查存在 ⇒ 不死锁 |
+| **(b)** | 默认活动类型不含 `edited` | retarget **那一刻**的运行（事件发了但没订阅） | retarget 时跑一次，且此时 base 已是 `main` ⇒ 不死锁 |
+
+两条同时成立 ⇒ **必需检查从头到尾没有任何一次上报机会 = 无法满足的条件 = 永久 BLOCKED**。
 
 ### 2.2 根因二（潜伏）：一条把仓库重新浅化的冗余 `git fetch`
 
@@ -112,23 +125,50 @@ base 是上游分支（例如 `feat/drawing-session-default-persistence`），�
 | F15 | 浅化后当分叉点在窗口外时，`git diff --name-only origin/main...HEAD` → `fatal: origin/main...HEAD: no merge base`，rc=**128** | 本地复现：分叉点距 main 顶端 55 个提交；浅化前同一条命令 rc=0 正常输出，浅化后 rc=128 |
 | F16 | 在**本仓真实历史**上，`--depth=50` 实际抓到 162 个提交，最老可见 2026-06-19 | `git clone --depth=50 file:///<本仓>` 后 `git rev-list --count HEAD` = 162、`git log --format=%ci \| tail -1` = `2026-06-19` |
 | F17 | `.claude/workflow-rules.json` 的 `skill_gate_policy.enforcement_mode` 当前 = `drift-log` | `jq -r` 读取 |
+| **F18** | **自动 retarget 确实会触发 `pull_request` 事件** —— PR **#172**：`automatic_base_change_succeeded` @ `06:49:06Z`，**3 秒后（`06:49:09Z`）全仓仅 `check-bootstrap-used-once` 一个 workflow 运行**；而它是全仓**唯一**在 `types:` 里含 `edited` 的 workflow（F7） | `gh api .../issues/172/timeline` + `gh run list --branch feat/drawing-p1b-undo --json workflowName,createdAt,event`（2026-08-25） |
+| **F19** | **同一形态在 PR #170 上独立复现** —— `automatic_base_change_succeeded` @ `06:35:11Z` → `06:35:14Z` 仅 `check-bootstrap-used-once` 运行 | 同上，分支 `feat/drawing-p1b-autoselect` |
+| **F20** | 上述两个时刻**其它活动类型均被排除**：head sha 未变（⇒ 无 `synchronize`）、非新开（⇒ 无 `opened`）、`closed`/`reopened` 均发生在其**之后**（#172 = `06:49:30` / `06:49:34`；#170 = `06:39:04` / `06:39:08`）、PR 非草稿（⇒ 无 `ready_for_review`）⇒ **触发动作只可能是 `edited`** | 同上两份 timeline 全事件流 |
+| **F21** | 手工 close / reopen 之后（#172 `06:49:36Z`、#170 `06:39:10Z`）**8 个 workflow 全部运行**，其中含 `hardening-6 framework gate` —— 这就是当时唯一让 `acceptance` 上报的途径 | 同上两份 `gh run list` |
 
 ---
 
 ## 4. 决策
 
-### D1　删除 `pull_request.branches: [main]`
+### D1（修订版 · codex R1 后）　删除 `branches: [main]`，**并**显式订阅 `edited`
 
 `on:` 段变为：
 
 ```yaml
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 ```
 
-即：**在所有 PR 上运行，不论 base 指向哪里**。
+（`opened` / `synchronize` / `reopened` 就是原本的默认三项，显式写出以便加上第四项；
+**行为上只增不减**。）
 
-**为什么安全 —— 四条论证，逐条锚到台账：**
+两处改动各封掉 §2.1 里的一个死锁条件：**删 `branches` 封 (a)**，**加 `edited` 封 (b)**。
+
+**为什么两条都要 —— 不是冗余，各自解决不同问题：**
+
+| | 只删 `branches` | 只加 `edited` | **两者都做（本决策）** |
+|---|---|---|---|
+| 死锁解除 | ✅ | ✅ | ✅ |
+| 评审期内看得到闸门结果 | ✅ 一开 PR 就有 | ❌ 直到 retarget 前一刻都没有 | ✅ |
+| retarget 后闸门是**针对 `main`** 算出来的 | ❌ 沿用 retarget 前那次 ← **codex R1 的 [high]** | ✅ | ✅ |
+| 万一将来 GitHub 改掉 retarget 行为 | 退化为「有检查但可能陈旧」 | **死锁复发** | 退化为「有检查但可能陈旧」，**不死锁** |
+
+最后一行是关键：**`edited` 是加法式保险 —— 它只增加运行，从不减少运行。**
+即使将来 GitHub 不再于 retarget 时发 `edited`，已删掉的 `branches` 仍保证有检查上报，
+**不会退回死锁**；反过来「只加 `edited`」把全部赌注押在单一 GitHub 行为上。
+
+**codex R1 的 [high] 是怎么被封掉的**：下游 PR 要够到 `main`，**只有两条路** ——
+① 自动 retarget（上游分支被删）；② 有人手工把 base 改成 `main`。
+**两条都会发出 `pull_request` / `edited`**（①见 F18–F20；②是同一事件、`changes.base` 字段）。
+因此必然产生一次针对新 base 的**新运行**，且该运行 pending 期间 PR 不可合并
+⇒ **retarget 前那盏绿灯不可能单独满足闸门**。详见 R6。
+
+**删 `branches` 为什么安全 —— 四条论证，逐条锚到台账：**
 
 1. **job 自带短路（F8）**。没碰第 50 行相关名单里那 8 个治理文件的 PR，
    `relevant=false`，跳到「Skip when nothing relevant changed」echo 一句成功收场。
@@ -141,9 +181,14 @@ on:
    `base.ref` / `GITHUB_BASE_REF` 的引用数为 0 —— 它是纯粹检查「当前这棵文件树」的脚本。
    因此「叠罗汉 PR 上跑它」在语义上**等同于**「同一棵树在 main-base PR 上跑」。
 4. **同文件先例 + 同仓样式（F10 / F7）**。头注释白纸黑字写着当初为**一模一样的死锁理由**
-   删掉了 `paths` 过滤器；同一个道理原样套到 `branches` 上。删完之后这个 `on:` 段与
-   `branch-protection-config-self-check.yml`、`codeowners-config-check.yml` 完全一致，
-   本文件不再是 13 个 workflow 里的异类（F2）。
+   删掉了 `paths` 过滤器；同一个道理原样套到 `branches` 上。
+   改完之后本文件**在两条轴上都不再是异类**：
+   - `branches` 轴 —— 与其余 12 个 workflow 一致（都不按 base 过滤，F2）；
+   - `types` 轴 —— 与 `check-bootstrap-used-once.yml` 一致（同样显式列出并含 `edited`，F7）。
+
+   > 注：改完后 `on:` 段与 `branch-protection-config-self-check.yml` /
+   > `codeowners-config-check.yml` 那两个光秃秃的 `on: pull_request:` **并不逐字相同**
+   > —— 本闸门多一行 `types:`。这是刻意的（见 D1 对照表），不是样式漂移。
 
 **必需检查的名字不变**：ruleset 里登记的 context 是 `acceptance`（F3），
 它来自 job id / job 名，本次不动 job，**context 名稳定，ruleset 无需改**。
@@ -178,8 +223,11 @@ on:
 ### D3　头注释按本文件既有体例，追记本次先例
 
 文件头已有 `# v28 R28 F3 fix: REMOVED pull_request.paths filter. ...` 一段（F10）。
-本次在其后追加一段同体例注释，记录：删掉 `branches` 的理由、
-「retarget 不重新触发 workflow」这一事实、以及短路机制仍在兜底。
+本次在其后追加一段同体例注释，必须记录三件事：
+1. 删掉 `branches` 的理由（与当初删 `paths` 同构）；
+2. **`edited` 为什么必须显式列出** —— retarget 会发该事件但它不在默认活动类型里
+   （⚠️ 这一条最容易被后人当成「多余的样板」删掉，注释必须写明删了会怎样）；
+3. 短路机制仍在兜底，故「在所有 PR 上跑」的成本可忽略。
 
 **语言**：本文件头注释现状为全英文，按 `CLAUDE.md` §3「Match existing style」，
 本次追加的注释**用英文**；spec 与 PR 正文用中文（见 `feedback_pr_language_chinese`）。
@@ -237,22 +285,42 @@ on:
 > 而不是只看检查显示绿。见 `feedback_uikit_gated_evidence_traps`：
 > 「成功字样 + 零执行量」是本仓踩过的典型假绿。
 
-### 5.3 无法在本 PR 内实证的部分（明确声明）
+### 5.3 本 PR 无法自证的部分（明确声明，不假装已验证）
 
-**「叠罗汉 PR 现在能拿到 `acceptance` 了」这一条，本 PR 无法自证** ——
-本 PR 自己的 base 就是 `main`，走的是修改前后行为相同的那条路径。
-要实证必须等**下一个真实的叠罗汉 PR**。
+| 命题 | 状态 |
+|---|---|
+| 删掉 `branches` 后，叠罗汉 PR 在 base=上游分支时**能拿到** `acceptance` | **未实证** —— 本 PR 自己的 base 就是 `main`，走的是改动前后行为相同的那条路径 |
+| 加上 `edited` 后，retarget 时刻会产生一次**针对 `main` 的新** `acceptance` 运行 | **机制已实证**（F18–F20：事件确实发出、且已 opt-in 的 workflow 确实收到并运行）；但「**本闸门自身**加上 `types` 后也收得到」这一步**未实证** |
 
-**纪律**：spec、实施计划、提交信息、PR 正文中，
-对这一条一律表述为「**未实证 · 待下一个叠罗汉 PR 验证**」，
-**不得写成已验证**（见 `feedback_codex_convergence_honest_reporting`
-与 `superpowers:verification-before-completion`）。
+**待下一个真实叠罗汉 PR 核对的两条**：
 
-### 5.4 不做的验证
+1. PR 一开出（base 仍是上游分支）就有 `acceptance` 上报；
+2. `automatic_base_change_succeeded` 事件后数秒内出现**新的** `acceptance` 运行。
 
-不构造人工叠罗汉 PR 来验证。理由：造一个假的上游 PR + 下游 PR、
-等上游合并触发 retarget、再观察下游 —— 会在 `main` 上留下两个无意义的合并记录，
-代价与收益不成比例。等真实叠罗汉 PR 出现即可。
+**纪律**：spec、实施计划、提交信息、PR 正文中，对上表两条一律表述为
+「**未实证 · 待下一个叠罗汉 PR 验证**」，**不得写成已验证**
+（见 `feedback_codex_convergence_honest_reporting` 与 `superpowers:verification-before-completion`）。
+
+### 5.4 不做的验证 —— 对 codex R1 第二条建议的答复
+
+codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通过后更新上游分支，
+再验证下游会针对最终 main base 重跑。」**不采纳**，三条理由：
+
+1. **该测试要回答的核心问题，生产数据已经回答。** 它的待证命题是
+   「base 变化时下游会不会重跑」—— F18 / F19 已用 #170 与 #172 **两次真实 retarget** 证实：
+   事件确实发出，且唯一订阅 `edited` 的 workflow 确实收到并运行。
+2. **剩下的推断只有一步，且失败是安全的。** F18/F19 证明的是
+   「`check-bootstrap-used-once` 收到了」，不是「`hardening_6_gate` 加上 `types` 后也收得到」；
+   这一步依赖 GitHub 对同一事件向所有 opt-in workflow 的统一投递。
+   万一不成立，退化结果是「检查存在但可能陈旧」（因 `branches` 已删），
+   **不会退回死锁**（见 D1 对照表末行）。
+3. **成本不对称。** 造两个一次性 PR + 合并上游触发 retarget + 清理分支，
+   换来的是对一个**已有两次生产观测**的行为的第三次观测。
+
+**（补充）为什么也不在 `main` 上造实验 PR**：会留下无意义的合并记录。
+若将来确需实测，正确做法是**全程不碰 `main`** —— 用三个一次性分支
+（`tmp-base` ← `tmp-up` ← `tmp-down`）互相开 PR、把上游合进 `tmp-base` 触发 retarget、
+观察后全部关闭并删除分支。本次不做。
 
 ---
 
@@ -265,6 +333,8 @@ on:
 | **R3** | `--depth=50` 那条删掉后，若将来有人给 checkout 改成 `fetch-depth: 1`，`origin/main` 会消失、diff 直接失败 | 属未来改动的风险，不是本次引入 | 由 §5.2 的自证机制兜底：任何改动本文件的 PR 都会 `relevant=true` 从而真跑一遍 |
 | **R4** | `actions/checkout@v4` 未钉 SHA，与其余 12 个 workflow 不一致 | 真实的信任边界不一致 | D5：本次只记录不改，留作独立 backlog |
 | **R5** | `enforcement_mode` 当前为 `drift-log`（F17），故第 58–75 行那一步里的 `--final` 分支与第 86–121 行的 advisory 步骤当前均不生效 | 本次改动不触碰这两处逻辑；将来翻到 `block` 时，第 87 行的 base 判断会让 advisory 步骤在叠罗汉 PR 上按原设计跳过 | 接受，无需动作 |
+| **R6** | **retarget 之前跑出的绿灯被复用来满足闸门** —— 下游 PR 从未针对最终 `main` 状态验证过（**codex R1 的 [high]**） | **已由 D1 的 `edited` 封掉**：下游 PR 够到 `main` 只有「自动 retarget」与「人工改 base」两条路，**两条都发 `pull_request`/`edited`** ⇒ 必然产生一次针对新 base 的新运行，其 pending 期间 PR 不可合并 | **已处置**（D1 修订版） |
+| **R7** | 残留的陈旧面：`strict_required_status_checks_policy = false`（F6）⇒ 检查通过后 `main` 仍可继续前进，合并时的 `main` 未必是验证时的 `main` | **仓库级既有配置，非本次引入** —— 本仓**任何** PR（不只叠罗汉）都同样如此。codex R1 称此配置「特别放大」本次风险，该定性不成立：R6 封掉后，叠罗汉 PR 的陈旧面与普通 PR 同级 | 接受，**超出本次范围**（要改需动 ruleset，属独立决策） |
 
 ---
 
@@ -276,7 +346,8 @@ on:
 - 不改 acceptance 脚本 `scripts/acceptance/hardening_6_framework.sh`；
 - 不改 ruleset（context 名 `acceptance` 不变，F3）；
 - 不改任何其它 workflow；
-- 不给 `pull_request` 增加 `types:`（替代方案 B，已否决，见 §8）。
+- **不**增加 `ready_for_review` 活动类型（`check-bootstrap-used-once.yml` 有，本闸门无此需要）；
+- 不改 `strict_required_status_checks_policy`（见 R7）。
 
 ---
 
@@ -284,7 +355,7 @@ on:
 
 | 方案 | 内容 | 否决理由 |
 |---|---|---|
-| **B** | 保留 `branches: [main]`，改为增加 `types: [opened, synchronize, reopened, edited]`，指望 retarget 触发 `edited`（仓内 `check-bootstrap-used-once.yml` 确有 `edited` 的用法先例） | ① 依赖「GitHub 自动 retarget 会不会发 `edited` 事件」这一**本人无法离线证实**的行为；② **即使成立也更糟**：从 PR 开出到上游合并的整段时间里，必需检查一直缺失，评审期间**看不到闸门会不会过**，最后一刻才知道；③ 与 F7 揭示的同仓样式背道而驰 |
+| **B** | **保留** `branches: [main]`，**只**增加 `types: [opened, synchronize, reopened, edited]` | **其机制已被 D1 采纳**（`edited` 那一半），但作为**替代方案**仍否决：① 从 PR 开出到上游合并的整段时间里必需检查一直缺失，评审期间**看不到闸门会不会过**，最后一刻才知道；② 一旦 GitHub 改掉 retarget 行为则**死锁复发**，而删掉 `branches` 的方案只退化为「陈旧检查」；③ 与 F7 的同仓样式不一致。<br>⚠️ **初稿的否决理由之一「无法离线证实 `edited` 是否触发」现已作废** —— F18–F20 已用生产数据证实它确实触发 |
 | **C** | 把 `acceptance` 从 ruleset 必需名单里摘掉 | 等于关掉治理闸门，方向相反，违背 `CLAUDE.md` 治理 backstop 第 1 条的精神 |
 | **D** | 把 `git fetch origin main --depth=50` 改成完整 fetch（而非删除） | 由 F12 已证 `origin/main` 本就存在且完整，改成完整 fetch 仍是纯冗余动作；删除更简单，符合 `CLAUDE.md` §2「最少代码」 |
 
@@ -309,3 +380,26 @@ on:
 4. 实施 → PR。
 
 **push 与开 PR 由用户在自己的终端执行**（Claude 的 Bash 被守卫拦截）。
+
+---
+
+## 11. 评审轮次记录
+
+### R1 · codex `adversarial-review` · 2026-08-25 · HEAD `0c7bf3c` → **needs-attention**（1 条 high）
+
+**Finding [high]**：D1 让下游 PR 在 base 仍指向上游分支时就跑出绿灯，
+而 spec 又自称依赖「retarget 不重新触发」⇒ 那盏绿灯可被复用来满足闸门，
+下游却从未针对最终 `main` 状态验证过；`strict: false` 放大该风险。
+
+**判定：成立 —— 且它暴露了 spec 的一处事实错误。** 四条处置：
+
+| # | 处置 | 落点 |
+|---|---|---|
+| 1 | **事实更正**。「retarget 不重新触发 workflow」是错的：retarget 会发 `pull_request`/`edited`，只是默认活动类型不含它。已用 #170 / #172 两次生产数据实证 | 新增 F18–F21；§2.1 重写为「两条件合取」 |
+| 2 | **设计修订**。D1 增加 `types: [..., edited]`，使 retarget 必然产生一次针对新 base 的运行 ⇒ 陈旧绿灯不可能单独满足闸门 | D1 修订版；R6 |
+| 3 | **不采纳**其「新增一次性叠罗汉集成测试」的建议 —— 待证问题已由 #170/#172 生产数据回答，且剩余推断失败时**退化为陈旧而非死锁** | §5.4 |
+| 4 | **不采纳**其对 `strict: false` 的定性（称「特别放大」）—— 该配置是仓库级既有设定，本仓任何 PR 均如此，R6 封掉后叠罗汉与普通 PR 同级 | R7 |
+
+**本轮的方法论教训**：初稿把「我无法离线证实」直接当成了「不可证实」，
+据此否决了方案 B 的机制。实际上仓内**已有生产数据**可证（#170/#172 的 timeline + run 列表），
+只是我没想到去查。⇒ **判定「无法证实」之前，先问一遍「历史数据里有没有现成的自然实验」。**
