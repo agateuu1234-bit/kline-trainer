@@ -25,7 +25,7 @@ __all__ = [
     "LockUnavailableError", "LockDisciplineError", "MarkerInvalidError",
     "BoundaryError",
     # 路径规则
-    "normalize_abs_path", "split_components",
+    "normalize_abs_path", "split_components", "split_relative_components",
     # 逐段无跟随
     "open_root", "open_under", "parent_fd_under",
     # 耐久提交
@@ -134,6 +134,20 @@ def _split_rel(relpath: str) -> list[str]:
             f"相对路径不得含空分量 / `.` / `..`，收到 {relpath!r}"
         )
     return parts
+
+
+def split_relative_components(relpath: str) -> list[str]:
+    """相对路径 → 分量列表，与 `open_root` **同一套分量规则**：拒绝绝对路径 /
+    空分量 / `.` / `..`。不合规时抛 `PathDisciplineError`。
+
+    **公开出来是给 manifest 读侧校验用的**（S2）：manifest 里每条
+    `relative_path` 都要判「留在 staging 之内」。spec 原文写的是「经 `resolve()`
+    后落在 staging 之内」，但 `resolve()` **会跟随符号链接**（那正是 O2-F4 造
+    `parent_fd_under` 的全部理由），拿它当边界判据等于把判据建在会被绕过的调用上。
+    分量规则更强，且**不碰文件系统**——读侧校验因此得以是纯函数。
+    真正的符号链接防线在打开那一刻由 `open_under` 逐段 `O_NOFOLLOW` 承担。
+    """
+    return _split_rel(relpath)
 
 
 def _raise_walk_error(relative_path: str, component: str, exc: OSError):

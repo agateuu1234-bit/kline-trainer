@@ -1428,3 +1428,32 @@ def test_assert_lock_still_held_is_not_the_same_check_as_fd_still_at(tmp_path: P
     finally:
         os.close(lk)
         os.close(root)
+
+
+# ─────────────────────────────────────────────────────────────
+# S2a Task 1：公开相对路径分量规则（读侧校验要用它判「留在 staging 之内」）
+# ─────────────────────────────────────────────────────────────
+from qmt_fsroot import split_relative_components
+
+
+def test_split_relative_components_accepts_normal_relative_path():
+    """正向放行档。"""
+    assert split_relative_components("1分钟K线_前复权/000001.SZ_平安银行_1分钟K线_前复权.csv") == [
+        "1分钟K线_前复权", "000001.SZ_平安银行_1分钟K线_前复权.csv",
+    ]
+    assert split_relative_components("export_log.csv") == ["export_log.csv"]
+
+
+@pytest.mark.parametrize("bad", [
+    "/abs/path.csv",        # 绝对路径
+    "../escape.csv",        # 上跳
+    "a/../b.csv",           # 中段上跳
+    "./a.csv",              # 当前目录
+    "a//b.csv",             # 空分量
+    "a/",                   # 尾斜杠产生空分量（相对路径不做尾斜杠宽容）
+    "",                     # 空串
+])
+def test_split_relative_components_rejects_escapes(bad):
+    """七个坏档**已实测**（2026-08-24 在 `_split_rel` 上真跑过）全部被拒。"""
+    with pytest.raises(PathDisciplineError):
+        split_relative_components(bad)
