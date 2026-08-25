@@ -37,5 +37,8 @@ app.include_router(routes.router)
 @app.get("/health")
 async def health():
     # repository 字段（spec §4-D5）：DATABASE_URL 缺失时后端会静默回落 InMemory，
-    # 这个字段让「有没有真连上 PG」变成一条可 curl 的判据。
+    # 这个字段让「本进程装配的是哪一种 repository」变成一条可 curl 的判据。
+    # 注意它报的是**装配结果**，不是此刻的连通性：因为 asyncpg.create_pool() 在 startup
+    # 真的会去建连接，所以报 "asyncpg" 确实意味着「启动时连上过 PG」；但 PG 若在运行中挂掉，
+    # /health 仍会返回 200 + "asyncpg"。要判「现在还活着吗」需要另做一次真查询。
     return {"status": "ok", "repository": routes.current_repository_kind()}

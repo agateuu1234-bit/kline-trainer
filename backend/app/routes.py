@@ -43,9 +43,11 @@ def current_repository_kind() -> str:
     - 不写第三个取值：_default_repo 未设的第三态在组合根不可达
       （app/main.py 模块 import 即 set_default_repo(InMemoryLeaseRepository())），
       按 CLAUDE.md §2 不为不可达场景写分支；isinstance 对 None 自然落到 "inmemory"。
-    - 刻意读模块全局而非经 Depends(get_repository)：后者在 _default_repo is None 时
-      抛 RuntimeError，会让健康检查端点变成 500。代价是测试里的 dependency_overrides
-      不会反映到 /health —— 生产路径不用 overrides，无分歧。
+    - 刻意读模块全局而非经 Depends(get_repository)：/health 的职责是报**地面真相**
+      （这个进程实际装配了什么），而 Depends 是可被 app.dependency_overrides 顶掉的 ——
+      走 Depends 就等于允许测试替身把真相遮住，那这个字段也就不再能用来判「真连上没」。
+      顺带的第二层好处（belt-and-braces）：_default_repo is None 时 get_repository()
+      会抛 RuntimeError，绕开它就不会让健康检查端点变成 500。
     """
     return "asyncpg" if isinstance(_default_repo, AsyncpgLeaseRepository) else "inmemory"
 
