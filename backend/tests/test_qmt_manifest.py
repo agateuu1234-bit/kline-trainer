@@ -692,6 +692,12 @@ def test_negative_index_pointing_at_a_real_entry_is_still_rejected():
     不匹配，两条判据都会拒，因此它对界内判据**零判别力**——2026-08-25 控制者
     单独变异时发现：删掉界内判据后那一条仍绿。）
 
+    ⚠️⚠️ **`files` 必须跟着 `pool_order` 一起改**（2026-08-25 全量重跑时发现）：
+    只改 `pool_order` 的话，基座 `files` 里那两只股就成了「不属于任何 pooled 股的
+    多余记录」——于是**变异掉界内判据之后，Task 9 才加的 `files` 判据会兜底**，
+    测试仍红、变异什么都没证明。（本条在 Task 8 交付时是真档；Task 9 加了 `files`
+    判据之后被掩盖——**判据的判别力不是永久属性**。）
+
     不挡住的后果：下游按 `universe_idx` 升序消费时 `-1` 排在最前，
     而它实际指向最后一只股 → **消费顺序静默错乱，且没有任何一处会报错**。
 
@@ -701,7 +707,9 @@ def test_negative_index_pointing_at_a_real_entry_is_still_rejected():
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
             pool_order={"SH": [{"code": "600006.SH", "universe_idx": -1}],
-                        "SZ": [], "BJ": []}))
+                        "SZ": [], "BJ": []},
+            files=[_file_rec("600006.SH", "申能股份", "1m"),
+                   _file_rec("600006.SH", "申能股份", "daily")]))
 
 
 def test_universe_idx_must_actually_point_at_that_code():
