@@ -19,6 +19,9 @@ import json
 import re
 from typing import Iterable
 
+from qmt_fsroot import PathDisciplineError, split_relative_components
+from qmt_normalize import QmtSchemaError, parse_qmt_filename
+
 # ── 版本 ─────────────────────────────────────────────────────
 # 新增任何**必需**字段都必须 bump 本值（spec O2-F8）。可选字段经
 # 「未知顶层键原样保留」通道流转，不需要 bump。
@@ -321,6 +324,78 @@ def _validate_cursor(cursor: object, universe: dict) -> None:
                  f"合法范围 0..{n}，取到 {n} 表示该层已取遍）")
 
 
+def _require_relative_inside(relpath: object, where: str) -> list[str]:
+    """路径必须**留在 staging 之内**。
+
+    ⚠️ 用的是 S1 的**分量规则**，不是 spec 字面写的 `resolve()`：`resolve()`
+    **会跟随符号链接**（那正是 O2-F4 造 `parent_fd_under` 的全部理由），拿它当
+    边界判据等于把判据建在会被绕过的调用上。分量规则更强，且**不碰文件系统**
+    ——读侧校验因此得以是纯函数。真正的符号链接防线在打开那一刻由
+    `open_under` 逐段 `O_NOFOLLOW` 承担。
+    """
+    _require(isinstance(relpath, str), f"{where} 必须是文字，读到 {relpath!r}")
+    try:
+        return split_relative_components(relpath)
+    except PathDisciplineError as e:
+        raise ManifestInvalidError(f"{where} 不是一条留在 staging 内的相对路径：{e}") from e
+
+
+def _validate_files(files: object, pool: dict) -> None:
+    """实拷清单逐项合规（R21-F3）。
+
+    ⚠️ **这份清单是 `staging_intact` / `pilot_stock_source` / 三方源校验共同的
+    真相基准**，而读侧校验此前唯独漏了它。一份被编辑过或半截写入的 manifest
+    可以形状全过，却给某只股缺一条、重一条、或**把 1m 的哈希绑到 daily 上**
+    ——于是「校验的字节与导入器实际消费的字节根本不是同一批」。
+    """
+    _require(isinstance(files, list), "files 必须是列表")
+
+    pooled: set[str] = {item["code"] for mk in MARKETS for item in pool[mk]}
+    by_stock: dict[str, list[str]] = {}
+
+    for i, rec in enumerate(files):
+        where = f"files[{i}]"
+        _require(isinstance(rec, dict), f"{where} 必须是对象")
+        for key in ("stock_code", "period", "relative_path", "bytes", "sha256"):
+            _require(key in rec, f"{where} 缺 {key}")
+
+        code = rec["stock_code"]
+        _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+                 f"{where}.stock_code 不是合法股票代码：{code!r}")
+        _require(rec["period"] in PERIODS,
+                 f"{where}.period 必须是 {list(PERIODS)} 之一，读到 {rec['period']!r}")
+
+        parts = _require_relative_inside(rec["relative_path"], f"{where}.relative_path")
+        try:
+            f_code, _f_name, f_period = parse_qmt_filename(parts[-1])
+        except QmtSchemaError as e:
+            raise ManifestInvalidError(
+                f"{where}.relative_path 的文件名不符合 QMT 导出规则：{e}") from e
+        _require(f_code == code,
+                 f"{where} 自称是 {code!r}，而文件名解析出的是 {f_code!r}")
+        _require(f_period == rec["period"],
+                 f"{where} 自称周期是 {rec['period']!r}，而文件名解析出的是 "
+                 f"{f_period!r}——把 1m 的哈希绑到 daily 上，校验的字节与导入器"
+                 "消费的字节就不是同一批了")
+
+        _require(isinstance(rec["bytes"], int) and not isinstance(rec["bytes"], bool)
+                 and rec["bytes"] >= 0,
+                 f"{where}.bytes 必须是非负整数，读到 {rec['bytes']!r}")
+        _require_sha256(rec["sha256"], f"{where}.sha256")
+
+        _require(code in pooled,
+                 f"{where} 记的 {code!r} 不属于 pool_order 里的任何一只股——"
+                 "多余的活跃记录会让完整性闸拿着一个没人认领的基准去比对")
+        by_stock.setdefault(code, []).append(rec["period"])
+
+    for code in sorted(pooled):
+        got = sorted(by_stock.get(code, []))
+        _require(got == sorted(PERIODS),
+                 f"{code} 在 files 里的记录是 {got}，必须恰好是 "
+                 f"{sorted(PERIODS)} 各一条——一只股的两个文件是一次事务，"
+                 "缺一条意味着上一次运行崩在两次 os.replace 之间")
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -348,4 +423,5 @@ def validate_manifest(payload: object) -> dict:
     _validate_source_mount(payload["source_mount"])
     _validate_pool_order(payload["pool_order"], payload["source_snapshot"]["universe"])
     _validate_cursor(payload["cursor"], payload["source_snapshot"]["universe"])
+    _validate_files(payload["files"], payload["pool_order"])
     return payload

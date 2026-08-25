@@ -739,3 +739,113 @@ def test_cursor_equal_to_universe_length_is_the_legal_exhausted_state():
     """
     m = _valid_manifest(cursor={"SH": 3, "SZ": 2, "BJ": 1})   # 各层 len 分别是 3/2/1
     assert validate_manifest(m) == m
+
+
+def test_each_pooled_stock_needs_exactly_two_file_records():
+    m = _valid_manifest()
+    m["files"] = [r for r in m["files"] if r["stock_code"] != "600000.SH"]
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_a_stock_with_two_records_of_the_same_period_is_rejected():
+    """⭐ 只有本条够得到：条数对（2 条），但周期是 1m + 1m。
+
+    判别力：只数「恰好 2 条」而不查周期集合的实现会放行本档。
+    """
+    m = _valid_manifest()
+    dup = dict(_file_rec("600000.SH", "浦发银行", "1m"))
+    dup["relative_path"] = dup["relative_path"].replace(".csv", "_2.csv")
+    m["files"] = [r for r in m["files"]
+                  if not (r["stock_code"] == "600000.SH" and r["period"] == "daily")] + [dup]
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_extra_file_record_not_belonging_to_any_pooled_stock_is_rejected():
+    m = _valid_manifest()
+    m["files"] = m["files"] + [_file_rec("600004.SH", "上海机场", "1m")]
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_file_relative_path_must_stay_inside_staging():
+    for bad in ("../outside.csv", "/etc/passwd", "a/../../x.csv", "./x.csv", ""):
+        m = _valid_manifest()
+        m["files"][0]["relative_path"] = bad
+        _recompute_evidence(m)
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_file_name_must_parse_to_the_same_code_and_period():
+    """⭐ 文件名解析出的 code/period 必须与记录里写的一致。
+
+    判别力：删掉这条，「把 1m 的哈希绑到 daily 上」就静默通过——
+    而校验的字节与导入器消费的字节从此不是同一批（R21-F3 原话）。
+    """
+    m = _valid_manifest()
+    # 记录说自己是 daily，文件名却是 1 分钟线
+    rec = next(r for r in m["files"]
+               if r["stock_code"] == "600000.SH" and r["period"] == "daily")
+    rec["relative_path"] = "日K线_前复权/600000.SH_浦发银行_1分钟K线_前复权.csv"
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_file_name_code_mismatch_is_rejected():
+    m = _valid_manifest()
+    m["files"][0]["relative_path"] = "1分钟K线_前复权/600004.SH_上海机场_1分钟K线_前复权.csv"
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_file_name_not_matching_qmt_rules_is_rejected():
+    m = _valid_manifest()
+    m["files"][0]["relative_path"] = "1分钟K线_前复权/随便一个名字.csv"
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_file_bytes_must_be_nonnegative_int():
+    for bad in (-1, "1", 1.5, True, None):
+        m = _valid_manifest()
+        m["files"][0]["bytes"] = bad
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_file_sha256_must_be_hex64_lowercase():
+    for bad in ("", "z" * 64, "A" * 64, "a" * 63, 1):
+        m = _valid_manifest()
+        m["files"][0]["sha256"] = bad
+        _recompute_evidence(m)
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_zero_byte_file_record_is_allowed():
+    """正向档：bytes == 0 合法（一只 status=empty 的股导出 0 行的 CSV
+    仍是一个真实存在、可被哈希的文件）。判据是「非负」，不是「正」。"""
+    m = _valid_manifest()
+    m["files"][0]["bytes"] = 0
+    assert validate_manifest(m) == m
+
+
+def test_empty_pool_with_empty_files_is_valid():
+    """⭐ 正向档：一次刚起步、还没拷到任何股的 fetch。
+
+    判据是「pool_order 里每只股恰好 2 条」，池为空时 files 也为空是合法的
+    ——首份 manifest 就是这个形状（staged_export_log 先于任何 K 线落盘）。
+    """
+    m = _valid_manifest(
+        pool_order={"SH": [], "SZ": [], "BJ": []},
+        cursor={"SH": 0, "SZ": 0, "BJ": 0},
+        files=[])
+    assert validate_manifest(m) == m
