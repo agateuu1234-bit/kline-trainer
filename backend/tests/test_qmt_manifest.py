@@ -1095,3 +1095,85 @@ def test_absent_lifecycle_keys_are_still_valid():
     assert "fetch_fatal_error" not in m
     assert "stopped_reason_secondary" not in m
     assert validate_manifest(m) == m
+
+
+_GMT = "@GMT-2026.08.24-04.00.00"
+
+
+def _evidence(level, *, n_pass, files_verified, agg, agree=None, mount=None):
+    ev = {"level": level, "passes": [
+        {"pass": i + 1, "files_verified": files_verified, "aggregate_sha256": agg,
+         "completed_at": f"2026-08-24T12:0{i}:00+08:00"} for i in range(n_pass)]}
+    if agree is not None:
+        ev["passes_agree"] = agree
+    if mount is not None:
+        ev["mount_check"] = mount
+    return ev
+
+
+def _agg_of(m):
+    return aggregate_sha256(manifest_members(m))
+
+
+def test_source_verification_must_be_one_of_three_levels():
+    for bad in ("FULL", "verified", "", None, 1):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(source_verification=bad))
+
+
+def test_full_level_requires_operator_attestation():
+    """⭐ R15-F2：一个光秃秃的 "full" 字符串不许换来出货级标签。"""
+    m = _valid_manifest()
+    del m["operator_attestation"]
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_full_level_attestation_must_be_true_and_timestamped():
+    for bad in ({"no_export_window": False, "recorded_at": "t"},
+                {"no_export_window": True},
+                {"no_export_window": True, "recorded_at": ""},
+                {"recorded_at": "t"}):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(operator_attestation=bad))
+
+
+def test_snapshot_level_requires_a_well_formed_gmt_token():
+    base = _valid_manifest()
+    agg = _agg_of(base)
+    n = len(base["files"]) + 1
+    for token in (None, "", "@GMT-2026.8.24-4.0.0", "2026.08.24", "@GMT-xxxx"):
+        snap = {"export_log_sha256": base["source_snapshot"]["export_log_sha256"],
+                "universe": base["source_snapshot"]["universe"]}
+        if token is not None:
+            snap["gmt_token"] = token
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                source_snapshot=snap,
+                source_verification="snapshot",
+                source_verification_evidence=_evidence(
+                    "snapshot", n_pass=1, files_verified=n, agg=agg,
+                    mount={"gmt_token": _GMT, "verified_against_mount": True})))
+
+
+def test_snapshot_level_passes_with_a_valid_token():
+    """正向放行档。"""
+    base = _valid_manifest()
+    snap = dict(base["source_snapshot"], gmt_token=_GMT)
+    m = _valid_manifest(
+        source_snapshot=snap,
+        source_verification="snapshot",
+        source_verification_evidence=_evidence(
+            "snapshot", n_pass=1, files_verified=len(base["files"]) + 1,
+            agg=_agg_of(base),
+            mount={"gmt_token": _GMT, "verified_against_mount": True}))
+    assert validate_manifest(m) == m
+
+
+def test_partial_level_needs_no_inputs_at_all():
+    """正向放行档：partial 什么都不需要（它什么都没证明）。"""
+    m = _valid_manifest(
+        source_verification="partial",
+        source_verification_evidence={"level": "partial", "passes": []})
+    del m["operator_attestation"]
+    assert validate_manifest(m) == m

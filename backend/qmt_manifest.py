@@ -70,6 +70,7 @@ LIFECYCLE_KEYS = frozenset({
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)$")
+_GMT_TOKEN_RE = re.compile(r"^@GMT-\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}$")
 
 # `fetch_fatal_error.errno` 的闭合枚举：仅两种能触发「留在挂载点内」的逃逸
 # 判据的系统调用错误码（R94-F2）。
@@ -497,6 +498,41 @@ def _validate_lifecycle(payload: dict) -> None:
                  f"不得被覆盖），读到 {secondary!r}")
 
 
+def _validate_verification_inputs(payload: dict) -> str:
+    """`source_verification` 的级别，以及该级别要求的**前置输入**（R15-F2）。
+
+    ⚠️ **写侧记录与读侧核实是两件事**：R10-F3 加了 `--snapshot-gmt-token` 与
+    `--confirm-no-export-window` 让证据有处可记，**却从没要求读侧去核实它们
+    真的在**。于是版本错位、半截写入或手工编辑的 manifest 里，一个
+    **光秃秃的 `source_verification: "full"` 字符串**就足以让 pilot 判出
+    `ship_eligible: true`，而声称属于该级别必要条件的那份证据整个缺席。
+
+    ⚠️ **本校验不授予任何出货资格**（R17-F2 / R18-F2）——它只是一致性检查。
+    `ship_eligible ≡ (final_verdict == "SUCCESS")` 是派生量（R26-F1）。
+    """
+    level = payload["source_verification"]
+    _require(isinstance(level, str) and level in VERIFICATION_LEVELS,
+             f"source_verification 必须是 {list(VERIFICATION_LEVELS)} 之一，"
+             f"读到 {level!r}")
+
+    if level == "snapshot":
+        token = payload["source_snapshot"].get("gmt_token")
+        _require(isinstance(token, str) and _GMT_TOKEN_RE.match(token) is not None,
+                 "source_verification = 'snapshot' 要求 source_snapshot.gmt_token "
+                 f"形如 @GMT-YYYY.MM.DD-HH.MM.SS，读到 {token!r}")
+    elif level == "full":
+        att = payload.get("operator_attestation")
+        _require(isinstance(att, dict),
+                 "source_verification = 'full' 要求 operator_attestation —— "
+                 "缺了它，一个光秃秃的 'full' 字符串就成了出货级标签，"
+                 "而那份人工声明从未发生过")
+        _require(att.get("no_export_window") is True,
+                 "operator_attestation.no_export_window 必须为 true")
+        _require_nonempty_str(att.get("recorded_at"),
+                              "operator_attestation.recorded_at")
+    return level
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -528,4 +564,5 @@ def validate_manifest(payload: object) -> dict:
     _validate_staged_export_log(payload["staged_export_log"],
                                  payload["source_snapshot"]["export_log_sha256"])
     _validate_lifecycle(payload)
+    _validate_verification_inputs(payload)
     return payload
