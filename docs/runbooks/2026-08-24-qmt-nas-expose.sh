@@ -47,8 +47,11 @@
 set -u
 
 TS_CTR=tailscale
-STATE=/tmp/kline-trainer-expose.deadline
-PIDFILE=/tmp/kline-trainer-expose.pid
+# ⚠️ 状态不放 /tmp（codex plan-R17）：/tmp 会被系统清理，而「状态文件不见了」
+#    在旧设计里等同于「用户主动撤销」→ 看门狗安静退出、端点却还开着。
+#    放到脚本旁边的专用目录（跟部署目录一起在 /vol1 上，不会被 tmp 清理扫到）。
+#    ⚠️ 但这只降低触发概率，**真正的修法是下面的「失联即关闭」**：
+#    绝不再把「文件不在」当成撤销信号。
 LOG=/tmp/kline-trainer-expose.log
 UPSTREAM_HOST=127.0.0.1
 UPSTREAM_PORT=8010
@@ -67,6 +70,12 @@ LOCKFILE=/tmp/kline-trainer-expose.lock
 LOCK_WAIT=120
 
 SELF=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+
+STATE_DIR="${SELF%/*}/.expose-state"
+STATE="$STATE_DIR/deadline"
+PIDFILE="$STATE_DIR/watchdog.pid"
+
+mkdir -p "$STATE_DIR" 2>/dev/null; chmod 700 "$STATE_DIR" 2>/dev/null
 
 ts() { timeout 30 docker exec -i "$TS_CTR" tailscale "$@" </dev/null; }
 now() { date +%s; }
@@ -265,39 +274,47 @@ arm() {
     write_state "$(( $(now) + _secs ))" "$_tok" || { echo "ARM_FAILED: 写不了 $STATE"; return 1; }
 
     nohup sh -c '
-        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"; MYTOK="$6"
+        STATE="$1"; LOG="$2"; POLL="$3"; PIDFILE="$4"; SELF="$5"; MYTOK="$6"; CTR="$7"
         printf "%s %s\n" "$$" "$MYTOK" > "$PIDFILE"
-        # 只在 PID 文件仍归自己时才删（否则会删掉新一代的）
         trap "[ \"$(cut -d\" \" -f2 \"$PIDFILE\" 2>/dev/null)\" = \"$MYTOK\" ] && rm -f \"$PIDFILE\"" EXIT
-        while [ -f "$STATE" ]; do
+        stamp() { date "+%Y-%m-%d %H:%M:%S"; }
+
+        # ⚠️ 失联即关闭（codex plan-R17）。旧设计把「状态文件不在了」当作
+        #    「用户主动撤销」——可是「主动撤销」与「文件被 /tmp 清理/被别人删掉」
+        #    在这里**长得一模一样**，后者发生时看门狗会安静退出而端点仍开着。
+        #    现在：状态没了 = **情况不明**，先去读真实世界的状态；
+        #    只有确认 `No serve config` 才允许安静退出，否则强制走 close-loop。
+        exit_only_if_closed() {
+            _s=$(timeout 30 docker exec -i "$CTR" tailscale serve status </dev/null 2>&1); _rc=$?
+            if [ "$_rc" -eq 0 ] && printf "%s" "$_s" | grep -q "No serve config"; then
+                echo "$(stamp) WATCHDOG_EXIT_VERIFIED_CLOSED: 状态已撤且端点确认关着，退出" >>"$LOG"
+                exit 0
+            fi
+            echo "$(stamp) WATCHDOG_STATE_LOST_BUT_SERVE_OPEN: 状态没了但端点没关（或读不到状态）—— 强制关闭" >>"$LOG"
+            "$SELF" close-loop 0
+            exit $?
+        }
+
+        while : ; do
+            if [ ! -f "$STATE" ]; then exit_only_if_closed; fi
             _d=$(cut -d" " -f1 "$STATE" 2>/dev/null)
             _t=$(cut -d" " -f2 "$STATE" 2>/dev/null)
-            [ -n "$_d" ] || break
-            # 状态已归别人（有更新一代接管）→ 安静退出，不关任何东西
-            [ "$_t" = "$MYTOK" ] || {
-                echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_SUPERSEDED: 状态已归新一代，本代退出" >>"$LOG"
+            # 内容读不出来 = 情况不明，同样不许当成撤销
+            if [ -z "$_d" ] || [ -z "$_t" ]; then exit_only_if_closed; fi
+            # 状态归了**新一代**（令牌不同但文件在）→ 由新一代负责，本代安静退出
+            if [ "$_t" != "$MYTOK" ]; then
+                echo "$(stamp) WATCHDOG_SUPERSEDED: 状态已归新一代，本代退出" >>"$LOG"
                 exit 0
-            }
+            fi
             if [ "$(date +%s)" -ge "$_d" ]; then
-                # ⚠️ 只有**确认关闭成功**才退出（codex plan-R12）。
-                #    close-loop 外面包着 flock 等待，并发的 close 完全可能持锁超过
-                #    LOCK_WAIT（它每轮 reset 30 秒 + status 30 秒，而限时只算退避）。
-                #    早先写成 `exit $?` —— 拿不到锁就退出、EXIT 陷阱顺手清掉 PID 文件，
-                #    于是「状态还 armed、端点可能还开着，却没有看门狗再去重试」，
-                #    正好推翻手册里「关闭失败时看门狗仍在重试」那句话。
-                #    现在：任何非 0 都不退出，只要 STATE 还在且归属仍是自己就继续重试
-                #    （循环条件与令牌检查负责真正的退出）。
                 "$SELF" close-loop 0
                 _rc=$?
                 [ "$_rc" -eq 0 ] && exit 0
-                echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_KEEPS_TRYING: close-loop rc=${_rc}（锁被占或归属有变）—— 仍持有归属，不退出" >>"$LOG"
-                sleep "$POLL"
-                continue
+                echo "$(stamp) WATCHDOG_KEEPS_TRYING: close-loop rc=${_rc}（锁被占或归属有变）—— 仍持有归属，不退出" >>"$LOG"
             fi
             sleep "$POLL"
         done
-        echo "$(date "+%Y-%m-%d %H:%M:%S") WATCHDOG_DISARMED: 状态文件已移除，未执行关闭" >>"$LOG"
-    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" "$_tok" >/dev/null 2>&1 &
+    ' _ "$STATE" "$LOG" "$POLL" "$PIDFILE" "$SELF" "$_tok" "$TS_CTR" >/dev/null 2>&1 &
 
     sleep 1
     if ! watchdog_owns_state; then
