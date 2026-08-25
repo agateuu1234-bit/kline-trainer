@@ -19,7 +19,12 @@
 - **CI 是 `ubuntu-latest`，且任何 skip 都算失败**。禁止 `@pytest.mark.skip` / `skipif` / `importorskip`。平台专属常量一律 `getattr(mod, "NAME", None)` 取，走「该平台最强的那个原语」。
 - **测试的 import 不得依赖 CI 没装的包**。`requirements-test.txt` 不装 `asyncpg`；本模块**零外部依赖**，测试只 import 标准库 + `qmt_manifest` + `qmt_fsroot` + `qmt_normalize`。
 - **全部测试跑在 `tmp_path`**，不连数据库、不连网络、不读真实挂载点。
-- **中文错误信息**面向非程序员操作者：每条拒绝都要说清「哪里不对」与「该怎么办」。
+- **中文错误信息**面向非程序员操作者：每条拒绝都要说清「哪里不对」**与**「该怎么办」。
+  ⚠️ **落地方式（2026-08-25 裁决，勿逐点重复）**：「该怎么办」由 `ManifestInvalidError`
+  **在类里统一追加**（`GUIDANCE` 常量），**调用点只写「哪里不对」**。本模块有约 90 个拒绝点，
+  其中绝大多数的「该怎么办」是同一个答案；逐点重复既冗余、又必然漏——本片已因此被评审提了三次。
+  提到类里之后，这条约束由 `test_every_invalid_error_carries_actionable_guidance` 钉死，
+  **结构上不可违反**。
 - **变异验证必须禁字节码缓存**：`PYTHONDONTWRITEBYTECODE=1` 且每次清 `__pycache__`。等长改动 + 同秒还原会让旧 `.pyc` 继续生效，**结论两个方向都可能是假的**。
 - **变异由控制者亲跑**，不接受实施者自报「验过了」。
 - `manifest_version` 本片定为 **1**。**新增任何必需字段必须 bump 版本**（spec O2-F8）。
@@ -414,7 +419,24 @@ class ManifestInvalidError(Exception):
     **与 `ManifestVersionError` 是两族**：本族说「这份账本坏了」，那族说
     「这份账本是别的版本写的」。混成一句话会让操作者面对一棵已拉几百只股的
     staging 无路可走（O2-F8）。
+
+    ⚠️ **动作指引由本类统一追加，调用点只说「哪里不对」**（2026-08-25 裁决）：
+    全局约束要求每条拒绝都说清「哪里不对」**与**「该怎么办」，而本模块有约 90 个
+    拒绝点、其中绝大多数的「该怎么办」是**同一个答案**。逐点重复同一句话既冗余、
+    又必然漏（本片因此被评审提了三次）。把它提到类里，约束就从散文变成
+    **结构上不可违反**的东西，并由 `test_every_invalid_error_carries_actionable_guidance`
+    钉死。
     """
+
+    #: 所有「账本坏了」类拒绝共用的动作指引。
+    GUIDANCE = (
+        "该怎么办：这份账本（fetch_manifest.json）已不可信，本工具不会尝试修复它"
+        "——半份账本比没有账本更危险。请换一个新的 staging 目录 + 新 seed 重新拉取。"
+    )
+
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(f"{detail}\n{self.GUIDANCE}")
 
 
 class ManifestVersionError(Exception):
@@ -974,7 +996,10 @@ def test_every_required_key_is_actually_required(missing):
 def test_top_level_universe_is_not_required_and_not_rejected():
     """顶层没有 universe（S2-F3）：不加它照样过；加了也只当未知键保留。
 
-    判别力：把 "universe" 加回 REQUIRED_KEYS，本条第一半必红。
+    判别力：把 "universe" 加回 REQUIRED_KEYS，本条**第二半**必红。
+    （⚠️ 不是第一半——`assert "universe" not in _valid_manifest()` 与 REQUIRED_KEYS
+    无关：基座构造的字典本来就没有顶层 universe，改常量不影响那个断言。
+    2026-08-25 评审独立推演指出，控制者核实为真。**结论对不代表归因对。**）
     """
     assert "universe" not in _valid_manifest()          # 基座本来就没有它
     validate_manifest(_valid_manifest())                # 且照样通过
@@ -1003,6 +1028,27 @@ def test_validate_manifest_reports_shape_error_when_version_matches():
     """
     with pytest.raises(ManifestInvalidError):
         validate_manifest({"manifest_version": 1})      # 版本对，但九个必需键全缺
+
+
+def test_every_invalid_error_carries_actionable_guidance():
+    """⭐ 不变量：**任何**一条「账本坏了」的拒绝，字符串里都必须带动作指引。
+
+    本模块有约 90 个拒绝点，逐点检查那句话写没写是不可能的纪律——
+    把指引提到异常类里统一追加，这条不变量就成了结构上不可违反的东西。
+    （2026-08-25：本片曾因「只说哪里不对、没说该怎么办」被评审提了三次，根因即在此。）
+
+    判别力：把 GUIDANCE 的追加去掉（`super().__init__(detail)`），本条必红。
+    """
+    e = ManifestInvalidError("随便什么细节")
+    assert "随便什么细节" in str(e)          # 「哪里不对」还在
+    assert "该怎么办" in str(e)              # 「该怎么办」被统一追加
+    assert "换一个新的 staging" in str(e)    # 且是可执行的动作，不是空话
+
+
+def test_invalid_error_keeps_the_raw_detail_separately():
+    """`detail` 保留未经追加的原文，便于精确断言与日志分级。"""
+    e = ManifestInvalidError("缺少必需字段 'seed'")
+    assert e.detail == "缺少必需字段 'seed'"
 
 
 def test_empty_seed_is_rejected():
@@ -1090,6 +1136,7 @@ Expected: 约 30 passed（数字是估算，**判据是没有 failed / error / s
 | M13 | `validate_manifest` 首行改成 `raise ManifestInvalidError("x")`（**恒抛**） | `test_the_baseline_manifest_passes_everything` —— 这一条就是为它存在的 |
 | M14 | 把 `check_version(payload)` 挪到必需键循环**之后** | `test_validate_manifest_reports_version_before_shape`（真正的次序钉） |
 | M15 | 把必需键循环整个删掉 | `..._reports_shape_error_when_version_matches` + 9 个 `..._is_actually_required` 档 |
+| M16 | `ManifestInvalidError.__init__` 改回 `super().__init__(detail)`（不追加指引） | `test_every_invalid_error_carries_actionable_guidance` |
 
 - [ ] **Step 6: 提交**
 
