@@ -123,33 +123,68 @@ serve_status_is_expected() {
 #    共享表，那一整类竞态**根本不存在**（不是把窗口缩小，是消灭）。
 #    代价：写 /etc/cron.d 需要 root，本机 agate1234 无免密 sudo →
 #    装/卸变成**由 user 跑一条命令**（与 P1/P5 同类），脚本负责生成命令并核验。
-boot_guard_installed() {
-    [ -f "$BOOT_GUARD_FILE" ] && grep -q 'boot-close' "$BOOT_GUARD_FILE" 2>/dev/null
+# 守卫文件的**完整期望内容**（两行）。检测与安装都以它为唯一真相。
+# ⚠️ 自带 PATH 行（与同目录 /etc/cron.d/sysstat 的惯例一致）：cron 跑任务时环境是
+#    受限的。本机实测 docker 在 /usr/bin、且 /etc/crontab 的 PATH 覆盖得到，
+#    但那是**当前**的巧合 —— 把 PATH 写进守卫文件，才不依赖系统默认值。
+BOOT_GUARD_PATH='/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin'
+
+# ⚠️ cron 行里的路径**不能带空白**：cron 按空白切字段，带空格的路径会被切碎，
+#    而且是**静默**坏掉（守卫看着装上了，开机时却跑不起来）。部署目录
+#    /vol1/1000/agate1234/kline-trainer 不带空格；这里加一道硬检查免得将来踩。
+assert_self_path_sane() {
+    case "$SELF" in
+        *[[:space:]]*)
+            printf '%s\n' "BAD_SCRIPT_PATH: 脚本路径含空白，cron 会把它切碎 —— 请把脚本放到不带空格的目录：$SELF"
+            return 1 ;;
+    esac
+    return 0
 }
 
-# /etc/cron.d 的行格式比用户 crontab 多一个「以哪个用户身份跑」的字段。
 boot_guard_line() {
     printf '@reboot %s %s boot-close >>%s 2>&1' "$(id -un)" "$SELF" "$LOG"
 }
 
+boot_guard_content() {
+    printf 'PATH=%s\n%s\n' "$BOOT_GUARD_PATH" "$(boot_guard_line)"
+}
+
+# ⚠️ 必须**逐字精确匹配**，不能只找子串（codex plan-R16）。
+#    早先写的是「文件存在 且 内容含 boot-close」—— 一行**注释** `# boot-close`、
+#    一条写坏的 cron 行、路径或用户名不对、甚至别的命令里恰好带这几个字，
+#    统统都能骗过去；open 于是认为「重启守卫在」而把零认证端点开出来，
+#    重启后端点回来却没人关。
+#    现在：剥掉空行与注释后剩下的**活动行**，必须与期望内容**完全一致**
+#    （含定时表达式、以哪个用户跑、脚本绝对路径、参数、重定向、PATH 行）。
+boot_guard_installed() {
+    [ -f "$BOOT_GUARD_FILE" ] || return 1
+    _active=$(grep -vE '^[[:space:]]*(#|$)' "$BOOT_GUARD_FILE" 2>/dev/null)
+    _want=$(boot_guard_content | grep -vE '^[[:space:]]*(#|$)')
+    [ "$_active" = "$_want" ]
+}
+
 # ⚠️ 这两个函数一律用 printf 输出，**不用 echo**（本机 /bin/sh 是 dash，
-#    dash 的 echo 会解释 `\n` 之类的转义 —— 实测把给 user 的那条安装命令
-#    从中间打断成了两行，粘贴过去是坏的）。printf 的 %s 不解释参数里的转义。
+#    dash 的 echo 会解释 \n 之类的转义 —— 实测把给 user 的那条安装命令
+#    从中间打断成了两行，粘贴过去是坏的）。
+# ⚠️ 远程命令先装进变量、再用 printf 的 %s 占位符打出来，**不要**把它拼进
+#    另一层引号里 —— 实测那样会把 \n 打成 \\n、把 && 打成 \&\&，粘过去同样是坏的。
 print_boot_guard_install() {
+    _remote="printf 'PATH=%s\n%s\n' '$BOOT_GUARD_PATH' '$(boot_guard_line)' | sudo tee $BOOT_GUARD_FILE >/dev/null && sudo chmod 644 $BOOT_GUARD_FILE && echo INSTALLED"
     printf '%s\n' "开机守卫要写到：$BOOT_GUARD_FILE"
     printf '%s\n' "这个文件属于 root，所以**这一步得你自己跑**（会问 NAS 密码）。"
     printf '\n'
     printf '%s\n' "在你自己的终端里，把下面这一整行粘贴进去（把 <NAS地址> 换成 NAS 的 IP）："
     printf '\n'
-    printf '%s\n' "  ssh $(id -un)@<NAS地址> \"printf '%s\\n' '$(boot_guard_line)' | sudo tee $BOOT_GUARD_FILE >/dev/null && sudo chmod 644 $BOOT_GUARD_FILE && echo INSTALLED\""
+    printf '  ssh %s@<NAS地址> "%s"\n' "$(id -un)" "$_remote"
     printf '\n'
     printf '%s\n' "看到 INSTALLED 之后，回来跑：$SELF boot-guard-status"
 }
 
 print_boot_guard_remove() {
+    _remote="sudo rm -f $BOOT_GUARD_FILE && echo REMOVED"
     printf '%s\n' "在你自己的终端里跑（会问 NAS 密码，把 <NAS地址> 换成 NAS 的 IP）："
     printf '\n'
-    printf '%s\n' "  ssh $(id -un)@<NAS地址> \"sudo rm -f $BOOT_GUARD_FILE && echo REMOVED\""
+    printf '  ssh %s@<NAS地址> "%s"\n' "$(id -un)" "$_remote"
 }
 
 # 等 docker 与 tailscale 容器就绪（开机时 cron 可能跑在它们起来之前）。
@@ -295,6 +330,7 @@ esac
 
 case "${1:-}" in
 boot-guard-status)
+    assert_self_path_sane || exit 1
     # ⚠️ 为什么必须有开机守卫（codex plan-R7 F2）：超时看门狗是 /tmp 里的状态文件
     #    加一个进程，而 tailscale 的 serve 配置是**持久**的。NAS 一重启，守卫没了、
     #    端点却回来了 —— 正好回到「零认证端点无人看管地一直开着」这个本要防的状态。
@@ -311,6 +347,7 @@ boot-guard-status)
     fi
     ;;
 show-boot-guard-install)
+    assert_self_path_sane || exit 1
     print_boot_guard_install
     ;;
 show-boot-guard-remove)
