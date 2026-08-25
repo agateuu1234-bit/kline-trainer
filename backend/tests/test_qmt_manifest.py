@@ -90,6 +90,27 @@ def test_invalid_error_carries_a_detail_string():
     assert "seed" in str(e)
 
 
+def test_every_invalid_error_carries_actionable_guidance():
+    """⭐ 不变量：**任何**一条「账本坏了」的拒绝，字符串里都必须带动作指引。
+
+    本模块有 90 个拒绝点，逐点检查那句话写没写是不可能的纪律——
+    把指引提到异常类里统一追加，这条不变量就成了结构上不可违反的东西。
+    （本片被评审提了三次「只说哪里不对、没说该怎么办」，根因即在此。）
+
+    判别力：把 GUIDANCE 的追加去掉（`super().__init__(detail)`），本条必红。
+    """
+    e = ManifestInvalidError("随便什么细节")
+    assert "随便什么细节" in str(e)          # 「哪里不对」还在
+    assert "该怎么办" in str(e)              # 「该怎么办」被统一追加
+    assert "换一个新的 staging" in str(e)    # 且是可执行的动作，不是空话
+
+
+def test_invalid_error_keeps_the_raw_detail_separately():
+    """`detail` 保留未经追加的原文，便于精确断言与日志分级。"""
+    e = ManifestInvalidError("缺少必需字段 'seed'")
+    assert e.detail == "缺少必需字段 'seed'"
+
+
 from qmt_manifest import check_version
 
 
@@ -376,7 +397,7 @@ def test_every_required_key_is_actually_required(missing):
 def test_top_level_universe_is_not_required_and_not_rejected():
     """顶层没有 universe（S2-F3）：不加它照样过；加了也只当未知键保留。
 
-    判别力：把 "universe" 加回 REQUIRED_KEYS，本条第一半必红。
+    判别力：把 "universe" 加回 REQUIRED_KEYS，本条第二半必红。
     """
     assert "universe" not in _valid_manifest()          # 基座本来就没有它
     validate_manifest(_valid_manifest())                # 且照样通过

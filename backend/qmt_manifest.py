@@ -71,7 +71,22 @@ class ManifestInvalidError(Exception):
     **与 `ManifestVersionError` 是两族**：本族说「这份账本坏了」，那族说
     「这份账本是别的版本写的」。混成一句话会让操作者面对一棵已拉几百只股的
     staging 无路可走（O2-F8）。
+
+    ⚠️ **动作指引由本类统一追加，调用点只说「哪里不对」**：全局约束要求每条拒绝
+    都说清「哪里不对」**与**「该怎么办」，而本模块有 90 个拒绝点、其中绝大多数的
+    「该怎么办」是**同一个答案**。逐点重复同一句话既冗余、又必然漏（本片已被评审
+    提了三次）。把它提到类里，约束就从散文变成**结构上不可违反**的东西。
     """
+
+    #: 所有「账本坏了」类拒绝共用的动作指引。
+    GUIDANCE = (
+        "该怎么办：这份账本（fetch_manifest.json）已不可信，本工具不会尝试修复它"
+        "——半份账本比没有账本更危险。请换一个新的 staging 目录 + 新 seed 重新拉取。"
+    )
+
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(f"{detail}\n{self.GUIDANCE}")
 
 
 class ManifestVersionError(Exception):
