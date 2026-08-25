@@ -115,6 +115,11 @@ enum DrawingEditRouter {
     ///      平移到线看不见时**不重绘** → 控件停在旧状态（验收 #18c 失效）。
     ///      提示陈旧最坏只是晚一帧，写入仍会被 `canEditStyle` 那道现算的门拦住。
     static func styleControlsEnabled(engine: TrainingEngine) -> Bool {
+        // D86（自动选中 spec §6.1 第二张表）：分流判据是 `session.mode`，不再是「有没有选中」。
+        // 画线态**恒可用** —— 面板此刻改的是「本局默认」（必然写得进去），与任何线的状态无关；
+        // 锁定的线只该让**附带的** `applyStyle` 被拒（§6.3 #2：灰只降饱和、绝不写解释文案），
+        // 不该把面板整个灰掉。
+        guard engine.drawingSession.mode == .select else { return true }
         guard engine.drawingSession.selectedDrawingID != nil else { return true }   // ①
         return editableIgnoringGeometry(engine: engine)
             && engine.drawingSession.selectionGeometryVisible                        // ②
@@ -132,7 +137,23 @@ enum DrawingEditRouter {
     /// **是每次求值现算的派生值，不是拷贝进某个 @State 的副本**（D49：常驻面板长期存活，
     /// 任何第二份样式状态都会与 `engine.drawings` 里的真值漂移）。
     static func panelStyle(engine: TrainingEngine) -> DrawingDefaultStyle {
-        guard let d = uniqueSelected(engine: engine) else { return engine.drawingSession.defaultStyle }
+        // D86（自动选中 spec §6.1 第一张表）：分流判据是 `session.mode`，不再是「有没有选中」。
+        // 画线态恒显示**本局默认**（=「接下来要画的样式」）。这条规则的自洽性来源是 D38：
+        // 画线态下点图表是落锚、**不做 hitTest** → 画线态下被选中的必然是刚画的那一条；
+        // 提交那一刻两者相等（`commitPending` 就是用 `defaultStyle` 造的线），只在「那条线改不动、
+        // 默认继续改」之后才分叉 —— 而画线态的语义本来就是「我下一笔要画成什么样」。
+        // 这是对 D49 的**有意修订**（§6.5 #3），不是回归。
+        guard engine.drawingSession.mode == .select,
+              let d = uniqueSelected(engine: engine) else { return engine.drawingSession.defaultStyle }
+        return styleFields(of: d)
+    }
+
+    /// 从一条线上取 5 个样式字段。**`Sources/` 里唯一一处从 `DrawingObject` 取样式**（D49）。
+    /// ⚠️ 它服务两个**不同的问题**：`panelStyle` 的选择态分支问「面板显示什么」，
+    ///    Task 6 的 `selectedLineStyle` 问「改线时从哪儿起算」。两者在画线态**刻意不同**
+    ///    （前者取默认、后者取线）—— 合并成一个函数正是 codex spec-R9 那条 high 的来源
+    ///    （§6.4：「单一真相」是对同一个问题只留一个答案，不是对两个问题共用一个函数）。
+    private static func styleFields(of d: DrawingObject) -> DrawingDefaultStyle {
         var s = DrawingDefaultStyle()
         s.lineSubType = d.lineSubType
         s.lineStyle = d.lineStyle
@@ -195,22 +216,152 @@ enum DrawingEditRouter {
     // PR-4 把派生值算好传进视图时，把「现取」这个性质丢了。这两个函数把它还回来：
     // `DrawingStyleParams` 只把**变更意图**（mutation 闭包）传上去，「现取 + 合并」在这里（host 可测）完成。
 
-    /// 把一次样式变更**合并进动作发生那一刻的当前真值**再写入选中线。
-    /// ⚠️ **绝不能改成接收调用方传入的快照**——那正是本函数要修的回归本身。
-    @discardableResult
-    static func applyStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
-                                   engine: TrainingEngine) -> Bool {
-        var next = panelStyle(engine: engine)      // ← 现取（动作发生这一刻的真值，不是渲染时的快照）
-        mutate(&next)
-        return applyStyle(next, engine: engine)
+    /// §6.4 base ②：选中线**当前**的 5 个样式字段（无选中 / 不唯一 / 结构性不可见 → nil）。
+    /// 与 `panelStyle` 的选择态分支**同源取值**（都经 `uniqueSelected` + `styleFields`），
+    /// 但**语义不同**：那个回答「面板显示什么」，这个回答「改线时从哪儿起算」。
+    /// 两者在画线态**刻意不同** —— 前者取默认、后者取线。
+    private static func selectedLineStyle(engine: TrainingEngine) -> DrawingDefaultStyle? {
+        guard let d = uniqueSelected(engine: engine) else { return nil }
+        return styleFields(of: d)
     }
 
-    /// 无选中时：同样「现取 + 合并」，写「下一条线的默认」。
-    static func applyDefaultStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
-                                          engine: TrainingEngine) {
-        var next = engine.drawingSession.defaultStyle   // ← 现取
-        mutate(&next)
-        engine.drawingSession.setDefaultStyle(next)
+    /// D86：常驻面板的**唯一**写入入口。取代 applyStyleMutation / applyDefaultStyleMutation。
+    /// ⚠️ **不是**三个分支都与被取代的旧函数逐字等价：
+    ///    - 分支 ②（选择态+有选中）/ 分支 ③（选择态+无选中）与旧的 `applyStyleMutation` /
+    ///      `applyDefaultStyleMutation` **逐字等价** —— 这是「可以安全删掉旧函数」这一结论的证据；
+    ///    - 分支 ①（画线态）是 **D86 的新语义**，与旧行为**有意不同**：旧函数从未覆盖过画线态，
+    ///      本分支把「改样式」在画线态下的含义从「只改选中线」改成「改本局默认 + best-effort
+    ///      顺带套到线上」，且**必须**用两个独立的 base（见下方反例）——那两个旧函数成为孤儿是
+    ///      因为分支 ②③ 吸收了它们，不是因为分支 ① 把它们泛化了。
+    ///    ⚠️ **不得**把分支 ① 的 base 改回 `panelStyle(engine:)`：画线态下它 ≡ `defaultStyle`，
+    ///       改回去就是把整份默认快照套到线上（§6.3 #0 的缺陷），
+    ///       `lockedDivergenceIsNeverRetroactivelyApplied`（M15）那条五步档会红。
+    ///
+    /// ⚠️ **画线态把同一个 mutation 分别套到两个 base 上**（spec §6.3 #0），**不是**套一份默认快照。
+    ///    反例（上一稿会真的发生）：画线 A（橙、粗细 1，自动选中）→ 锁定 A → 改颜色为紫
+    ///    （默认变紫；`applyStyle` 被 `!d.locked` 拒 → A 仍是橙 ⇒ **默认与 A 已分叉**）→ 解锁 A
+    ///    → 只改**粗细**为 3。若此刻把「默认的整份快照 {紫, 3}」套上去 ⇒ **A 的颜色被静默从橙改成紫**，
+    ///    并经 `drawingsRevision` → autosave **落盘**。用户只碰了粗细，被改掉的却是他刚刚特意
+    ///    锁起来保护过的颜色。
+    ///    ⚠️ `applyStyle` 的入参是**完整的** `DrawingDefaultStyle`（D50 的 API 形状，本片不改），
+    ///       所以「只改一项」**只能靠选对 base 来表达**。**base 选错就是这条缺陷本身。**
+    ///
+    /// ⚠️ 两个 base 都**现取**（动作发生这一刻的真值，不是视图渲染时的快照）——
+    ///    **绝不能改成接收调用方传入的快照**，那正是 1b-i PR-4 整支 R3 修过的那个真丢数据回归
+    ///    （两个控件在 SwiftUI 重渲染之前先后触发，第二次拿旧快照把第一次 revert 掉，
+    ///    选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。
+    static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
+                                        engine: TrainingEngine) {
+        let session = engine.drawingSession
+        if session.mode == .draw {
+            // **顺序 load-bearing**：先写默认（主语义、必须成功），**再** best-effort 改线
+            // （附带、可能被锁定 / 滑出屏幕 / 未来数据 / 工具未实现四类门拒）。反过来写会让
+            // 「线改失败」在实现上很容易被顺手写成「整个操作失败」，而用户点了一下颜色却什么都没变。
+            var d = session.defaultStyle                        // base ①：默认自己
+            mutate(&d)
+            session.setDefaultStyle(d)
+            if let cur = selectedLineStyle(engine: engine) {    // base ②：那条线自己当前的 5 个样式字段
+                var l = cur
+                mutate(&l)
+                // ⚠️ 返回值**刻意丢弃**且**不得**据它决定选中生命期（D64 原样成立：失败原因有五类，
+                //    其中三类必须保留选中，一个 Bool 表达不了）。失败也**不回滚默认、不给任何反馈**
+                //    （母 spec §3 逐字：灰只降饱和、绝不写任何解释文案）。
+                _ = applyStyle(l, engine: engine)
+            }
+        } else if session.selectedDrawingID != nil {
+            // 选择态 + 有选中：只改那一条，**不回写默认**（D49 的核心价值，原样保留）。
+            // base 取 `panelStyle` —— 选择态下它与 `selectedLineStyle` 同源，且这一支与被本函数
+            // 取代的 `applyStyleMutation` **逐字等价**（严格泛化的证据）。
+            var l = panelStyle(engine: engine)
+            mutate(&l)
+            _ = applyStyle(l, engine: engine)
+        } else {
+            // 选择态 + 无选中：改「下一条线的默认」。与被取代的 `applyDefaultStyleMutation` 逐字等价。
+            var d = session.defaultStyle
+            mutate(&d)
+            session.setDefaultStyle(d)
+        }
+    }
+
+    // MARK: D83 / D84 / D85 提交路由（自动选中 spec §3 / §4 / §5）
+
+    /// **外层 = 生产入口**：从 pending 锚提交一条新线，并按状态决定选中处置。
+    ///
+    /// 覆盖 D83 分支 1 与分支 2 的**全部六条出口**（spec §3.1 那张表）—— 这就是它必须从
+    /// `commitPending` 开始、而不是从 `routeDrawingCommit` 开始的全部理由（spec §3.4）：
+    /// 出口 a / b / c 在改动前是 `ChartContainerView` 里的 `return`，在 `routeDrawingCommit`
+    /// **之前**就退出了，于是最主要的两条被拒路径**永远不会清空选中**，D37 那个陷阱原样复现。
+    /// ⚠️ **错误的修法（明令禁止，spec §3.4）**：在 `ChartContainerView` 的两处 `guard … else { return }`
+    ///    里各补一句 `clearSelection()` —— 那会把分支 2 的判据散进三个地方，其中两处在 UIKit-gated
+    ///    文件里（host 上根本不编译），且「三处保持一致」没有任何机制保证。
+    ///
+    /// `commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点（源码守卫 G1 / G1b）。
+    static func commitPendingAndSelect(panel: PanelId, mapper: CoordinateMapper, engine: TrainingEngine) {
+        let session = engine.drawingSession
+
+        // ① 出口 a（多锚 period 不一致）/ 出口 b（`withStyle` 语义闸拒，如水平线的 `.segment`）。
+        //    判据与顺序**一字承接**改动前 `ChartContainerView` 的那道门 —— 本片只是给它补一句
+        //    `clearSelection()` 并搬了位置，**不新增、不放宽、不重排任何落库门**（spec §5.1 约束 3）。
+        guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else {
+            session.clearSelection()                       // 变异 M13 守这一句
+            return
+        }
+
+        // ② 出口 c（射线锚点越主图右缘 → `lineXRange` 返 nil）。承接改动前那道「不可见画线不落库」的门。
+        //    ⚠️ 用的是**调用方传进来的 `mapper`**，**不是** `session.viewportMapper(for: panel)`
+        //       （spec §5.1 约束 2）：改动前那道门用的就是本次 tap 现算的 mapper；换成 session 里
+        //       发布的那一份会在「本面板无 candles」时变成 fail-closed —— 那是对**既有落库门**的
+        //       行为改动，不属本片范围。**不得顺手"改进"**。
+        guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else {
+            session.clearSelection()                       // 变异 M14 守这一句（= codex spec-R1 那条 high）
+            return
+        }
+
+        // ⚠️ ① / ② 的 `clearSelection()` 在 D84 复盘门（内层第 ⑤ 步）**之前**，这是有意的
+        //    （spec §5.1 约束 1）：那道门管的是复盘**不得获得**选中能力，而「清空」从不授予任何能力
+        //    —— 无论哪个模式，一次被拒的提交都不该留下陈旧选中。**不得**把第 ⑤ 步提前去包住 ① / ②。
+        routeAndSelect(committed, panel: panel, engine: engine)
+    }
+
+    /// **内层**：落库与选中处置（六步流程的 ③④⑤⑥）。**接收一个已经造好的 `DrawingObject`**。
+    ///
+    /// 这个缝不是为测试硬开的口子，它就是「造对象」与「落库 + 定选中」两件事的自然分界；
+    /// 但它顺带让四条变异**可构造**（spec §5.1）—— 外层的 `commitPending` 内部经
+    /// `DrawingObject.init` 生成**全新 UUID**，测试无从预知 id，经外层根本写不出 id 碰撞档。
+    ///
+    /// ⚠️ **六步顺序是 load-bearing 的，一步都不许换位**（每一步的换位后果见各自行内注）。
+    /// ⚠️ 生产路径上**只有外层 `commitPendingAndSelect` 一个调用点**（源码守卫 G6）——
+    ///    拆内外两层**不得**变成两个生产入口。
+    static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine) {
+        // ③ 提交**前**的存在性快照。**必须在 ④ 之前求值**：挪到 ④ 之后恒为 true
+        //    → 第 ⑥ 步的合取项 ① 恒假 → 自动选中整体失效（变异 M5c）。
+        let wasPresent = engine.drawings.contains { $0.id == committed.id }
+
+        // ④ **无条件**落库：复盘照常落线（浮动铅笔钮，1a-iii 起的既有功能，D26 明写复盘继续用它）。
+        engine.routeDrawingCommit(committed)
+
+        // ⑤ D84 复盘门。**只包住「授予选中」这一步**（spec §4.2）：
+        //    挪到 ④ 之前 = 复盘的**落线**功能整个回归掉（变异 M2），与 1b-ii 那道 `.segment` 门
+        //    误管所有工具是同一类错误 —— fail-closed 的门必须限定到它真适用的那一类。
+        //    删掉它 = 复盘获得选中能力，于是能对**已归档 record 里的原训练线**做 🗑 / 🔒 / 改样式
+        //    （D34 trust boundary，带 (层, id) 权限门控的复盘选中是 P5，变异 M1）。
+        guard engine.flow.mode != .review else { return }
+
+        // ⑥ D83 的判据 = **提交前后两次状态快照的合取**，**绝不读任何返回值**（D64：
+        //    `routeDrawingCommit` 返回 `Void`、吞掉 `appendDrawing` 的返回值；而失败原因有五类，
+        //    一个 Bool 表达不了）。
+        //    合取项 ①（提交前不存在）单独挡 id 碰撞——少了它会选中那条**陈旧的老线**（D37 的陷阱）；
+        //    合取项 ②（提交后在**本面板**的可见集合里）单独挡周期不一致 / 几何 nil / revealTick 未到 /
+        //    归属判到了另一个面板。
+        //    ⚠️ ② 用 **membership**，不用 `count == 1`：与 `syncSelectionByState` 的判据纪律逐字一致
+        //    （见其头注「不复用 uniqueSelected」），有了 ① 之后「同 id 出现两条」在本路径上不可达。
+        let visible = RenderStateBuilder.visibleDrawings(
+            engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+        if !wasPresent && visible.contains(where: { $0.id == committed.id }) {
+            engine.drawingSession.setCommittedSelection(id: committed.id, panel: panel)
+        } else {
+            engine.drawingSession.clearSelection()          // 出口 d / e / f
+        }
     }
 
     /// 删除选中线。**唯一合法调用点是确认框「删除」按钮的 action**——几何必须在**确认那一刻**

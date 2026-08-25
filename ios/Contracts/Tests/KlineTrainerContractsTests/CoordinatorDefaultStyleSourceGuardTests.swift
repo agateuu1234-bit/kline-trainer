@@ -5,19 +5,20 @@
 import Testing
 @testable import KlineTrainerContracts
 
-/// G1（D96）：`setDefaultStyle` 的调用点**恰好 3 个** ——
-/// `DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay`（本片新增两处种子）。
-/// 多于 3 ⇒ 出现了第四条写默认的路径，必须回来重审「哪些时机允许改本局默认」；
-/// 少于 3 ⇒ 有一处种子没接上（正是 M9 / M10 要造的形态）。
-@Test func g1_setDefaultStyle_has_exactly_three_call_sites() throws {
+/// G1（D96 + 自动选中 PR 的 D86）：`setDefaultStyle` 的调用点**恰好 4 个** ——
+/// `DrawingEditRouter.applyPanelStyleMutation` **2 处**（D86：画线态分支写「本局默认」+
+/// 无选中分支写「下一条线的默认」）+ `resumePending` + `resumePendingReplay`（两处续训种子）。
+/// ⚠️ 3→4 是**自动选中 PR 有意为之**：D86 让画线态的一次改样式同时写「那条线」与「本局默认」，
+///    这是新增的第四条写默认路径，已按本守卫头注的要求重审并接受（spec §6.1 / §6.3）。
+/// 多于 4 ⇒ 又出现了新的写默认路径，必须再次回来重审；
+/// 少于 4 ⇒ 有一处没接上（种子漏接，或 D86 的某个分支没写默认）。
+@Test func g1_setDefaultStyle_has_exactly_four_call_sites() throws {
     let sites = try callSiteCount("setDefaultStyle(")
     let total = sites.reduce(0) { $0 + $1.count }
-    #expect(total == 3, "setDefaultStyle 调用点应恰好 3 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
-    for needle in ["DrawingEditRouter.swift", "TrainingSessionCoordinator.swift"] {
-        #expect(sites.contains { $0.file.hasSuffix(needle) },
-                "\(needle) 里应有 setDefaultStyle 调用点，实测：\(sites.map(\.file))")
-    }
-    // 两处 resume 都在 coordinator 同一个文件里 ⇒ 该文件应占 2 次（只数总数会漏「两处种子挤成一处」）
+    #expect(total == 4, "setDefaultStyle 调用点应恰好 4 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
+    // 逐文件计数（只数总数会漏「两处挤成一处、另一处多出一次」这种互相抵消的坏状态）
+    #expect(sites.first { $0.file.hasSuffix("DrawingEditRouter.swift") }?.count == 2,
+            "路由里应恰好 2 处（D86 画线态分支 + 无选中分支），实测：\(sites.map { "\($0.file)×\($0.count)" })")
     #expect(sites.first { $0.file.hasSuffix("TrainingSessionCoordinator.swift") }?.count == 2,
             "coordinator 里应恰好 2 处（resumePending + resumePendingReplay）")
 }

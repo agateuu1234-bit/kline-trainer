@@ -772,7 +772,7 @@ struct TrainingEngineDrawingSessionTests {
         #expect(reviewAppends.map(\.count).reduce(0, +) == 1)
         let route = try callSiteCount("routeDrawingCommit(")
         #expect(route.map(\.count).reduce(0, +) == 1)
-        #expect(route.allSatisfy { $0.file.hasSuffix("/Render/ChartContainerView.swift") })        // 在 handleDrawingTap 的门之后
+        #expect(route.allSatisfy { $0.file.hasSuffix("/Drawing/DrawingEditRouter.swift") })        // 在 handleDrawingTap 的门之后
         // index 版删除：零生产调用点（D51/D67）
         #expect(try callSiteCount("deleteDrawing(at:").isEmpty)
         #expect(try callSiteCount("removeReviewDrawing(at:").isEmpty)
@@ -793,10 +793,12 @@ struct TrainingEngineDrawingSessionTests {
         //       `routeDrawingCommit` 在 TrainingEngine.swift（定义）与 ChartContainerView.swift:304（唯一路由）；
         //       其余文件（TrainingView/DrawingSession/LossyDrawingArray）里的同名字样**全是注释**，
         //       扫描器剥注释后不计入 —— 这条正是「必须剥注释」的实证理由，别把剥注释那步删了。
+        //     自动选中 PR（D85）后：`routeDrawingCommit` 的唯一调用点从 ChartContainerView.swift
+        //       搬进了 DrawingEditRouter.swift；白名单同步为 TrainingEngine.swift ∪ DrawingEditRouter.swift。
         #expect(try filesMentioning("appendDrawing").allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") })
         #expect(try filesMentioning("appendReviewDrawing").allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") })
         #expect(try filesMentioning("routeDrawingCommit").allSatisfy {
-            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Render/ChartContainerView.swift")
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
         })
     }
 

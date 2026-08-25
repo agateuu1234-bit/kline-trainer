@@ -474,13 +474,40 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   drawingsRevision 对照组），它们 `#if canImport(UIKit)` 门控、host `swift test` 完全不编译，
 #   故只能落在本门。pass-main-current.log 已用本轮真 fresh Catalyst 日志（1778 tests /
 #   208 suites，`-only-testing:KlineTrainerContractsTests`，与 CI 同款命令）逐行重裁。
+#   【画完自动选中（本轮）】总数 1778→1798（+20）：其中 1 条为本轮 Task 4 新增的 M12 守门测试
+#   （ChartContainerViewAutoSelectTests，`#if canImport(UIKit)` 门控，host swift test 完全不编译）；
+#   其余 19 条是本分支自己 Task 1-3 新增的 host-visible 测试（非外部漂移，只是当时没顺手同步
+#   进本基线）。同步理由**不是**「+20 漂出了 ±30 容差」——1778+30=1808，1798 根本没到上限；
+#   真实理由是本轮新增了 UIKit-gated 测试，uikit 清单一变、gate self-test 的一致性检测就会红，
+#   四处必须联动同步，顺带把 Task 1-3 累积的 +19 一并平账。uikit 77→78（+1，同上 M12）。
+#   Task 4 把 `.draw` 分支的落库+选中收口进 `DrawingEditRouter.commitPendingAndSelect`
+#   后，两条既有 UIKit-gated 行为测试的前提被自动选中打破（选中不再是"画线态恒空"）：
+#   `drawModeTapAlwaysAnchorsNeverSelects`（D54 的"画线态永远不建立选中"一句已被 spec D54
+#   明文推翻，判据改为"提交后选中的必须是刚画的那条新线"——**结果态**判据，不能证明
+#   "不是靠 hitTest 命中已有那条"：`DrawingHitTester.firstHit` 取最上层，两种实现选到的都是
+#   同一条，该机制改由三条既有结构守卫另行承担，见该测试注释）、
+#   `selectedLineActuallyRendersHighlighted`（`before` 快照的手动 rebuildRenderState 挪到
+#   `setMode(.select)` 之后，否则带着自动选中的旧渲染态、`before==after` 恒真）。
+#   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1798 tests / 211 suites）逐行重裁。
+#   【画完自动选中 Task 7（本轮）】total 1798→1811（+13）：Task 5 新增 7 条 + Task 6 新增 6 条
+#   host-visible 测试（styleFields/selectedLineStyle 显示置灰 + applyPanelStyleMutation 两个
+#   base 写入 + G3/G4 守卫），均为纯 host-visible（无 canImport(UIKit) 门），Catalyst delta 与
+#   host swift-testing delta（1901→1907，同为 +6；1894→1901，+7）对得上。uikit 清单不变，仍是
+#   78（本轮未新增/删除任何 UIKit-gated 测试，故不触发四处联动）。
+#   ⚠️ 同步理由**不是**「+13 漂出了 ±30 容差」——1798+30=1828，1811 远没到上限，实测没有漂出；
+#   真实理由是：若不同步，下一轮读到的仍是旧基线 1798，窗口下限锁死在 1798−30=1768，而当前真实
+#   总数已经是 1811 ⇒ 从 1811 掉到 1768 都不会报警，等于把这道门「掉 30 条就报警」的设计意图
+#   悄悄放宽成了「掉 43 条才报警」，且这个偏移会随每一片不同步而逐片累积。不同步 = 门被静默
+#   放宽，不是「反正没超容差就不用管」。
+#   pass-main-current.log 本轮未重裁（该 fixture 仍是 uikit 78 / total 1798 的真实冻结日志，
+#   1798 落在新窗口 [1781,1841] 内，下方活基线自测断言的回显数字不受影响）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1778" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 77 / total 1778）→ GATE PASS 且回显 1778 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1798" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1798）→ GATE PASS 且回显 1798 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1778，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1798，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

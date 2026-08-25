@@ -11,6 +11,7 @@ D55 dispatch：selectedDrawingID == nil → 一条都不高亮
 像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）
 像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）
 像素级：粗细 1…5 的墨量**严格递增**（图标真的越来越粗，不是 5 根同宽线）
+M12 的守门测试：画线态点一下 → 落线 + 自动选中，且**本帧** renderState.selectedDrawingID 已是新那条
 ChartContainerView 可构造 + 符合 UIViewRepresentable
 Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）
 Coordinator crosshairPoint 默认 nil（视图层瞬态）

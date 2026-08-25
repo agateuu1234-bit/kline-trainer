@@ -434,7 +434,7 @@ struct DrawingEditRouterTests {
     // `style` 是**视图渲染那一刻**捕获的快照。若两个控件在 SwiftUI 完成重渲染之前先后触发，第二次动作
     // 仍从同一份旧快照出发 → 把第一次的改动 revert 掉（选中线路径还经 `drawingsRevision` 被 autosave
     // 持久化）。`origin/main` 上的旧实现本来就是「动作发生那一刻，从活的单一真相现取」；PR-4 把派生值
-    // 算好传进视图时丢了这个性质。`applyStyleMutation`/`applyDefaultStyleMutation` 把「现取 + 合并」
+    // 算好传进视图时丢了这个性质。`applyPanelStyleMutation` 把「现取 + 合并」
     // 收回 `DrawingEditRouter`（host 可测）：本条**不经视图**、直接背靠背调用两次入口，模拟「同一渲染帧
     // 里两个控件先后触发」——旧实现下第二次会读到过期的 `style` 快照，第一枪会被 revert。
 
@@ -447,9 +447,9 @@ struct DrawingEditRouterTests {
         let rev = e.drawingsRevision
 
         // 背靠背两枪：旧实现（`mutate` 作用在调用方传入的快照上）下，第二枪会拿第一枪之前的旧颜色
-        // 把它 revert 掉；新实现每次都经 `applyStyleMutation` 内部 `panelStyle(engine:)` 现取。
-        #expect(DrawingEditRouter.applyStyleMutation({ $0.colorToken = .green }, engine: e) == true)
-        #expect(DrawingEditRouter.applyStyleMutation({ $0.thickness = 5 }, engine: e) == true)
+        // 把它 revert 掉；新实现每次都经 `applyPanelStyleMutation` 内部 `panelStyle(engine:)` 现取。
+        DrawingEditRouter.applyPanelStyleMutation({ $0.colorToken = .green }, engine: e)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)
 
         #expect(e.drawings[0].colorToken == .green, "第二枪不得把第一枪设的颜色 revert 掉")
         #expect(e.drawings[0].thickness == 5, "第二枪自己设的粗细必须生效")
@@ -460,14 +460,18 @@ struct DrawingEditRouterTests {
     func consecutiveDefaultStyleMutationsDoNotRevertEachOther() {
         let e = TrainingEngine.preview()
         e.toggleDrawingMode()
+        // D86：rig 显式设成 .select，以保持原测试的被测性质（「选择态 + 无选中」这一支，与被取代的
+        // applyDefaultStyleMutation 逐字等价）——画线态下 applyPanelStyleMutation 会额外 best-effort
+        // 改线（此处无选中会是 no-op，但那是另一条分支，不是本测试要测的那一支）。
+        e.drawingSession.setMode(.select)
         #expect(e.drawingSession.selectedDrawingID == nil)
         let initial = DrawingDefaultStyle()   // thickness:1 / colorToken:.orange（构造函数默认值）
         #expect(initial.colorToken != .green, "fixture 前提不成立：默认颜色已经是 .green")
         #expect(initial.thickness != 5, "fixture 前提不成立：默认粗细已经是 5")
         e.drawingSession.setDefaultStyle(initial)
 
-        DrawingEditRouter.applyDefaultStyleMutation({ $0.colorToken = .green }, engine: e)
-        DrawingEditRouter.applyDefaultStyleMutation({ $0.thickness = 5 }, engine: e)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.colorToken = .green }, engine: e)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)
 
         #expect(e.drawingSession.defaultStyle.colorToken == .green, "第二枪不得把第一枪设的颜色 revert 掉")
         #expect(e.drawingSession.defaultStyle.thickness == 5, "第二枪自己设的粗细必须生效")
