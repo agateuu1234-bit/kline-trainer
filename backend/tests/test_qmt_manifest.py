@@ -928,3 +928,21 @@ def test_staged_export_log_bytes_must_be_nonnegative_int():
         m["staged_export_log"]["bytes"] = bad
         with pytest.raises(ManifestInvalidError):
             validate_manifest(m)
+
+
+def test_staged_export_log_zero_bytes_is_allowed():
+    """⭐ 正向档：`bytes == 0` 合法——判据是「非负」，不是「正」。
+
+    ⚠️ **这条钉的是职责边界**：零字节的 `export_log.csv` 确实是坏数据，但拒绝它是
+    **解析阶段**的事（设计文档 §5：缺失/零字节/截断 → `parse_export_log` 抛
+    `QmtSchemaError` 干净拒绝）。一份记着 `bytes=0` + 空文件指纹的账本，
+    **结构上是自洽的**——账本的结构校验**不替内容校验做决定**。
+
+    （对称性：`files` 那边已有 `test_zero_byte_file_record_is_allowed`；
+    此处此前缺档——2026-08-25 控制者变异时发现：把 `>= 0` 改成 `> 0` 全绿。）
+
+    判别力：把 `sel["bytes"] >= 0` 改成 `> 0`，本条必红。
+    """
+    m = _valid_manifest()
+    m["staged_export_log"]["bytes"] = 0
+    assert validate_manifest(m) is m
