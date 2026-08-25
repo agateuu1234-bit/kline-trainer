@@ -2431,6 +2431,35 @@ def test_max_bytes_with_a_retained_fatal_error_is_valid():
     assert validate_manifest(m) == m
 
 
+def test_explicit_null_fetch_fatal_error_is_rejected():
+    """⭐ 只有形状判据够得到：显式写了 `fetch_fatal_error: null`，且**没有** stopped_reason。
+
+    「键写了却写成 null」与「键根本不存在」是**两件事**：前者是一份写坏了的账本，
+    必须拒；后者是绝大多数正常账本的样子，必须放行。
+
+    ⚠️ 与 `..._max_bytes_with_a_retained_fatal_error_is_valid` 那档的区别：那一档有
+    escape 类 stopped_reason，`null` 会被**配对判据**接住；本档**没有** stopped_reason，
+    配对判据够不着，**只有形状判据能拒它**（2026-08-25 控制者实测：修正前放行）。
+
+    判别力：把 `if "fetch_fatal_error" in payload:` 改回 `if fatal is not None:`，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(fetch_fatal_error=None))
+
+
+def test_absent_lifecycle_keys_are_still_valid():
+    """⭐ 对称的正向档：三个生命周期键**都不存在**时必须放行。
+
+    没有这一条，一个「凡是这三个键沾边就拒」的实现也能让上面那些否定档全绿——
+    而绝大多数正常账本正是三个键都没有的样子。
+    """
+    m = _valid_manifest()
+    assert "stopped_reason" not in m
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason_secondary" not in m
+    assert validate_manifest(m) == m
+
+
 def test_stopped_reason_secondary_only_allows_max_bytes():
     for bad in ("staging_path_escape", "", None, 1):
         with pytest.raises(ManifestInvalidError):
@@ -2479,13 +2508,18 @@ def _validate_lifecycle(payload: dict) -> None:
     reason = payload.get("stopped_reason")
     fatal = payload.get("fetch_fatal_error")
 
-    if reason is not None:
+    # ⚠️ **判据是「键写了没有」，不是「取出来是不是 None」**（2026-08-25 由 Task 11
+    # 实施者发现、控制者实测确认）：`"stopped_reason": null` 是**写坏了的账本**、必须拒；
+    # 键根本不存在才是绝大多数正常账本的样子、必须放行。`.get() is not None` 把两者
+    # **混成一档**而放行。三个生命周期键**用同一套判据**——本仓教训「同一条判据有多种
+    # 正交的绕过方式」：留一个入口不补就是留一条绕过路径。
+    if "stopped_reason" in payload:
         _require(isinstance(reason, str) and reason in STOPPED_REASONS,
                  f"stopped_reason 必须是 {sorted(STOPPED_REASONS)} 之一，"
                  f"读到 {reason!r}")
 
-    if fatal is not None:
-        _require(reason is not None,
+    if "fetch_fatal_error" in payload:
+        _require("stopped_reason" in payload,
                  "有 fetch_fatal_error 却没有 stopped_reason——写侧只落了一半")
         _require(isinstance(fatal, dict), "fetch_fatal_error 必须是对象")
         for key in FATAL_FIELDS:
@@ -2509,7 +2543,7 @@ def _validate_lifecycle(payload: dict) -> None:
                  "stopped_reason 会被后续运行的 max_bytes 洗掉")
 
     secondary = payload.get("stopped_reason_secondary")
-    if secondary is not None:
+    if "stopped_reason_secondary" in payload:
         _require(secondary == "max_bytes",
                  "stopped_reason_secondary 只允许 'max_bytes'（纯人读附注："
                  "Run1 撞 escape、Run2 触顶时，escape 的 stopped_reason "
@@ -2536,7 +2570,18 @@ Expected: 约 94 passed（数字是估算，**判据是没有 failed / error / s
 | M34 | 加一条 `fatal["kind"] == reason` | `test_fatal_kind_is_decoupled_from_stopped_reason` |
 | M35 | 删 `reason is not None` 那条反向配对 | `..._without_stopped_reason_is_rejected` |
 | M36 | `FATAL_FIELDS` 去掉 `errno` | `..._needs_exactly_four_fields[errno]` |
-| M37 | `_validate_lifecycle` 整体删掉调用 | 上述否定档全红，**而 5 条正向档仍绿** ← 证明正向档不是靠这条判据活着 |
+| M37 | `_validate_lifecycle` 整体删掉调用 | 上述否定档全红，**而正向档仍绿** ← 证明正向档不是靠这条判据活着 |
+| M38 | 三处 `"key" in payload` 任一改回 `value is not None` | 对应的 `..._explicit_null_...` 档 |
+
+> ⚠️⚠️ **判据是「键写了没有」，不是「取出来是不是 None」**（2026-08-25 由 Task 11 实施者
+> 发现、控制者实测确认 —— 这是 **plan 自身的 bug**）：`"stopped_reason": null` 是**写坏了的
+> 账本**、必须拒；键根本不存在才是正常账本的样子、必须放行。`.get() is not None` 把两者
+> **混成一档**而放行。
+>
+> ⚠️ 三个生命周期键必须**用同一套判据**。实测过一个反例：`fetch_fatal_error: null` 配上
+> escape 类 `stopped_reason` 时**会被拒**——但拒它的是**配对判据**，不是形状判据；
+> 而 `fatal: null` 且**没有** `stopped_reason` 时两条都够不着 → 放行。
+> 这是本仓「**同一条判据有多种正交的绕过方式**」的又一实例：留一个入口不补就是留一条绕过路径。
 
 - [ ] **Step 6: 提交**
 
