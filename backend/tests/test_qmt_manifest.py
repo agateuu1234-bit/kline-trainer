@@ -135,12 +135,14 @@ def test_check_version_rejects_non_int_version_as_invalid():
             check_version({"manifest_version": bad})
 
 
-def test_version_is_decided_before_shape(  ):
-    """次序钉：一份版本更高、且形状按本版要求**缺了一堆必需键**的 manifest，
-    必须报「版本更高」，而不是「形状非法」。
+def test_check_version_ignores_everything_but_the_version():
+    """一份**只有版本号、别的全没有**的输入，`check_version` 也必须只看版本
+    ——它不该顺手去查形状（那是 `validate_manifest` 的活）。
 
-    判别力：把 validate_manifest 写成「先查必需键、再查版本」，本条必红。
-    这正是 O4-F10 栽过的那档——指引整个走错。
+    ⚠️ **本条测不到「先版本后形状」的次序**（2026-08-25 控制者归因自查）：
+    次序是 `validate_manifest` 内部两步的先后，而它到 Task 5 才存在。
+    真正的次序钉是 Task 5 的 `test_validate_manifest_reports_version_before_shape`。
+    判别力：`raw > MANIFEST_VERSION` 那一支短路掉，本条必红（已变异证实）。
     """
     with pytest.raises(ManifestVersionError) as ei:
         check_version({"manifest_version": 99})       # 只有版本号，别的全没有

@@ -117,7 +117,8 @@ def check_version(payload: object) -> int:
     raw = payload["manifest_version"]
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ManifestInvalidError(
-            f"manifest_version 必须是整数，读到 {raw!r}（{type(raw).__name__}）"
+            f"manifest_version 必须是整数，读到 {raw!r}（{type(raw).__name__}）。"
+            "这通常意味着 manifest 被手工编辑过或写坏了——请换新 staging + 新 seed 重拉。"
         )
     if raw < MANIFEST_VERSION:
         raise ManifestVersionError(kind="older", found=raw, expected=MANIFEST_VERSION)
