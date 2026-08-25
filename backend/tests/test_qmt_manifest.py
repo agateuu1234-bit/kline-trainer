@@ -797,11 +797,15 @@ def test_file_relative_path_must_stay_inside_staging():
 def test_escaping_path_with_a_valid_filename_is_still_rejected(escaping):
     """⭐⭐ 只有**路径判据**够得到的档：路径逃出 staging，但**末段文件名完全合规**。
 
-    ⚠️ **为什么需要这一组**（2026-08-25 控制者变异时发现）：
-    `test_file_relative_path_must_stay_inside_staging` 的五个坏路径，其**末段本身
-    也不合规**（`outside.csv` / `passwd` / `x.csv` / `""`），于是它们统统在
-    `parse_qmt_filename(parts[-1])` 那一步被**文件名判据**拒了——
-    **路径判据从未被求值**。变异证实：把分量规则换成裸 `split("/")`，那五条**全绿**。
+    ⚠️ **为什么需要这一组**（2026-08-25 控制者变异 → 评审质疑 → 控制者再实测，三轮才定案）：
+    `test_file_relative_path_must_stay_inside_staging` 的五个坏路径**对路径判据零判别力**，
+    但**机理不是「路径判据没被求值」**——实测：真实实现下那五个**全部**由路径判据拒下，
+    它确实在工作。真正的原因是**变异掉路径判据之后，文件名判据会兜底**：
+    那五个路径的末段（`outside.csv` / `passwd` / `x.csv` / `""`）本身也不合规，
+    于是绕过路径判据后它们仍会被 `parse_qmt_filename` 拒 → 测试**仍红** → 变异什么都没证明。
+
+    本组的末段是 `600000.SH_浦发银行_1分钟K线_前复权.csv`，**完全合规**——
+    绕过路径判据后**没有任何判据兜底**，测试才会变绿，判别力才落在路径判据上。
 
     ⚠️ **这条判据是防逃逸的防线**：绕过它，`../` 路径会被接受 → 下游按这个相对路径
     读文件 → **读到 staging 之外**；而全套指纹校验查的是「同一条路径读回来的字节」，
