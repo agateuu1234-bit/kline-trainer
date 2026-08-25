@@ -41,4 +41,7 @@ async def health():
     # 注意它报的是**装配结果**，不是此刻的连通性：因为 asyncpg.create_pool() 在 startup
     # 真的会去建连接，所以报 "asyncpg" 确实意味着「启动时连上过 PG」；但 PG 若在运行中挂掉，
     # /health 仍会返回 200 + "asyncpg"。要判「现在还活着吗」需要另做一次真查询。
+    # 边界（刻意如此）：这是「配置身份」端点、不是数据库就绪探针。本次改动**之前**它同样
+    # 无条件 200（原文 {"status": "ok"}），故「PG 挂了仍 200」是既有性质、非本次引入；且响应体
+    # 被已合并的部署 runbook 逐字钉死三处。真要就绪探针（SELECT 1 + 超时 + 非 2xx）另开端点、另走 spec。
     return {"status": "ok", "repository": routes.current_repository_kind()}
