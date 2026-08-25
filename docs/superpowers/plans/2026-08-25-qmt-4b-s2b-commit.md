@@ -27,7 +27,64 @@
 ---
 
 
-## Task 15: `read_manifest` —— 逐段无跟随读回并校验
+## Task 15: S1 小改（另一半）+ `read_manifest` —— 逐段无跟随读回并校验
+
+> **⚠️ 本任务比 S2a 的原版多一个前置步骤（2026-08-25 pre-flight 裁决）**：
+> S1 的 `_atomic_write_json` 是**私有**的、且文件内容走普通 `fsync`，而 manifest
+> 提交按 O4-F11 定案要走 `F_FULLFSYNC`。这半边小改原本排在 S2a 的 Task 1，
+> 但它在 S2a 里**零使用者**（落盘在本片），故移到这里。
+>
+> **前置 Step 0：公开 `atomic_write_json` 并加 `full_sync` 开关**
+>
+> `backend/qmt_fsroot.py`：
+>
+> ```python
+> # ① __all__ 里，"耐久提交" 那一组改为：
+>     # 耐久提交
+>     "fsync_dir", "full_fsync", "atomic_write_json",
+> ```
+>
+> ```python
+> # ② _atomic_write_json 加参数（签名 + 文件 fsync 那一处）：
+> def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+>                        full_sync: bool = False) -> None:
+>     """（……原有 docstring 全部保留……）
+>
+>     `full_sync=True` 时，文件内容改用 `full_fsync()`（macOS 上即
+>     `fcntl(fd, F_FULLFSYNC)`）——**manifest 提交专用**（O4-F11 定案：断电在
+>     威胁模型之内，而本平台的 `fsync(2)` man page 明写它既不保证断电耐久、
+>     也不保证跨设备写序）。**默认 `False`**：归属标记等其余落地点保留 `fsync`，
+>     行为不变。目录项一律走 `fsync_dir`（`F_FULLFSYNC` 对目录 fd 的语义未经
+>     实测，不外推）。
+>     """
+>     ...
+>         try:
+>             _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+>             if full_sync:
+>                 full_fsync(fd)
+>             else:
+>                 os.fsync(fd)
+>         finally:
+>             os.close(fd)
+>     ...
+>
+>
+> def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+>                       full_sync: bool = False) -> None:
+>     """公开入口，语义同 `_atomic_write_json`。manifest 提交走它并传
+>     `full_sync=True`；模块内部（归属标记）继续走私有名与默认刷盘。
+>     """
+>     _atomic_write_json(dir_fd, name, payload, full_sync=full_sync)
+> ```
+>
+> 配套测试（追加到 `backend/tests/test_qmt_fsroot.py`）：`full_sync=True` 必须真的
+> 走 `F_FULLFSYNC`；`full_sync=False` **不得**走；`F_FULLFSYNC` 不存在的平台
+> （Linux CI）不得抛 `AttributeError`；**外加一条回归钉**——`write_owner_marker`
+> 仍然**不**走 `F_FULLFSYNC`（否则「默认不改行为」这句话就是空的）。
+> 三条 spy 档的写法与本片 Task 16 的 `..._uses_full_fsync` 相同，注意
+> `test_qmt_manifest.py` 顶部需要 `import fcntl`（S2a 未引入它，本片补）。
+
+### `read_manifest` 本体
 
 **Files:**
 - Modify: `backend/qmt_manifest.py`

@@ -54,8 +54,8 @@
 |---|---|
 | `backend/qmt_manifest.py`（新建） | manifest 的常量、异常族、版本三档、读侧闭合校验（纯函数）、聚合指纹算法、两个提交入口、生命周期决策表 |
 | `backend/tests/test_qmt_manifest.py`（新建） | 上述全部行为的正反档 |
-| `backend/qmt_fsroot.py`（修改） | 公开两个既有私有原语：`atomic_write_json`（加 `full_sync` 参数）、`split_relative_components` |
-| `backend/tests/test_qmt_fsroot.py`（修改） | 为新公开的两个原语补档；**加一条 `write_owner_marker` 行为不变的回归钉** |
+| `backend/qmt_fsroot.py`（修改） | 公开一个既有私有原语：`split_relative_components`（`atomic_write_json` 那一半归 S2b） |
+| `backend/tests/test_qmt_fsroot.py`（修改） | 为新公开的原语补正反档 |
 
 **拆片已执行**（user 2026-08-24 拍板「超了当场拆」，2026-08-25 执行）：估算 S2 约 157 条测试 > S1 的 94 条，故拆点定在 **Task 14 与 Task 15 之间**——
 - **S2a（本文件）** = Task 1–14：纯函数校验，零文件系统（除 Task 1 那次 S1 小改）
@@ -99,19 +99,19 @@
 
 ---
 
-## Task 1: S1 小改 —— 公开原子写 JSON（带更强刷盘）与相对路径分量规则
+## Task 1: S1 小改 —— 公开相对路径分量规则
 
 **Files:**
-- Modify: `backend/qmt_fsroot.py`（`__all__` 第 22-41 行；`_atomic_write_json` 第 625 行；`_split_rel` 第 122 行）
+- Modify: `backend/qmt_fsroot.py`（`__all__` 第 22-41 行；`_split_rel` 第 122 行之后）
 - Test: `backend/tests/test_qmt_fsroot.py`
 
 **Interfaces:**
 - Consumes: 无（本任务只动 S1 自己）
-- Produces:
-  - `atomic_write_json(dir_fd: int, name: str, payload: dict, *, full_sync: bool = False) -> None`
-  - `split_relative_components(relpath: str) -> list[str]`（抛 `PathDisciplineError`）
+- Produces: `split_relative_components(relpath: str) -> list[str]`（不合规时抛 `PathDisciplineError`）
 
-**为什么必须动 S1**：manifest 提交按 spec O4-F11 定案要走 `F_FULLFSYNC`（macOS 的 `fsync(2)` man page 原文写它**既不保证断电耐久、也不保证跨设备写序**），而 S1 的 `_atomic_write_json` 是**私有**的、且文件内容用的是普通 `os.fsync`。读侧校验要判「路径留在 staging 之内」，需要的正是 `_split_rel` 那套分量规则——同样是私有的。两者都只是**公开 + 加一个开关**，`write_owner_marker` 的行为一个字节都不变。
+**为什么必须动 S1**：读侧校验要判「manifest 里每条 `relative_path` 留在 staging 之内」，需要的正是 S1 `_split_rel` 那套分量规则——而它是**私有的**。本任务只是**公开它**，一行实现逻辑都不改。
+
+> ⚠️ **S1 的另一处小改（公开 `atomic_write_json` 并加 `full_sync` 开关）不在本片**（2026-08-25 pre-flight 裁决）：它的唯一使用者是 manifest 落盘，而落盘在 **S2b**。**本片不引入零使用者的改动**——那是评审必提的 YAGNI 违规，而本仓的教训是评审不收敛的代价很大。S2b 的 Task 15 负责那一半。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -119,122 +119,9 @@
 # backend/tests/test_qmt_fsroot.py 末尾追加
 
 # ─────────────────────────────────────────────────────────────
-# S2 Task 1：公开 atomic_write_json / split_relative_components
+# S2a Task 1：公开相对路径分量规则（读侧校验要用它判「留在 staging 之内」）
 # ─────────────────────────────────────────────────────────────
-import fcntl as _fcntl_t1
-import json as _json_t1
-
-from qmt_fsroot import (
-    atomic_write_json,
-    split_relative_components,
-    PathDisciplineError,
-    open_root,
-)
-
-
-def test_atomic_write_json_is_public_and_round_trips(tmp_path):
-    """正向放行档：公开入口写出来的 JSON 必须能原样读回。"""
-    d = tmp_path / "d"
-    d.mkdir()
-    fd = open_root(str(d))
-    try:
-        payload = {"a": 1, "中文键": ["1分钟K线_前复权", None, True]}
-        atomic_write_json(fd, "x.json", payload)
-        assert _json_t1.loads((d / "x.json").read_text(encoding="utf-8")) == payload
-    finally:
-        os.close(fd)
-
-
-def test_atomic_write_json_full_sync_true_uses_F_FULLFSYNC(tmp_path, monkeypatch):
-    """full_sync=True 必须真的走 F_FULLFSYNC，而不是普通 fsync。
-
-    判别力：把实现里的 full_fsync(fd) 改回 os.fsync(fd)，本条必红
-    （calls 会是空列表）。
-    """
-    if not hasattr(_fcntl_t1, "F_FULLFSYNC"):        # Linux CI：该常量不存在
-        return                                        # 由下一条负责该平台
-    calls = []
-    real = _fcntl_t1.fcntl
-
-    def spy(fd, cmd, *a):
-        calls.append(cmd)
-        return real(fd, cmd, *a)
-
-    monkeypatch.setattr(_fcntl_t1, "fcntl", spy)
-    d = tmp_path / "d"
-    d.mkdir()
-    fd = open_root(str(d))
-    try:
-        atomic_write_json(fd, "x.json", {"k": "v"}, full_sync=True)
-    finally:
-        os.close(fd)
-    assert _fcntl_t1.F_FULLFSYNC in calls
-
-
-def test_atomic_write_json_full_sync_false_does_not_use_F_FULLFSYNC(tmp_path, monkeypatch):
-    """反向档：默认（full_sync=False）**不得**升级成 F_FULLFSYNC。
-
-    没有这一条，把实现写成「无条件 full_fsync」也能让上一条绿——
-    那样 write_owner_marker 的行为就被悄悄改了。
-    """
-    if not hasattr(_fcntl_t1, "F_FULLFSYNC"):
-        return
-    calls = []
-    real = _fcntl_t1.fcntl
-
-    def spy(fd, cmd, *a):
-        calls.append(cmd)
-        return real(fd, cmd, *a)
-
-    monkeypatch.setattr(_fcntl_t1, "fcntl", spy)
-    d = tmp_path / "d"
-    d.mkdir()
-    fd = open_root(str(d))
-    try:
-        atomic_write_json(fd, "x.json", {"k": "v"}, full_sync=False)
-    finally:
-        os.close(fd)
-    assert _fcntl_t1.F_FULLFSYNC not in calls
-
-
-def test_atomic_write_json_full_sync_works_where_F_FULLFSYNC_absent(tmp_path, monkeypatch):
-    """Linux CI 档：常量不存在时 full_sync=True 不得抛 AttributeError。"""
-    monkeypatch.delattr(_fcntl_t1, "F_FULLFSYNC", raising=False)
-    d = tmp_path / "d"
-    d.mkdir()
-    fd = open_root(str(d))
-    try:
-        atomic_write_json(fd, "x.json", {"k": "v"}, full_sync=True)
-    finally:
-        os.close(fd)
-    assert _json_t1.loads((d / "x.json").read_text(encoding="utf-8")) == {"k": "v"}
-
-
-def test_write_owner_marker_still_does_not_full_sync(tmp_path, monkeypatch):
-    """回归钉：S1 既有行为不得被本次公开化改掉。
-
-    write_owner_marker 走的是默认刷盘；若实现把默认改成 full_sync=True，
-    本条必红。
-    """
-    if not hasattr(_fcntl_t1, "F_FULLFSYNC"):
-        return
-    from qmt_fsroot import write_owner_marker
-    calls = []
-    real = _fcntl_t1.fcntl
-
-    def spy(fd, cmd, *a):
-        calls.append(cmd)
-        return real(fd, cmd, *a)
-
-    monkeypatch.setattr(_fcntl_t1, "fcntl", spy)
-    d = tmp_path / "d"
-    d.mkdir()
-    fd = open_root(str(d))
-    try:
-        write_owner_marker(fd, ".owner.json", {"tool": "t"})
-    finally:
-        os.close(fd)
-    assert _fcntl_t1.F_FULLFSYNC not in calls
+from qmt_fsroot import split_relative_components
 
 
 def test_split_relative_components_accepts_normal_relative_path():
@@ -255,82 +142,47 @@ def test_split_relative_components_accepts_normal_relative_path():
     "",                     # 空串
 ])
 def test_split_relative_components_rejects_escapes(bad):
+    """七个坏档**已实测**（2026-08-24 在 `_split_rel` 上真跑过）全部被拒。"""
     with pytest.raises(PathDisciplineError):
         split_relative_components(bad)
 ```
 
+> ⚠️ `PathDisciplineError` 与 `pytest` 在本文件顶部已 import；若测试文件里没有，
+> 补 `from qmt_fsroot import PathDisciplineError`。
+
 - [ ] **Step 2: 跑测试确认它红**
 
 ```bash
-cd backend && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_qmt_fsroot.py -q -k "atomic_write_json or split_relative_components or owner_marker_still" 2>&1 | tail -20
+cd backend && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_qmt_fsroot.py -q -k split_relative_components 2>&1 | tail -20
 ```
 
-Expected: FAIL —— `ImportError: cannot import name 'atomic_write_json' from 'qmt_fsroot'`
+Expected: FAIL —— `ImportError: cannot import name 'split_relative_components' from 'qmt_fsroot'`
 
 - [ ] **Step 3: 最小实现**
 
-`backend/qmt_fsroot.py` 三处改动：
+`backend/qmt_fsroot.py` 两处改动：
 
 ```python
 # ① __all__ 里，"路径规则" 那一组改为：
     # 路径规则
     "normalize_abs_path", "split_components", "split_relative_components",
-# ② __all__ 里，"耐久提交" 那一组改为：
-    # 耐久提交
-    "fsync_dir", "full_fsync", "atomic_write_json",
 ```
 
 ```python
-# ③ _split_rel 保持不动，紧跟其后新增一个公开别名：
+# ② _split_rel 保持不动，紧跟其后新增一个公开别名：
 
 def split_relative_components(relpath: str) -> list[str]:
     """相对路径 → 分量列表，与 `open_root` **同一套分量规则**：拒绝绝对路径 /
-    空分量 / `.` / `..`。抛 `PathDisciplineError`。
+    空分量 / `.` / `..`。不合规时抛 `PathDisciplineError`。
 
     **公开出来是给 manifest 读侧校验用的**（S2）：manifest 里每条
     `relative_path` 都要判「留在 staging 之内」。spec 原文写的是「经 `resolve()`
     后落在 staging 之内」，但 `resolve()` **会跟随符号链接**（那正是 O2-F4 造
-    `parent_fd_under` 的全部理由），拿它当边界判据等于把判据建在会被绕过的调用上；
+    `parent_fd_under` 的全部理由），拿它当边界判据等于把判据建在会被绕过的调用上。
     分量规则更强，且**不碰文件系统**——读侧校验因此得以是纯函数。
     真正的符号链接防线在打开那一刻由 `open_under` 逐段 `O_NOFOLLOW` 承担。
     """
     return _split_rel(relpath)
-```
-
-```python
-# ④ _atomic_write_json 加参数（签名与两处调用点）：
-
-def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
-                       full_sync: bool = False) -> None:
-    """原子写一份 JSON：`lstat` 守卫 → 唯一名 `O_EXCL` 临时文件 → `fsync(文件)`
-    → `os.replace` → `fsync(目录)`。**本模块唯一的文件写入路径。**
-
-    （……原有 docstring 全部保留……）
-
-    `full_sync=True` 时，文件内容改用 `full_fsync()`（macOS 上即
-    `fcntl(fd, F_FULLFSYNC)`）——**manifest 提交专用**（O4-F11 定案：断电在威胁
-    模型之内，而本平台的 `fsync(2)` man page 明写它既不保证断电耐久、也不保证
-    跨设备写序）。**默认 `False`**：归属标记等其余落地点保留 `fsync`，行为不变。
-    目录项一律走 `fsync_dir`（`F_FULLFSYNC` 对目录 fd 的语义未经实测，不外推）。
-    """
-    ...
-        try:
-            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-            if full_sync:
-                full_fsync(fd)
-            else:
-                os.fsync(fd)
-        finally:
-            os.close(fd)
-    ...
-
-
-def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
-                      full_sync: bool = False) -> None:
-    """公开入口，语义同 `_atomic_write_json`。S2 的 manifest 提交走它并传
-    `full_sync=True`；模块内部（归属标记）继续走私有名与默认刷盘。
-    """
-    _atomic_write_json(dir_fd, name, payload, full_sync=full_sync)
 ```
 
 - [ ] **Step 4: 跑测试确认它绿**
@@ -339,15 +191,14 @@ def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
 cd backend && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_qmt_fsroot.py -q 2>&1 | tail -5
 ```
 
-Expected: PASS，且**总数比基线多 8 条**（基线 94 条 → 102 条）
+Expected: 约 102 passed（数字是估算，**判据是没有 failed / error / skipped**，且比基线 94 条只增不减）
 
 - [ ] **Step 5: 变异验证（控制者亲跑）**
 
 | # | 变异 | 必红的测试 |
 |---|---|---|
-| M1 | `if full_sync:` → `if False:` | `..._full_sync_true_uses_F_FULLFSYNC` |
-| M2 | `if full_sync:` → `if True:` | `..._full_sync_false_does_not_use...` + `test_write_owner_marker_still_does_not_full_sync` |
-| M3 | `split_relative_components` 内改为 `return relpath.split("/")`（绕过规则） | 7 条 `..._rejects_escapes` 参数档全红 |
+| M1 | `split_relative_components` 内改为 `return relpath.split("/")`（绕过规则） | 7 条 `..._rejects_escapes` 参数档全红 |
+| M2 | `split_relative_components` 内改为 `return _split_rel(relpath.lstrip("./"))` | `..._rejects_escapes[./a.csv]` 变绿 → **本条不红即说明规则被绕过** |
 
 ```bash
 # 每次变异前后都要清字节码缓存
@@ -359,18 +210,17 @@ cp qmt_fsroot.py /tmp/qmt_fsroot.bak     # 复原用 cp，绝不用 git checkout
 
 ```bash
 git add backend/qmt_fsroot.py backend/tests/test_qmt_fsroot.py
-git commit -m "feat(4b-S2): 公开 S1 的原子写 JSON 与相对路径分量规则
+git commit -m "feat(4b-S2a): 公开 S1 的相对路径分量规则
 
-manifest 提交按 O4-F11 定案要走 F_FULLFSYNC（本平台 fsync(2) 明写既不保证
-断电耐久也不保证跨设备写序），而 S1 的原子写是私有的、文件内容走普通 fsync。
-读侧校验要判「路径留在 staging 之内」，需要的正是 S1 那套相对路径分量规则。
-
-两者都只是公开 + 加一个默认关闭的开关：write_owner_marker 的行为一个字节
-未变，并为此立了一条回归钉。
+读侧校验要判「manifest 里每条 relative_path 留在 staging 之内」，需要的正是
+S1 _split_rel 那套分量规则——而它是私有的。本任务只公开它，一行实现逻辑未改。
 
 分量规则替代 spec 原文的 resolve()：resolve() 会跟随符号链接（那正是 O2-F4
 造 parent_fd_under 的理由），拿它当边界判据是把判据建在会被绕过的调用上。
-分量规则更强，且不碰文件系统——读侧校验因此得以是纯函数。"
+分量规则更强，且让读侧校验保持纯函数（不碰文件系统）。
+
+S1 的另一半小改（公开 atomic_write_json + full_sync 开关）留给 S2b——
+它在本片零使用者，本片不引入用不到的改动。"
 ```
 
 ---
@@ -400,7 +250,6 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.4 + §4.5
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 
@@ -3209,13 +3058,13 @@ grep -c 'S2-F1\|S2-F2\|S2-F3\|S2-F4' ../../../docs/superpowers/specs/2026-07-27-
 | `source_verification` 三级与**前置输入**（R15-F2） | Task 12 |
 | `source_verification_evidence` 存根（R16-F1 + O4-F2 + O4-F13） | Task 13 |
 | 聚合指纹算法（S2-F4 补定义） | Task 4 |
-| manifest 原子写所需的**原语**（`atomic_write_json` + `F_FULLFSYNC`，R45-F2 + O4-F11） | Task 1 |
+| 读侧路径判据所需的**原语**（`split_relative_components`） | Task 1 |
 
 **本片刻意不覆盖、留给 S2b 的（逐条登记，防止「声称覆盖了而实际没做」）**：
 
 | spec 判据 | 去处 |
 |---|---|
-| manifest 的实际落盘（原子写 + 目录耐久） | S2b Task 15/16 |
+| manifest 的实际落盘（`atomic_write_json` + `F_FULLFSYNC` + 目录耐久，R45-F2 + O4-F11） | S2b Task 15/16 |
 | 每股提交一次（R37-F1）且**不动**生命周期字段（§9-3s） | S2b Task 16 |
 | 收尾提交的清除/保留规则（R95-F2 + O2-F7 + O4-F1 + P2-F3） | S2b Task 17/18 |
 | 引导态：manifest 不存在 ≠ 畸形（R60-F3） | S2b Task 15 |
