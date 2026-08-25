@@ -538,7 +538,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
   - **时机：在任何 K 线拷贝之前，随首次 manifest 一起落盘**（R38-F1）。放在拷贝循环之后会制造一个新的坏状态：manifest 读侧现在**要求** `staged_export_log` 存在，而 fetch 崩在循环中途会留下一份没有该键的 manifest —— **fetch 自己也读不回来、无法续跑**。它是全局输入，本就该在消费它之前先钉住。
 
   > **为什么它必须被钉住（R38-F1 修正）**：`import_qmt_stock` 真正消费的元数据就是**这一份 staged 副本** —— `build_stock_import` 的门2 拿它的 `rows` 与首尾 `datetime` 去卡每只股的 K 线。而此前全套完整性闸只钉了 K 线 CSV：`files` 清单逐条 `bytes`+`sha256`、`staging_intact` 逐股复校、三方相等逐文件比对，**唯独漏了这个所有股都依赖的全局输入**。`source_snapshot.export_log_sha256` 记的是**源那一份**的哈希，源边界闸第 3 条查的也是**源那一份**——没有任何一处回头看过 staging 里这一份。于是它被截断、被手工改过、或残留自上一代，pilot 都照用不误：轻则把好数据判成 `export_log_mismatch` 一片 skip，重则**一份手改的 staged log 能让本该被拒的股过门**，而权威源里那份根本不认。这与 R21-F3（被最广泛信任的结构自己没被校验）是同一模式的第二次，只是这次漏掉的不是一个清单而是一个文件。
-- 写 `fetch_manifest.json`（**每只股提交一次**，提交节奏见上方按股事务，R37-F1）：**`manifest_version`**（O4-F10：此前只在读侧必填、写侧枚举里没有它 → 自己产出的每一份 manifest 都被自己的读侧拒绝）/ `seed` / 配额 / 预筛统计 / **`source_snapshot`**（`export_log_sha256` + 冻结的完整分层 `universe`，`snapshot` 级另含 `gmt_token`）/ **`source_mount`**（`{fstype, device, mountpoint, source_root, source_root_relative, gmt_token?}`——`source_root_relative` 是 fetch 当初使用的**导出根在共享内的相对路径**，**它才是 pilot 侧的比对判据**；`source_root`/`mountpoint` 记的是 fetch 那次的绝对形态，**仅供留痕、不参与判定**，因为挂载点会变，R19-F2 + R23-F1 + R25-F2）/ **`cursor`**（按层已尝试到的 universe 下标，R3-F2）/ **`failures`**（含 `universe_idx` 与 `attempts`）/ 实拷清单（code, market, 每文件 `{bytes, sha256}`）/ **各层储备池顺序 `pool_order`**（成功列表，每项 `{code, universe_idx}`，pilot 的唯一消费顺序来源，见 P4-D8）/ `source_verification`（`snapshot`/`full`/`partial`）/ **`source_verification_evidence`**（校验过程存根，R16-F1）/ `operator_attestation`（`full` 级）/ 累计字节 / `batches` 历史。
+- 写 `fetch_manifest.json`（**每只股提交一次**，提交节奏见上方按股事务，R37-F1）：**`manifest_version`**（O4-F10：此前只在读侧必填、写侧枚举里没有它 → 自己产出的每一份 manifest 都被自己的读侧拒绝）/ `seed` / 配额 / 预筛统计 / **`source_snapshot`**（`export_log_sha256` + 冻结的完整分层 `universe`，`snapshot` 级另含 `gmt_token`）/ **`source_mount`**（`{fstype, device, mountpoint, source_root, source_root_relative, gmt_token?}`——`source_root_relative` 是 fetch 当初使用的**导出根在共享内的相对路径**，**它才是 pilot 侧的比对判据**；`source_root`/`mountpoint` 记的是 fetch 那次的绝对形态，**仅供留痕、不参与判定**，因为挂载点会变，R19-F2 + R23-F1 + R25-F2）/ **`cursor`**（按层已尝试到的 universe 下标，R3-F2）/ **`failures`**（含 `universe_idx` 与 `attempts`）/ **实拷清单 `files`**（每条 **`{stock_code, period, relative_path, bytes, sha256}` 五字段**，与读侧枚举**逐字相同**，S2-F5；`market` 从 code 后缀派生，**不落盘**）/ **各层储备池顺序 `pool_order`**（成功列表，每项 `{code, universe_idx}`，pilot 的唯一消费顺序来源，见 P4-D8）/ `source_verification`（`snapshot`/`full`/`partial`）/ **`source_verification_evidence`**（校验过程存根，R16-F1）/ `operator_attestation`（`full` 级）/ 累计字节 / `batches` 历史。
 
 **补拉的 manifest 语义**：第二次 fetch 落到**同一 staging**，manifest **就地更新而非覆盖**——`pool_order[market]` **按序追加**该层新拉到的 code（已在列表中的不重复追加），并记一条 `batches: [{seed, quota, added: [...]}]` 历史。理由：pilot 只从 manifest 读顺序，若覆盖式重写会让第一批已消费的股从顺序里消失，断点续跑的 `already_done` 判定与「池穷尽」判定双双失真。**若第二次 fetch 的 `--seed` 与 manifest 里已记的 seed 不同 → 拒绝**（不同 seed 的顺序不可拼接，混用会让「可复现」这个属性静默失效）。
 
@@ -1226,8 +1226,16 @@ fetch/储备池占 4 条、路径·锁占 8 条。**共享地基（§4.1）是�
 | S2-F3 | **high** | **读侧必需键里的顶层 `universe` 是笔误** —— 同一句话末尾校验的是 `source_snapshot.universe`，写侧枚举与 §4.4 结构示例也**只产出后者**。照原文实现：**本工具诚实产出的每一份 manifest 都被本工具自己的读侧判 `FAIL_MANIFEST_INVALID`**，一次都跑不通 | §4.5:662 顶层枚举 vs §4.5:664 校验句 vs §4.5:533 写侧枚举 vs §4.4:295 示例，四处逐字核 | 删掉顶层 `universe`；名单唯一位置定为 `source_snapshot.universe`。**这是「写侧形状与读侧要求不配对」的第三次**（R94-F2 四字段、O4-F13 `2N+1`）→ 立纪律：**每新增一个持久化字段，必须同时在写侧枚举与读侧枚举各出现一次且层级逐字相同** |
 | S2-F4 | medium | **`aggregate_sha256` 的序列化方式从未定义** —— 只说「排序列表取 sha256」，没说列表怎么拼成字节。而**写它的是 4b、读它比对的是 4c**（两个切片、两份 plan、不同时间实施），拼法差一个空格或一个 `\uXXXX` 转义就让每一份诚实产出的 manifest 被判非法 | §4.5 存根定义处逐字核：无任何字节级规定 | 写死为 `json.dumps(sorted(pairs), ensure_ascii=False, separators=(",", ":")).encode("utf-8")` 后取 sha256；`ensure_ascii=False` 与 `separators` **都是判据的一部分**（周期目录名是中文）。**由 4b 提供唯一实现，4c 直接调用，不得各自重写** |
 
+| S2-F5 | **high** | **`files` 每条记录的字段名，写侧与读侧又一次不配对（同族第五次）** —— 写侧枚举写「实拷清单（`code`, `market`, 每文件 `{bytes, sha256}`）」，读侧却要求 `stock_code` / `period`，且**写侧从头到尾没提 `relative_path`**（而读侧把它当作路径逃逸判据的对象）。照写侧实现的 `qmt_fetch` 产出的每一份 manifest，都会被读侧判 `FAIL_MANIFEST_INVALID` | 写侧 §4.5「写 `fetch_manifest.json`」那一条 vs 读侧 §4.5「实拷清单必须逐项合规」逐字对照 | 写侧改为 **`{stock_code, period, relative_path, bytes, sha256}` 五字段**，与读侧逐字相同。**`market` 不落盘**（可由 code 后缀派生；冗余字段一旦落盘就必须再配一条「与后缀一致」的校验，否则可伪造——白加一个字段与一条判据，user 2026-08-24 拍板不存） |
+
 **本轮由真跑（非推理）坐实的两条**：S2-F1 的真实目录布局（挂载实测）、以及「`rglob` 对
-`front_ratio_cn_stocks_ab_bj/` 这一层零依赖」（纯 `tmp_path` 实测）。其余两条为逐字核原文。
+`front_ratio_cn_stocks_ab_bj/` 这一层零依赖」（纯 `tmp_path` 实测）。其余三条为逐字核原文。
+
+**⚠️ S2-F5 是在 S2a 实施到 Task 4 时才被翻出来的**（2026-08-25，由任务评审的一条
+「⚠️ 无法从 diff 核实：字段名是否与写侧一致」引出，控制者回 spec 追锚点时发现）。
+**这说明「写侧/读侧逐字对表」这条纪律，光在评审 spec 时跑一遍是不够的**——
+S2-F3 立它的时候我对着 `universe` 跑过一遍，却没对 `files` 的**条目字段**再跑一遍。
+判据是：**每一个持久化结构，连同它的每一层条目，都要单独对一次表**。
 
 **S2-F3 与 S2-F4 同属一个家族，且这是该家族第三、第四次**：一个持久化字段的
 **写侧形状**与**读侧要求**、或**两个工具各自的算法**，只要没有被逐字对过表，就会产出
