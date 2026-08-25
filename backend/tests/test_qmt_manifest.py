@@ -682,6 +682,28 @@ def test_negative_universe_idx_is_rejected():
                         "SZ": [], "BJ": []}))
 
 
+def test_negative_index_pointing_at_a_real_entry_is_still_rejected():
+    """⭐ 只有「界内」判据够得到的档：负数下标 + code **恰好等于** `layer[-1]`。
+
+    Python 的负数下标是合法索引，所以 `layer[-1]` 取得到最后一只股。
+    此时交叉核对 `layer[idx] == code` **会通过**——挡住它的只有界内判据。
+
+    （对比：`test_negative_universe_idx_is_rejected` 用的 code 与 `layer[-1]`
+    不匹配，两条判据都会拒，因此它对界内判据**零判别力**——2026-08-25 控制者
+    单独变异时发现：删掉界内判据后那一条仍绿。）
+
+    不挡住的后果：下游按 `universe_idx` 升序消费时 `-1` 排在最前，
+    而它实际指向最后一只股 → **消费顺序静默错乱，且没有任何一处会报错**。
+
+    判别力：删掉 `0 <= idx` 那半个条件，本条必红。
+    """
+    # 基座的 universe["SH"] 是 ["600000.SH", "600004.SH", "600006.SH"]
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600006.SH", "universe_idx": -1}],
+                        "SZ": [], "BJ": []}))
+
+
 def test_universe_idx_must_actually_point_at_that_code():
     """⭐ 交叉核对：下标合法、代码合法、后缀对层，但**指向的是另一只股**。
 
