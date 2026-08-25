@@ -14,6 +14,10 @@ Spec: `docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md` §4.4 + §4
 """
 from __future__ import annotations
 
+import hashlib
+import json
+from typing import Iterable
+
 # ── 版本 ─────────────────────────────────────────────────────
 # 新增任何**必需**字段都必须 bump 本值（spec O2-F8）。可选字段经
 # 「未知顶层键原样保留」通道流转，不需要 bump。
@@ -125,3 +129,39 @@ def check_version(payload: object) -> int:
     if raw > MANIFEST_VERSION:
         raise ManifestVersionError(kind="newer", found=raw, expected=MANIFEST_VERSION)
     return raw
+
+
+def manifest_members(manifest: dict) -> list[tuple[str, str]]:
+    """聚合指纹的**成员集合**（O2-F12 写死）：`files` 的每一条 + `staged_export_log`
+    一条，各取 `(relative_path, sha256)`。
+
+    ⚠️ **`staged_export_log` 那一条不能漏**：它是所有股共用的元数据基准
+    （`build_stock_import` 门 2 拿它的 rows 与首尾时间戳卡每只股）。spec 原文
+    「写侧含 export_log、读侧要求由 `files` 逐条重算」而 `files` 里没有它——
+    **差这一项就让每一份诚实产出的 manifest 都被判 `FAIL_MANIFEST_INVALID`**
+    （O4-F13 与 R94-F2 同类）。成员数因此恒为奇数 `2N+1`。
+    """
+    members = [(f["relative_path"], f["sha256"]) for f in manifest["files"]]
+    sel = manifest["staged_export_log"]
+    members.append((sel["relative_path"], sel["sha256"]))
+    return members
+
+
+def aggregate_sha256(members: Iterable[tuple[str, str]]) -> str:
+    """对「全部已校验文件的 `(相对路径, 文件 sha256)` 排序列表」取 sha256。
+
+    **序列化方式逐字写死（S2-F4）——两个工具必须算出同一个数，故拼法不许各写各的**：
+    按相对路径升序 → `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
+    → UTF-8 → sha256。
+
+    ⚠️ `ensure_ascii=False` 与 `separators` **都是判据的一部分**：周期目录名是
+    中文，两个取值会产出完全不同的字节。spec 原文只说「排序列表取 sha256」，
+    **没定义这个列表怎么拼成字节**——而写这个数的是 `qmt_fetch`（4b）、拿它比对的
+    是 `qmt_pilot`（4c），两个切片、两份 plan、不同时间实施。
+
+    **本函数是唯一实现，4c 直接调用，不得各自重写。**
+    """
+    pairs = sorted(members)
+    blob = json.dumps([[r, s] for r, s in pairs],
+                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()

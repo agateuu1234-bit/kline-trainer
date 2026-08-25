@@ -147,3 +147,77 @@ def test_check_version_ignores_everything_but_the_version():
     with pytest.raises(ManifestVersionError) as ei:
         check_version({"manifest_version": 99})       # 只有版本号，别的全没有
     assert ei.value.kind == "newer"
+
+
+import hashlib
+import json as _json
+
+from qmt_manifest import aggregate_sha256, manifest_members
+
+
+def test_aggregate_sha256_is_the_exact_frozen_serialization():
+    """算法逐字写死（S2-F4）：按相对路径升序 → JSON（中文不转义、分隔符无空格）
+    → UTF-8 → sha256。
+
+    判别力：ensure_ascii、separators、排序、UTF-8 任一改动，本条必红。
+    这四个都是**判据的一部分**——周期目录名是中文，ensure_ascii 的两个取值
+    会产出完全不同的字节。
+    """
+    members = [
+        ("日K线_前复权/000001.SZ_平安银行_日K线_前复权.csv", "b" * 64),
+        ("1分钟K线_前复权/000001.SZ_平安银行_1分钟K线_前复权.csv", "a" * 64),
+    ]
+    expect_blob = _json.dumps(
+        [["1分钟K线_前复权/000001.SZ_平安银行_1分钟K线_前复权.csv", "a" * 64],
+         ["日K线_前复权/000001.SZ_平安银行_日K线_前复权.csv", "b" * 64]],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    assert aggregate_sha256(members) == hashlib.sha256(expect_blob).hexdigest()
+
+
+def test_aggregate_sha256_is_order_independent_of_input():
+    """输入次序不影响结果（内部排序），否则「先拷谁」会改变聚合值。"""
+    a = [("x/1.csv", "a" * 64), ("x/2.csv", "b" * 64)]
+    assert aggregate_sha256(a) == aggregate_sha256(list(reversed(a)))
+
+
+def test_aggregate_sha256_differs_when_ensure_ascii_would_differ():
+    """钉住 ensure_ascii=False 这一半：若实现漏写它（默认 True），
+    中文路径会被转成 \\uXXXX，聚合值不同。
+
+    判别力：把 ensure_ascii=False 删掉，本条必红。
+    """
+    members = [("1分钟K线_前复权/a.csv", "a" * 64)]
+    ascii_blob = _json.dumps([["1分钟K线_前复权/a.csv", "a" * 64]],
+                             ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    assert aggregate_sha256(members) != hashlib.sha256(ascii_blob).hexdigest()
+
+
+def test_aggregate_sha256_differs_when_separators_would_differ():
+    """钉住 separators 这一半：默认分隔符带空格，聚合值不同。
+
+    判别力：把 separators=(",", ":") 删掉，本条必红。
+    """
+    members = [("a.csv", "a" * 64)]
+    spaced = _json.dumps([["a.csv", "a" * 64]], ensure_ascii=False).encode("utf-8")
+    assert aggregate_sha256(members) != hashlib.sha256(spaced).hexdigest()
+
+
+def test_manifest_members_is_files_plus_staged_export_log():
+    """成员集合写死（O2-F12）：files 每条 + staged_export_log 一条。
+    故 files_verified 恒为奇数 2N+1（O4-F13 定的就是这个数）。
+
+    判别力：漏掉 staged_export_log 那一条，本条必红——而 spec 原文正是
+    「写侧含 export_log、读侧要求由 files 逐条重算而 files 里没有它」，
+    差这一项就让每份诚实产出的 manifest 都被判非法。
+    """
+    m = {
+        "files": [
+            {"relative_path": "1分钟K线_前复权/a.csv", "sha256": "a" * 64},
+            {"relative_path": "日K线_前复权/a.csv", "sha256": "b" * 64},
+        ],
+        "staged_export_log": {"relative_path": "export_log.csv", "sha256": "c" * 64},
+    }
+    members = manifest_members(m)
+    assert len(members) == 3                      # 2N+1，N=1
+    assert ("export_log.csv", "c" * 64) in members
