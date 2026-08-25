@@ -165,8 +165,28 @@ boot_guard_content() {
 #    重启后端点回来却没人关。
 #    现在：剥掉空行与注释后剩下的**活动行**，必须与期望内容**完全一致**
 #    （含定时表达式、以哪个用户跑、脚本绝对路径、参数、重定向、PATH 行）。
+# ⚠️ 光内容对还不够，**属主和权限也得对**（codex plan-R18）。
+#    cron 手册原文：「/etc/crontab 和 /etc/cron.d 下的文件必须属主为 root，
+#    且不能被组或其他人写」——不满足时 cron **直接忽略**这个文件。
+#    而安装用的 `sudo tee` 覆盖一个**已存在**的文件时**不会修正属主**：
+#    于是会出现「内容一字不差、检测通过、cron 却根本不跑它」——
+#    open 以为重启守卫在，把零认证端点开出来，重启后端点回来却没人关。
+#    $1 = 待检文件；返回 0 = cron 会认。
+boot_guard_file_perms_ok() {
+    _f=$1
+    _st=$(stat -c '%U %A' "$_f" 2>/dev/null) || return 1
+    _owner=${_st%% *}
+    _mode=${_st##* }
+    [ "$_owner" = "root" ] || return 1
+    # -rw-r--r-- ：第 6 位是组写位，第 9 位是其他人写位
+    [ "$(printf '%s' "$_mode" | cut -c6)" = "w" ] && return 1
+    [ "$(printf '%s' "$_mode" | cut -c9)" = "w" ] && return 1
+    return 0
+}
+
 boot_guard_installed() {
     [ -f "$BOOT_GUARD_FILE" ] || return 1
+    boot_guard_file_perms_ok "$BOOT_GUARD_FILE" || return 1
     _active=$(grep -vE '^[[:space:]]*(#|$)' "$BOOT_GUARD_FILE" 2>/dev/null)
     _want=$(boot_guard_content | grep -vE '^[[:space:]]*(#|$)')
     [ "$_active" = "$_want" ]
@@ -178,7 +198,7 @@ boot_guard_installed() {
 # ⚠️ 远程命令先装进变量、再用 printf 的 %s 占位符打出来，**不要**把它拼进
 #    另一层引号里 —— 实测那样会把 \n 打成 \\n、把 && 打成 \&\&，粘过去同样是坏的。
 print_boot_guard_install() {
-    _remote="printf 'PATH=%s\n%s\n' '$BOOT_GUARD_PATH' '$(boot_guard_line)' | sudo tee $BOOT_GUARD_FILE >/dev/null && sudo chmod 644 $BOOT_GUARD_FILE && echo INSTALLED"
+    _remote="printf 'PATH=%s\n%s\n' '$BOOT_GUARD_PATH' '$(boot_guard_line)' | sudo tee $BOOT_GUARD_FILE >/dev/null && sudo chown root:root $BOOT_GUARD_FILE && sudo chmod 644 $BOOT_GUARD_FILE && echo INSTALLED"
     printf '%s\n' "开机守卫要写到：$BOOT_GUARD_FILE"
     printf '%s\n' "这个文件属于 root，所以**这一步得你自己跑**（会问 NAS 密码）。"
     printf '\n'
@@ -357,7 +377,13 @@ boot-guard-status)
         sed 's/^/  /' "$BOOT_GUARD_FILE"
         echo "BOOT_GUARD_OK"
     else
-        echo "BOOT_GUARD_MISSING: $BOOT_GUARD_FILE 不存在，或内容里没有 boot-close"
+        if [ -f "$BOOT_GUARD_FILE" ] && ! boot_guard_file_perms_ok "$BOOT_GUARD_FILE"; then
+            echo "BOOT_GUARD_BAD_PERMS: $BOOT_GUARD_FILE 存在但属主/权限不对（cron 会直接忽略它）"
+            stat -c '  当前: 属主=%U 组=%G 权限=%A' "$BOOT_GUARD_FILE" 2>/dev/null
+            echo "  cron 要求: 属主 root，且不可被组或其他人写"
+        else
+            echo "BOOT_GUARD_MISSING: $BOOT_GUARD_FILE 不存在，或内容与期望不一致"
+        fi
         echo
         print_boot_guard_install
         exit 1
@@ -564,6 +590,32 @@ selftest)
         else
             echo "  FAIL  cut 行为与预期不符（拿到 [$_t]）"; exit 1
         fi
+    ) || _fail=1
+    echo "守卫文件属主/权限判据自检（codex plan-R18）："
+    (
+        # 正向：系统自带的 /etc/cron.d/sysstat 是 root:root 644，cron 认它
+        if [ -f /etc/cron.d/sysstat ]; then
+            if boot_guard_file_perms_ok /etc/cron.d/sysstat; then
+                echo "  pass  root 属主 + 644 → 认可"
+            else
+                echo "  FAIL  root 属主 + 644 却被判不合格"; exit 1
+            fi
+        else
+            echo "  skip  本机没有 /etc/cron.d/sysstat 可做正向样本"
+        fi
+        # 反向：自己建的文件属主不是 root
+        _tf=/tmp/kline-guard-perm-probe.$$
+        : > "$_tf"
+        if boot_guard_file_perms_ok "$_tf"; then
+            echo "  FAIL  非 root 属主竟然被判合格"; rm -f "$_tf"; exit 1
+        fi
+        echo "  pass  非 root 属主 → 拒绝"
+        chmod 666 "$_tf"
+        if boot_guard_file_perms_ok "$_tf"; then
+            echo "  FAIL  人人可写竟然被判合格"; rm -f "$_tf"; exit 1
+        fi
+        echo "  pass  人人可写 → 拒绝"
+        rm -f "$_tf"
     ) || _fail=1
     if [ "$_fail" -eq 0 ]; then echo "SELFTEST_PASS"; else echo "SELFTEST_FAIL"; exit 1; fi
     ;;
