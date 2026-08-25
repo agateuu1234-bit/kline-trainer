@@ -946,3 +946,122 @@ def test_staged_export_log_zero_bytes_is_allowed():
     m = _valid_manifest()
     m["staged_export_log"]["bytes"] = 0
     assert validate_manifest(m) is m
+
+
+def _fatal(kind="staging_path_escape"):
+    return {"kind": kind, "relative_path": "1分钟K线_前复权/x.csv",
+            "component": "1分钟K线_前复权", "errno": "ENOTDIR"}
+
+
+def test_manifest_without_stopped_reason_is_valid():
+    """正向档：绝大多数 manifest 没有这个字段（它是可选的）。"""
+    m = _valid_manifest()
+    assert "stopped_reason" not in m
+    assert validate_manifest(m) == m
+
+
+def test_max_bytes_needs_no_fatal_error():
+    """正向档：干净的配额触顶**不**带 fetch_fatal_error（R44-F2：
+    容量停止是可恢复的、与数据无关的终止条件，不是信任边界破坏）。"""
+    m = _valid_manifest(stopped_reason="max_bytes")
+    assert validate_manifest(m) == m
+
+
+def test_stopped_reason_outside_the_closed_enum_is_rejected():
+    for bad in ("disk_full", "", "MAX_BYTES", None, 1):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(stopped_reason=bad))
+
+
+@pytest.mark.parametrize("reason", [
+    "source_path_escape", "staging_path_escape", "staging_recheck_failed",
+])
+def test_escape_reasons_require_a_fetch_fatal_error(reason):
+    """⭐ 三个值都必须同时带 fetch_fatal_error。
+
+    判别力：只对两个 escape 要求而漏掉 staging_recheck_failed（原 spec 只写了
+    两个值，O4-F3 才补的第四值），本条第三个参数档必红。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(stopped_reason=reason))
+
+
+@pytest.mark.parametrize("reason", [
+    "source_path_escape", "staging_path_escape", "staging_recheck_failed",
+])
+def test_escape_reasons_pass_with_a_well_formed_fatal_error(reason):
+    """正向放行档：带上合规的四字段就必须通过。
+
+    没有这一条，一个「凡带 stopped_reason 就拒」的实现也能让上一条绿。
+    """
+    m = _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal())
+    assert validate_manifest(m) == m
+
+
+def test_fetch_fatal_error_needs_exactly_four_fields():
+    """⭐ 四字段（R94-F2）：写侧曾写三字段、读侧要四字段 → 一个合规的写者
+    产出的 manifest 会被读者判 FAIL_MANIFEST_INVALID，于是一次信任边界破坏
+    被报成「manifest 畸形」，恢复指引整个走错。"""
+    for drop in ("kind", "relative_path", "component", "errno"):
+        bad = _fatal()
+        del bad[drop]
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                stopped_reason="staging_path_escape", fetch_fatal_error=bad))
+
+
+def test_fatal_kind_must_be_in_the_kind_enum():
+    for bad in ("staging_recheck_failed", "max_bytes", "whatever", ""):
+        f = _fatal()
+        f["kind"] = bad
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                stopped_reason="staging_path_escape", fetch_fatal_error=f))
+
+
+def test_fatal_errno_must_be_eloop_or_enotdir():
+    for bad in ("EACCES", "ENOENT", 20, ""):
+        f = _fatal()
+        f["errno"] = bad
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                stopped_reason="staging_path_escape", fetch_fatal_error=f))
+
+
+def test_fatal_kind_is_decoupled_from_stopped_reason():
+    """⭐⭐ O4-F3 的核心：`kind` 记首次逃逸类型，`stopped_reason` 记本次为何停。
+    「保留 fatal + 换 stopped_reason」是复校失败那一档的**唯一**表达方式。
+
+    判别力：把校验写成 `kind == stopped_reason`，本条必红——而那会让
+    「修好后重跑、复校没过」这一档**结构上不可表达**，实施者无路可走。
+    """
+    m = _valid_manifest(stopped_reason="staging_recheck_failed",
+                        fetch_fatal_error=_fatal(kind="staging_path_escape"))
+    assert validate_manifest(m) == m
+
+
+def test_fetch_fatal_error_without_stopped_reason_is_rejected():
+    """反向配对：有 fatal 却没有 stopped_reason 说明写侧漏了一半。"""
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(fetch_fatal_error=_fatal()))
+
+
+def test_max_bytes_with_a_retained_fatal_error_is_valid():
+    """⭐ 正向档：Run1 撞 escape、Run2 触顶——**fatal 原样保留、escape 的
+    stopped_reason 不得被覆盖**，本次触顶另记 stopped_reason_secondary（O4-F1）。
+
+    这份形状必须**可读**，否则那条「不许被 max_bytes 洗白」的规则无处落地。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal(),
+                        stopped_reason_secondary="max_bytes")
+    assert validate_manifest(m) == m
+
+
+def test_stopped_reason_secondary_only_allows_max_bytes():
+    for bad in ("staging_path_escape", "", None, 1):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                stopped_reason="staging_path_escape",
+                fetch_fatal_error=_fatal(),
+                stopped_reason_secondary=bad))

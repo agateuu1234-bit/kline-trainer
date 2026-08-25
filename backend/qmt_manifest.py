@@ -71,6 +71,15 @@ LIFECYCLE_KEYS = frozenset({
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)$")
 
+# `fetch_fatal_error.errno` 的闭合枚举：仅两种能触发「留在挂载点内」的逃逸
+# 判据的系统调用错误码（R94-F2）。
+FATAL_ERRNOS = frozenset({"ELOOP", "ENOTDIR"})
+
+# `fetch_fatal_error` 的必需字段外延——**四字段**，不是三字段（R94-F2）：
+# 写侧曾只写三字段、读侧要四字段，会让一个合规的写者产出的 manifest
+# 被读者判非法。
+FATAL_FIELDS = ("kind", "relative_path", "component", "errno")
+
 
 class ManifestInvalidError(Exception):
     """manifest 形状/自洽性不过 → `FAIL_MANIFEST_INVALID`。
@@ -420,6 +429,69 @@ def _validate_staged_export_log(sel: object, export_log_sha256: str) -> None:
              "——同一份字节的两处记录对不上，这份 manifest 自相矛盾")
 
 
+def _validate_lifecycle(payload: dict) -> None:
+    """`stopped_reason` / `fetch_fatal_error` / `stopped_reason_secondary` 的形状与配对。
+
+    ⚠️ **一个信号只有同时进了「写侧规定」与「读侧校验」，它才真的存在**（R93-F1）：
+    一次被源树逃逸终止的 fetch，其 manifest 仍带着此前成功拉到的 `pool_order` 与
+    `files`，**形状上完全合法**——读侧不查这两个字段的实现会照常消费那批股，
+    把一次信任边界破坏报成「候选不够」甚至走到 `SUCCESS`。
+
+    ⚠️ **`kind` 与 `stopped_reason` 解耦**（O4-F3）：`kind` 记**首次逃逸的类型**，
+    `stopped_reason` 记**本次为什么停**。复校失败那一档正是「保留 fatal +
+    换 `stopped_reason`」——写成「`kind` 恒等于 `stopped_reason`」会让它
+    **结构上不可表达**，实施者无路可走。
+
+    ⚠️ 消费侧的 fail-closed 判据是「`fetch_fatal_error` 存在」，**不是**
+    「`stopped_reason` 取值」（O4-F1）：前者是**粘性的信任状态**，后者是
+    **易失的本次事件**，拿后者当安全判据必然被后续运行的 `max_bytes` 洗掉。
+    本函数只管形状；分支由消费方（4c §4.2 步骤 ②）负责。
+    """
+    reason = payload.get("stopped_reason")
+    fatal = payload.get("fetch_fatal_error")
+
+    # ⚠️ 判「是否要校验枚举」用**键是否存在**，不是「取到的值是否为 None」：
+    # 显式写 `"stopped_reason": null` 与**根本没有这个键**是两回事——前者
+    # 是「写了却写坏了」，必须拒；`.get() is not None` 会把两者混成一档，
+    # 让显式 null 冒充成「可选字段没填」而放行（2026-08-25 TDD 红灯实测抓到）。
+    if "stopped_reason" in payload:
+        _require(isinstance(reason, str) and reason in STOPPED_REASONS,
+                 f"stopped_reason 必须是 {sorted(STOPPED_REASONS)} 之一，"
+                 f"读到 {reason!r}")
+
+    if fatal is not None:
+        _require(reason is not None,
+                 "有 fetch_fatal_error 却没有 stopped_reason——写侧只落了一半")
+        _require(isinstance(fatal, dict), "fetch_fatal_error 必须是对象")
+        for key in FATAL_FIELDS:
+            _require(key in fatal,
+                     f"fetch_fatal_error 缺 {key}（必须是 {list(FATAL_FIELDS)} "
+                     "四字段——写侧三字段、读侧四字段会让一个合规的写者产出的 "
+                     "manifest 被读者判非法，恢复指引整个走错）")
+        _require(fatal["kind"] in FATAL_KINDS,
+                 f"fetch_fatal_error.kind 必须是 {sorted(FATAL_KINDS)} 之一，"
+                 f"读到 {fatal['kind']!r}")
+        _require_nonempty_str(fatal["relative_path"], "fetch_fatal_error.relative_path")
+        _require_nonempty_str(fatal["component"], "fetch_fatal_error.component")
+        _require(fatal["errno"] in FATAL_ERRNOS,
+                 f"fetch_fatal_error.errno 必须是 {sorted(FATAL_ERRNOS)} 之一，"
+                 f"读到 {fatal['errno']!r}")
+
+    if reason in REASONS_REQUIRING_FATAL:
+        _require(fatal is not None,
+                 f"stopped_reason = {reason!r} 必须同时带形状合规的 "
+                 "fetch_fatal_error——它才是那个粘性的信任状态，"
+                 "stopped_reason 会被后续运行的 max_bytes 洗掉")
+
+    # 同理：显式 null 与键缺失是两回事，判据用键是否存在。
+    secondary = payload.get("stopped_reason_secondary")
+    if "stopped_reason_secondary" in payload:
+        _require(secondary == "max_bytes",
+                 "stopped_reason_secondary 只允许 'max_bytes'（纯人读附注："
+                 "Run1 撞 escape、Run2 触顶时，escape 的 stopped_reason "
+                 f"不得被覆盖），读到 {secondary!r}")
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -450,4 +522,5 @@ def validate_manifest(payload: object) -> dict:
     _validate_files(payload["files"], payload["pool_order"])
     _validate_staged_export_log(payload["staged_export_log"],
                                  payload["source_snapshot"]["export_log_sha256"])
+    _validate_lifecycle(payload)
     return payload
