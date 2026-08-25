@@ -3033,8 +3033,21 @@ def _validate_verification_evidence(payload: dict, level: str) -> None:
                  "——存根自相矛盾")
 
 
-# validate_manifest 里，`level = _validate_verification_inputs(payload)` 之后追加：
+# validate_manifest 里：Task 12 把这一行写成了**裸调用**（当时 `level` 无人使用，
+# 按 surgical changes 删掉了赋值——那个判断在单任务视角下是对的）。
+# 本任务要用 `level`，故**把赋值加回来**：
+#
+#     _validate_verification_inputs(payload)          ← 改前
+#     level = _validate_verification_inputs(payload)  ← 改后
+#
+# 然后紧随其后追加：
     _validate_verification_evidence(payload, level)
+
+> ⚠️ **这是「当前未使用 ≠ 无用」的第四次**（前三次：Task 2 的 `import pytest`、
+> Task 6 的 `_require_market_map` 的 `"int"` 分支、Task 7 的 `_validate_pool_order`
+> 的 `universe` 参数——都是为下一个任务准备的，控制者当时都判了保留）。
+> 单任务视角下「删掉未使用的东西」是对的 surgical 判断；**跨任务视角下它会给下一片
+> 制造一次无谓的往返**。两种视角都有道理，所以**由计划显式说明归属**，而不是让实施者猜。
 ```
 
 - [ ] **Step 4: 跑测试确认它绿**
