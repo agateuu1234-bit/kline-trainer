@@ -301,7 +301,7 @@ def test_main_app_startup_without_dsn_keeps_inmemory(monkeypatch):
         assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}
 
 
-def _install_fake_asyncpg(monkeypatch, closed, *, lock_result=True):
+def _install_fake_asyncpg(monkeypatch, closed, *, lock_result=True, close_raises=False):
     import sys
     import types
 
@@ -318,6 +318,8 @@ def _install_fake_asyncpg(monkeypatch, closed, *, lock_result=True):
             return None
         async def close(self):
             closed["pool"] = True
+            if close_raises:                # codex R3 档：关 pool 自己抛错
+                raise RuntimeError("pool close failed")
 
     fake = types.ModuleType("asyncpg")
 
@@ -372,6 +374,66 @@ def test_health_identity_not_stale_after_dsn_lifespan_exits(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with TestClient(main.app) as client:
         assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}
+
+
+def _enter_dsn_lifespan(monkeypatch, closed, **fake_kwargs):
+    """装好假 asyncpg、设上 DSN，返回一个**已 startup** 的 lifespan 上下文管理器。
+
+    两条异常路径档共用。刻意直接驱动 `main.lifespan(...)` 而不经 TestClient：
+    codex R3 说的是「异常被抛在 yield 这一点上」，只有 `__aexit__(exc_type, ...)`
+    能精确复刻它；TestClient 的 body 异常走的是另一条路径，测不到这件事。
+    """
+    import app.main as main
+
+    monkeypatch.setenv("DATABASE_URL", "postgres://x")
+    _install_fake_asyncpg(monkeypatch, closed, **fake_kwargs)
+    return main.lifespan(main.app)
+
+
+def test_repo_restored_when_lifespan_body_raises(monkeypatch):
+    """codex R3 档一：lifespan body 抛异常 → pool 仍要关、全局仍要还原。
+
+    裸 `yield` 后接清理的写法在这条路径上**整段不执行**，坏状态会活下来。
+    """
+    import app.routes as routes
+    from app.lease_repo import AsyncpgLeaseRepository
+
+    closed = {"pool": False}
+    cm = _enter_dsn_lifespan(monkeypatch, closed)
+
+    async def _drive():
+        await cm.__aenter__()
+        assert isinstance(routes._default_repo, AsyncpgLeaseRepository)
+        boom = RuntimeError("lifespan body failed")
+        # @asynccontextmanager 把异常抛在 yield 处；未被吞掉时 __aexit__ 返回 False
+        suppressed = await cm.__aexit__(type(boom), boom, boom.__traceback__)
+        assert suppressed is False, "异常不该被 lifespan 吞掉"
+
+    asyncio.run(_drive())
+    assert closed["pool"] is True
+    assert not isinstance(routes._default_repo, AsyncpgLeaseRepository)
+
+
+def test_repo_restored_when_pool_close_raises(monkeypatch):
+    """codex R3 档二：pool.close() 自己抛错 → 全局**仍然**要还原。
+
+    还原若写在 close() 之后（非最内层 finally），这条会红。
+    """
+    import app.routes as routes
+    from app.lease_repo import AsyncpgLeaseRepository
+
+    closed = {"pool": False}
+    cm = _enter_dsn_lifespan(monkeypatch, closed, close_raises=True)
+
+    async def _drive():
+        await cm.__aenter__()
+        assert isinstance(routes._default_repo, AsyncpgLeaseRepository)
+        with pytest.raises(RuntimeError, match="pool close failed"):
+            await cm.__aexit__(None, None, None)
+
+    asyncio.run(_drive())
+    assert closed["pool"] is True
+    assert not isinstance(routes._default_repo, AsyncpgLeaseRepository)
 
 
 def test_scheduler_main_run_wires_and_cleans_up(monkeypatch, tmp_path):
