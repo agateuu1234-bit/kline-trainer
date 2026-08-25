@@ -346,6 +346,34 @@ def test_main_lifespan_dsn_swaps_repo_only(monkeypatch):
         routes.set_default_repo(InMemoryLeaseRepository())   # 复原全局，避免污染后续测试
 
 
+def test_health_identity_not_stale_after_dsn_lifespan_exits(monkeypatch):
+    """codex R2 回归档：DSN lifespan 退出后，生产代码自己必须把全局还原。
+
+    不还原的话，一个「底下 pool 已关」的 Asyncpg repo 会活到下一次 lifespan ——
+    无 DSN 分支不做任何赋值 —— 于是数据路径必然失败而 /health 照报 "asyncpg"。
+    ⚠️ 本测试**刻意不写 finally 兜底复原**：判据就是「生产代码自己会还原」，
+       在这里加兜底会让它对该行为零判别力。
+    """
+    import app.main as main
+    import app.routes as routes
+    from app.lease_repo import AsyncpgLeaseRepository
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DATABASE_URL", "postgres://x")
+    closed = {"pool": False}
+    _install_fake_asyncpg(monkeypatch, closed)
+    with TestClient(main.app) as client:
+        assert client.get("/health").json()["repository"] == "asyncpg"
+    assert closed["pool"] is True
+    # pool 已关 → 全局不得仍指向它
+    assert not isinstance(routes._default_repo, AsyncpgLeaseRepository)
+
+    # 第二次 lifespan，这次没有 DSN（走「不做任何赋值」那条分支）
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with TestClient(main.app) as client:
+        assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}
+
+
 def test_scheduler_main_run_wires_and_cleans_up(monkeypatch, tmp_path):
     # D12：独立进程接线——建 pool/repo/adapter/start，block 立即返回后清理（关 pool）
     pytest.importorskip("apscheduler")

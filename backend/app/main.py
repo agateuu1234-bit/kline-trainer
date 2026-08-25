@@ -23,6 +23,12 @@ async def lifespan(app: FastAPI):
     yield
     if pool is not None:
         await pool.close()
+        # 关 pool 之后必须把全局还原（codex R2）：无 DSN 那条分支**不做任何赋值**，
+        # 所以同一个 app 再走一次 lifespan 时，一个「底下 pool 已关」的 Asyncpg repo
+        # 会原样存活下来 —— 数据路径必然失败，而 /health 照报 "asyncpg"，
+        # 正是本 PR 要消灭的那种假绿。让这个坏状态**不可表达**，而不是让每个测试各自兜底
+        # （test_scheduler.py:346 此前正是在替生产代码擦这个屁股）。
+        routes.set_default_repo(InMemoryLeaseRepository())
 
 
 app = FastAPI(title="Kline Trainer API", version="0.1.0", lifespan=lifespan)
