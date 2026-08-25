@@ -1210,10 +1210,17 @@ def test_full_level_requires_passes_agree_true():
 
 
 def test_full_level_rejects_two_passes_with_different_aggregates():
-    """⭐ 只有本条够得到：两趟都在、passes_agree 写着 true，但两趟的聚合
-    摘要**不等** —— 即 passes_agree 在撒谎。
+    """两趟都在、`passes_agree` 写着 true，但两趟的聚合摘要**不等**。
 
-    判别力：只查 passes_agree 布尔值而不比两趟聚合的实现会放行本档。
+    ⚠️⚠️ **本条实际拒它的是「聚合与重算相符」那条，不是「两趟相等」**
+    （2026-08-25 控制者单独变异发现）：把 pass2 的聚合改成别的值之后，它在
+    **循环内**就被 `p["aggregate_sha256"] == expect_agg` 拒了，**根本走不到**
+    循环后的 `aggs[0] == aggs[1]`。
+
+    真正钉住「聚合与重算相符」的是
+    `test_aggregate_must_match_recomputation_from_manifests_own_records`；
+    本条与它判别力重叠，保留是因为它描述的**场景**（passes_agree 在撒谎）
+    对读者有意义。
     """
     base = _valid_manifest()
     n, agg = len(base["files"]) + 1, _agg_of(base)

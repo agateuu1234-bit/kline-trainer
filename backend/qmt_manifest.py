@@ -603,6 +603,11 @@ def _validate_verification_evidence(payload: dict, level: str) -> None:
     else:                                          # full
         _require(ev.get("passes_agree") is True,
                  "full 级要求 passes_agree 为 true")
+        # ⚠️⚠️ **本条在当前实现下是恒真断言**（2026-08-25 控制者变异证实：删掉它全绿）：
+        # 循环内已要求**每一趟**都 `== expect_agg`，两趟都过 ⇒ 两趟必然相等。
+        # **保留而不删的理由**：①spec 明写 full 级「两趟聚合摘要相等」，删掉是偏离；
+        # ②它是**防御性冗余**——若将来有人放宽了循环内那条（例如改成只查格式合法），
+        # 这条还在守。**但它此刻挡不住任何循环内那条挡不住的东西，别指望它。**
         _require(aggs[0] == aggs[1],
                  "full 级的两趟聚合摘要不相等，而 passes_agree 写着 true"
                  "——存根自相矛盾")
