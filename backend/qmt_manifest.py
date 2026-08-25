@@ -165,3 +165,40 @@ def aggregate_sha256(members: Iterable[tuple[str, str]]) -> str:
     blob = json.dumps([[r, s] for r, s in pairs],
                       ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _require(cond: bool, detail: str) -> None:
+    """判据不满足即 fail-closed。**绝不「尽力而为地解析」**。"""
+    if not cond:
+        raise ManifestInvalidError(detail)
+
+
+def _require_nonempty_str(value: object, where: str) -> None:
+    _require(isinstance(value, str) and value != "",
+             f"{where} 必须是非空文字，读到 {value!r}")
+
+
+def validate_manifest(payload: object) -> dict:
+    """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
+    任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
+
+    ⚠️ **必须在任何 DB 写入之前**（R21-F3）。
+
+    ⚠️ **不做「尽力而为地解析」**：一个被截断的 manifest 解析出来往往仍是合法
+    JSON 的**前缀片段**，静默消费它 = 把 manifest 损坏伪装成「候选就这么多」，
+    最终产出一份**会撒谎的 pilot 报告**（R1-F4）。
+
+    本函数的作用域**仅限于**把畸形/不自洽的 manifest 挡在门外。
+    **它不授予、也不参与任何出货资格判定**（R17-F2 / R18-F2）——
+    `ship_eligible ≡ (final_verdict == "SUCCESS")` 是派生量，与本函数无关。
+    """
+    check_version(payload)                 # ← 先版本、后形状（次序是判据的一部分）
+    assert isinstance(payload, dict)       # check_version 已保证
+
+    for key in REQUIRED_KEYS:
+        _require(key in payload,
+                 f"manifest 缺少必需字段 {key!r}。"
+                 "这通常意味着文件被截断，或由不兼容的版本写出。")
+
+    _require_nonempty_str(payload["seed"], "seed")
+    return payload

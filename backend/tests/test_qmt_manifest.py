@@ -221,3 +221,198 @@ def test_manifest_members_is_files_plus_staged_export_log():
     members = manifest_members(m)
     assert len(members) == 3                      # 2N+1，N=1
     assert ("export_log.csv", "c" * 64) in members
+
+
+from qmt_manifest import validate_manifest
+
+
+def _sha(tag: str) -> str:
+    """造一个形状合法、可区分的假 sha256（只用于测试，不代表真实哈希）。"""
+    return hashlib.sha256(tag.encode("utf-8")).hexdigest()
+
+
+def _file_rec(code: str, name: str, period: str) -> dict:
+    """按**真实 QMT 导出格式**造一条文件记录。
+
+    ⚠️ 目录名与文件名里的 label 必须同源：目录 = f"{label}_前复权"，
+    文件名 = f"{code}_{name}_{label}_前复权.csv"。照想象造样本让两个缺陷
+    藏了三年且测试全绿（见 qmt_ingest 的 1d/status 两个生产缺陷）。
+    """
+    label = "1分钟K线" if period == "1m" else "日K线"
+    rel = f"{label}_前复权/{code}_{name}_{label}_前复权.csv"
+    return {"stock_code": code, "period": period, "relative_path": rel,
+            "bytes": 1234567, "sha256": _sha(rel)}
+
+
+_STOCKS = (("600000.SH", "浦发银行"), ("000001.SZ", "平安银行"))
+
+
+def _valid_manifest(**overrides) -> dict:
+    """一份**必须能通过全部校验**的最小合法 manifest。
+
+    所有否定档从它派生、只改一处。`source_verification_evidence` 在 overrides
+    **之后**按最终的 files/staged_export_log 重算，这样改 files 的档不会因为
+    聚合值对不上而被**另一条**判据拒掉——**两条判据互相掩盖时，单独变异
+    都不会红**（本仓栽过的假阴性形态之一）。
+    """
+    universe = {
+        "SH": ["600000.SH", "600004.SH", "600006.SH"],
+        "SZ": ["000001.SZ", "000002.SZ"],
+        "BJ": ["430047.BJ"],
+    }
+    elog_sha = _sha("export_log.csv@2026-08-24")
+    m: dict = {
+        "manifest_version": 1,
+        "seed": "s-2026-08-24",
+        "source_snapshot": {"export_log_sha256": elog_sha, "universe": universe},
+        "source_mount": {
+            "fstype": "smbfs",
+            "device": "//agate@192.168.5.151/QMT_Export",
+            "source_root_relative": "front_ratio_cn_stocks_ab_bj",
+        },
+        "pool_order": {
+            "SH": [{"code": "600000.SH", "universe_idx": 0}],
+            "SZ": [{"code": "000001.SZ", "universe_idx": 0}],
+            "BJ": [],
+        },
+        "cursor": {"SH": 1, "SZ": 1, "BJ": 0},
+        "files": [r for code, nm in _STOCKS for r in
+                  (_file_rec(code, nm, "1m"), _file_rec(code, nm, "daily"))],
+        "staged_export_log": {"relative_path": "export_log.csv",
+                              "bytes": 2399554, "sha256": elog_sha},
+        "source_verification": "full",
+        "operator_attestation": {"no_export_window": True,
+                                 "recorded_at": "2026-08-24T12:00:00+08:00"},
+    }
+    m.update(overrides)
+    if "source_verification_evidence" not in overrides:
+        try:
+            agg = aggregate_sha256(manifest_members(m))
+            n = len(m["files"]) + 1
+        except Exception:                     # overrides 把 files 弄坏了
+            agg, n = _sha("uncomputable"), 0
+        m["source_verification_evidence"] = {
+            "level": "full",
+            "passes": [
+                {"pass": 1, "files_verified": n, "aggregate_sha256": agg,
+                 "completed_at": "2026-08-24T12:01:00+08:00"},
+                {"pass": 2, "files_verified": n, "aggregate_sha256": agg,
+                 "completed_at": "2026-08-24T12:09:00+08:00"},
+            ],
+            "passes_agree": True,
+        }
+    return m
+
+
+def _recompute_evidence(m: dict) -> dict:
+    """改动 files / staged_export_log 之后**必须**调它一次。
+
+    ⚠️⚠️ 不调的后果是**两条判据互相掩盖，让变异验证出假阴性**：聚合指纹的成员是
+    `(relative_path, sha256)`，改了任一项（或增删条目）都会让存根里的
+    `aggregate_sha256` 与 `files_verified` 同时对不上。此时否定档照样红——
+    但红的是**聚合判据**，不是被测的那一条。于是把被测判据变异掉之后测试
+    **仍然绿**，而变异表会显示「零红」，被误读成「测试没判别力」。
+    本仓栽过这个形态（见 feedback_mutation_false_negatives_two_shapes）。
+
+    弄坏到算不出来时保持原样：那种档由 files / staged_export_log 的形状判据
+    负责（它们排在存根校验**之前**）。
+    """
+    try:
+        agg = aggregate_sha256(manifest_members(m))
+        n = len(m["files"]) + 1
+    except Exception:
+        return m
+    m["source_verification_evidence"]["passes"] = [
+        {"pass": i + 1, "files_verified": n, "aggregate_sha256": agg,
+         "completed_at": f"2026-08-24T12:0{i}:00+08:00"} for i in range(2)]
+    return m
+
+
+def _with_universe(uni: dict, **overrides) -> dict:
+    """只换 universe，**保持两处 export_log sha256 一致**。
+
+    ⚠️ 不这么做的话，「staged_export_log.sha256 必须等于
+    source_snapshot.export_log_sha256」那条判据会**掩盖**本要测的判据：
+    否定档照样红，但红的是相等判据，于是变异掉被测判据后测试仍绿。
+    """
+    base = _valid_manifest()
+    return _valid_manifest(
+        source_snapshot={
+            "export_log_sha256": base["source_snapshot"]["export_log_sha256"],
+            "universe": uni},
+        **overrides)
+
+
+def test_the_baseline_manifest_passes_everything():
+    """⭐ 正向放行档 —— 整套否定档的判别力全部建立在它之上。
+
+    没有这一条，一个 `def validate_manifest(p): raise ManifestInvalidError("x")`
+    的**恒抛**实现会让下面每一条否定档都绿，而五组判据一次都没执行过。
+    本仓真栽过这个形态（429 测试 + codex 14 轮全漏）。
+    """
+    m = _valid_manifest()
+    assert validate_manifest(m) == m
+
+
+@pytest.mark.parametrize("missing", [
+    "manifest_version", "seed", "source_snapshot", "source_mount",
+    "pool_order", "cursor", "files", "staged_export_log",
+    "source_verification", "source_verification_evidence",
+])
+def test_every_required_key_is_actually_required(missing):
+    """10 个必需键**逐个**删，每个都必须让整份 manifest 被拒。
+
+    判别力：把 REQUIRED_KEYS 里任一项删掉，对应那个参数档必红。
+    ⚠️ 缺 manifest_version 那一档抛的是 ManifestVersionError（缺失视为 0），
+    与其余九档不同——这正是「版本与形状是两族」的体现。
+    """
+    m = _valid_manifest()
+    del m[missing]
+    expected = ManifestVersionError if missing == "manifest_version" else ManifestInvalidError
+    with pytest.raises(expected):
+        validate_manifest(m)
+
+
+def test_top_level_universe_is_not_required_and_not_rejected():
+    """顶层没有 universe（S2-F3）：不加它照样过；加了也只当未知键保留。
+
+    判别力：把 "universe" 加回 REQUIRED_KEYS，本条第一半必红。
+    """
+    assert "universe" not in _valid_manifest()          # 基座本来就没有它
+    validate_manifest(_valid_manifest())                # 且照样通过
+
+
+def test_validate_manifest_reports_version_before_shape():
+    """⭐⭐ **真正的次序钉**（Task 3 那条测不到它——它调的是 `check_version`，
+    而 `validate_manifest` 那时还不存在；2026-08-25 控制者归因自查发现）。
+
+    一份版本更高、且按**本版**要求缺了九个必需键的 manifest，必须报
+    `ManifestVersionError`（「你的工具太旧」），**而不是** `ManifestInvalidError`
+    （「账本畸形」）。一棵已拉几百只股的 staging 收到错误的那一句，
+    操作者就不知道该重拉还是该换工具版本（O4-F10 栽过的那档）。
+
+    判别力：把 `validate_manifest` 写成「先查必需键、再 `check_version`」，本条必红。
+    """
+    with pytest.raises(ManifestVersionError) as ei:
+        validate_manifest({"manifest_version": 99})     # 只有版本号，别的全没有
+    assert ei.value.kind == "newer"
+
+
+def test_validate_manifest_reports_shape_error_when_version_matches():
+    """反向档：版本对上了，才轮到形状判据说话。
+
+    没有这一条，一个「凡缺键就报 VersionError」的实现也能让上一条绿。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest({"manifest_version": 1})      # 版本对，但九个必需键全缺
+
+
+def test_empty_seed_is_rejected():
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(seed=""))
+
+
+def test_non_string_seed_is_rejected():
+    for bad in (1, None, ["s"]):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(seed=bad))
