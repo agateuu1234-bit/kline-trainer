@@ -286,7 +286,11 @@ public struct TrainingView: View {
                                      lockIsOn: DrawingEditRouter.lockIsOn(engine: engine),
                                      onToggleLock: { DrawingEditRouter.toggleLockSelected(engine: engine) },
                                      deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
-                                     onDelete: { confirmingDeleteDrawing = true })
+                                     onDelete: { confirmingDeleteDrawing = true },
+                                     undoEnabled: DrawingEditRouter.undoButtonEnabled(engine: engine),
+                                     onUndo: { DrawingEditRouter.undo(engine: engine) },
+                                     redoEnabled: DrawingEditRouter.redoButtonEnabled(engine: engine),
+                                     onRedo: { DrawingEditRouter.redo(engine: engine) })
                 } else {
                     TradeActionBar(
                         content: TradeActionBarContent(price: engine.currentPrice),

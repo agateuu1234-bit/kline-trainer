@@ -5,22 +5,23 @@
 import Testing
 @testable import KlineTrainerContracts
 
-/// G1（D96 + 自动选中 PR 的 D86）：`setDefaultStyle` 的调用点**恰好 4 个** ——
-/// `DrawingEditRouter.applyPanelStyleMutation` **2 处**（D86：画线态分支写「本局默认」+
-/// 无选中分支写「下一条线的默认」）+ `resumePending` + `resumePendingReplay`（两处续训种子）。
-/// ⚠️ 3→4 是**自动选中 PR 有意为之**：D86 让画线态的一次改样式同时写「那条线」与「本局默认」，
-///    这是新增的第四条写默认路径，已按本守卫头注的要求重审并接受（spec §6.1 / §6.3）。
-/// 多于 4 ⇒ 又出现了新的写默认路径，必须再次回来重审；
-/// 少于 4 ⇒ 有一处没接上（种子漏接，或 D86 的某个分支没写默认）。
-@Test func g1_setDefaultStyle_has_exactly_four_call_sites() throws {
+/// G1（D96 + 自动选中 PR 的 D86 + 1b-ii 撤销 PR 的 D102）：`setDefaultStyle` 的调用点**恰好 5 个** ——
+/// `DrawingEditRouter.applyPanelStyleMutation` **2 处** + `resumePending` + `resumePendingReplay`
+/// + **`TrainingEngine.applyUndoEntry` 1 处**（撤销 / 前进时把本局默认一并回滚 / 一并重做）。
+/// ⚠️ 4→5 是**1b-ii 撤销 PR 有意为之**：D102 让「画线态改样式」的两处写入成为一个可撤销动作，
+///    撤销执行单点因此必须能写回默认。这是第五条写默认路径，已按本守卫头注的要求重审并接受。
+/// 多于 5 ⇒ 又出现了新的写默认路径，必须再次回来重审；
+/// 少于 5 ⇒ 有一处没接上（种子漏接、D86 某分支没写默认，或撤销漏了默认那一半 = 成对回滚失效）。
+@Test func g1_setDefaultStyle_has_exactly_five_call_sites() throws {
     let sites = try callSiteCount("setDefaultStyle(")
     let total = sites.reduce(0) { $0 + $1.count }
-    #expect(total == 4, "setDefaultStyle 调用点应恰好 4 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
-    // 逐文件计数（只数总数会漏「两处挤成一处、另一处多出一次」这种互相抵消的坏状态）
+    #expect(total == 5, "setDefaultStyle 调用点应恰好 5 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
     #expect(sites.first { $0.file.hasSuffix("DrawingEditRouter.swift") }?.count == 2,
             "路由里应恰好 2 处（D86 画线态分支 + 无选中分支），实测：\(sites.map { "\($0.file)×\($0.count)" })")
     #expect(sites.first { $0.file.hasSuffix("TrainingSessionCoordinator.swift") }?.count == 2,
             "coordinator 里应恰好 2 处（resumePending + resumePendingReplay）")
+    #expect(sites.first { $0.file.hasSuffix("TrainingEngine.swift") }?.count == 1,
+            "引擎里应恰好 1 处（applyUndoEntry 的成对回滚）—— 0 处 = 撤销没回滚默认（D102 失效）")
 }
 
 /// G3（D95）：`replayBaseline` 的元组构造点**恰好 3 处**，且**每一处都带 defaultStyle 分量**。

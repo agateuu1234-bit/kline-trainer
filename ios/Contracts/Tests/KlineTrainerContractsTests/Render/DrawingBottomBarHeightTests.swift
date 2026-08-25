@@ -41,7 +41,9 @@ struct DrawingBottomBarHeightTests {
     private func drawingBottomBarHeight(width: CGFloat) -> CGFloat {
         let bar = DrawingBottomBar(typeRowExpanded: .constant(false),
                                    lockEnabled: false, lockIsOn: false, onToggleLock: {},
-                                   deleteEnabled: false, onDelete: {})
+                                   deleteEnabled: false, onDelete: {},
+                                   undoEnabled: false, onUndo: {},
+                                   redoEnabled: false, onRedo: {})
         return measuredHeight(bar, width: width)
     }
 

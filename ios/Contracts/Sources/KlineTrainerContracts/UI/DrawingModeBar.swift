@@ -2,8 +2,8 @@
 #if canImport(UIKit)
 import SwiftUI
 
-/// 画线底栏（单行）：①「类型」键 + **②🔒 锁定（1b-ii PR-1）** + ③🗑 删除。
-/// ④↩⑤↪ 属 1b-ii PR-2，本期**一个占位都不渲染**（母 spec D19 / D24：不 ship 恒灰的未接线按钮）。
+/// 画线底栏（单行）：①「类型」键 + ②🔒 锁定 + ③🗑 删除 + **④↩ 撤销 + ⑤↪ 前进（1b-ii 撤销 PR）**。
+/// 至此为母 spec §2 的 5 键终局形态。
 /// 与 TradeActionBar/ReviewControlBar 共享同一个 `BottomBarMetrics.height` 固定高度 → 三者切换零跳动。
 struct DrawingBottomBar: View {
     @Binding var typeRowExpanded: Bool
@@ -17,6 +17,14 @@ struct DrawingBottomBar: View {
     let deleteEnabled: Bool
     /// 只负责**弹确认框**，绝不直接删（D65 R13-F1：弹框期间线可能滑出屏，几何必须在确认那一刻重算）。
     let onDelete: () -> Void
+    /// D78「撤销可用」谓词的结果。**本视图自己不判任何东西**——判据全在 `DrawingEditRouter`。
+    /// ⚠️ 这个谓词**刻意不含**几何与选中分量（与 🔒/🗑 不同）：撤销是会话级操作。
+    ///    形状不一致是**有意的**，不要"顺手统一"（D78）。
+    let undoEnabled: Bool
+    let onUndo: () -> Void
+    /// D78「前进可用」谓词的结果。理由同上。
+    let redoEnabled: Bool
+    let onRedo: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -37,6 +45,12 @@ struct DrawingBottomBar: View {
             Button(action: onDelete) { Image(systemName: "trash") }
                 .accessibilityLabel("删除")
                 .disabled(!deleteEnabled)
+            Button(action: onUndo) { Image(systemName: "arrow.uturn.backward") }
+                .accessibilityLabel("撤销")
+                .disabled(!undoEnabled)
+            Button(action: onRedo) { Image(systemName: "arrow.uturn.forward") }
+                .accessibilityLabel("前进")
+                .disabled(!redoEnabled)
             Spacer()
         }
         .buttonStyle(.bordered)

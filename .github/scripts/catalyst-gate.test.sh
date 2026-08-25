@@ -501,13 +501,29 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   放宽，不是「反正没超容差就不用管」。
 #   pass-main-current.log 本轮未重裁（该 fixture 仍是 uikit 78 / total 1798 的真实冻结日志，
 #   1798 落在新窗口 [1781,1841] 内，下方活基线自测断言的回显数字不受影响）。
+#   【1b-ii 撤销 PR（本轮）】total 1811→1861（+50）：本片新增 50 条 host 测试（撤销栈行为 + 源码守卫），
+#   **零条 UIKit-gated 新增**（uikit 基线仍 78，已重生成确认零 diff）。
+#   同步理由：不同步的话下一轮读到的仍是旧基线 1811，窗口下限锁死在 1811−30=1781，而当前真实总数
+#   已是 1861 ⇒ 从 1861 掉到 1781 都不会报警，等于把这道门「掉 30 条就报警」的设计意图废掉。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
+#   【1b-ii 撤销 PR 终审修复轮（本轮）】total 1861→1864（+3）：整支最终评审 Important-3 给
+#   `pairedRedoSurvivesSaveAndResume` 补一条↩/↪中间态断言（同一条测试内，不新增测试数）、
+#   Minor-2 给复盘门两个置灰谓词补 1 条回归 + 顺手补 D102 两条 fail-closed 回归网（嵌套 /
+#   单作用域二次改动，各 1 条）——共 3 条 host swift-testing 测试新增，均落在
+#   KlineTrainerContractsTests target。另有 1 条 XCTest 自检（U-G4 的 init 分类双向自检，
+#   为 Important-4 补的判据配套）同落该 target，但 XCTest 用例数不计入本行的 swift-testing
+#   汇总（"Test run with N tests" 只统计 swift-testing）。**零条 UIKit-gated 新增**（uikit
+#   基线仍 78，已重生成确认零 diff）。
+#   同步理由：不同步的话下一轮读到的仍是旧基线 1861，窗口下限锁死在 1861−30=1831，而当前真实
+#   总数已是 1864 ⇒ 从 1864 掉到 1831 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1798" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1798）→ GATE PASS 且回显 1798 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1864" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1864）→ GATE PASS 且回显 1864 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1798，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1864，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

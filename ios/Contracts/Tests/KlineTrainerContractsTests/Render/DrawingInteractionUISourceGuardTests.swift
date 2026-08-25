@@ -98,31 +98,53 @@ struct DrawingInteractionUISourceGuardTests {
             "前景色不是绑 isDrawMode 的三元——被硬编码成常量，图标会恒亮/恒灭")
     }
 
-    @Test("spec §1.1 / D24：底栏**恰好 3 个按钮**（类型 + ②🔒 + ③🗑），④↩⑤↪ 属 PR-2 一个都不渲染")
-    func bottomBarHasExactlyThreeKeys() throws {
+    @Test("1b-ii 撤销 PR：底栏**恰好 5 个按钮**（①类型 ②🔒 ③🗑 ④↩ ⑤↪ = 母 spec §2 的终局形态）")
+    func bottomBarHasExactlyFiveKeys() throws {
         let bar = try code("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
-        // 结构计数（PD7：不是「禁止图标名」黑名单）—— 1b-ii PR-1 把 2 改成 3
-        #expect(bar.components(separatedBy: "Button").count - 1 == 3,
-                "底栏按钮数不是 3 —— 多了就是把 PR-2 的 ↩↪ 提前 ship 了，少了就是 🔒 或 🗑 没接进来")
+        // 结构计数（G-5：不是「禁止图标名」黑名单）—— 锁定 PR 把 2 改成 3，撤销 PR 把 3 改成 5
+        #expect(bar.components(separatedBy: "Button").count - 1 == 5,
+                "底栏按钮数不是 5 —— 少了就是 ↩ / ↪ 没接进来，多了就是把 P1c 的键提前 ship 了")
         #expect(bar.contains("deleteEnabled"), "🗑 必须由传入谓词置灰，不得自己判")
         #expect(bar.contains(squeeze(".disabled(!deleteEnabled)")))
         #expect(bar.contains("lockEnabled"), "🔒 必须由传入谓词置灰，不得自己判")
         #expect(bar.contains(squeeze(".disabled(!lockEnabled)")))
-        // 底栏不得自己读 locked —— 判据必须在路由里（结构断言，读 squeezed 正确）
+        #expect(bar.contains("undoEnabled"), "↩ 必须由传入谓词置灰，不得自己判")
+        #expect(bar.contains(squeeze(".disabled(!undoEnabled)")))
+        #expect(bar.contains("redoEnabled"), "↪ 必须由传入谓词置灰，不得自己判")
+        #expect(bar.contains(squeeze(".disabled(!redoEnabled)")))
+        // 底栏不得自己读任何状态 —— 判据必须在路由里
         #expect(!bar.contains(squeeze("drawing.locked")), "底栏不得自己读 DrawingObject.locked")
+        #expect(!bar.contains(squeeze("canUndoDrawing")), "底栏不得自己读引擎的栈状态")
         #expect(bar.contains("BottomBarMetrics.height"))
-        // ★ 用户可见文案 / SF Symbol 名是**字符串字面量** → 必须读原始文本，且带完整调用语法做锚
+        // ★ 用户可见文案 / SF Symbol 名是**字符串字面量** → 必须读原始文本
         let barRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
         #expect(barRaw.contains("Text(\"类型\")"))
         #expect(barRaw.contains("Image(systemName: \"trash\")"), "③🗑 未接入")
         #expect(barRaw.contains(".accessibilityLabel(\"删除\")"))
-        #expect(barRaw.contains("Image(systemName: lockIsOn ? \"lock\" : \"lock.open\")"),
-                "🔒 图标没接 lockIsOn —— 图标态不会反映选中线的锁定状态")
+        #expect(barRaw.contains("Image(systemName: lockIsOn ? \"lock\" : \"lock.open\")"))
         #expect(barRaw.contains(".accessibilityLabel(lockIsOn ? \"解锁\" : \"锁定\")"))
-        // ④↩⑤↪ 属 PR-2：本期一个占位都不许渲染（读原始文本才数得到字面量）
-        for undoIcon in ["arrow.uturn.backward", "arrow.uturn.forward"] {
-            #expect(!barRaw.contains(undoIcon), "\(undoIcon) 属 PR-2，本期不得渲染")
-        }
+        // ④↩ ⑤↪ 本期**必须**渲染（锁定 PR 时这两条是否定断言，撤销 PR 反转过来）
+        #expect(barRaw.contains("Image(systemName: \"arrow.uturn.backward\")"), "④↩ 未接入")
+        #expect(barRaw.contains(".accessibilityLabel(\"撤销\")"))
+        #expect(barRaw.contains("Image(systemName: \"arrow.uturn.forward\")"), "⑤↪ 未接入")
+        #expect(barRaw.contains(".accessibilityLabel(\"前进\")"))
+    }
+
+    /// ⚠️ 只查 `DrawingModeBar.swift` **挡不住**「按钮长得对但根本没接上」——
+    ///    `DrawingBottomBar(undoEnabled: true, onUndo: {}, …)` 会让上面那条五键守卫全绿，
+    ///    而屏幕上那个 ↩ 恒亮、点了没反应。可用性与动作的**真相在路由里**。
+    @Test("底栏 ↩ / ↪ 的可用性与动作四者都必须接 DrawingEditRouter，不得传常量或空闭包")
+    func trainingViewWiresUndoRedoToRouter() throws {
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains(squeeze("undoEnabled: DrawingEditRouter.undoButtonEnabled(engine: engine)")),
+                "↩ 的可用性没接路由 —— 可能传了常量")
+        #expect(tv.contains(squeeze("redoEnabled: DrawingEditRouter.redoButtonEnabled(engine: engine)")),
+                "↪ 的可用性没接路由")
+        #expect(tv.contains(squeeze("DrawingEditRouter.undo(engine: engine)")), "↩ 的动作没接路由")
+        #expect(tv.contains(squeeze("DrawingEditRouter.redo(engine: engine)")), "↪ 的动作没接路由")
+        // ⚠️ **不得**绕过路由直接调引擎（那样选中态永远不同步，D77 / U-G6 同族）
+        #expect(!tv.contains(squeeze("engine.undoDrawing(")), "↩ 绕过了路由直接调引擎")
+        #expect(!tv.contains(squeeze("engine.redoDrawing(")), "↪ 绕过了路由直接调引擎")
     }
 
     /// ⚠️ 只查 `DrawingModeBar.swift` **挡不住**「按钮长得对但根本没接上」：

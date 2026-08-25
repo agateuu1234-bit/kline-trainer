@@ -191,10 +191,17 @@ struct DrawingTapHitShieldTests {
         // ⚠️「删除」只准出现在**底栏**：PR-4 把它从黑名单移进正向断言时，overlay 那半边的守卫
         //    连带失效了（整支 Opus 终审 Minor-2）——类型行再冒出一个 🗑 将无人拦。单独补回。
         #expect(!overlay.contains("accessibilityLabel(\"删除\")"))
-        for banned in ["accessibilityLabel(\"锁定\")",
-                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②④⑤ 仍属 1b-ii，不渲染
-            #expect(!overlay.contains(banned)); #expect(!bottom.contains(banned))
+        // 类型行永远不该有 ②🔒 / ④↩ / ⑤↪ —— **这一半继续有效**，与撤销功能是否 ship 无关。
+        // ⚠️ 与上面「删除」那条同一个教训：把某个键从黑名单移进正向断言时，**overlay 那半边的
+        //    守卫会连带失效**（整支 Opus 终审 Minor-2 就是这么来的），所以只解禁 bottom 那一半。
+        // ⚠️ 禁的是**裸字面量**而不是 `accessibilityLabel("…")` 这种带包装的串：底栏 🔒 用的是三元
+        //    `accessibilityLabel(lockIsOn ? "解锁" : "锁定")`，包装串拼不出来 ⇒ 原写法对三元形态
+        //    **恒真**（「锁定」那一项从来没生效过，已实测）。裸字面量连三元写法一起拦得住。
+        for banned in ["锁定", "解锁", "撤销", "前进"] {
+            #expect(!overlay.contains(banned), "类型行不得出现「\(banned)」键")
         }
+        // 底栏那一半已随 1b-ii 全部 ship（②🔒 锁定 PR、④↩⑤↪ 本 PR），
+        // 正向覆盖见 DrawingInteractionUISourceGuardTests.bottomBarHasExactlyFiveKeys。
     }
 }
 

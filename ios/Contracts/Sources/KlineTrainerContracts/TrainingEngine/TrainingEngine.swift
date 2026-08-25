@@ -28,6 +28,27 @@ public final class TrainingEngine {
     /// 否则原地改样式不改长度→永不落盘）。**只覆盖 `drawings`，不覆盖 `reviewDrawings`**（复盘本期不改样式）。
     /// 运行时计数器，不进存储（初值 0，每次装载从 0 起算，绝对值无语义）。
     public private(set) var drawingsRevision: Int = 0
+    /// 深度 1 的撤销栈（D25：不跨画线会话保留，故**绝不落盘**）。
+    /// **存引擎不存 DrawingSession** 的两条理由（D74）：
+    ///   ① 撤销要在 `drawings` 上按**精确下标**操作，那是引擎的私有存储；
+    ///   ② 入栈点必须与写入点同处 —— 四个写入 API 全在引擎里，放这儿「写了却忘了入栈」
+    ///      在结构上不可能发生。放 UI 层则每个调用点都要记得入栈，1b-i 的 D56 已经证明
+    ///      「靠调用方记得」是错的。
+    /// ⚠️ 存储属性必须留在**类体本身**——同文件 extension（`:735` 起）不能新增存储属性（Swift 硬限制），
+    ///    只能加计算属性/方法；本片其余撤销代码（`canUndoDrawing`/`recordDrawingUndoDelta` 等）仍留在
+    ///    那个 extension 里，靠同文件 `private` 可见性访问这个字段。
+    private var drawingUndoEntry: DrawingUndoEntry?
+    /// D102：「一次动作」作用域的中间态。`nil` = 当前没有打开的作用域。
+    /// ⚠️ 用**一个可选结构**而不是几个平行布尔/可选量 —— 「作用域没开却存着 defaultBefore」
+    ///    这类坏状态因此不可表达。
+    /// ⚠️ 存储属性同上一条理由必须留在**类体本身**——本包的 `performDrawingAction` /
+    ///    `recordDrawingUndoDelta` 仍留在 `:745` 起的 extension 里，靠同文件 `private` 可见性访问。
+    private struct DrawingActionScope {
+        let defaultBefore: DrawingDefaultStyle
+        var delta: DrawingUndoEntry.DrawingsDelta?
+        var aborted: Bool
+    }
+    private var drawingActionScope: DrawingActionScope?
     /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
     /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
     /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
@@ -1089,6 +1110,9 @@ extension TrainingEngine {
     func deleteDrawing(at index: Int) {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
+        // D79 第一层：本方法**绕过撤销栈**直接改数组，且会让栈里已存的下标全部失准。
+        // 它不是「用户动作」（零生产调用点），入栈没有语义 —— **作废**是唯一正确的表态。
+        clearDrawingUndoStack()
         drawingsRevision += 1
     }
 
@@ -1112,7 +1136,9 @@ extension TrainingEngine {
         let matches = drawings.indices.filter { drawings[$0].id == id }
         guard matches.count == 1, let i = matches.first else { return false }
         guard !drawings[i].locked else { return false }
+        let removed = drawings[i]
         drawings.remove(at: i)
+        recordDrawingUndoDelta(.removed(before: removed, at: i))      // D75
         drawingsRevision += 1
         return true
     }
@@ -1131,6 +1157,7 @@ extension TrainingEngine {
         guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
         guard !drawing.id.isEmpty, !drawings.contains(where: { $0.id == drawing.id }) else { return false }     // D66：id 非空 + 与目标数组唯一
         drawings.append(drawing)
+        recordDrawingUndoDelta(.inserted(after: drawing, at: drawings.count - 1))   // D75
         drawingsRevision += 1
         return true
     }
@@ -1184,6 +1211,7 @@ extension TrainingEngine {
         // 统一之后「`drawingsRevision` 递增 ⟺ 内容真的变了」成为不变量，PR-2 的入栈条件恰好等于它。
         guard updated != old else { return true }
         drawings[i] = updated
+        recordDrawingUndoDelta(.replaced(before: old, after: updated, at: i))       // D75
         drawingsRevision += 1
         return true
     }
@@ -1206,7 +1234,11 @@ extension TrainingEngine {
         guard matches.count == 1, let i = matches.first else { return false }  // ①（D66 唯一）
         let old = drawings[i]
         guard old.locked != newLocked else { return true }                     // D80：内容未变 → 零副作用
-        drawings[i] = DrawingObject(
+        // ⚠️ 参数内部名必须仍是 `newLocked`、且必须**就地构造不抽 helper** ——
+        //    L12 守卫（TrainingEngineDrawingSessionTests.swift:992）数的是
+        //    「非拷贝直传的 `locked:` 写入恰好 1 处」，抽 helper 会让它误判。
+        //    引入 `let updated` 不影响它（仍是就地构造，`locked: newLocked` 字面仍在本函数体内）。
+        let updated = DrawingObject(
             id: old.id, toolType: old.toolType, anchors: old.anchors,
             isExtended: old.isExtended, panelPosition: old.panelPosition,
             revealTick: old.revealTick, period: old.period,
@@ -1217,6 +1249,8 @@ extension TrainingEngine {
             text: old.text, fontSize: old.fontSize,
             textColorToken: old.textColorToken, textForm: old.textForm,
             tailAnchor: old.tailAnchor)
+        drawings[i] = updated
+        recordDrawingUndoDelta(.replaced(before: old, after: updated, at: i))       // D75
         drawingsRevision += 1
         return true
     }
@@ -1358,7 +1392,12 @@ extension TrainingEngine {
         stopAllDeceleration()
         setActiveBounds(nil, panel: .upper)
         setActiveBounds(nil, panel: .lower)
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.deactivate()                 // 幂等：先落会话真相
+        // D74 / D103：清栈绑「drawingModeActive 真的翻转」，不是「进了这个函数」。
+        // 本函数是**第三条真实拆除路径**（public，既有测试用它退出画线模式）——
+        // 只在 begin/end 清栈会让它退出后残留一个陈旧栈（spec §2.1 codex R4-F2）。
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
         normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
@@ -1395,11 +1434,18 @@ extension TrainingEngine {
         armPanelForDrawing(tool, panel: .upper)
         armPanelForDrawing(tool, panel: .lower)
         guard isDrawingActive(on: .upper), isDrawingActive(on: .lower) else {
+            let wasActive = drawingSession.drawingModeActive
             cancelDrawingAllPanels()          // 回滚（此刻会话仍未开 → fail-closed 守卫放行）
             drawingSession.deactivate()       // 幂等；确保工具/pending 不残留
+            if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }   // D103
             return
         }
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.activate(tool: tool)   // 两面板都武装好了，才认会话开启
+        // ⚠️ D103：`activate` 对 `drawingModeActive` 是**幂等**的（DrawingSession.swift:202 第一行就置 true）。
+        //    会话已开时再调一次 begin 会走到这里却**没有翻转** —— 无条件清栈会悄悄抹掉一条有效撤销记录
+        //    （用户什么都没做，↩ 就灰了）。N-Q5 就是把那种实现直接测红的档。
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }
     }
 
     /// 结束会话：清真相 + 两面板退出 `.drawing`。幂等（未开会话时全 no-op）。
@@ -1415,12 +1461,184 @@ extension TrainingEngine {
         stopAllDeceleration()
         setActiveBounds(nil, panel: .upper)
         setActiveBounds(nil, panel: .lower)
+        let wasActive = drawingSession.drawingModeActive
         drawingSession.deactivate()
+        if wasActive != drawingSession.drawingModeActive { clearDrawingUndoStack() }   // D103
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
         // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
         normalizeOffsetForCurrentBounds(panel: .upper)
         normalizeOffsetForCurrentBounds(panel: .lower)
+    }
+
+    // MARK: 撤销栈（1b-ii 撤销 PR）—— D74 存引擎 / D75 入栈点 / D101 入栈条件
+    // ⚠️ 存储属性 `drawingUndoEntry` 本身声明在类体里（`:30` 附近，extension 不能加存储属性）；
+    //    本 extension 与它同文件，靠 `private` 的同文件可见性直接读写。
+
+    /// ④↩ 亮的条件（D78）：**不在复盘模式**、且栈非空**且**栈顶尚未被撤销。
+    /// ⚠️ **与选中态无关、与几何无关** —— 撤销是会话级操作，不需要选中任何线，也不需要那条线
+    ///    此刻看得见。这是本片唯一**不**共享 `selectionGeometryVisible` 的底栏判据，属**刻意不对称**，
+    ///    后人不要"顺手统一"（D78 逐字）。
+    /// ⚠️ 整支终审 Minor-2：`flow.mode != .review` 与动作入口 `undoDrawing()` 同口径（N-O，D34
+    ///    纵深防御）——**不要**以为「今天复盘态底栏被另一条与撤销无关的渲染条件挡住了」就把这句省掉。
+    ///    没有它，复盘模式下若栈非空，谓词会是 true 而动作恒 false = 按钮亮着但点了没反应，
+    ///    正是本仓反复强调「不 ship 未接线按钮」要防的形态；渲染条件一旦被改动就直接可达。
+    var canUndoDrawing: Bool { flow.mode != .review && (drawingUndoEntry.map { !$0.isUndone } ?? false) }
+
+    /// ⑤↪ 亮的条件（D78）：**不在复盘模式**、且存在一个**已被撤销**的栈顶。理由同上，刻意不对称。
+    /// ⚠️ 同 `canUndoDrawing` 上方那条注释：纵深防御，不要因为渲染条件"挡住了"就省掉这句。
+    var canRedoDrawing: Bool { flow.mode != .review && (drawingUndoEntry?.isUndone ?? false) }
+
+    /// 清空撤销栈。**两类调用者共用同一个函数**（语义都是"栈作废"）：
+    ///   ① 会话状态**真翻转**时（D74 / D103，见 begin/end/cancel 三处）；
+    ///   ② 有人绕过栈直接改了 `drawings`、让已存下标失准时（D79 第一层，Task 4）。
+    /// ⚠️ 整支终审 Minor-3：第二句 `drawingActionScope?.aborted = true` 防的是「作废发生在一个
+    ///    **已打开的**『一次动作作用域』内部」这种情况——若不 abort，`performDrawingAction` 收尾时
+    ///    会无条件用它移位前捕获的 delta 建一条**新**记录，把这次作废原样推翻。今天不可达（生产代码
+    ///    里没有任何调用点会在作用域内部触发清栈），但这是根因作废（D79 第一层）与动作归并（D102）
+    ///    两层之间唯一一条没被组合验证过的缝，补一行堵死它。
+    private func clearDrawingUndoStack() { drawingUndoEntry = nil; drawingActionScope?.aborted = true }
+
+    /// D102：把 `body` 里发生的写入合并成**一条**撤销记录。
+    ///
+    /// **为什么需要它**：自动选中片（D86）让画线态的一次改样式变成**两处写入** ——
+    /// 先写「本局默认」（`DrawingSession`），再 best-effort 改「那条线」（引擎）。
+    /// 入栈点在引擎的四个写入 API 里（D74/D75），它**看不见**前面那次默认写入；
+    /// 照原样各入一条，深度 1 的栈会让第二条把第一条挤掉 —— 正是交接 §10.1 点名的坏结果。
+    ///
+    /// **为什么不把入栈搬到路由层**：D74 的理由「入栈必须与写入同处，否则'写了却忘了入栈'
+    /// 要靠人记」一个字都没过时（1b-i 的 D56 已经证明过一次）。本作用域是在**不破坏**那条理由
+    /// 的前提下，补上「一次动作可以跨两个写入面」这件 spec 当时没有的事。
+    ///
+    /// **唯一调用点** = `DrawingEditRouter.applyPanelStyleMutation`（守卫 U-G5 钉死）。
+    /// 其余三条动作路径（删线 / 锁定 / 画线提交）**不包作用域**，写入 API 直接自成一条记录。
+    func performDrawingAction(_ body: () -> Void) {
+        // 嵌套 = 「哪一层算一个动作」无法定义 → fail-closed：整个外层动作作废，绝不 crash。
+        guard drawingActionScope == nil else {
+            drawingActionScope?.aborted = true
+            body()
+            return
+        }
+        drawingActionScope = DrawingActionScope(
+            defaultBefore: drawingSession.defaultStyle, delta: nil, aborted: false)
+        body()
+        let scope = drawingActionScope
+        drawingActionScope = nil
+
+        guard let scope, !scope.aborted else { clearDrawingUndoStack(); return }
+        let after = drawingSession.defaultStyle
+        let defaultChanged = (after != scope.defaultBefore)
+
+        // D101：`drawings` 没变就不入栈 —— 只改了本局默认的动作**撤不回来**，这是已接受残留。
+        guard let delta = scope.delta else {
+            // ⚠️ **但不能就这么放着**（codex plan-R3 high，已核实为真）：
+            //    栈顶那条记录的默认分量说「默认从 X 变成 Y」，而用户刚刚又把默认改成了 Z。
+            //    此后 ↩ 按 X 写回、↪ 按 Y 写回 —— **两个方向都会静默覆盖掉用户刚选的 Z**，
+            //    并经 autosave 落盘。不变量：**默认分量两端必须仍与当前默认值对得上**；
+            //    对不上就把这一半丢掉。`drawings` 那一半照常保留 —— 那条线根本没被碰过。
+            if defaultChanged { drawingUndoEntry?.defaultDelta = nil }
+            return
+        }
+        // ⚠️ 实参顺序 = 声明顺序 `drawingsDelta` → `isUndone` → `defaultDelta`（codex plan-R1）。
+        drawingUndoEntry = DrawingUndoEntry(
+            drawingsDelta: delta,
+            isUndone: false,
+            defaultDelta: defaultChanged
+                ? DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after) : nil)
+    }
+
+    /// 入栈单点。**唯一**被四个写入 API 的成功路径调用（D75）。
+    /// **位置纪律**：必须紧贴 `drawingsRevision += 1` —— D80 之后
+    /// 「`drawingsRevision` 递增 ⟺ `drawings` 内容真的变了」是不变量，而入栈条件**恰好等于**它（D101）。
+    /// 同条件同位置 ⇒ 「入栈与 revision 不同步」这个坏状态不可表达，而不是靠实施者两处都记得写。
+    private func recordDrawingUndoDelta(_ delta: DrawingUndoEntry.DrawingsDelta) {
+        if drawingActionScope != nil {
+            // 一个作用域内只允许**一次** `drawings` 改动（D102）。第二次到达 = 我们对
+            // 「一个动作」的建模已经与现实脱节 → fail-closed 作废，**绝不 crash**
+            // （这条路径在生产里不可达，但 crash 会把一个建模问题变成用户可见的闪退）。
+            if drawingActionScope?.delta != nil { drawingActionScope?.aborted = true }
+            else { drawingActionScope?.delta = delta }
+            return
+        }
+        // 深度 1：新动作直接覆盖栈顶，redo 位随之清空（D25）。
+        drawingUndoEntry = DrawingUndoEntry(drawingsDelta: delta, isUndone: false)
+    }
+
+    /// ④↩：撤销一步。返回 `false` = 没做任何事（空栈 / 栈顶已撤销 / 复盘 / 陈旧栈项）。
+    /// **不接受任何外部参数** —— 这个签名本身就是信任边界（D76 / D79 第三条）。
+    @discardableResult
+    func undoDrawing() -> Bool {
+        guard flow.mode != .review else { return false }              // N-O：D34 纵深防御
+        guard var entry = drawingUndoEntry, !entry.isUndone else { return false }
+        guard applyUndoEntry(entry, direction: .undo) else { return false }   // 失败时它内部已作废栈
+        entry.isUndone = true
+        drawingUndoEntry = entry
+        return true
+    }
+
+    /// ⑤↪：前进一步。**恒用 `after` 快照，绝不从当前默认样式 / 当前选中态重算**（D25 / D76）。
+    @discardableResult
+    func redoDrawing() -> Bool {
+        guard flow.mode != .review else { return false }
+        guard var entry = drawingUndoEntry, entry.isUndone else { return false }
+        guard applyUndoEntry(entry, direction: .redo) else { return false }
+        entry.isUndone = false
+        drawingUndoEntry = entry
+        return true
+    }
+
+    /// undo / redo 的**唯一**执行单点（D79 第三条：它俩共用这一个私有函数）。
+    ///
+    /// **为什么不复用四个写入 API**（本片最容易做错的一处，D76 逐条）：
+    ///   · `insert(at:)` 根本不存在 —— `appendDrawing` 只能 append，用它撤销删除会把线放到数组末尾
+    ///     = **z-order 变了**，之后在同一位置单击选中的不再是原来那条（D25 / D33 / D40 点名的正是这个）；
+    ///   · `updateDrawingStyle` 会被 D60 的 locked 门与 D61 的 raw-aware 门挡住 →
+    ///     「撤销一条带未来数据线的锁定」直接走不通。
+    /// **那些门为什么可以不走**：它们防的是**外部传进来的坏数据**；而 before / after 是引擎自己刚才
+    /// 吐出来的、**已经过完整门列表**的快照。
+    ///
+    /// **D79 第二层：前置条件逐 case 写死，任一不成立 → 返 `false`、`drawings` 不动、
+    /// `drawingsRevision` 不递增、并把整个撤销栈作废**（fail-closed，不留半吊子状态）。
+    /// ⚠️ Swift 数组越界是 **trap（进程直接崩）**，`do/catch` 接不住；不越界但身份对不上时，则是
+    ///    **删掉 / 改写了另一条线**，然后 `drawingsRevision += 1` 让这个坏状态被 autosave 固化。
+    ///    所以校验必须在**任何一次突变之前**跑完。
+    ///
+    /// ⚠️ **本函数自身绝不入栈**（D79 第三条）：不调 `recordDrawingUndoDelta`，也不经过四个写入 API。
+    ///    否则「撤销一次锁定」会把这次撤销本身又推进栈里，第二次点 ↩ 的行为无法定义。
+    private func applyUndoEntry(_ entry: DrawingUndoEntry, direction: DrawingUndoDirection) -> Bool {
+        switch (entry.drawingsDelta, direction) {
+
+        // 目标操作：remove(at: index)
+        case (.inserted(let obj, let index), .undo), (.removed(let obj, let index), .redo):
+            guard drawings.indices.contains(index), drawings[index].id == obj.id else {
+                clearDrawingUndoStack(); return false
+            }
+            drawings.remove(at: index)
+
+        // 目标操作：insert(obj, at: index)
+        case (.inserted(let obj, let index), .redo), (.removed(let obj, let index), .undo):
+            guard (0...drawings.count).contains(index),
+                  !drawings.contains(where: { $0.id == obj.id })          // 防 D66 的重复 id
+            else { clearDrawingUndoStack(); return false }
+            drawings.insert(obj, at: index)
+
+        // 目标操作：drawings[index] = obj
+        case (.replaced(let before, let after, let index), _):
+            let target = (direction == .undo) ? before : after
+            guard drawings.indices.contains(index), drawings[index].id == target.id else {
+                clearDrawingUndoStack(); return false
+            }
+            drawings[index] = target
+        }
+
+        // D102：本局默认与那条线是**同一个动作**的两半，一并回滚 / 一并重做。
+        // 写它会经 `DrawingSession.defaultStyle` 的 @Observable 变化触发 autosave
+        // （TrainingView 的 DrawingAutosaveTriggersModifier，D94）—— 本片不新增任何触发器。
+        if let dd = entry.defaultDelta {
+            drawingSession.setDefaultStyle(direction == .undo ? dd.before : dd.after)
+        }
+        drawingsRevision += 1     // 照常触发 autosave（D56：与四个写入 API 同一个 dirty 信号）
+        return true
     }
 }
 
@@ -1489,6 +1707,20 @@ extension TrainingEngine {
     /// 仅测试：直接置换 `drawings`，绕过全部写入门。用于构造生产入口**造不出**的坏状态
     /// （N21c：两条同 id → update/delete 必须 fail 而不是"打第一条"）。
     /// 不动 `drawingsRevision`（它只由真实写入面递增；测试自己记录基线）。
-    func injectDrawingsForTesting(_ ds: [DrawingObject]) { drawings = ds }
+    /// ⚠️ D79 第一层：整体换掉 `drawings` 会让栈里已存的下标必然错位。**必须作废栈** ——
+    ///    不作废的话，任何「先种一个非空栈、再注入一批线」的测试都会造出一个下标必然错位的
+    ///    引擎却全绿，正是本仓的假绿套路（N-N3a 就是钉这一条的）。
+    func injectDrawingsForTesting(_ ds: [DrawingObject]) {
+        drawings = ds
+        clearDrawingUndoStack()
+    }
+
+    /// 仅测试：**只读**栈顶，用来断言"入栈了什么"（N-N4 要求断言**栈内容**，不是只断言行为）。
+    var drawingUndoEntryForTesting: DrawingUndoEntry? { drawingUndoEntry }
+
+    /// 仅测试：直接种一条栈项，用来构造生产入口**造不出**的坏状态
+    /// （N-N2 的三个陈旧栈 case：越界 / id 对不上 / insert 时 id 已存在）。
+    /// ⚠️ `Sources/` 中调用点必须恒为 **0**（Task 3 的守卫 U-G3 钉死）。
+    func injectDrawingUndoEntryForTesting(_ entry: DrawingUndoEntry?) { drawingUndoEntry = entry }
 }
 #endif
