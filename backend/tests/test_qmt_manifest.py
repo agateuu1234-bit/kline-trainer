@@ -666,3 +666,54 @@ def test_pool_order_duplicate_universe_idx_within_a_layer_is_rejected():
             pool_order={"SH": [{"code": "600000.SH", "universe_idx": 0},
                                {"code": "600004.SH", "universe_idx": 0}],
                         "SZ": [], "BJ": []}))
+
+
+def test_universe_idx_out_of_range_is_rejected():
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600000.SH", "universe_idx": 99}],
+                        "SZ": [], "BJ": []}))
+
+
+def test_negative_universe_idx_is_rejected():
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600000.SH", "universe_idx": -1}],
+                        "SZ": [], "BJ": []}))
+
+
+def test_universe_idx_must_actually_point_at_that_code():
+    """⭐ 交叉核对：下标合法、代码合法、后缀对层，但**指向的是另一只股**。
+
+    判别力：删掉 `universe[mk][idx] == code` 那条，本条必红（且只有它会红）。
+    一份手工编辑或版本错位的 manifest 正是这个形状。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600000.SH", "universe_idx": 1}],  # [1] 是 600004.SH
+                        "SZ": [], "BJ": []}))
+
+
+def test_cursor_must_be_int_per_market():
+    for bad in ({"SH": "1", "SZ": 1, "BJ": 0}, {"SH": 1.0, "SZ": 1, "BJ": 0},
+                {"SH": True, "SZ": 1, "BJ": 0}):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(cursor=bad))
+
+
+def test_cursor_out_of_range_is_rejected():
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(cursor={"SH": 4, "SZ": 1, "BJ": 0}))
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(cursor={"SH": -1, "SZ": 1, "BJ": 0}))
+
+
+def test_cursor_equal_to_universe_length_is_the_legal_exhausted_state():
+    """⭐ 上界是**闭**区间：取遍全层时 cursor == len(universe)，那是池穷尽
+    这个合法终态，不是越界。
+
+    判别力：把 `<= len` 写成 `< len`，本条必红——而那会让一次正常跑到池尽的
+    staging 在下次启动时被判「账本非法」。
+    """
+    m = _valid_manifest(cursor={"SH": 3, "SZ": 2, "BJ": 1})   # 各层 len 分别是 3/2/1
+    assert validate_manifest(m) == m

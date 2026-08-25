@@ -293,8 +293,32 @@ def _validate_pool_order(pool: object, universe: dict) -> None:
                      f"{where}.universe_idx 必须是整数，读到 {idx!r}")
             _require(code not in seen_codes, f"{where}.code = {code!r} 在本层重复出现")
             _require(idx not in seen_idx, f"{where}.universe_idx = {idx} 在本层重复出现")
+            layer = universe[mk]
+            _require(0 <= idx < len(layer),
+                     f"{where}.universe_idx = {idx} 越界"
+                     f"（本层冻结名单长度 {len(layer)}）")
+            _require(layer[idx] == code,
+                     f"{where} 的锚点对不上：universe[{mk}][{idx}] 是 "
+                     f"{layer[idx]!r}，而这条记录自称是 {code!r}。"
+                     "这份 manifest 被编辑过或来自另一次 fetch。")
             seen_codes.add(code)
             seen_idx.add(idx)
+
+
+def _validate_cursor(cursor: object, universe: dict) -> None:
+    """`cursor[market]` = **已尝试到**冻结名单的下标（R3-F2），与 `pool_order`
+    这个**成功列表**语义不同、不可互相替代。
+
+    ⚠️ **上界是闭区间**：取遍全层时 `cursor == len(universe[market])`，
+    那是「池穷尽」这个合法终态。写成开区间会让一次正常跑到池尽的 staging
+    在下次启动时被判「账本非法」。
+    """
+    _require_market_map(cursor, "cursor", "int")
+    for mk in MARKETS:
+        n = len(universe[mk])
+        _require(0 <= cursor[mk] <= n,
+                 f"cursor[{mk}] = {cursor[mk]} 越界（本层冻结名单长度 {n}，"
+                 f"合法范围 0..{n}，取到 {n} 表示该层已取遍）")
 
 
 def validate_manifest(payload: object) -> dict:
@@ -323,4 +347,5 @@ def validate_manifest(payload: object) -> dict:
     _validate_source_snapshot(payload["source_snapshot"])
     _validate_source_mount(payload["source_mount"])
     _validate_pool_order(payload["pool_order"], payload["source_snapshot"]["universe"])
+    _validate_cursor(payload["cursor"], payload["source_snapshot"]["universe"])
     return payload
