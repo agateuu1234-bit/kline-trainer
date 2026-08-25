@@ -574,11 +574,23 @@ renew)
             exit 1
         fi
         _tok=$(state_token)
-        write_state "$(( $(now) + _secs ))" "$_tok" || { echo "RENEW_FAILED: 写不了状态"; exit 1; }
+        # ⚠️ 写状态失败也要**同步关闭**（与本子命令其它失败路径一致）：
+        #    此刻端点是开着的，写不进新的到期时间 = 没人能保证它按时关。
+        if ! write_state "$(( $(now) + _secs ))" "$_tok"; then
+            echo "RENEW_FAILED: 写不了状态 —— 端点开着且无法保证按时关，改为立即关闭"
+            if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
+            exit 1
+        fi
         if watchdog_owns_state; then
             echo "RENEW_OK 新到期时刻=$(date -d "@$(state_deadline)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || state_deadline)"
         else
-            echo "RENEW_FAILED: 写完之后归属对不上"; exit 1
+            # ⚠️ **失败关闭**（codex plan-R24）。原来这里只打印一行就 exit 1 ——
+            #    而此刻：端点开着、到期时间刚被推后、看门狗却已经不在（可能在两次
+            #    归属检查之间被杀）。这正是「无人看管的零认证暴露」，而且是本子命令
+            #    里唯一一条**失败开放**的路径，与其它路径不一致。
+            echo "RENEW_FAILED: 写完之后归属对不上（看门狗可能刚被杀）—— 立即关闭"
+            if close_loop 120; then echo "已确认关闭；要继续验收请重跑 open"; else echo "⚠️ 未能确认关闭，请查 $LOG"; fi
+            exit 1
         fi
     else
         # 证明不了归属 = 端点可能开着却没人管 → **同步关闭**，不能只报个失败就走
