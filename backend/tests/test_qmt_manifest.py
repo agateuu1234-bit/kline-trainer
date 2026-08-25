@@ -601,19 +601,24 @@ def test_pool_order_code_must_match_the_stock_code_pattern():
 def test_pool_order_code_suffix_must_match_its_market_layer():
     """代码本身合法，但被放进了错的层。
 
-    ⚠️⚠️ **本档对应的变异是「等价变异」，已登记**（2026-08-24 实测确认）：
-    在一份**合法的** universe 下（每层 code 后缀都对），一个后缀错的
-    pool_order code **必然也过不了**交叉核对 `universe[mk][idx] == code`
-    ——两条判据**结构上重叠**，造不出「只有后缀判据够得到」的档。
+    ⚠️⚠️ **本条的判别力是「有时序的」**（2026-08-25 实施 Task 7 时由实施者发现、
+    控制者实测确认）：
 
-    保留后缀判据的理由是它给出**更准确的错误信息**（「放错层了」而不是
-    「锚点对不上」），**不是**它挡住了别的判据挡不住的东西。
-    故变异 M19 之后本条**仍绿是预期的**——别把它当成「测试没判别力」而去
-    删判据，也别为了让它红而伪造一个 universe（那会同时踩到
-    `_validate_source_snapshot` 的后缀判据，测的就不是这一条了）。
+    · **Task 8 落地之前**（`_validate_pool_order` 里还没有交叉核对
+      `universe[mk][idx] == code`）——本条**有真判别力**：关掉后缀判据它就红。
+    · **Task 8 落地之后**——交叉核对会覆盖它：在一份**合法的** universe 下
+      （每层 code 后缀都对），一个后缀错的 pool_order code 必然也过不了
+      `universe[mk][idx] == code`。两条判据**结构上重叠**，本条随之退化为
+      **等价变异**（关掉后缀判据仍绿是**预期**）。
 
-    （`source_snapshot.universe` 那一侧的同名判据**有**专属档，
-    见 `test_universe_code_suffix_must_match_its_layer`。）
+    ⚠️ **别因为它「退化了」就删掉后缀判据**：保留它的理由是**更准确的错误信息**
+    （「放错层了」而不是「锚点对不上」），不是它挡住了别的判据挡不住的东西。
+    ⚠️ 也别为了让它「看起来有判别力」而伪造一个非法的 universe——那会同时踩到
+    `_validate_source_snapshot` 的后缀判据，测的就不是这一条了。
+
+    （`source_snapshot.universe` 那一侧的同名判据**有永久专属档**，见
+    `test_universe_code_suffix_must_match_its_layer`——它把 pool_order 与 files
+    清空，好让交叉核对够不着。）
     """
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
