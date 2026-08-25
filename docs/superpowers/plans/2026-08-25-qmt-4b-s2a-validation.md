@@ -1627,6 +1627,16 @@ code 唯一与 universe_idx 唯一是两条判据，各配一个只有它够得�
 >
 > **为什么要回头重跑**：一条判据的判别力**不是永久属性**，会随着别的判据加入而变化。
 > 只在引入当时验一次，等于默认它此后不变——而本片已经出现两次「判别力随时序改变」。
+>
+> **✅ 两条待办的执行结果（2026-08-25，控制者亲跑）**：
+> 1. **M19 如期退化**：Task 7 时关掉后缀判据→红；Task 8 落地后→**绿**。预测被证实，
+>    「有时序的判别力」这个说法准确。
+> 2. **两条新判据各有专属档，但界内那条的归因原本是错的**：只删交叉核对 → 专属档红 ✅；
+>    只删界内判据 → 仅 `..._out_of_range`（idx=99）红且红因是**裸 IndexError**，
+>    而 `..._negative_universe_idx_is_rejected` **没红**（被交叉核对掩盖）。
+>    → 已补 `..._negative_index_pointing_at_a_real_entry_is_still_rejected` 作为真专属档。
+>
+> **这条待办本身证明了它的价值**：不回头重跑，那个掩盖会一直藏着。
 
 **Files:**
 - Modify: `backend/qmt_manifest.py`
@@ -1664,6 +1674,28 @@ def test_universe_idx_must_actually_point_at_that_code():
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
             pool_order={"SH": [{"code": "600000.SH", "universe_idx": 1}],  # [1] 是 600004.SH
+                        "SZ": [], "BJ": []}))
+
+
+def test_negative_index_pointing_at_a_real_entry_is_still_rejected():
+    """⭐ 只有「界内」判据够得到的档：负数下标 + code **恰好等于** `layer[-1]`。
+
+    Python 的负数下标是合法索引，所以 `layer[-1]` 取得到最后一只股。
+    此时交叉核对 `layer[idx] == code` **会通过**——挡住它的只有界内判据。
+
+    （对比：`test_negative_universe_idx_is_rejected` 用的 code 与 `layer[-1]`
+    不匹配，两条判据都会拒，因此它对界内判据**零判别力**——2026-08-25 控制者
+    单独变异时发现：删掉界内判据后那一条仍绿。）
+
+    不挡住的后果：下游按 `universe_idx` 升序消费时 `-1` 排在最前，
+    而它实际指向最后一只股 → **消费顺序静默错乱，且没有任何一处会报错**。
+
+    判别力：删掉 `0 <= idx` 那半个条件，本条必红。
+    """
+    # 基座的 universe["SH"] 是 ["600000.SH", "600004.SH", "600006.SH"]
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600006.SH", "universe_idx": -1}],
                         "SZ": [], "BJ": []}))
 
 
@@ -1750,7 +1782,14 @@ Expected: 约 51 passed（数字是估算，**判据是没有 failed / error / s
 |---|---|---|
 | M22 | 删 `layer[idx] == code` 那条 | `..._must_actually_point_at_that_code` |
 | M23 | `0 <= cursor[mk] <= n` → `0 <= cursor[mk] < n` | `..._equal_to_universe_length_is_the_legal_exhausted_state` |
-| M24 | `0 <= idx < len(layer)` → `idx < len(layer)` | `test_negative_universe_idx_is_rejected` |
+| M24 | `0 <= idx < len(layer)` → `idx < len(layer)` | `..._negative_index_pointing_at_a_real_entry_is_still_rejected` |
+
+> ⚠️ **M24 的归因已纠正**（2026-08-25 实测）：原写它会让 `test_negative_universe_idx_is_rejected` 红
+> ——**那是错的**。Python 的负数下标是合法索引，那条档的 code 与 `layer[-1]` 不匹配，
+> 于是**交叉核对会顶上来**接住它 → 删掉界内判据后它**仍绿**，对界内判据零判别力。
+> 真正只有界内判据够得到的，是「负数下标 + code 恰好等于 `layer[-1]`」那一档（新补）。
+> **这个掩盖不是无害的**：若界内判据被删，那种输入会被**接受**，下游按 idx 升序消费时
+> `-1` 排在最前而实际指向最后一只股 —— 顺序静默错乱且无人报错。
 
 - [ ] **Step 6: 提交**
 
