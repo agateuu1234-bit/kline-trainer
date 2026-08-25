@@ -262,7 +262,10 @@ ssh $NAS "cd $DIR && docker compose up -d db"
 
 ### P6-RESET · 销毁旧数据卷（**破坏性，需要你明确点头**）
 
-只有第一步发现 `kline-trainer_pgdata` 已存在时才走这一节。**四道门全过 + 你明确说「销毁」之后**才执行最后一步。
+只有 P6 第一步发现 `kline-trainer_pgdata` 已存在时才走这一节。
+
+> ⚠️ **这一节的次序是判据的一部分**（codex 评审 R22）：备份**必须在你点头之后、且在写入已经停住之后**才做，做完立刻销毁，中间不留空档。
+> 早先的排法是「先备份并校验 → 再等你点头 → 再销毁」—— 等待你点头的时间是**不确定**的，这期间任何提交的写入都**不在那份备份里，却会随卷一起被销毁**。而且 `docker compose up -d db` **并不证明没有写入方**（`api` 容器可能还跑着）。
 
 **门 1 · 确认要动的确实是我们的项目**（防 `$DIR` 写错打到别的项目）
 
@@ -278,58 +281,75 @@ ssh $NAS "docker compose -f $DIR/docker-compose.yml config" | head -1
 
 - ✅ 通过：输出**恰好**是 `name: kline-trainer`。不是的话**立刻停**，先查 `$DIR`。
 
-**门 2 · 看清楚这个卷里到底有什么**
+**门 2 · 先把写入停住，再看这个卷里有什么**
+
+先停掉后端（它是唯一的常规写入方），只留数据库：
 
 ```
-ssh $NAS "cd $DIR && docker compose up -d db"
+ssh $NAS "cd $DIR && docker compose stop api 2>/dev/null; docker compose up -d db && docker compose ps --format '{{.Service}} {{.State}}'"
 ```
+
+- ✅ 通过：`db running`，且**看不到** `api running`
+
+确认待销毁的确实是那一个卷：
 
 ```
 ssh $NAS "docker inspect kline-trainer-db-1 --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}'"
 ```
 
-- ✅ 通过：输出是 `kline-trainer_pgdata -> /var/lib/postgresql/data`（确认待销毁的就是这一个）
+- ✅ 通过：输出是 `kline-trainer_pgdata -> /var/lib/postgresql/data`
+
+看清楚里面有什么（这些数字等下要给你看）：
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c 'SELECT count(*) AS 训练组行数 FROM training_sets;' -c 'SELECT id, stock_code, status FROM training_sets ORDER BY id;'"
+ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d kline_trainer -c \"SELECT tablename || ' = ' || (xpath('/row/c/text()', query_to_xml('SELECT count(*) c FROM ' || quote_ident(tablename), false, true, '')))[1]::text || ' 行' FROM pg_tables WHERE schemaname='public' ORDER BY tablename;\""
 ```
 
-**门 3 · 先备份，并且把备份**真恢复一遍**来验证它能用**
+- ✅ 通过：打印 4 张表各自的行数
 
-> ⚠️ **刻意不用 `pg_dump ... | gzip > 文件` 这种写法**（codex 评审 R4 的 high finding，**已实测**）。
-> 那条管道没开 `pipefail`，`pg_dump` 失败时 —— 比如连不上、认证失败、库名写错 ——
-> **整条管道的退出码仍然是 0**，`gzip` 会产出一个 **20 字节、`gzip -t` 能通过、内容 0 行**的
-> 空文件。原来的判据「大小不是 0 + `gzip -t` 通过」会打印 `BACKUP_OK`，紧接着卷就被销毁 ——
-> 这是一条真实的、不可逆的数据丢失路径。
->
-> 现在：用**自定义格式**（`-Fc`，本身就压缩）**完全去掉管道**，退出码直接就是 `pg_dump` 的；
-> 先写临时名，**只有成功才改名**（失败时连最终文件都不会存在）；再用三道递进的校验。
+**门 3 · 报给你，等你明确点头**
 
-**3a · 先给这次备份定一个带时间戳的名字**（在你自己的终端里跑，只设一个变量）
+我会把门 2 看到的**每张表的行数**报给你。⛔ **在你明确回复「销毁」之前，下面的步骤一律不执行。**
+
+**门 4 · 点头之后才做：证明没有写入方 → 备份 → 校验 → 立刻销毁**
+
+⚠️ 从这里开始**一气做完，中间不要停**。
+
+**4a · 证明现在没有别的连接在写**
+
+```
+ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d kline_trainer -c \"SELECT count(*) FROM pg_stat_activity WHERE datname='kline_trainer' AND pid <> pg_backend_pid();\""
+```
+
+- ✅ 通过：打印 `0`
+- ❌ 不是 0：有别的连接，**先查清楚是谁**（`SELECT pid, application_name, client_addr, state FROM pg_stat_activity WHERE datname='kline_trainer'`），不要继续
+
+**4b · 定备份文件名**（在你自己的终端里跑，只设一个变量）
 
 ```
 BK=$DIR/backup-before-reset-$(date +%Y%m%d-%H%M%S).dump
 ```
 
-**3b · 备份（无管道；失败就不改名）**
+**4c · 备份（无管道；失败就不改名）**
 
 ```
 ssh $NAS "docker exec kline-trainer-db-1 pg_dump -U kline -d kline_trainer -Fc > $BK.tmp && mv $BK.tmp $BK && echo DUMP_OK"
 ```
 
 - ✅ 通过：打印 `DUMP_OK`
-- ❌ 没打印 `DUMP_OK`：备份失败，**立刻停**，绝不往下走
+- ❌ 没打印 `DUMP_OK`：备份失败，**立刻停**
 
-**3c · 结构校验：备份里必须含 4 张表的数据**
+> ⚠️ **刻意不用 `pg_dump ... | gzip > 文件`**（codex 评审 R4，**已实测**）。那条管道没开 `pipefail`，`pg_dump` 失败时**整条管道的退出码仍然是 0**，`gzip` 会产出一个 **20 字节、`gzip -t` 能通过、内容 0 行**的空文件 —— 判据会打印「备份没问题」，紧接着卷就被销毁。这是一条真实的、不可逆的数据丢失路径。
+
+**4d · 结构校验：备份里必须含 4 张表的数据**
 
 ```
 ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore --list < $BK" | grep -c 'TABLE DATA'
 ```
 
-- ✅ 通过：打印 `4`
-（实测：空文件与截断文件在这一步都会被拒，退出码 1。）
+- ✅ 通过：打印 `4`（实测：空文件与截断文件在这一步都会被拒）
 
-**3d · 语义校验：把备份真恢复到一个临时库，比对行数**
+**4e · 语义校验：把备份真恢复到临时库，逐表比对**
 
 ```
 ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE IF EXISTS restore_check;' -c 'CREATE DATABASE restore_check;'"
@@ -347,26 +367,17 @@ ssh $NAS "$DIR/2026-08-24-qmt-nas-verify-backup.sh kline-trainer-db-1 kline_trai
 - ❌ 打印 `VERIFY_FAILED`：**立刻停**，备份不可信，**绝不销毁卷**。它会把哪张表对不上直接列出来
 
 > ⚠️ **为什么要逐表验，而不是只看 `training_sets`**（codex 评审 R21）：
-> 早先这一步只比对了 `training_sets` 的行数。而 `pg_restore --list` 里出现 4 条 `TABLE DATA`
-> **只能证明归档里有这四个条目**，证明不了另外三张表（`klines` / `stocks` / `stock_coverage`）的
-> 行有没有被完整带走。于是「备份里少了 6 万行 K 线」这种情况会一路通过 —— 然后卷就被销毁了，不可逆。
->
+> `pg_restore --list` 里出现 4 条 `TABLE DATA` **只能证明归档里有这四个条目**，证明不了另外三张表（`klines` / `stocks` / `stock_coverage`）的行有没有被完整带走。于是「备份里少了 6 万行 K 线」这种情况会一路通过 —— 然后卷就被销毁了，不可逆。
 > 现在这个脚本逐表比对**行数 + 内容 md5 指纹**（按主键排序后整行拼接），并断言两边**恰好**都是那 4 张表。
-> **判别力已实测**（四档）：完整备份 → `VERIFY_OK`；**恢复库少了一半 klines 行而 `training_sets` 正常** →
-> 抓出并列出差异；**行数相同但内容被改** → 指纹抓出；**恢复库少一张表** → 表清单判据抓出。
-> 退出码直验（不接管道）：不一致时为 1，一致时为 0。
+> **判别力已实测**（四档）：完整备份 → `VERIFY_OK`；**恢复库少了一半 `klines` 行而 `training_sets` 正常** → 抓出并列出差异；**行数相同但内容被改** → 指纹抓出；**恢复库少一张表** → 表清单判据抓出。退出码直验：不一致 1、一致 0。
 
 ```
 ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE restore_check;'"
 ```
 
-（校验用的临时库清掉。它本来就在马上要销毁的那个卷里，但保持干净便于后面读日志。）
+**4f · 立刻销毁**（⚠️ 不可逆；**显式指名那一个卷**，不用 `down -v`）
 
-**门 4 · 报给你，等你明确点头**
-
-我会把门 2 看到的行数与内容、门 3 的备份文件名报给你。⛔ **在你明确回复「销毁」之前，下面两条不执行。**
-
-**执行销毁**（⚠️ 不可逆；**显式指名那一个卷**，不用 `down -v`）
+⚠️ 4e 通过之后**马上做这一步**。中间若又过了很久、或有人动过数据库，请回到 4a 重来。
 
 ```
 ssh $NAS "docker compose -f $DIR/docker-compose.yml down"

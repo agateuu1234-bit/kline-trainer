@@ -614,10 +614,15 @@ boot-close)
     else
         echo "$(stamp) BOOT_GUARD: 等待 15 分钟仍未就绪，仍然进入关闭重试" >>"$LOG"
     fi
-    if close_loop 86400; then
+    # ⚠️ **不设终止期限**（codex plan-R22 F1）。早先写的是「最多重试 24 小时」——
+    #    可是 Docker 或 tailscale 容器完全可能停机更久（长时间维护、硬件问题），
+    #    之后它们起来了、持久的 serve 配置跟着回来，而守卫早已放弃退出。
+    #    给一个「无条件关闭」的安全控制设期限，等于否定了它自己。
+    #    close_loop 0 = 不限时，退避封顶 60 秒，直到读到 No serve config 为止。
+    if close_loop 0; then
         echo "$(stamp) BOOT_GUARD_DONE: 已确认 No serve config" >>"$LOG"
     else
-        echo "$(stamp) BOOT_GUARD_FAILED: 24 小时内未能确认关闭 —— 需人工处理" >>"$LOG"
+        echo "$(stamp) BOOT_GUARD_UNEXPECTED: close_loop 在不限时模式下返回非 0（归属有变）" >>"$LOG"
         exit 1
     fi
     ;;
