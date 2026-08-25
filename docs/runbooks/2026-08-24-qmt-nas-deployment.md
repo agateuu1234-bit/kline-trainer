@@ -141,7 +141,7 @@ rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql" "$WT
 ```
 
 ```
-rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-expose.sh" $NAS:$DIR/ && ssh $NAS "chmod +x $DIR/2026-08-24-qmt-nas-expose.sh && echo CHMOD_OK"
+rsync -av "$WT/docs/runbooks/2026-08-24-qmt-nas-expose.sh" "$WT/docs/runbooks/2026-08-24-qmt-nas-verify-backup.sh" $NAS:$DIR/ && ssh $NAS "chmod +x $DIR/2026-08-24-qmt-nas-expose.sh $DIR/2026-08-24-qmt-nas-verify-backup.sh && echo CHMOD_OK"
 ```
 
 **跑一次它自带的判据自检**（不碰任何真实端点）：
@@ -340,11 +340,21 @@ ssh $NAS "docker exec -i kline-trainer-db-1 pg_restore -U kline -d restore_check
 ```
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -tA -U kline -d restore_check -c \"SELECT count(*) FROM pg_tables WHERE schemaname='public';\" -c 'SELECT count(*) FROM training_sets;'"
+ssh $NAS "$DIR/2026-08-24-qmt-nas-verify-backup.sh kline-trainer-db-1 kline_trainer restore_check"
 ```
 
-- ✅ 通过：上一条打印 `RESTORE_OK`；这一条打印**两行** —— 第一行是 `4`（表数），第二行的行数与**门 2 看到的行数一模一样**
-- ❌ 任一条不符：**立刻停**，备份不可信，绝不销毁卷
+- ✅ 通过：上一条打印 `RESTORE_OK`；这一条最后一行是 `VERIFY_OK: 4 张表的行数与内容指纹逐表一致，备份可恢复`
+- ❌ 打印 `VERIFY_FAILED`：**立刻停**，备份不可信，**绝不销毁卷**。它会把哪张表对不上直接列出来
+
+> ⚠️ **为什么要逐表验，而不是只看 `training_sets`**（codex 评审 R21）：
+> 早先这一步只比对了 `training_sets` 的行数。而 `pg_restore --list` 里出现 4 条 `TABLE DATA`
+> **只能证明归档里有这四个条目**，证明不了另外三张表（`klines` / `stocks` / `stock_coverage`）的
+> 行有没有被完整带走。于是「备份里少了 6 万行 K 线」这种情况会一路通过 —— 然后卷就被销毁了，不可逆。
+>
+> 现在这个脚本逐表比对**行数 + 内容 md5 指纹**（按主键排序后整行拼接），并断言两边**恰好**都是那 4 张表。
+> **判别力已实测**（四档）：完整备份 → `VERIFY_OK`；**恢复库少了一半 klines 行而 `training_sets` 正常** →
+> 抓出并列出差异；**行数相同但内容被改** → 指纹抓出；**恢复库少一张表** → 表清单判据抓出。
+> 退出码直验（不接管道）：不一致时为 1，一致时为 0。
 
 ```
 ssh $NAS "docker exec kline-trainer-db-1 psql -q -U kline -d postgres -c 'DROP DATABASE restore_check;'"
