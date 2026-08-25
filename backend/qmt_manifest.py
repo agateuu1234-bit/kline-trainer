@@ -396,6 +396,30 @@ def _validate_files(files: object, pool: dict) -> None:
                  "缺一条意味着上一次运行崩在两次 os.replace 之间")
 
 
+def _validate_staged_export_log(sel: object, export_log_sha256: str) -> None:
+    """staged `export_log.csv` 与 K 线 CSV 受**同等纪律**（R38-F1）。
+
+    ⚠️ **它是所有股共用的元数据基准**：`build_stock_import` 的门 2 拿它的
+    `rows` 与首尾时间戳去卡每一只股。此前全套完整性闸只钉了 K 线 CSV，
+    唯独漏了它——**一份手改的 staged log 能让本该被拒的股过门**，而权威源里
+    那一份根本不认。
+
+    `sha256` 必须**等于** `source_snapshot.export_log_sha256`：同一份字节在
+    manifest 里被记了两次，不等即自相矛盾。
+    """
+    _require(isinstance(sel, dict), "staged_export_log 必须是对象")
+    for key in ("relative_path", "bytes", "sha256"):
+        _require(key in sel, f"staged_export_log 缺 {key}")
+    _require_relative_inside(sel["relative_path"], "staged_export_log.relative_path")
+    _require(isinstance(sel["bytes"], int) and not isinstance(sel["bytes"], bool)
+             and sel["bytes"] >= 0,
+             f"staged_export_log.bytes 必须是非负整数，读到 {sel['bytes']!r}")
+    _require_sha256(sel["sha256"], "staged_export_log.sha256")
+    _require(sel["sha256"] == export_log_sha256,
+             "staged_export_log.sha256 与 source_snapshot.export_log_sha256 不等"
+             "——同一份字节的两处记录对不上，这份 manifest 自相矛盾")
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -424,4 +448,6 @@ def validate_manifest(payload: object) -> dict:
     _validate_pool_order(payload["pool_order"], payload["source_snapshot"]["universe"])
     _validate_cursor(payload["cursor"], payload["source_snapshot"]["universe"])
     _validate_files(payload["files"], payload["pool_order"])
+    _validate_staged_export_log(payload["staged_export_log"],
+                                 payload["source_snapshot"]["export_log_sha256"])
     return payload

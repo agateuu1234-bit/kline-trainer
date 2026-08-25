@@ -888,3 +888,43 @@ def test_empty_pool_with_empty_files_is_valid():
         cursor={"SH": 0, "SZ": 0, "BJ": 0},
         files=[])
     assert validate_manifest(m) == m
+
+
+def test_staged_export_log_requires_all_three_subkeys():
+    for drop in ("relative_path", "bytes", "sha256"):
+        m = _valid_manifest()
+        del m["staged_export_log"][drop]
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_staged_export_log_path_must_stay_inside_staging():
+    for bad in ("../export_log.csv", "/etc/passwd", ""):
+        m = _valid_manifest()
+        m["staged_export_log"]["relative_path"] = bad
+        _recompute_evidence(m)
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_staged_export_log_sha256_must_equal_source_snapshot_sha256():
+    """⭐ 只有本条够得到：两处都是合法的 sha256，但**互不相等**。
+
+    同一份字节在 manifest 里被记了两次（源那一份 / staged 那一份），
+    不等即 manifest **自相矛盾**（R38-F1）。
+
+    判别力：删掉这条相等判据，本条必红（且只有它会红）。
+    """
+    m = _valid_manifest()
+    m["staged_export_log"]["sha256"] = _sha("another")
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+
+def test_staged_export_log_bytes_must_be_nonnegative_int():
+    for bad in (-1, "1", 1.5, True):
+        m = _valid_manifest()
+        m["staged_export_log"]["bytes"] = bad
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
