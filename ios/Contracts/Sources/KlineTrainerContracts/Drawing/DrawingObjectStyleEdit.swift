@@ -24,7 +24,7 @@ extension DrawingObject {
         //    PR-4 按 D49 派生回显把 8 原样传回来时，这条线连改颜色都会被拒死。
         //    故：**写入一个新的越域值 → 拒**；**原样带回本对象已有的越域值 → 放行**（不代高版本决定它的粗细，
         //    与 D52「装载不加闸」、D61「不认识的就别改」同一条纪律）。
-        guard (1...5).contains(s.thickness) || s.thickness == thickness else { return nil }
+        guard DrawingDefaultStyle.thicknessRange.contains(s.thickness) || s.thickness == thickness else { return nil }
         return DrawingObject(
             id: id, toolType: toolType, anchors: anchors,
             isExtended: s.lineSubType == .ray,                     // 派生①

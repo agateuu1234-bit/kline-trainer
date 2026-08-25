@@ -36,6 +36,28 @@ struct DrawingLowerPanelFrameKey: PreferenceKey {
     static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
 }
 
+/// task-8 spike：把「画线/改样式/删除即存」的两条 autosave 触发（既有 `drawingsRevision` + 本片新增
+/// `defaultStyle`，D94）抽成一个具名 ViewModifier——两条一起抽，避免「两条触发分居两处」的漂移，
+/// 同时供 headless `ImageRenderer` 宿主验证 `.onChange` 是否真的触发（见
+/// `DrawingLayoutInvariantTests.swift:9-28` 记录的平台限制）。生产行为与拆分前逐字相同。
+struct DrawingAutosaveTriggersModifier: ViewModifier {
+    let engine: TrainingEngine
+    let lifecycle: TrainingSessionLifecycle
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: engine.drawingsRevision) { _, _ in
+                lifecycle.autosave(immediate: true)                 // §4.6：画线/改样式/删除即存（不推 tick，D9）
+            }
+            .onChange(of: engine.drawingSession.defaultStyle) { _, _ in
+                // D94：本局默认是局内状态，与画线改动同等待遇（旁边那条是 drawingsRevision）。
+                // ⚠️ 价值是**收窄崩溃窗口** —— 用户主动退出/切后台已由 scenePhase 的
+                //    flushForBackground 覆盖，别把本条的作用写夸张。
+                lifecycle.autosave(immediate: true)
+            }
+    }
+}
+
 public struct TrainingView: View {
     private let lifecycle: TrainingSessionLifecycle
     private let onExit: () -> Void
@@ -365,9 +387,7 @@ public struct TrainingView: View {
                 break
             }
         }
-        .onChange(of: engine.drawingsRevision) { _, _ in
-            lifecycle.autosave(immediate: true)                 // §4.6：画线/改样式/删除即存（不推 tick，D9）
-        }
+        .modifier(DrawingAutosaveTriggersModifier(engine: engine, lifecycle: lifecycle))
         .onChange(of: engine.reviewDrawings.count) { _, _ in
             // review-redesign Task 10：复盘新画线走 reviewDrawings（非 drawings），故上面那条 onChange 不触发；
             // 镜像同款「画线即存」语义，改调 autosaveReview（Task 7）。非 review 模式下 reviewDrawings 恒不变，no-op。

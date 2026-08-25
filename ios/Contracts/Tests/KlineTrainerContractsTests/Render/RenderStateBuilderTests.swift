@@ -1235,7 +1235,7 @@ struct RenderStateBuilderTests {
     }
 
     @MainActor
-    @Test("N7：选中态绝不落盘 —— 选中前后 DrawingObject 逐字段一致、契约仍 1.12")
+    @Test("N7：选中态绝不落盘 —— 选中前后 DrawingObject 逐字段一致、契约仍 1.13")
     func selectionNeverPersists() {
         let e = TrainingEngine.preview()
         let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
@@ -1257,7 +1257,7 @@ struct RenderStateBuilderTests {
         #expect(e.drawings == before, "选中不得改动任何 DrawingObject")
         #expect(e.drawings.map(\.id) == before.map(\.id))
         #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
-        #expect(CONTRACT_VERSION == "1.12")
+        #expect(CONTRACT_VERSION == "1.13")
     }
 
     // MARK: - PR-4 Step 6b：PD1 前提（codex plan-R3-F2）
