@@ -1831,13 +1831,20 @@ def test_each_pooled_stock_needs_exactly_two_file_records():
 
 
 def test_a_stock_with_two_records_of_the_same_period_is_rejected():
-    """⭐ 只有本条够得到：条数对（2 条），但周期是 1m + 1m。
+    """⭐ 只有本条够得到：条数对（2 条）、文件名都合规、code 与 period 都自洽，
+    但周期集合是 `{1m, 1m}` 而不是 `{1m, daily}`。
 
-    判别力：只数「恰好 2 条」而不查周期集合的实现会放行本档。
+    ⚠️ **构造要点**（2026-08-25 控制者变异时发现原构造有缺陷）：重复的那条必须
+    用一个**文件名仍然合规**的路径——原构造把 `.csv` 换成 `_2.csv`，那个名字
+    过不了 `parse_qmt_filename`（结尾必须是 `_前复权.csv`），于是它在**文件名判据**
+    就被拒了，**根本走不到**周期集合这条判据。变异证实：把 `got == sorted(PERIODS)`
+    改成 `len(got) == 2` 之后，原构造下本条**仍绿**。
+    改 name（`浦发银行` → `浦发银行B`）即可让文件名合规而周期重复。
+
+    判别力：把 `got == sorted(PERIODS)` 改成 `len(got) == 2`，本条必红。
     """
     m = _valid_manifest()
-    dup = dict(_file_rec("600000.SH", "浦发银行", "1m"))
-    dup["relative_path"] = dup["relative_path"].replace(".csv", "_2.csv")
+    dup = _file_rec("600000.SH", "浦发银行B", "1m")     # 文件名合规，周期与既有那条重复
     m["files"] = [r for r in m["files"]
                   if not (r["stock_code"] == "600000.SH" and r["period"] == "daily")] + [dup]
     _recompute_evidence(m)
@@ -2040,7 +2047,12 @@ Expected: 约 62 passed（数字是估算，**判据是没有 failed / error / s
 |---|---|---|
 | M25 | 删 `f_period == rec["period"]` 那条 | `..._must_parse_to_the_same_code_and_period` |
 | M26 | 删 `f_code == code` 那条 | `..._file_name_code_mismatch_is_rejected` |
-| M27 | `got == sorted(PERIODS)` → `len(got) == 2` | `..._two_records_of_the_same_period_is_rejected` |
+| M27 | `got == sorted(PERIODS)` → `len(got) == 2` | `..._two_records_of_the_same_period_is_rejected`（**原构造下本条仍绿**，见下） |
+
+> ⚠️ **M27 曾因测试构造缺陷而失效**（2026-08-25 实测）：原构造把重复记录的 `.csv`
+> 换成 `_2.csv`，那个文件名过不了 `parse_qmt_filename`，于是它在**文件名判据**就被拒、
+> **走不到**周期集合判据 → 变异后仍绿。已改为「改 name 使文件名合规而周期重复」。
+> **这是「测试测不到它声称的判据」在本片的第三次**（前两次：假次序钉、负数下标被交叉核对掩盖）。
 | M28 | 删 `code in pooled` 那条 | `..._extra_file_record_not_belonging...` |
 | M29 | `rec["bytes"] >= 0` → `rec["bytes"] > 0` | `test_zero_byte_file_record_is_allowed` |
 | M30 | `_require_relative_inside` 直接 `return relpath.split("/")` | 5 条 `..._must_stay_inside_staging` |
