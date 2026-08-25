@@ -750,13 +750,19 @@ def test_each_pooled_stock_needs_exactly_two_file_records():
 
 
 def test_a_stock_with_two_records_of_the_same_period_is_rejected():
-    """⭐ 只有本条够得到：条数对（2 条），但周期是 1m + 1m。
+    """⭐ 只有本条够得到：条数对（2 条）、文件名都合规、code 与 period 都自洽，
+    但周期集合是 {1m, 1m} 而不是 {1m, daily}。
 
-    判别力：只数「恰好 2 条」而不查周期集合的实现会放行本档。
+    ⚠️ **构造要点**（2026-08-25 控制者变异时发现原构造有缺陷）：重复的那条必须
+    用一个**文件名仍然合规**的路径——原构造把 `.csv` 换成 `_2.csv`，那个名字
+    过不了 `parse_qmt_filename`，于是它在**文件名判据**就被拒了，
+    **根本走不到**周期集合这条判据（变异证实：只数条数的实现下本条仍绿）。
+    改名（`浦发银行` → `浦发银行B`）即可让文件名合规而周期重复。
+
+    判别力：把 `got == sorted(PERIODS)` 改成 `len(got) == 2`，本条必红。
     """
     m = _valid_manifest()
-    dup = dict(_file_rec("600000.SH", "浦发银行", "1m"))
-    dup["relative_path"] = dup["relative_path"].replace(".csv", "_2.csv")
+    dup = _file_rec("600000.SH", "浦发银行B", "1m")     # 文件名合规，周期与既有那条重复
     m["files"] = [r for r in m["files"]
                   if not (r["stock_code"] == "600000.SH" and r["period"] == "daily")] + [dup]
     _recompute_evidence(m)
