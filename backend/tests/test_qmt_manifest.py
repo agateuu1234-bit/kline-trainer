@@ -1177,3 +1177,140 @@ def test_partial_level_needs_no_inputs_at_all():
         source_verification_evidence={"level": "partial", "passes": []})
     del m["operator_attestation"]
     assert validate_manifest(m) == m
+
+
+def test_evidence_level_must_match_source_verification():
+    base = _valid_manifest()
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            source_verification_evidence=_evidence(
+                "snapshot", n_pass=2, files_verified=len(base["files"]) + 1,
+                agg=_agg_of(base), agree=True)))
+
+
+def test_full_level_requires_exactly_two_passes():
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    for k in (0, 1, 3):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                source_verification_evidence=_evidence(
+                    "full", n_pass=k, files_verified=n, agg=agg, agree=True)))
+
+
+def test_full_level_requires_passes_agree_true():
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    for agree in (False, None, "true"):
+        ev = _evidence("full", n_pass=2, files_verified=n, agg=agg)
+        if agree is not None:
+            ev["passes_agree"] = agree
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(source_verification_evidence=ev))
+
+
+def test_full_level_rejects_two_passes_with_different_aggregates():
+    """⭐ 只有本条够得到：两趟都在、passes_agree 写着 true，但两趟的聚合
+    摘要**不等** —— 即 passes_agree 在撒谎。
+
+    判别力：只查 passes_agree 布尔值而不比两趟聚合的实现会放行本档。
+    """
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    ev = _evidence("full", n_pass=2, files_verified=n, agg=agg, agree=True)
+    ev["passes"][1]["aggregate_sha256"] = _sha("different")
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(source_verification_evidence=ev))
+
+
+def test_snapshot_level_requires_exactly_one_pass_and_a_verified_mount_check():
+    base = _valid_manifest()
+    snap = dict(base["source_snapshot"], gmt_token=_GMT)
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    ok_mount = {"gmt_token": _GMT, "verified_against_mount": True}
+    for ev in (
+        _evidence("snapshot", n_pass=2, files_verified=n, agg=agg, mount=ok_mount),
+        _evidence("snapshot", n_pass=1, files_verified=n, agg=agg),           # 缺 mount_check
+        _evidence("snapshot", n_pass=1, files_verified=n, agg=agg,
+                  mount={"gmt_token": _GMT, "verified_against_mount": False}),
+    ):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                source_snapshot=snap, source_verification="snapshot",
+                source_verification_evidence=ev))
+
+
+def test_files_verified_must_equal_len_files_plus_one():
+    """⭐ O4-F13：是 2N+1 不是 2N。
+
+    原文「已成功拷贝的文件数」的自然读法是 2N，与 O2-F12 写死的成员集合
+    （files 每条 + staged_export_log 一条）互斥 —— **两边照哪个实现都会让
+    另一边全红**。
+
+    判别力：把判据写成 len(files)，本条必红。
+    """
+    base = _valid_manifest()
+    agg = _agg_of(base)
+    for wrong in (len(base["files"]), len(base["files"]) + 2, 0):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                source_verification_evidence=_evidence(
+                    "full", n_pass=2, files_verified=wrong, agg=agg, agree=True)))
+
+
+def test_aggregate_must_match_recomputation_from_manifests_own_records():
+    """⭐ 存根里的聚合必须与「拿 manifest 自己记的逐文件 sha256 重算」逐字相符。
+
+    判别力：删掉重算比对，一份自填聚合的 manifest 就静默通过。
+    （它挡的是截断/版本错位/字段缺失；**挡不住**手工伪造——那由 pilot 自己
+    读源来挣，R17-F2。）
+    """
+    base = _valid_manifest()
+    n = len(base["files"]) + 1
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            source_verification_evidence=_evidence(
+                "full", n_pass=2, files_verified=n, agg=_sha("forged"), agree=True)))
+
+
+def test_partial_evidence_is_always_readable_even_mid_crash():
+    """⭐⭐ O4-F2：partial 级的 manifest **永远可读**。
+
+    模拟「首次 fetch 拷到一半被 SIGKILL」：几百条 files 都在、**没有任何存根**
+    （存根只能由批后的收尾复校产出）。若对 partial 也强制趟数/聚合一致性，
+    读侧会 fail-closed 拒绝 → 而崩溃恢复明写在「读完并校验账本**之后**」→
+    .inflight.json 回滚、幂等四象限、按股事务**一条都执行不到**，
+    代价是一棵 2 GiB 的 staging。
+
+    判别力：把 partial 也纳入趟数/聚合校验，本条必红。
+    """
+    m = _valid_manifest(
+        source_verification="partial",
+        source_verification_evidence={"level": "partial", "passes": []})
+    del m["operator_attestation"]
+    assert validate_manifest(m) == m
+
+
+def test_partial_evidence_still_needs_the_two_structural_keys():
+    """partial 宽容的是**一致性**，不是**形状**：level 与 passes 仍必须在。"""
+    for bad in ({}, {"level": "partial"}, {"passes": []},
+                {"level": "full", "passes": []}):
+        m = _valid_manifest(source_verification="partial",
+                            source_verification_evidence=bad)
+        m.pop("operator_attestation", None)
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(m)
+
+
+def test_partial_with_nonempty_passes_is_rejected():
+    """per-stock 提交时的取值写死为 passes: []（O4-F2）。带着趟数的 partial
+    说明写侧没按写死的取值来。"""
+    base = _valid_manifest()
+    m = _valid_manifest(
+        source_verification="partial",
+        source_verification_evidence=_evidence(
+            "partial", n_pass=1, files_verified=len(base["files"]) + 1,
+            agg=_agg_of(base)))
+    m.pop("operator_attestation", None)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)

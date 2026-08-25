@@ -533,6 +533,81 @@ def _validate_verification_inputs(payload: dict) -> str:
     return level
 
 
+_PASSES_REQUIRED = {"snapshot": 1, "full": 2}
+
+
+def _validate_verification_evidence(payload: dict, level: str) -> None:
+    """校验过程存根（R16-F1）——证明校验**真的跑过**。
+
+    ⚠️ **存根本身是自指的，不足以支撑出货资格**（R17-F2）：本函数拿
+    `aggregate_sha256` 与「manifest **自己记录的**逐文件 sha256」比对，
+    因此它证明的只是**这份 manifest 内部自洽**，**不证明校验进程真的读过
+    SMB 源**——手工编辑者完全可以自填哈希、自算聚合、自称 `full`。
+    故这套校验是**一致性检查**：能挡住截断、版本错位、字段缺失，
+    **不再单独授予任何出货资格**。
+
+    ⚠️ **`partial` 级永远可读**（O4-F2）：趟数 / `passes_agree` /
+    `aggregate_sha256` / `files_verified` 的一致性校验**只适用于
+    `snapshot` / `full` 两级**。首次 fetch 跑到第 200 只股被 SIGKILL 时，
+    磁盘上那份 manifest 有几百条 `files`、没有存根（存根只能由**批后**的
+    收尾复校产出）；对 `partial` 也强制一致性会让读侧 fail-closed 拒绝，
+    而崩溃恢复明写在「读完并校验 manifest **之后**」——于是 `.inflight.json`
+    回滚、幂等四象限、按股事务**一条都执行不到**。
+    """
+    ev = payload["source_verification_evidence"]
+    _require(isinstance(ev, dict), "source_verification_evidence 必须是对象")
+    _require("level" in ev and "passes" in ev,
+             "source_verification_evidence 必须有 level 与 passes")
+    _require(ev["level"] == level,
+             f"source_verification_evidence.level = {ev['level']!r} 与 "
+             f"source_verification = {level!r} 不一致")
+    _require(isinstance(ev["passes"], list),
+             "source_verification_evidence.passes 必须是列表")
+
+    if level == "partial":
+        # 形状仍要，一致性不要（O4-F2）。
+        _require(ev["passes"] == [],
+                 "partial 级的存根必须是 passes: [] —— per-stock 提交时这两个"
+                 "字段的取值是写死的，带着趟数说明写侧没按写死的取值来")
+        return
+
+    want = _PASSES_REQUIRED[level]
+    _require(len(ev["passes"]) == want,
+             f"{level} 级要求恰好 {want} 趟复校，读到 {len(ev['passes'])} 趟")
+
+    expect_n = len(payload["files"]) + 1          # O4-F13：2N+1，含 staged_export_log
+    expect_agg = aggregate_sha256(manifest_members(payload))
+    aggs: list[str] = []
+    for i, p in enumerate(ev["passes"]):
+        where = f"source_verification_evidence.passes[{i}]"
+        _require(isinstance(p, dict), f"{where} 必须是对象")
+        for key in ("pass", "files_verified", "aggregate_sha256", "completed_at"):
+            _require(key in p, f"{where} 缺 {key}")
+        _require(p["files_verified"] == expect_n,
+                 f"{where}.files_verified = {p['files_verified']}，"
+                 f"必须等于 len(files) + 1 = {expect_n}"
+                 "（成员集合含那一份 staged export_log，故恒为奇数 2N+1）")
+        _require_sha256(p["aggregate_sha256"], f"{where}.aggregate_sha256")
+        _require(p["aggregate_sha256"] == expect_agg,
+                 f"{where}.aggregate_sha256 与「拿 manifest 自己记的逐文件 "
+                 "sha256 重算出的聚合」不符——这份存根与它所在的 manifest 对不上")
+        _require_nonempty_str(p["completed_at"], f"{where}.completed_at")
+        aggs.append(p["aggregate_sha256"])
+
+    if level == "snapshot":
+        mc = ev.get("mount_check")
+        _require(isinstance(mc, dict), "snapshot 级要求 mount_check")
+        _require(mc.get("verified_against_mount") is True,
+                 "snapshot 级要求 mount_check.verified_against_mount 为 true"
+                 "——否则那个 token 只是一个形状对的字符串，没跟真实挂载核过")
+    else:                                          # full
+        _require(ev.get("passes_agree") is True,
+                 "full 级要求 passes_agree 为 true")
+        _require(aggs[0] == aggs[1],
+                 "full 级的两趟聚合摘要不相等，而 passes_agree 写着 true"
+                 "——存根自相矛盾")
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -564,5 +639,6 @@ def validate_manifest(payload: object) -> dict:
     _validate_staged_export_log(payload["staged_export_log"],
                                  payload["source_snapshot"]["export_log_sha256"])
     _validate_lifecycle(payload)
-    _validate_verification_inputs(payload)
+    level = _validate_verification_inputs(payload)
+    _validate_verification_evidence(payload, level)
     return payload
