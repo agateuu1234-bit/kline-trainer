@@ -2519,7 +2519,12 @@ def _validate_lifecycle(payload: dict) -> None:
                  f"读到 {reason!r}")
 
     if "fetch_fatal_error" in payload:
-        _require("stopped_reason" in payload,
+        # ⚠️ **这一行刻意保持 `reason is not None`，不改成键存在性**（2026-08-25 定案）：
+        # 上面 `if "stopped_reason" in payload:` 那一块**先于**本块执行，且该键存在时
+        # 若取值非法（含 `None`）会先行抛出 —— 所以走到这里时，只有键**真正不存在**
+        # 一种可能，此时两种写法**恒等价**（Task 11 实施者用 6 种组合实测确认）。
+        # 保持原样是 surgical changes：等价改动不进 diff。
+        _require(reason is not None,
                  "有 fetch_fatal_error 却没有 stopped_reason——写侧只落了一半")
         _require(isinstance(fatal, dict), "fetch_fatal_error 必须是对象")
         for key in FATAL_FIELDS:
