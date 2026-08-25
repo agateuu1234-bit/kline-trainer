@@ -561,3 +561,83 @@ def test_source_mount_may_carry_extra_trace_only_keys():
         "source_root": "/Users/agate/qmt_mnt/front_ratio_cn_stocks_ab_bj",
     })
     assert validate_manifest(m) == m
+
+
+def test_pool_order_must_have_all_three_markets_as_lists():
+    for bad in ({"SH": [], "SZ": []}, {"SH": [], "SZ": [], "BJ": 0}):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(pool_order=bad))
+
+
+def test_pool_order_bare_string_elements_are_rejected():
+    """⭐ 旧式裸字符串必须被拒（R13-F1）。
+
+    判别力：若实现「兼容」裸字符串（退回只读 code），本条必红。
+    退回等于丢掉 universe_idx，把 R12-F1 那个「产出取决于网络抖动」的口子重开。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(pool_order={
+            "SH": ["600000.SH"], "SZ": [], "BJ": [],
+        }))
+
+
+def test_pool_order_element_needs_both_code_and_universe_idx():
+    for bad in ({"code": "600000.SH"}, {"universe_idx": 0}, {}):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                pool_order={"SH": [bad], "SZ": [], "BJ": []},
+                files=[], staged_export_log={"relative_path": "export_log.csv",
+                                             "bytes": 1, "sha256": _sha("e")}))
+
+
+def test_pool_order_code_must_match_the_stock_code_pattern():
+    for bad in ("600000", "600000.HK", "../600000.SH", "600000.sh", ""):
+        with pytest.raises(ManifestInvalidError):
+            validate_manifest(_valid_manifest(
+                pool_order={"SH": [{"code": bad, "universe_idx": 0}],
+                            "SZ": [], "BJ": []}))
+
+
+def test_pool_order_code_suffix_must_match_its_market_layer():
+    """代码本身合法，但被放进了错的层。
+
+    ⚠️⚠️ **本档对应的变异是「等价变异」，已登记**（2026-08-24 实测确认）：
+    在一份**合法的** universe 下（每层 code 后缀都对），一个后缀错的
+    pool_order code **必然也过不了**交叉核对 `universe[mk][idx] == code`
+    ——两条判据**结构上重叠**，造不出「只有后缀判据够得到」的档。
+
+    保留后缀判据的理由是它给出**更准确的错误信息**（「放错层了」而不是
+    「锚点对不上」），**不是**它挡住了别的判据挡不住的东西。
+    故变异 M19 之后本条**仍绿是预期的**——别把它当成「测试没判别力」而去
+    删判据，也别为了让它红而伪造一个 universe（那会同时踩到
+    `_validate_source_snapshot` 的后缀判据，测的就不是这一条了）。
+
+    （`source_snapshot.universe` 那一侧的同名判据**有**专属档，
+    见 `test_universe_code_suffix_must_match_its_layer`。）
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "000001.SZ", "universe_idx": 0}],
+                        "SZ": [], "BJ": []}))
+
+
+def test_pool_order_duplicate_code_within_a_layer_is_rejected():
+    """层内 code 唯一：同一只股出现两次会让 pilot 重复消费。"""
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600000.SH", "universe_idx": 0},
+                               {"code": "600000.SH", "universe_idx": 1}],
+                        "SZ": [], "BJ": []}))
+
+
+def test_pool_order_duplicate_universe_idx_within_a_layer_is_rejected():
+    """⭐ 层内 universe_idx 也必须唯一 —— 与 code 唯一是**两条**判据。
+
+    判别力：只查 code 唯一的实现会放行本档（两个不同 code 指向同一下标），
+    而那意味着锚点坏了。删掉 idx 唯一那条，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": [{"code": "600000.SH", "universe_idx": 0},
+                               {"code": "600004.SH", "universe_idx": 0}],
+                        "SZ": [], "BJ": []}))

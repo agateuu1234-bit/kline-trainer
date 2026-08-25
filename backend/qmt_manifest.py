@@ -261,6 +261,42 @@ def _validate_source_mount(mount: object) -> None:
              f"{mount['source_root_relative']!r}")
 
 
+def _validate_pool_order(pool: object, universe: dict) -> None:
+    """`pool_order` 是 **pilot 的唯一消费顺序来源**（P4-D8），故它的每一条都要
+    带锚点、锚点要交叉核对、层内两个字段各自唯一。
+
+    ⚠️ **裸字符串元素必须被拒**（R13-F1）：R12-F1 把元素改成 `{code, universe_idx}`
+    正是因为拷贝失败是跳过继续、而重试发生在下一批开头——U5 第一批失败、
+    U6–U121 成功后顺次追加，第二批重试 U5 成功就被追加到**列表末尾**。
+    pilot 按追加顺序消费的话，**最终选中哪 100 只取决于当时 SMB 有没有抖一下**。
+    「兼容」裸字符串等于丢掉锚点，把那个口子重开。
+    """
+    _require_market_map(pool, "pool_order", "list")
+    for mk in MARKETS:
+        seen_codes: set[str] = set()
+        seen_idx: set[int] = set()
+        for i, item in enumerate(pool[mk]):
+            where = f"pool_order[{mk}][{i}]"
+            _require(isinstance(item, dict),
+                     f"{where} 必须是对象 {{code, universe_idx}}，读到 "
+                     f"{type(item).__name__}——裸字符串是旧版格式，"
+                     "缺锚点会让消费顺序取决于网络抖动，一律拒绝")
+            _require("code" in item and "universe_idx" in item,
+                     f"{where} 必须同时有 code 与 universe_idx，读到 {sorted(item)}")
+            code = item["code"]
+            _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+                     f"{where}.code 不是合法股票代码：{code!r}")
+            _require(code.endswith("." + mk),
+                     f"{where}.code = {code!r} 的后缀与所在层 {mk} 不符")
+            idx = item["universe_idx"]
+            _require(isinstance(idx, int) and not isinstance(idx, bool),
+                     f"{where}.universe_idx 必须是整数，读到 {idx!r}")
+            _require(code not in seen_codes, f"{where}.code = {code!r} 在本层重复出现")
+            _require(idx not in seen_idx, f"{where}.universe_idx = {idx} 在本层重复出现")
+            seen_codes.add(code)
+            seen_idx.add(idx)
+
+
 def validate_manifest(payload: object) -> dict:
     """**读侧闭合校验**：`qmt_fetch` 与 `qmt_pilot` 读 manifest 时都必须过它，
     任一判据不满足即 fail-closed 拒绝整份 manifest。原样返回通过校验的 manifest。
@@ -286,4 +322,5 @@ def validate_manifest(payload: object) -> dict:
     _require_nonempty_str(payload["seed"], "seed")
     _validate_source_snapshot(payload["source_snapshot"])
     _validate_source_mount(payload["source_mount"])
+    _validate_pool_order(payload["pool_order"], payload["source_snapshot"]["universe"])
     return payload
