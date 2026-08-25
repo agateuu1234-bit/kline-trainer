@@ -250,12 +250,7 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.4 + §4.5
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from qmt_manifest import (
     MANIFEST_VERSION,
