@@ -647,12 +647,32 @@ def test_pool_order_code_suffix_must_match_its_market_layer():
 
 
 def test_pool_order_duplicate_code_within_a_layer_is_rejected():
-    """层内 code 唯一：同一只股出现两次会让 pilot 重复消费。"""
+    """⭐ 层内 code 唯一：同一只股出现两次会让下游重复消费。
+
+    ⚠️⚠️ **构造要点**（2026-08-25 全量重跑时发现）：两条重复项必须**各自指向
+    自己在 universe 里的真实位置**，否则 **Task 8 加的交叉核对会兜底**——
+    原构造的第二条写 `universe_idx: 1`，而 `universe["SH"][1]` 是 `"600004.SH"`，
+    交叉核对先把它拒了，唯一性判据**从未被求值**。
+    （本条在 Task 7 交付时是真档；Task 8 加了交叉核对之后被掩盖——
+    **判据的判别力不是永久属性**。）
+
+    故这里让 `universe["SH"]` 本身含重复项，两条各指其一：交叉核对**都通过**，
+    只剩唯一性判据能拒。
+
+    判别力：删掉 `code not in seen_codes` 那条，本条必红。
+    """
+    base = _valid_manifest()
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
+            source_snapshot={
+                "export_log_sha256": base["source_snapshot"]["export_log_sha256"],
+                "universe": {"SH": ["600000.SH", "600000.SH"], "SZ": [], "BJ": []}},
             pool_order={"SH": [{"code": "600000.SH", "universe_idx": 0},
                                {"code": "600000.SH", "universe_idx": 1}],
-                        "SZ": [], "BJ": []}))
+                        "SZ": [], "BJ": []},
+            cursor={"SH": 2, "SZ": 0, "BJ": 0},
+            files=[_file_rec("600000.SH", "浦发银行", "1m"),
+                   _file_rec("600000.SH", "浦发银行", "daily")]))
 
 
 def test_pool_order_duplicate_universe_idx_within_a_layer_is_rejected():
@@ -660,6 +680,26 @@ def test_pool_order_duplicate_universe_idx_within_a_layer_is_rejected():
 
     判别力：只查 code 唯一的实现会放行本档（两个不同 code 指向同一下标），
     而那意味着锚点坏了。删掉 idx 唯一那条，本条必红。
+
+    ⚠️⚠️ **本条的判别力也「有时序」，但与上面那条不同——它无法用同样的手法修**
+    （2026-08-26 全量变异重跑时发现，控制者与实施者共同核实）：
+
+    · **Task 8 落地之前**：删掉 idx 唯一判据，本条真的会红。
+    · **Task 8 落地之后**（交叉核对 `universe[mk][idx] == code`）：本条已
+      **不可逆地退化为等价变异**——且**证明为数学上不可能绕开**，不是构造
+      技巧不够：第一条记录 `{code0, idx}` 要想在**未变异**的实现下走到
+      「第二条」的唯一性判据，它自己必须先通过交叉核对，即
+      `universe[mk][idx] == code0`；第二条记录若真的换成不同的 `code1 ≠ code0`
+      却复用同一个 `idx`，它的交叉核对算的是同一个 `universe[mk][idx]`——
+      已经被第一条锁定等于 `code0`，不可能同时又等于 `code1`。于是不论
+      idx 唯一判据在不在，第二条都会被交叉核对拒——**与「层内 code 唯一」
+      能靠 `universe` 里放重复值来绕开不同**：那条的两个下标各自独立、互不
+      锁定同一个值；这条的两个下标**就是同一个**，同一个位置只能锁一个值。
+
+    ⚠️ **别删这条判据、也别删这个测试**：它仍是产线上**真正先触发**的那一句
+    （检查顺序上排在交叉核对之前），给出的错误信息也更准确（「在本层重复
+    出现」而不是「锚点对不上」）——不删的理由与 M19
+    （`test_pool_order_code_suffix_must_match_its_market_layer`）完全一致。
     """
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
