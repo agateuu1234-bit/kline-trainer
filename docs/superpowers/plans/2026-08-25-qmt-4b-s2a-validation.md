@@ -2197,6 +2197,28 @@ def test_staged_export_log_bytes_must_be_nonnegative_int():
         m["staged_export_log"]["bytes"] = bad
         with pytest.raises(ManifestInvalidError):
             validate_manifest(m)
+
+
+def test_staged_export_log_zero_bytes_is_allowed():
+    """⭐ 正向档：`bytes == 0` 合法——判据是「非负」，不是「正」。
+
+    ⚠️ **这条钉的是职责边界**：零字节的 `export_log.csv` 确实是坏数据，但拒绝它是
+    **解析阶段**的事（spec §5：缺失/零字节/截断 → `parse_export_log` 抛
+    `QmtSchemaError` 干净拒绝）。一份记着 `bytes=0` + 空文件指纹的 manifest，
+    **结构上是自洽的**——**读侧结构校验不替内容校验做决定**。
+
+    （对称性：`files` 那边已有 `test_zero_byte_file_record_is_allowed`；
+    此处此前**缺档**——2026-08-25 控制者变异时发现：把 `>= 0` 改成 `> 0` **全绿**，
+    因为基座的 `staged_export_log.bytes` 是 2399554，没有任何档能区分这两个写法。）
+
+    ⚠️ 不需要 `_recompute_evidence`：聚合指纹的成员是 `(relative_path, sha256)`，
+    `bytes` 不在其中（`files` 那边的零字节档同理也没调）。
+
+    判别力：把 `sel["bytes"] >= 0` 改成 `> 0`，本条必红。
+    """
+    m = _valid_manifest()
+    m["staged_export_log"]["bytes"] = 0
+    assert validate_manifest(m) is m
 ```
 
 - [ ] **Step 2: 跑测试确认它红**
@@ -2254,7 +2276,13 @@ Expected: 约 71 passed（数字是估算，**判据是没有 failed / error / s
 | # | 变异 | 必红的测试 |
 |---|---|---|
 | M31 | 删 `sel["sha256"] == export_log_sha256` 那条 | `..._must_equal_source_snapshot_sha256` |
-| M32 | 删整个 `_validate_staged_export_log` 调用 | 上面 4 组全红 |
+| M32 | 删整个 `_validate_staged_export_log` 调用 | 上面各组全红 |
+| M33 | `sel["bytes"] >= 0` → `> 0` | `test_staged_export_log_zero_bytes_is_allowed` |
+
+> ⚠️ **M33 此前无档**（2026-08-25 控制者变异发现全绿）：基座的
+> `staged_export_log.bytes` 是 2399554（非零），而 `files` 那边有零字节正向档、
+> 这边没有——**是 plan 自身的两侧不对称**。补档后钉住的是**职责边界**：
+> 拒绝零字节 export_log 是**解析阶段**的事（spec §5），读侧结构校验**不替内容校验做决定**。
 
 > ⚠️ **M32 的归因需人核**：删掉该调用后，「缺子键」那一组会在存根校验里撞
 > `KeyError`（`manifest_members` 取不到 `sha256`）而不是干净的
