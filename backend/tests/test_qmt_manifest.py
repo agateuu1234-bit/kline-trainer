@@ -1065,3 +1065,33 @@ def test_stopped_reason_secondary_only_allows_max_bytes():
                 stopped_reason="staging_path_escape",
                 fetch_fatal_error=_fatal(),
                 stopped_reason_secondary=bad))
+
+
+def test_explicit_null_fetch_fatal_error_is_rejected():
+    """⭐ 只有形状判据够得到：显式写了 `fetch_fatal_error: null`，且**没有** stopped_reason。
+
+    「键写了却写成 null」与「键根本不存在」是**两件事**：前者是一份写坏了的账本，
+    必须拒；后者是绝大多数正常账本的样子，必须放行。用 `.get() is not None`
+    判断会把两者混成一档而放行。
+
+    ⚠️ 注意与 `..._with_a_retained_fatal_error` 那档的区别：那一档有 escape 类
+    stopped_reason，`null` 会被**配对判据**接住；本档**没有** stopped_reason，
+    配对判据够不着，**只有形状判据能拒它**（2026-08-25 控制者实测：修正前放行）。
+
+    判别力：把 `if "fetch_fatal_error" in payload:` 改回 `if fatal is not None:`，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(fetch_fatal_error=None))
+
+
+def test_absent_lifecycle_keys_are_still_valid():
+    """⭐ 对称的正向档：三个生命周期键**都不存在**时必须放行。
+
+    没有这一条，一个「凡是这三个键沾边就拒」的实现也能让上面那些否定档全绿——
+    而绝大多数正常账本正是三个键都没有的样子。
+    """
+    m = _valid_manifest()
+    assert "stopped_reason" not in m
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason_secondary" not in m
+    assert validate_manifest(m) == m

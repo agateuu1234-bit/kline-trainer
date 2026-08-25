@@ -459,7 +459,12 @@ def _validate_lifecycle(payload: dict) -> None:
                  f"stopped_reason 必须是 {sorted(STOPPED_REASONS)} 之一，"
                  f"读到 {reason!r}")
 
-    if fatal is not None:
+    # 同理：`fetch_fatal_error: null`（键存在、值为 null）与键根本不存在是两回事，
+    # 判据同样用键是否存在，不用 `.get() is not None`（协调者实测抓到：显式
+    # null 且没有 stopped_reason 时，`.get() is not None` 会让两条判据都够不着
+    # 而放行——「配对判据」与「形状判据」各自都因为看到的是 None 而误判成
+    # 「这个字段不存在」）。
+    if "fetch_fatal_error" in payload:
         _require(reason is not None,
                  "有 fetch_fatal_error 却没有 stopped_reason——写侧只落了一半")
         _require(isinstance(fatal, dict), "fetch_fatal_error 必须是对象")
