@@ -7,12 +7,7 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.4 + §4.5
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from qmt_manifest import (
     MANIFEST_VERSION,
@@ -93,3 +88,60 @@ def test_version_error_carries_kind_and_actionable_guidance():
 def test_invalid_error_carries_a_detail_string():
     e = ManifestInvalidError("缺少必需字段 seed")
     assert "seed" in str(e)
+
+
+from qmt_manifest import check_version
+
+
+def test_check_version_accepts_current():
+    """正向放行档。"""
+    assert check_version({"manifest_version": 1}) == 1
+
+
+def test_check_version_missing_is_treated_as_zero_and_reported_as_older():
+    """缺失视为 0，走「低于」档（O4-F10：原文只写了「低于」一档，
+    「大于」与「缺失」只在 §5 出现过）。"""
+    with pytest.raises(ManifestVersionError) as ei:
+        check_version({})
+    assert ei.value.kind == "older"
+    assert ei.value.found == 0
+
+
+def test_check_version_older_and_newer_are_distinct_kinds():
+    with pytest.raises(ManifestVersionError) as older:
+        check_version({"manifest_version": 0})
+    assert older.value.kind == "older"
+
+    with pytest.raises(ManifestVersionError) as newer:
+        check_version({"manifest_version": 2})
+    assert newer.value.kind == "newer"
+
+
+def test_check_version_rejects_non_dict_as_invalid_not_version():
+    """根本不是对象 → 形状非法，**不是**版本问题。"""
+    for bad in ([], "x", 3, None):
+        with pytest.raises(ManifestInvalidError):
+            check_version(bad)
+
+
+def test_check_version_rejects_non_int_version_as_invalid():
+    """版本号存在但不是整数 → 形状非法。
+
+    ⚠️ bool 是 int 的子类：True 必须被拒，否则 {"manifest_version": True}
+    会被当成版本 1 放行。
+    """
+    for bad in ("1", 1.0, True, None, [1]):
+        with pytest.raises(ManifestInvalidError):
+            check_version({"manifest_version": bad})
+
+
+def test_version_is_decided_before_shape(  ):
+    """次序钉：一份版本更高、且形状按本版要求**缺了一堆必需键**的 manifest，
+    必须报「版本更高」，而不是「形状非法」。
+
+    判别力：把 validate_manifest 写成「先查必需键、再查版本」，本条必红。
+    这正是 O4-F10 栽过的那档——指引整个走错。
+    """
+    with pytest.raises(ManifestVersionError) as ei:
+        check_version({"manifest_version": 99})       # 只有版本号，别的全没有
+    assert ei.value.kind == "newer"

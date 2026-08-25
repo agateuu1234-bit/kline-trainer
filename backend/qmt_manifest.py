@@ -91,3 +91,36 @@ class ManifestVersionError(Exception):
             f"本工具只到 {expected} 版。请用对应版本的工具，或换新 staging。"
         )
         super().__init__(self.guidance)
+
+
+def check_version(payload: object) -> int:
+    """**读侧的第一道**：先定版本，再谈形状。
+
+    返回本工具认可的版本号；不认可即抛 `ManifestVersionError`（三档）。
+    根本不是对象、或版本号不是整数 → `ManifestInvalidError`。
+
+    ⚠️ **次序是判据的一部分**：一份版本更高的 manifest，其形状按**本版**要求
+    去量必然缺东西。先跑形状校验的实现会把「你的工具太旧」报成「账本畸形」，
+    **指引整个走错**（O4-F10 栽过的那档）。
+
+    ⚠️ `bool` 是 `int` 的子类：不排除它，`{"manifest_version": True}` 会被
+    当成版本 1 放行。
+    """
+    if not isinstance(payload, dict):
+        raise ManifestInvalidError(
+            f"manifest 必须是一个 JSON 对象，实际读到 {type(payload).__name__}。"
+            "这通常意味着文件被截断或根本不是 manifest。"
+        )
+    if "manifest_version" not in payload:
+        # 缺失视为 0（O4-F10），走「低于」档的指引。
+        raise ManifestVersionError(kind="older", found=0, expected=MANIFEST_VERSION)
+    raw = payload["manifest_version"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ManifestInvalidError(
+            f"manifest_version 必须是整数，读到 {raw!r}（{type(raw).__name__}）"
+        )
+    if raw < MANIFEST_VERSION:
+        raise ManifestVersionError(kind="older", found=raw, expected=MANIFEST_VERSION)
+    if raw > MANIFEST_VERSION:
+        raise ManifestVersionError(kind="newer", found=raw, expected=MANIFEST_VERSION)
+    return raw
