@@ -527,12 +527,14 @@ def test_check_version_rejects_non_int_version_as_invalid():
             check_version({"manifest_version": bad})
 
 
-def test_version_is_decided_before_shape(  ):
-    """次序钉：一份版本更高、且形状按本版要求**缺了一堆必需键**的 manifest，
-    必须报「版本更高」，而不是「形状非法」。
+def test_check_version_ignores_everything_but_the_version():
+    """一份**只有版本号、别的全没有**的输入，`check_version` 也必须只看版本
+    ——它不该顺手去查形状（那是 `validate_manifest` 的活）。
 
-    判别力：把 validate_manifest 写成「先查必需键、再查版本」，本条必红。
-    这正是 O4-F10 栽过的那档——指引整个走错。
+    ⚠️ **本条测不到「先版本后形状」的次序**（2026-08-25 控制者归因自查）：
+    次序是 `validate_manifest` 内部两步的先后，而它到 Task 5 才存在。
+    真正的次序钉是 Task 5 的 `test_validate_manifest_reports_version_before_shape`。
+    判别力：`raw > MANIFEST_VERSION` 那一支短路掉，本条必红（已变异证实）。
     """
     with pytest.raises(ManifestVersionError) as ei:
         check_version({"manifest_version": 99})       # 只有版本号，别的全没有
@@ -600,6 +602,7 @@ Expected: 约 11 passed（数字是估算，**判据是没有 failed / error / s
 | M4 | 删掉 `isinstance(raw, bool)` 那半个条件 | `..._rejects_non_int_version_as_invalid`（`True` 那一档） |
 | M5 | `raw < MANIFEST_VERSION` → `raw <= MANIFEST_VERSION` | `test_check_version_accepts_current` |
 | M6 | 缺失时返回 `MANIFEST_VERSION` 而不是抛 | `..._missing_is_treated_as_zero...` |
+| M7 | `raw > MANIFEST_VERSION` 那一支短路掉 | `..._older_and_newer_are_distinct_kinds` + `..._ignores_everything_but_the_version` |
 
 - [ ] **Step 6: 提交**
 
@@ -977,6 +980,31 @@ def test_top_level_universe_is_not_required_and_not_rejected():
     validate_manifest(_valid_manifest())                # 且照样通过
 
 
+def test_validate_manifest_reports_version_before_shape():
+    """⭐⭐ **真正的次序钉**（Task 3 那条测不到它——它调的是 `check_version`，
+    而 `validate_manifest` 那时还不存在；2026-08-25 控制者归因自查发现）。
+
+    一份版本更高、且按**本版**要求缺了九个必需键的 manifest，必须报
+    `ManifestVersionError`（「你的工具太旧」），**而不是** `ManifestInvalidError`
+    （「账本畸形」）。一棵已拉几百只股的 staging 收到错误的那一句，
+    操作者就不知道该重拉还是该换工具版本（O4-F10 栽过的那档）。
+
+    判别力：把 `validate_manifest` 写成「先查必需键、再 `check_version`」，本条必红。
+    """
+    with pytest.raises(ManifestVersionError) as ei:
+        validate_manifest({"manifest_version": 99})     # 只有版本号，别的全没有
+    assert ei.value.kind == "newer"
+
+
+def test_validate_manifest_reports_shape_error_when_version_matches():
+    """反向档：版本对上了，才轮到形状判据说话。
+
+    没有这一条，一个「凡缺键就报 VersionError」的实现也能让上一条绿。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest({"manifest_version": 1})      # 版本对，但九个必需键全缺
+
+
 def test_empty_seed_is_rejected():
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(seed=""))
@@ -988,10 +1016,17 @@ def test_non_string_seed_is_rejected():
             validate_manifest(_valid_manifest(seed=bad))
 ```
 
+> **⚠️ 本任务另有一项「修正 Task 3 遗留」的要求（控制者 2026-08-25 裁决）**：
+> 把已落地的 `def test_version_is_decided_before_shape(  ):` 改名为
+> `def test_check_version_ignores_everything_but_the_version():`（顺带去掉括号内
+> 多余的两个空格），并把它的 docstring 换成上面 ① 给出的版本——原 docstring 声称
+> 判别力来自 `validate_manifest` 的次序，而它调的是 `check_version`，**归因是错的**。
+> 本仓纪律：**报告里的归因要单独核，结论对不代表归因对**。
+
 - [ ] **Step 2: 跑测试确认它红**
 
 ```bash
-cd backend && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_qmt_manifest.py -q -k "baseline or required_key or top_level_universe or seed" 2>&1 | tail -10
+cd backend && PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_qmt_manifest.py -q -k "baseline or required_key or top_level_universe or seed or version_before_shape" 2>&1 | tail -10
 ```
 
 Expected: FAIL —— `ImportError: cannot import name 'validate_manifest'`
@@ -1053,6 +1088,8 @@ Expected: 约 30 passed（数字是估算，**判据是没有 failed / error / s
 | M11 | `for key in REQUIRED_KEYS:` → `for key in ():` | 9 个 `..._is_actually_required` 参数档 |
 | M12 | `_require_nonempty_str` 里去掉 `!= ""` | `test_empty_seed_is_rejected` |
 | M13 | `validate_manifest` 首行改成 `raise ManifestInvalidError("x")`（**恒抛**） | `test_the_baseline_manifest_passes_everything` —— 这一条就是为它存在的 |
+| M14 | 把 `check_version(payload)` 挪到必需键循环**之后** | `test_validate_manifest_reports_version_before_shape`（真正的次序钉） |
+| M15 | 把必需键循环整个删掉 | `..._reports_shape_error_when_version_matches` + 9 个 `..._is_actually_required` 档 |
 
 - [ ] **Step 6: 提交**
 
