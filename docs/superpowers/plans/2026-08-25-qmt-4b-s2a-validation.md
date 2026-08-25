@@ -1431,6 +1431,26 @@ def test_pool_order_bare_string_elements_are_rejected():
         }))
 
 
+def test_pool_order_string_element_containing_the_key_names_is_still_rejected():
+    """⭐ 只有类型判据够得到的档：一个**含有那两个键名子串**的字符串。
+
+    对字符串来说 `"code" in item` 是**子串检查**而非键检查，所以
+    `"code universe_idx"` 这种输入能穿过「两个键都要在」那条判据；
+    再往下执行 `item["code"]` 就会泄漏裸 `TypeError`（英文报错，
+    操作者读不懂，也不带「该怎么办」）。
+
+    `isinstance(item, dict)` 排在第一道挡住了它——本条就是给那条判据配的
+    专属档（2026-08-25 控制者变异时发现它此前**无档**：删掉类型判据，
+    现有测试一条都测不出来）。
+
+    判别力：把类型判据挪到键存在性判据之后、或删掉它，本条必红
+    （届时抛的是 TypeError 而不是 ManifestInvalidError）。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            pool_order={"SH": ["code universe_idx"], "SZ": [], "BJ": []}))
+
+
 def test_pool_order_element_needs_both_code_and_universe_idx():
     for bad in ({"code": "600000.SH"}, {"universe_idx": 0}, {}):
         with pytest.raises(ManifestInvalidError):
@@ -1562,7 +1582,13 @@ Expected: 约 45 passed（数字是估算，**判据是没有 failed / error / s
 
 | # | 变异 | 必红的测试 |
 |---|---|---|
-| M18 | `isinstance(item, dict)` → `isinstance(item, (dict, str))` | `..._bare_string_elements_are_rejected` |
+| M18 | **在类型判据之前**把裸字符串转成对象（模拟真正的「兼容实现」） | `..._bare_string_elements_are_rejected` |
+| M18′ | 把 `isinstance(item, dict)` 挪到键存在性判据之后、或删掉它 | `..._string_element_containing_the_key_names_is_still_rejected` |
+
+> ⚠️ **M18 必须模拟「真正的兼容实现」，不能只放宽 `isinstance`**（2026-08-25 实测教训）：
+> 只放宽类型检查时**全绿**——因为裸字符串被**下一条判据**接住了（对字符串
+> `"code" in item` 是**子串检查**，`"code" in "600000.SH"` 为 False）。
+> 那是**变异没对准判据**，不是测试没判别力。本仓纪律：**变异必须对准你要证明的那条判据**。
 | M19 | 删 `_validate_pool_order` 里的 `code.endswith("." + mk)` | **有时序**：Task 8 前 → `..._code_suffix_must_match_its_market_layer` 红；Task 8 后 → 退化为等价变异，预期不红（见下） |
 | M20 | 删 `idx not in seen_idx` 那条 | `..._duplicate_universe_idx_within_a_layer...` |
 | M21 | 删 `code not in seen_codes` 那条 | `..._duplicate_code_within_a_layer...` |
