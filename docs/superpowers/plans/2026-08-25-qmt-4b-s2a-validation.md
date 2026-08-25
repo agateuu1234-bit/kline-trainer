@@ -1451,16 +1451,20 @@ def test_pool_order_code_must_match_the_stock_code_pattern():
 def test_pool_order_code_suffix_must_match_its_market_layer():
     """代码本身合法，但被放进了错的层。
 
-    ⚠️⚠️ **本档对应的变异是「等价变异」，已登记**（2026-08-24 实测确认）：
-    在一份**合法的** universe 下（每层 code 后缀都对），一个后缀错的
-    pool_order code **必然也过不了**交叉核对 `universe[mk][idx] == code`
-    ——两条判据**结构上重叠**，造不出「只有后缀判据够得到」的档。
+    ⚠️⚠️ **本条的判别力是「有时序的」**（2026-08-25 实施 Task 7 时由实施者发现、
+    控制者实测确认——原文只写「已登记为等价变异」，**在 Task 8 落地前是错的**）：
 
-    保留后缀判据的理由是它给出**更准确的错误信息**（「放错层了」而不是
-    「锚点对不上」），**不是**它挡住了别的判据挡不住的东西。
-    故变异 M19 之后本条**仍绿是预期的**——别把它当成「测试没判别力」而去
-    删判据，也别为了让它红而伪造一个 universe（那会同时踩到
-    `_validate_source_snapshot` 的后缀判据，测的就不是这一条了）。
+    · **Task 8 落地之前**（`_validate_pool_order` 里还没有交叉核对
+      `universe[mk][idx] == code`）——本条**有真判别力**：关掉后缀判据它就红。
+    · **Task 8 落地之后**——交叉核对会覆盖它：在一份**合法的** universe 下
+      （每层 code 后缀都对），一个后缀错的 pool_order code 必然也过不了
+      `universe[mk][idx] == code`。两条判据**结构上重叠**，本条随之退化为
+      **等价变异**（关掉后缀判据仍绿是**预期**）。
+
+    ⚠️ **别因为它「退化了」就删掉后缀判据**：保留它的理由是**更准确的错误信息**
+    （「放错层了」而不是「锚点对不上」），不是它挡住了别的判据挡不住的东西。
+    ⚠️ 也别为了让它红而伪造一个非法的 universe——那会同时踩到
+    `_validate_source_snapshot` 的后缀判据，测的就不是这一条了。
 
     （`source_snapshot.universe` 那一侧的同名判据**有**专属档，
     见 `test_universe_code_suffix_must_match_its_layer`。）
@@ -1559,13 +1563,16 @@ Expected: 约 45 passed（数字是估算，**判据是没有 failed / error / s
 | # | 变异 | 必红的测试 |
 |---|---|---|
 | M18 | `isinstance(item, dict)` → `isinstance(item, (dict, str))` | `..._bare_string_elements_are_rejected` |
-| M19 | 删 `_validate_pool_order` 里的 `code.endswith("." + mk)` | **等价变异，预期不红**（见下） |
+| M19 | 删 `_validate_pool_order` 里的 `code.endswith("." + mk)` | **有时序**：Task 8 前 → `..._code_suffix_must_match_its_market_layer` 红；Task 8 后 → 退化为等价变异，预期不红（见下） |
 | M20 | 删 `idx not in seen_idx` 那条 | `..._duplicate_universe_idx_within_a_layer...` |
 | M21 | 删 `code not in seen_codes` 那条 | `..._duplicate_code_within_a_layer...` |
 
-> ⚠️ **M19 是已登记的等价变异**（2026-08-24 实测）：在合法 universe 下，后缀错的 code
-> 必然也过不了交叉核对，两条判据结构上重叠。变异后不红是**预期**，**不得据此删判据**
-> ——它的价值是更准确的错误信息。`source_snapshot` 那一侧的同名判据**有**专属档（M17）。
+> ⚠️ **M19 的判别力有时序**（2026-08-25 更正）：Task 8 引入交叉核对**之前**它是真判据
+> （已实测：关掉即红）；**之后**才退化为等价变异。**两个阶段都不得据此删判据**
+> ——它的价值是更准确的错误信息。`source_snapshot` 那一侧的同名判据**有永久专属档**（M17）。
+>
+> ⚠️ **Task 8 落地后必须回头重跑 M19**，确认它确实退化成了「不红」——若仍红，说明交叉核对
+> 没真正覆盖它，那时两条判据的关系需要重新判定。
 >
 > M20 与 M21 **必须各自单独变异**：只删一条时另一条不会红（两个否定档分别只碰一个字段），
 > 但若实现把两个集合写成同一个，两条变异**互相掩盖**——那时须补一条组合档。
@@ -1586,6 +1593,14 @@ code 唯一与 universe_idx 唯一是两条判据，各配一个只有它够得�
 ---
 
 ## Task 8: `universe_idx` 交叉核对与 `cursor` 边界
+
+> **⚠️ 本任务落地后，控制者必须回头重跑两条早先的变异**（2026-08-25 立）：
+> 1. **M19**（关掉 `_validate_pool_order` 的后缀判据）——Task 7 时它**有**判别力（实测），
+>    本任务引入交叉核对后应**退化为等价变异**（不红）。若仍红，说明交叉核对没真正覆盖它。
+> 2. **本任务自己新增的两条判据**（界内、交叉核对）是否各有专属档，还是互相掩盖。
+>
+> **为什么要回头重跑**：一条判据的判别力**不是永久属性**，会随着别的判据加入而变化。
+> 只在引入当时验一次，等于默认它此后不变——而本片已经出现两次「判别力随时序改变」。
 
 **Files:**
 - Modify: `backend/qmt_manifest.py`
