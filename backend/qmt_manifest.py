@@ -590,6 +590,12 @@ def _validate_verification_evidence(payload: dict, level: str) -> None:
         _require(isinstance(p, dict), f"{where} 必须是对象")
         for key in ("pass", "files_verified", "aggregate_sha256", "completed_at"):
             _require(key in p, f"{where} 缺 {key}")
+        _require(isinstance(p["pass"], int) and not isinstance(p["pass"], bool)
+                 and p["pass"] == i + 1,
+                 f"{where}.pass = {p['pass']!r}，必须是整数 {i + 1}"
+                 "——这个字段标记的是「这是第几趟」，取值必须与它在 passes 里的"
+                 "顺序位置一一对应，否则一份趟号重复/错序/越界的存根就能冒充"
+                 "一次真实发生过的连续复校")
         _require(p["files_verified"] == expect_n,
                  f"{where}.files_verified = {p['files_verified']}，"
                  f"必须等于 len(files) + 1 = {expect_n}"

@@ -1404,6 +1404,75 @@ def test_aggregate_must_match_recomputation_from_manifests_own_records():
                 "full", n_pass=2, files_verified=n, agg=_sha("forged"), agree=True)))
 
 
+@pytest.mark.parametrize("pass_values", [
+    pytest.param((1, 1), id="duplicate_identity"),
+    pytest.param((2, 1), id="reversed_order"),
+    pytest.param((None, 2), id="none"),
+    pytest.param((True, False), id="boolean"),
+    pytest.param((7, 9), id="out_of_range"),
+    pytest.param(("一", "二"), id="chinese_string"),
+])
+def test_full_level_rejects_malformed_pass_numbers(pass_values):
+    """codex R1 唯一一条 finding：循环内「四个键都要在」的 `for key in (...)`
+    只校验 `passes[i]["pass"]` **键存在**，从不校验**取值**。控制者实测证实
+    以下六种畸形存根在 full 级（要求恰两趟）下**全部被放行**：两趟都写
+    `pass: 1`（重复身份）/ 次序颠倒 `[2, 1]` / `pass: None` / `pass: True`、
+    `False`（布尔）/ 越界 `[7, 9]` / 字符串 `["一", "二"]`。
+
+    这个字段的存在意义就是标明「这是第几趟」：spec 第 737-739 行把形状钉死
+    为 `{"pass": 1, …}, {"pass": 2, …}`；一份两条都标 `pass 1` 的记录**不是**
+    两趟连续复校的记录，却能冒充它（R16-F1：存根的作用正是证明「那两趟全量
+    哈希校验真的跑过、且结果一致」）。
+
+    ⚠️ 每档只改 `pass` 这一个键，`files_verified` / `aggregate_sha256` 仍取自
+    `_evidence(...)` 算出的合法基线——不会被别的判据顺带拦下（自查纪律①）。
+    新判据排在循环内「四个键都要在」之后、`files_verified` 比对之前
+    （自查纪律②）：删掉它，执行会直接走到 `files_verified`/`aggregate_sha256`
+    比对，而这两项本档都没弄坏，因此**不会**被别的判据顶上——本条对新判据
+    有干净的判别力（自查纪律③见下面的变异验证）。
+
+    断言到具体文案片段（`.pass = ` + `必须是整数`），不只断异常类型——本文件
+    这个循环里还有 files_verified / aggregate_sha256 / completed_at 三条重叠
+    判据，只断类型分不出红的是哪一条。
+    """
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    ev = _evidence("full", n_pass=2, files_verified=n, agg=agg, agree=True)
+    for i, val in enumerate(pass_values):
+        ev["passes"][i]["pass"] = val
+    with pytest.raises(ManifestInvalidError) as ei:
+        validate_manifest(_valid_manifest(source_verification_evidence=ev))
+    assert ".pass = " in ei.value.detail
+    assert "必须是整数" in ei.value.detail
+
+
+def test_valid_pass_numbers_are_accepted_at_snapshot_and_full_level():
+    """⭐ 正向放行档：合法的 `[1]`（snapshot）与 `[1, 2]`（full）必须被放行。
+
+    ⚠️ 不是可选的：本仓栽过「全是『拒了』的套件让一个恒抛的守卫处处像在
+    工作」——上面那条否定档全红只能证明新判据**拒了**东西，不能证明它拒得
+    对；必须另配一条证明它对合法输入**放行**。
+
+    判别力：把新判据错写成恒假（例如 `p["pass"] == i + 2`），本条两个断言都
+    必红——合法的 `[1]` / `[1, 2]` 会被误拒。
+    """
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+
+    m_full = _valid_manifest(
+        source_verification_evidence=_evidence(
+            "full", n_pass=2, files_verified=n, agg=agg, agree=True))
+    assert validate_manifest(m_full) == m_full
+
+    snap = dict(base["source_snapshot"], gmt_token=_GMT)
+    m_snapshot = _valid_manifest(
+        source_snapshot=snap, source_verification="snapshot",
+        source_verification_evidence=_evidence(
+            "snapshot", n_pass=1, files_verified=n, agg=agg,
+            mount={"gmt_token": _GMT, "verified_against_mount": True}))
+    assert validate_manifest(m_snapshot) == m_snapshot
+
+
 def test_partial_evidence_is_always_readable_even_mid_crash():
     """⭐⭐ O4-F2：partial 级的 manifest **永远可读**。
 
