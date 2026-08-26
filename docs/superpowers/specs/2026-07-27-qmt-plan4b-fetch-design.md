@@ -694,7 +694,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
    - `cursor[market]` 为整数且在 `[0, len(source_snapshot.universe[market])]` 内
    - **实拷清单（`files`）必须逐项合规（R21-F3）**——它是 `staging_intact`、`pilot_stock_source`、三方源校验**共同的真相基准**，却一直不在本校验的枚举里：
      - `pool_order` 里的**每一只**股恰好对应 **2 条**记录，`period` 分别为 `1m` 与 `daily`；**不得缺、不得重、不得有不属于任何 `pool_order` 股的多余活跃记录**
-     - 每条的 `relative_path` 经 `resolve()` 后**必须落在 staging 之内**（禁 `..` 逃逸），且其**文件名解析出的 code/period 与该记录的 `stock_code`/`period` 一致**（用 `qmt_normalize.parse_qmt_filename` 的同一套规则）
+     - 每条的 `relative_path` 经**分量规则**（S1 的 `split_relative_components`：拒绝绝对路径 / 空分量 / `.` / `..`）校验后**必须落在 staging 之内**（S2-F6：**不用 `resolve()`**——它会跟随符号链接，且要碰文件系统；真正的符号链接防线在打开那一刻由 `open_under` 逐段 `O_NOFOLLOW` 承担），且其**文件名解析出的 code/period 与该记录的 `stock_code`/`period` 一致**（用 `qmt_normalize.parse_qmt_filename` 的同一套规则）
      - `bytes` 为非负整数；`sha256` 匹配 `^[0-9a-f]{64}$`
 
    - **顶层 `manifest_version: <int>` 必填，且旧版本要有出路（O2-F8）**：读侧在三轮内**追加过三次必需字段**
@@ -737,7 +737,7 @@ staged `export_log.csv` 是**唯一的非股级计账对象**，它落盘在**�
      > 把一次**信任边界破坏**报成「候选不够」甚至走到 `SUCCESS`。
      > **一个信号只有同时进了「写侧规定」与「读侧校验」，它才真的存在。**
 
-   - **`staged_export_log` 必须存在且自洽（R38-F1）**：`relative_path` 经 `resolve()` 后落在 staging 之内；`bytes` 为非负整数；`sha256` 匹配 `^[0-9a-f]{64}$` **且等于 `source_snapshot.export_log_sha256`**（同一份字节的两处记录，不等即 manifest 自相矛盾）。缺失或不自洽 → 拒绝整个 manifest。
+   - **`staged_export_log` 必须存在且自洽（R38-F1）**：`relative_path` 经**分量规则**校验后落在 staging 之内（S2-F6，同上）；`bytes` 为非负整数；`sha256` 匹配 `^[0-9a-f]{64}$` **且等于 `source_snapshot.export_log_sha256`**（同一份字节的两处记录，不等即 manifest 自相矛盾）。缺失或不自洽 → 拒绝整个 manifest。
 
      任一不符 → **拒绝整个 manifest，且必须发生在任何 DB 写入之前**。
 
@@ -1225,11 +1225,11 @@ fetch/储备池占 4 条、路径·锁占 8 条。**共享地基（§4.1）是�
 | S2-F2 | medium | **读侧「三子键均为非空 str」与 §4.6 (ii-a) 直接冲突** —— (ii-a) 用实测论证 `source_root_relative` **就是空串**（共享本身即导出根时），读侧却要求它非空 → 该部署先过 (ii-a) 的拼接、再被读侧判死，操作者被指向一个不存在的问题 | §4.5 读侧枚举 vs §4.6 (ii-a) 逐字对照 | 读侧放宽为「三子键均为 str；`fstype`/`device` 非空，`source_root_relative` 允许空串」。(ii-a) 原样保留（它有实测支撑），其举例改为一个在新源根定义下真正成立的形态 |
 | S2-F3 | **high** | **读侧必需键里的顶层 `universe` 是笔误** —— 同一句话末尾校验的是 `source_snapshot.universe`，写侧枚举与 §4.4 结构示例也**只产出后者**。照原文实现：**本工具诚实产出的每一份 manifest 都被本工具自己的读侧判 `FAIL_MANIFEST_INVALID`**，一次都跑不通 | §4.5:662 顶层枚举 vs §4.5:664 校验句 vs §4.5:533 写侧枚举 vs §4.4:295 示例，四处逐字核 | 删掉顶层 `universe`；名单唯一位置定为 `source_snapshot.universe`。**这是「写侧形状与读侧要求不配对」的第三次**（R94-F2 四字段、O4-F13 `2N+1`）→ 立纪律：**每新增一个持久化字段，必须同时在写侧枚举与读侧枚举各出现一次且层级逐字相同** |
 | S2-F4 | medium | **`aggregate_sha256` 的序列化方式从未定义** —— 只说「排序列表取 sha256」，没说列表怎么拼成字节。而**写它的是 4b、读它比对的是 4c**（两个切片、两份 plan、不同时间实施），拼法差一个空格或一个 `\uXXXX` 转义就让每一份诚实产出的 manifest 被判非法 | §4.5 存根定义处逐字核：无任何字节级规定 | 写死为 `json.dumps(sorted(pairs), ensure_ascii=False, separators=(",", ":")).encode("utf-8")` 后取 sha256；`ensure_ascii=False` 与 `separators` **都是判据的一部分**（周期目录名是中文）。**由 4b 提供唯一实现，4c 直接调用，不得各自重写** |
-
 | S2-F5 | **high** | **`files` 每条记录的字段名，写侧与读侧又一次不配对（同族第五次）** —— 写侧枚举写「实拷清单（`code`, `market`, 每文件 `{bytes, sha256}`）」，读侧却要求 `stock_code` / `period`，且**写侧从头到尾没提 `relative_path`**（而读侧把它当作路径逃逸判据的对象）。照写侧实现的 `qmt_fetch` 产出的每一份 manifest，都会被读侧判 `FAIL_MANIFEST_INVALID` | 写侧 §4.5「写 `fetch_manifest.json`」那一条 vs 读侧 §4.5「实拷清单必须逐项合规」逐字对照 | 写侧改为 **`{stock_code, period, relative_path, bytes, sha256}` 五字段**，与读侧逐字相同。**`market` 不落盘**（可由 code 后缀派生；冗余字段一旦落盘就必须再配一条「与后缀一致」的校验，否则可伪造——白加一个字段与一条判据，user 2026-08-24 拍板不存） |
+| S2-F6 | medium | **读侧的路径判据写着 `resolve()`，而实现用的是分量规则 —— 偏离未登记**（S2a 整支评审 I3 指出）。`resolve()` **会跟随符号链接**（那正是 O2-F4 造 `parent_fd_under` 的全部理由），拿它当边界判据等于把判据建在**会被绕过的调用**上；且它要碰文件系统，读侧校验就不再是纯函数。实现改用 S1 的**分量规则**（拒绝绝对路径 / 空分量 / `.` / `..`）——**更强且不碰磁盘** | S2a 实现与 §4.5:697/:740 逐字对照 | 两处读侧要求改为「经**分量规则**校验后落在 staging 之内」，并注明真正的符号链接防线在打开那一刻由 `open_under` 逐段 `O_NOFOLLOW` 承担。⚠️ §4.5:430 的 `.inflight.json` 形状校验**同样写着 `resolve()`**，那是 **S4** 的范围，本片不改，但已在此登记——**照原文实现会放行一条破坏性恢复路径删到边界之外**（R13-F2 早已论证过同一件事，只是那次只落在 `--output`） |
 
 **本轮由真跑（非推理）坐实的两条**：S2-F1 的真实目录布局（挂载实测）、以及「`rglob` 对
-`front_ratio_cn_stocks_ab_bj/` 这一层零依赖」（纯 `tmp_path` 实测）。其余三条为逐字核原文。
+`front_ratio_cn_stocks_ab_bj/` 这一层零依赖」（纯 `tmp_path` 实测）。其余四条为逐字核原文。
 
 **⚠️ S2-F5 是在 S2a 实施到 Task 4 时才被翻出来的**（2026-08-25，由任务评审的一条
 「⚠️ 无法从 diff 核实：字段名是否与写侧一致」引出，控制者回 spec 追锚点时发现）。
@@ -1239,5 +1239,5 @@ S2-F3 立它的时候我对着 `universe` 跑过一遍，却没对 `files` 的**
 
 **S2-F3 与 S2-F4 同属一个家族，且这是该家族第三、第四次**：一个持久化字段的
 **写侧形状**与**读侧要求**、或**两个工具各自的算法**，只要没有被逐字对过表，就会产出
-「谁都按规矩写、却谁也读不了对方」的死局。四条里有三条是对表对出来的——
+「谁都按规矩写、却谁也读不了对方」的死局。**六条里有四条**是对表对出来的——
 **对表本身就是最便宜的评审**。
