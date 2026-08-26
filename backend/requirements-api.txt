@@ -1,0 +1,8 @@
+# API 容器专用依赖（spec §4-D2 / C1-1）。
+# 恰好三项：读 backend/app/*.py 的 import 得到 —— API 运行只需要这些。
+# ⚠️ 刻意**不含** pandas-ta（那是数据导入脚本用的，且是已知安装陷阱）。
+# ⚠️ 每个 pin 必须与 backend/requirements.txt 中同名包逐字相同，
+#    由 tests/test_requirements_api.py 双向锁定（改任一侧都会红）。
+fastapi==0.115.12
+uvicorn==0.34.2
+asyncpg==0.30.0
