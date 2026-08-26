@@ -1,12 +1,14 @@
 """`fetch_manifest.json` —— `qmt_fetch` 写、`qmt_pilot` 读的唯一真相源。
 
 Spec: `docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md` §4.4 + §4.5
-（含文末「S2 实施轮」四条更正）。
+（含文末「S2 实施轮」五条更正）。
 
-本模块只做三件事，**不碰网络、不碰拷贝、不碰数据库**：
+本模块只做两件事，**不碰网络、不碰拷贝、不碰数据库**：
 1. 定义 manifest 的结构与版本；
-2. 读侧**闭合**校验（fail-closed，绝不「尽力而为地解析」）——纯函数，零文件系统；
-3. 两个提交入口 + `stopped_reason` / `fetch_fatal_error` 的生命周期决策表。
+2. 读侧**闭合**校验（fail-closed，绝不「尽力而为地解析」）——纯函数，零文件系统。
+
+（两个提交入口 + `stopped_reason` / `fetch_fatal_error` 的生命周期决策**落盘**逻辑
+属于 S2b；本片只定义这些字段的**形状校验**。）
 
 ⚠️ **为什么读侧校验必须闭合**：一个被截断的 manifest 解析出来往往仍是合法 JSON
 的**前缀片段**，静默消费它 = 把 manifest 损坏伪装成「候选就这么多」，最终产出一份
@@ -62,15 +64,20 @@ REASONS_REQUIRING_FATAL = frozenset({
 
 VERIFICATION_LEVELS = ("snapshot", "full", "partial")
 
-# 生命周期三字段：**只有收尾提交能动它们**，per-stock 提交在写入路径上够不到
-# （R95-F2 + spec §9-3s「使规则可机械检验」）。
+# 生命周期三字段的名字表。「只有收尾提交能动它们，per-stock 提交在写入路径上
+# 够不到」是**写入路径**的纪律（R95-F2 + spec §9-3s「使规则可机械检验」），
+# 落在 S2b；本片没有写入路径，这里只是形状校验用的一张名字表。
 LIFECYCLE_KEYS = frozenset({
     "stopped_reason", "stopped_reason_secondary", "fetch_fatal_error",
 })
 
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)$")
-_GMT_TOKEN_RE = re.compile(r"^@GMT-\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}$")
+# `\Z` 不是 `$`：不加 re.MULTILINE 时 `$` 仍会容忍**恰好一个尾随换行**
+# （匹配到换行之前的位置，不要求那是字符串真正的末尾），`\Z` 才是绝对末尾。
+# 三个都改，按判据本身穷尽（2026-08-26 整支评审实测：`$` 下 gmt_token / sha256
+# 带一个尾随 "\n" 都会被放行）。
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+_STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)\Z")
+_GMT_TOKEN_RE = re.compile(r"^@GMT-\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}\Z")
 
 # `fetch_fatal_error.errno` 的闭合枚举：仅两种能触发「留在挂载点内」的逃逸
 # 判据的系统调用错误码（R94-F2）。
@@ -157,7 +164,7 @@ def check_version(payload: object) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ManifestInvalidError(
             f"manifest_version 必须是整数，读到 {raw!r}（{type(raw).__name__}）。"
-            "这通常意味着 manifest 被手工编辑过或写坏了——请换新 staging + 新 seed 重拉。"
+            "这通常意味着 manifest 被手工编辑过或写坏了。"
         )
     if raw < MANIFEST_VERSION:
         raise ManifestVersionError(kind="older", found=raw, expected=MANIFEST_VERSION)

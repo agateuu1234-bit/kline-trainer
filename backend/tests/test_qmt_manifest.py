@@ -1,7 +1,7 @@
 """QMT 4b S2：fetch_manifest.json 的结构、读侧闭合校验与生命周期。
 
 Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.4 + §4.5
-（含文末「S2 实施轮」的四条更正 S2-F1~F4）。
+（含文末「S2 实施轮」的五条更正 S2-F1~F5）。
 
 ⚠️ 本文件全部测试跑在 tmp_path 或纯内存，零 DB、零网络、零真实挂载点。
 """
@@ -755,13 +755,20 @@ def test_negative_index_pointing_at_a_real_entry_is_still_rejected():
 def test_universe_idx_must_actually_point_at_that_code():
     """⭐ 交叉核对：下标合法、代码合法、后缀对层，但**指向的是另一只股**。
 
+    ⚠️ **`files` 必须跟着 `pool_order` 一起给**（2026-08-26 整支评审实测发现）：
+    若只改 `pool_order`、`files` 仍是基座那两只股，删掉交叉核对之后
+    `000001.SZ` 的两条记录会变成「不属于任何 pooled 股的多余记录」，被
+    Task 9 的 `files` 判据兜底拒绝——测试照样红，但红的不是交叉核对。
+
     判别力：删掉 `universe[mk][idx] == code` 那条，本条必红（且只有它会红）。
     一份手工编辑或版本错位的 manifest 正是这个形状。
     """
     with pytest.raises(ManifestInvalidError):
         validate_manifest(_valid_manifest(
             pool_order={"SH": [{"code": "600000.SH", "universe_idx": 1}],  # [1] 是 600004.SH
-                        "SZ": [], "BJ": []}))
+                        "SZ": [], "BJ": []},
+            files=[_file_rec("600000.SH", "浦发银行", "1m"),
+                   _file_rec("600000.SH", "浦发银行", "daily")]))
 
 
 def test_cursor_must_be_int_per_market():
@@ -1169,6 +1176,33 @@ def test_source_verification_must_be_one_of_three_levels():
             validate_manifest(_valid_manifest(source_verification=bad))
 
 
+def test_source_verification_outside_the_three_levels_is_rejected():
+    """⭐ 只有顶层枚举判据够得到：一个不在三级之内的取值。
+
+    ⚠️ 上一条 `test_source_verification_must_be_one_of_three_levels` 对本判据
+    **零判别力**（2026-08-26 整支评审实测证实：删掉顶层枚举判据，那条测试
+    仍然全绿）——因为它没有同步改 `source_verification_evidence.level`（后者
+    由 `_valid_manifest` 自动补成固定的 `"full"`）。顶层枚举判据一旦被删，
+    执行会继续往下走到「evidence.level 与 source_verification 必须一致」
+    那条，`"full" != "FULL"`（或其余坏值）照样让它拒——红的不是被测的那条。
+
+    本条把 `evidence.level` 也**同设为同一个坏值**，一致性判据因此够不着，
+    只剩顶层枚举判据能拒。
+
+    ⚠️ **不挡住的后果比「拒绝一份坏账本」严重**：判据被删后
+    `_PASSES_REQUIRED[level]` 会抛裸 `KeyError`——英文报错、无中文指引，
+    且**逃出 `ManifestInvalidError` 家族**，调用方的 fail-closed 分支够不着它，
+    变成未捕获崩溃而不是干净的「账本非法」。
+
+    判别力：删掉 `level in VERIFICATION_LEVELS` 那条，本条必红（届时抛的是
+    未被捕获的 `KeyError`，不是 `ManifestInvalidError`）。
+    """
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            source_verification="banana",
+            source_verification_evidence={"level": "banana", "passes": []}))
+
+
 def test_full_level_requires_operator_attestation():
     """⭐ R15-F2：一个光秃秃的 "full" 字符串不许换来出货级标签。"""
     m = _valid_manifest()
@@ -1216,6 +1250,48 @@ def test_snapshot_level_passes_with_a_valid_token():
             agg=_agg_of(base),
             mount={"gmt_token": _GMT, "verified_against_mount": True}))
     assert validate_manifest(m) == m
+
+
+def test_trailing_newline_after_sha256_or_gmt_token_is_rejected():
+    """⭐ M3：`_SHA256_RE` 与 `_GMT_TOKEN_RE` 都必须用 `\\Z` 收尾，不是 `$`——
+    不加 `re.MULTILINE` 时 `$` 仍会容忍**恰好一个尾随换行**（匹配到那个换行
+    之前的位置，不要求那是字符串真正的末尾），于是 `sha256 + "\\n"` 与
+    `"@GMT-...\\n"` 都会被当成合法值放行（2026-08-26 整支评审实测证实）。
+
+    ⚠️ **`_STOCK_CODE_RE` 的同一个问题未在此处配档**（2026-08-26 逐个 call
+    site 实测确认为等价变异）：股票代码在三处（`pool_order[mk][i].code` /
+    `source_snapshot.universe[mk][i]` / `files[i].stock_code`）都伴随一条
+    **字面量**判据（`.endswith("." + mk)`，或与文件名解析出的 code 相等）。
+    要触发 `$` 的尾随换行豁免，字符串必须以 `"\\n"` 结尾；而这样的字符串
+    **不可能同时**字面量地以 `.SH`/`.SZ`/`.BJ` 结尾、或等于解析出的 code——
+    三处都会先被那条字面量判据拦下（已用真实变异逐一验证：三处的判据被
+    弱化回 `$` 之后，测试全部仍红，红的都是那条字面量判据而不是正则本身）。
+    故对股票代码而言，`\\Z` 是**防御性冗余**，不是本条能证明的独立判据；
+    源码里那半个改动仍然做了（按判据本身穷尽），只是没有配到只有它才够得着
+    的档。
+
+    判别力：把 `_SHA256_RE` 或 `_GMT_TOKEN_RE` 的 `\\Z` 换回 `$`，本条对应的
+    那一半必红。
+    """
+    # sha256：files[i].sha256 尾随一个换行——这一处除了正则判据本身没有任何
+    # 字面量判据兜底（不像 staged_export_log.sha256 那样还要与另一处相等）。
+    m = _valid_manifest()
+    m["files"][0]["sha256"] = m["files"][0]["sha256"] + "\n"
+    _recompute_evidence(m)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
+
+    # GMT token：source_snapshot.gmt_token 尾随一个换行。
+    base = _valid_manifest()
+    n, agg = len(base["files"]) + 1, _agg_of(base)
+    snap = dict(base["source_snapshot"], gmt_token=_GMT + "\n")
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(_valid_manifest(
+            source_snapshot=snap,
+            source_verification="snapshot",
+            source_verification_evidence=_evidence(
+                "snapshot", n_pass=1, files_verified=n, agg=agg,
+                mount={"gmt_token": _GMT, "verified_against_mount": True})))
 
 
 def test_partial_level_needs_no_inputs_at_all():
@@ -1348,13 +1424,25 @@ def test_partial_evidence_is_always_readable_even_mid_crash():
 
 def test_partial_evidence_still_needs_the_two_structural_keys():
     """partial 宽容的是**一致性**，不是**形状**：level 与 passes 仍必须在。"""
-    for bad in ({}, {"level": "partial"}, {"passes": []},
-                {"level": "full", "passes": []}):
+    for bad in ({}, {"level": "partial"}, {"passes": []}):
         m = _valid_manifest(source_verification="partial",
                             source_verification_evidence=bad)
         m.pop("operator_attestation", None)
         with pytest.raises(ManifestInvalidError):
             validate_manifest(m)
+
+
+def test_partial_evidence_level_must_match_source_verification():
+    """⭐ M12：`{"level": "full", "passes": []}` 这个取值两个结构键都在，
+    命中的其实是「evidence.level 必须与 source_verification 一致」那条判据，
+    不是上一条测的「结构键缺失」——单独拆出来，测试名才对得上它实际验的东西
+    （2026-08-26 整支评审指出：原先混进上一条参数表里名不副实）。
+    """
+    m = _valid_manifest(source_verification="partial",
+                        source_verification_evidence={"level": "full", "passes": []})
+    m.pop("operator_attestation", None)
+    with pytest.raises(ManifestInvalidError):
+        validate_manifest(m)
 
 
 def test_partial_with_nonempty_passes_is_rejected():
