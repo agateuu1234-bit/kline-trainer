@@ -3250,7 +3250,7 @@ S3/S4 的 failures / batches / inflight_rollbacks / quota 正是靠这条通道�
 git branch --show-current && git rev-parse --short HEAD && pwd
 ```
 
-**期望**：三行依次是 `feat/qmt-4b-s2-manifest`、一个 7 位提交号、以 `.dev/worktree/qmt-4b-s2/backend` 结尾的路径。
+**期望**：三行依次是 `feat/qmt-4b-s2a-validation`、一个 7 位提交号、以 `.dev/worktree/qmt-4b-s2/backend` 结尾的路径。
 
 **通过判定**：分支名完全一致 → 通过；不一致 → 不通过（说明开了别的窗口或切错分支，**先别继续**）。
 
@@ -3264,15 +3264,17 @@ git branch --show-current && git rev-parse --short HEAD && pwd
 **动作**
 
 ```
-$PY -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
+"$PY" -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
 ```
 
 **期望**：最后一行形如 `NNN passed in XX.XXs`，**没有** `failed`、**没有** `skipped`、**没有** `error`。
 
 **通过判定**：出现 `passed`、且**没有** `failed` / `skipped` / `error` 字样 → 通过。
 
-> 数字本身只作参考：本片开工前的基线是 **937**，做完后应当明显更多（新增约 160 条）。
-> 若数字**比 937 还少**，说明有测试没被收集到——那是不通过，请把完整输出贴出来。
+> **不要拿一个写死的数字来对。** 这个总数会随主干（main）不断增长而变化，
+> 写死的基线过几天就是错的（本清单初稿写的 **937** 就已经过期了）。
+> 真正要看的是两件事：**A3** 的三个 0（机器数出来的执行量），
+> 以及 **A6** 单独去数本片自己那份测试文件——那个数字只跟本片有关，不受主干增长影响。
 
 ---
 
@@ -3284,7 +3286,7 @@ $PY -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
 **动作**
 
 ```
-$PY -c "import xml.etree.ElementTree as E;r=E.parse('/tmp/s2-accept.xml').getroot();f=lambda k:sum(int(s.get(k,0)) for s in r.iter('testsuite'));print('总数',f('tests'),'跳过',f('skipped'),'失败',f('failures'),'错误',f('errors'))"
+"$PY" -c "import xml.etree.ElementTree as E;r=E.parse('/tmp/s2-accept.xml').getroot();f=lambda k:sum(int(s.get(k,0)) for s in r.iter('testsuite'));print('总数',f('tests'),'跳过',f('skipped'),'失败',f('failures'),'错误',f('errors'))"
 ```
 
 **期望**：`跳过 0 失败 0 错误 0`，且`总数`与 A2 的数字一致。
@@ -3310,7 +3312,7 @@ printf 'import fcntl\ndef pytest_configure(config):\n    if hasattr(fcntl, "F_FU
 ```
 
 ```
-PYTHONPATH=/tmp/nofs $PY -m pytest tests/ -q -p nofullfsync
+PYTHONPATH=/tmp/nofs "$PY" -m pytest tests/ -q -p nofullfsync
 ```
 
 **期望**：与 A2 相同的通过数，**没有** `failed` / `skipped` / `error`。
@@ -3328,7 +3330,7 @@ PYTHONPATH=/tmp/nofs $PY -m pytest tests/ -q -p nofullfsync
 **动作**
 
 ```
-$PY -c "
+"$PY" -c "
 import sys; sys.path.insert(0,'tests')
 from test_qmt_manifest import _valid_manifest, _recompute_evidence
 from qmt_manifest import validate_manifest, ManifestInvalidError, ManifestVersionError
@@ -3354,21 +3356,47 @@ except ManifestVersionError as e: print('④ 版本更高：拦住了 ✅ ——
 
 ---
 
-### A7 · 确认 spec 的四处更正真的写进去了
+### A6 · 单独数一遍本片自己那份测试
+
+> 上一步 A2 的总数里混着整个项目的测试。这一步只数**本片新写的那一份**，
+> 它不受主干增长影响，所以是个稳定的判据。
 
 **动作**
 
 ```
-git log --oneline -1 -- ../../../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
+"$PY" -m pytest tests/test_qmt_manifest.py -q
+```
+
+**期望**：最后一行是 `126 passed in X.XXs`（秒数无所谓）。
+
+**通过判定**：数字恰为 **126** → 通过；比它少 → 不通过（有测试没被收集到）。
+
+---
+
+### A7 · 确认 spec 的七处更正真的写进去了
+
+**动作**
+
+> ⚠️ 路径是 `../docs/`（**两个点**）。本清单初稿写成了 `../../../docs/`，
+> 那会退到仓库外面去，跑出来是 `fatal:` —— 已修正。
+
+**动作**（两行，逐行执行）
+
+```
+grep -o 'S2-F[0-9]' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md | sort -u
 ```
 
 ```
-grep -c 'S2-F1\|S2-F2\|S2-F3\|S2-F4' ../../../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
+grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
 ```
 
-**期望**：第一条显示一次 `docs(4b): S2 实施前核实` 的提交；第二条输出的数字 ≥ 10。
+**期望**：第一条输出恰好七行，依次是 `S2-F1` 到 `S2-F7`；第二条输出的数字是 **7**。
 
-**通过判定**：两条都满足 → 通过。
+> 第二条数的是那张更正表里**以 `| S2-F` 开头的表格行**，所以它同时守着两件事：
+> 七条更正都在，**而且都还待在表格里**。（这份 spec 上我两次把新增行前面
+> 多打了一个空行，那一行就会掉出表格 —— 那时这个数会变成 6。）
+
+**通过判定**：两条都满足 → 通过；任一不满足 → 不通过（有更正没写进去，或有行掉出了表格）。
 
 ---
 
