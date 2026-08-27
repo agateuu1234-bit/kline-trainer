@@ -481,12 +481,17 @@ def _validate_lifecycle(payload: dict) -> None:
                      f"fetch_fatal_error 缺 {key}（必须是 {list(FATAL_FIELDS)} "
                      "四字段——写侧三字段、读侧四字段会让一个合规的写者产出的 "
                      "manifest 被读者判非法，恢复指引整个走错）")
-        _require(fatal["kind"] in FATAL_KINDS,
+        # ⚠️ 必须**先验类型再比取值**（同第 466 行 stopped_reason 的写法）：
+        # `FATAL_KINDS` 是 frozenset，拿一个 list/dict 去做 `in` 会抛
+        # `TypeError: unhashable type`——一份被编辑坏的 manifest 于是不是被
+        # fail-closed 拒绝，而是让进程带着原始 traceback 崩掉，恢复指引一个字
+        # 都印不出来。**守卫自己被它该抓的那种损坏弄坏了。**
+        _require(isinstance(fatal["kind"], str) and fatal["kind"] in FATAL_KINDS,
                  f"fetch_fatal_error.kind 必须是 {sorted(FATAL_KINDS)} 之一，"
                  f"读到 {fatal['kind']!r}")
         _require_nonempty_str(fatal["relative_path"], "fetch_fatal_error.relative_path")
         _require_nonempty_str(fatal["component"], "fetch_fatal_error.component")
-        _require(fatal["errno"] in FATAL_ERRNOS,
+        _require(isinstance(fatal["errno"], str) and fatal["errno"] in FATAL_ERRNOS,
                  f"fetch_fatal_error.errno 必须是 {sorted(FATAL_ERRNOS)} 之一，"
                  f"读到 {fatal['errno']!r}")
 

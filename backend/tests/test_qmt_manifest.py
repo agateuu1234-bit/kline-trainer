@@ -7,6 +7,8 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.4 + §4.5
 """
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from qmt_manifest import (
@@ -1559,3 +1561,76 @@ def test_validate_returns_the_same_object_not_a_copy():
     转头把原对象写回磁盘。"""
     m = _valid_manifest()
     assert validate_manifest(m) is m
+
+
+def _leaf_paths(obj, path=()):
+    """枚举一份 manifest 里**每一个**可替换位置（含容器本身）。"""
+    yield path
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _leaf_paths(v, path + (k,))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _leaf_paths(v, path + (i,))
+
+
+def _set_at(obj, path, value):
+    cur = obj
+    for step in path[:-1]:
+        cur = cur[step]
+    cur[path[-1]] = value
+
+
+def test_no_field_of_any_json_type_can_escape_as_a_raw_exception():
+    """⭐⭐ **整族守卫**：把**任何**字段换成**任何** JSON 类型，读侧都必须给出
+    `ManifestInvalidError` / `ManifestVersionError`，**绝不能抛原始异常**。
+
+    codex R3 挖出的形态：`fetch_fatal_error.kind` 或 `errno` 被写成 list/dict 时，
+    代码先做 `x in FATAL_KINDS`（frozenset）再验类型 → `TypeError: unhashable type`。
+    于是一份被编辑坏的 manifest **不是**被 fail-closed 拒绝，而是让进程带着原始
+    traceback 崩掉，`ManifestInvalidError.GUIDANCE` 那句「换新 staging + 新 seed
+    重拉」一个字都印不出来——**守卫自己被它该抓的那种损坏弄坏了**（本仓已栽过
+    同形态：机械检查器被损坏禁用了自身解析器 → 静默全绿）。
+
+    ⚠️ **为什么写成整族扫描而不是 4 条点测**：控制者实测过 984 个组合，崩溃**恰好**
+    只有那 4 个；但这个数字**会随字段增加而变化**。点测只钉住今天已知的 4 个，
+    新字段照样能把这个洞重开。这条扫描对**将来新增的字段自动生效**。
+
+    ⚠️ **防空转**：断言探测数有下限。若 `_leaf_paths` 哪天被改坏、只枚举出几个
+    位置，这条测试会「零崩溃」通过而实际什么都没测——下限断言让它当场红。
+    """
+    bases = [
+        _valid_manifest(),
+        _valid_manifest(stopped_reason="source_path_escape",
+                        fetch_fatal_error=_fatal()),
+    ]
+    for base in bases:
+        _recompute_evidence(base)
+
+    bad_values = {"list": [], "dict": {}, "null": None,
+                  "int": 0, "str": "x", "bool": True}
+    probed = 0
+    escapes = []
+    for base in bases:
+        for path in list(_leaf_paths(base)):
+            if not path:
+                continue
+            for name, value in bad_values.items():
+                victim = copy.deepcopy(base)
+                _set_at(victim, path, value)
+                probed += 1
+                try:
+                    validate_manifest(victim)
+                except (ManifestInvalidError, ManifestVersionError):
+                    pass                      # 承诺的行为
+                except Exception as exc:      # noqa: BLE001 —— 正是要抓这些
+                    escapes.append(
+                        f"{'.'.join(map(str, path))} = {name} → "
+                        f"{type(exc).__name__}: {exc}")
+
+    assert probed >= 900, (
+        f"只探测了 {probed} 个组合（预期 900+）——_leaf_paths 可能被改坏了，"
+        "这次运行对本判据零判别力")
+    assert not escapes, (
+        "以下字段的坏值逃出了 fail-closed，抛的是原始异常而不是 "
+        "ManifestInvalidError：\n  " + "\n  ".join(escapes))
