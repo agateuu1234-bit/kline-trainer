@@ -1,7 +1,22 @@
-version: "3.9"
+# backend/docker-compose.yml —— kline-trainer 部署编排（spec §4-D2）
+#
+# ⚠️ 顶层 name 是硬要求，不是装饰（C1-3 + spec §2.5-c）：
+#    compose 默认拿**目录名**当项目名。本文件在 backend/ 目录下，默认项目名就是
+#    `backend` —— 而 NAS 上**已经存在**卷 `backend_pgdata` 和镜像 `backend-api:latest`
+#    （2026-04 的遗留）。漏了这一行会静默挂上那个旧卷，而 sql/schema.sql 建表全是
+#    CREATE TABLE IF NOT EXISTS → 什么都不修却报成功，后面所有验收都跑在一个
+#    没被校验过的 schema 上。
+#
+# ⚠️ 不写 `version:` 键：compose v2 已忽略它并对其报警告，而部署时需要干净的输出
+#    才能判断有没有真警告。
+name: kline-trainer
+
 services:
   db:
-    image: postgres:15.12
+    # 拉取型服务（有 image 无 build）→ 供应链固定靠这里的 digest（C1-8①）。
+    # digest 取多架构 index 顶层值（含 linux/amd64 + linux/arm64/v8，2026-08-24 实测），
+    # 不是单平台 manifest 的 —— 否则镜像会被钉死在一个架构上。
+    image: postgres:15.12@sha256:8f6fbd24a12304d2adc332a2162ee9ff9d6044045a0b07f94d6e53e73125e11c
     restart: unless-stopped
     env_file:
       - .env
@@ -16,6 +31,43 @@ services:
       - "${DB_BIND_HOST:-127.0.0.1}:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # $$ 转义：让 pg_isready 读**容器自己**的环境变量，而不是被 compose 先插值掉。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    # 构建型服务（有 build）→ 供应链固定由 Dockerfile 的 FROM …@sha256: 承担（C1-8②）。
+    # ⚠️ 刻意**不写** image: 键。写了并带 digest 会让 `docker compose build` 直接报
+    #    `failed to solve: build tag cannot contain a digest`，而 `compose config`
+    #    对这份坏配置返回 0（实测）—— 所以这条只能靠「不写」和反向测试守住。
+    #    镜像名由项目名派生为 kline-trainer-api（2026-08-24 实测）。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # 刻意**不用** env_file：api 只需要 DATABASE_URL 一个变量，
+    # 把整份 .env（含 POSTGRES_PASSWORD）注进 api 容器是不必要的扩散。
+    # ${...} 的插值本来就自动读项目目录下的 .env，与 env_file 无关。
+    environment:
+      # 必需变量语法（C1-9）：未设**或空串**都会让 `docker compose up` 当场失败。
+      # 不这么写的话，插值得到空串 → app/main.py 静默回落 InMemory 假件 →
+      # 服务照样 200 地跑着，手机却一个训练组都拉不到。
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 未设或为空 —— 后端会静默回落 InMemory 假件，拒绝启动}
+    depends_on:
+      # condition 形式（C1-3b）：等 PG 真的能接受连接，不只是「容器起来了」。
+      # NAS 断电重启时 api 先起 → create_pool 抛错 → FastAPI startup 失败 → 容器退出。
+      db:
+        condition: service_healthy
+    ports:
+      # 默认只绑回环（C1-4）。对外暴露由 NAS 上的 tailscale serve 承担，不在这里开。
+      - "${API_BIND_HOST:-127.0.0.1}:8010:8000"
+    volumes:
+      # 只读挂载（C1-5）。容器内路径固定为 /data/training-sets —— training_sets.file_path
+      # 存的就是这个路径，宿主目录怎么变都不用改数据库（D3）。
+      - ${TRAINING_SETS_HOST_DIR:?TRAINING_SETS_HOST_DIR 未设 —— 训练组 zip 宿主目录必须显式指定}:/data/training-sets:ro
 
 volumes:
   pgdata:
