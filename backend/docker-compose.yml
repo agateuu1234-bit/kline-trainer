@@ -31,6 +31,15 @@ services:
       - "${DB_BIND_HOST:-127.0.0.1}:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # ⚠️ 建表脚本**刻意不接进这里**（codex PR2-R1 high 的答复，非遗漏）：
+    #    - `sql/schema.sql` 由部署 runbook 的 **P6** 显式灌入（第 434 行），P6 在起 api 的
+    #      **P8 之前**（P6 第 233 行 / P8 第 545 行），所以 api 面对的从来不是空库；
+    #    - 之所以要**显式一步**而不是挂进 `/docker-entrypoint-initdb.d/` 自动跑：schema 必须从
+    #      仓库权威 DDL 建、且**建完要被校验**（spec §「schema 从仓库权威 DDL 建」）。
+    #      建表语句全是 `CREATE TABLE IF NOT EXISTS` —— 挂进 initdb.d 在**旧卷**上会静默什么都不修
+    #      却一路绿灯，正是本项目反复要消灭的假绿。
+    #    - 校验由 **P6b**（第 450 行）承担，它比「表在不在」严得多：逐条核 38 个列、15 个约束、
+    #      9 个索引（含两条带 WHERE 的部分索引）的**完整定义**。`\dt` 出 4 张表**不是**充分判据。
     # $$ 转义：让 pg_isready 读**容器自己**的环境变量，而不是被 compose 先插值掉。
     # ⚠️ `-h 127.0.0.1` 不是可选的：不带 -h 时 pg_isready 走 **Unix socket**，而官方 postgres
     #    entrypoint 在首次初始化（initdb）期间会先跑一个 `listen_addresses=''` 的**临时服务器**
