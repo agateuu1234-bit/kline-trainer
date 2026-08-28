@@ -16,6 +16,8 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 MAIN_REQS = BACKEND_DIR / "requirements.txt"
 API_REQS = BACKEND_DIR / "requirements-api.txt"
+# CI（.github/workflows/backend-tests.yml）装的是这一份，不是 requirements.txt。
+TEST_REQS = BACKEND_DIR / "requirements-test.txt"
 
 EXPECTED_API_PACKAGES = {"fastapi", "uvicorn", "asyncpg"}
 
@@ -60,6 +62,33 @@ def test_api_requirements_pins_match_main_requirements():
         assert name in main, f"{name} 在 requirements.txt 里不存在"
         assert version == main[name], (
             f"{name} 版本不一致: requirements-api.txt={version} / requirements.txt={main[name]}"
+        )
+
+
+def test_api_and_test_requirements_pins_match():
+    """CI 真正安装的是 requirements-test.txt —— 这条把那一侧也锁上。
+
+    为什么单独一条：本文件开头承诺「本地 pytest 用的版本」不能与「容器里真跑的版本」
+    分家，但上面那条锁的是 requirements.txt，而 CI 从来不装它。只锁 requirements.txt
+    的话，把 requirements-test.txt 里的 fastapi 单独提一个版本，**没有任何测试会红** ——
+    那正好就是承诺要挡住的那种漂移。
+
+    交集为什么现在只有 {fastapi}：uvicorn 与 asyncpg 是**刻意**不在测试清单里的
+    （测试里没有任何东西 import 它们，装了只是浪费 CI 时间）。所以这条比对的
+    公共包目前就 fastapi 一个 —— 下面那句防空转断言就是用来在「哪天交集变空了」
+    时当场报错的，否则循环会静默地一条都不比。
+    """
+    api = _parse(API_REQS)
+    test = _parse(TEST_REQS)
+    shared = sorted(set(api) & set(test))
+    assert shared, (
+        "requirements-api.txt 与 requirements-test.txt 没有任何同名包 —— "
+        "下面的循环恒真通过，本条判据已失效"
+    )
+    for name in shared:
+        assert api[name] == test[name], (
+            f"{name} 版本不一致: requirements-api.txt={api[name]} / "
+            f"requirements-test.txt={test[name]}"
         )
 
 

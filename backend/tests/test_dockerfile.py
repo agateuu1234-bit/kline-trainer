@@ -31,6 +31,16 @@ def _from_lines() -> list[str]:
     return [ln for ln in _lines() if ln.strip().startswith("FROM ")]
 
 
+def _instruction_lines() -> list[str]:
+    """剥掉整行注释与空行 —— 判据只许读**指令**，不许读注释（本仓明令）。
+
+    读整份原始文本的话，一句完全正当的解释性注释（本仓的 Dockerfile 注释很多）
+    只要提到 `:latest` 或 `requirements.txt` 就会把闸门打红，而唯一的"修法"是
+    **把注释删掉** —— 判据变成在惩罚写注释的人。
+    """
+    return [ln for ln in _lines() if ln.strip() and not ln.strip().startswith("#")]
+
+
 def test_dockerfile_has_exactly_one_from():
     """防空转 + 防多阶段意外：本镜像是单阶段的。"""
     assert len(_from_lines()) == 1, f"期望恰好 1 条 FROM，实际 {len(_from_lines())} 条"
@@ -49,19 +59,36 @@ def test_base_image_is_exact_patch_tag_with_digest():
 
 
 def test_no_latest_anywhere():
-    """T6-4 的 Dockerfile 侧：不得出现 :latest。"""
-    for line in _lines():
-        assert ":latest" not in line, f"Dockerfile 出现 :latest: {line!r}"
+    """T6-4 的 Dockerfile 侧：**指令行**里不得出现 :latest（注释不算）。"""
+    for line in _instruction_lines():
+        assert ":latest" not in line, f"Dockerfile 指令行出现 :latest: {line!r}"
 
 
 def test_installs_api_requirements_not_main_requirements():
-    """T5-2：装的是裁剪后的清单。
+    """T5-2：装的是裁剪后的清单，且判据锚在**指令行**上。
+
+    要同时挡住两种形状：
+      ① 装了 `requirements.txt`（那份含 pandas-ta 安装陷阱）；
+      ② 根本不从清单装 —— `RUN pip install fastapi uvicorn asyncpg` 再配一句提到
+         `requirements-api.txt` 的注释，能满足"整份文本里出现过这个词"式的判据，
+         装进去的却是一组完全没有 pin 的版本。所以正向断言必须落在真正的
+         COPY / RUN 指令上，而不是全文文本。
 
     注意 `requirements.txt` **不是** `requirements-api.txt` 的子串，
-    所以下面这条否定断言不会误伤。
+    所以下面那条否定断言不会误伤。
     """
-    text = DOCKERFILE.read_text(encoding="utf-8")
-    assert "requirements-api.txt" in text, "Dockerfile 没有引用 requirements-api.txt"
-    assert "requirements.txt" not in text, (
-        "Dockerfile 引用了 requirements.txt —— 那份含 pandas-ta 安装陷阱"
+    instructions = _instruction_lines()
+    copy_lines = [ln for ln in instructions if ln.strip().startswith("COPY ")]
+    run_lines = [ln for ln in instructions if ln.strip().startswith("RUN ")]
+
+    assert any("requirements-api.txt" in ln for ln in copy_lines), (
+        f"没有一条 COPY 指令把 requirements-api.txt 拷进镜像: {copy_lines!r}"
     )
+    assert any(
+        "pip install" in ln and "-r requirements-api.txt" in ln for ln in run_lines
+    ), f"没有一条 RUN 指令用 `-r requirements-api.txt` 安装依赖: {run_lines!r}"
+
+    for line in instructions:
+        assert "requirements.txt" not in line, (
+            f"Dockerfile 指令行引用了 requirements.txt —— 那份含 pandas-ta 安装陷阱: {line!r}"
+        )

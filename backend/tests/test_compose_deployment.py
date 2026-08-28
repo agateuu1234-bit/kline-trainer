@@ -44,6 +44,21 @@ def test_both_service_classes_are_non_empty():
     assert _build_type_services(), "没有构建型服务 —— 反向 digest 判据会恒真通过"
 
 
+def test_service_classes_cover_every_service():
+    """分类必须**完备**：两类之外的第三类服务会同时逃过两条 digest 断言。
+
+    `_pull_type_services` 认「有 image 无 build」，`_build_type_services` 认「有 build」——
+    一个两者都没有的服务会被两个筛子同时漏掉，于是它的镜像来源不受任何判据约束，
+    而且不会有任何测试变红。这条把「漏掉」从"目前碰巧不会发生"提升成"结构上不可能"。
+    """
+    services = set(_services())
+    covered = set(_pull_type_services()) | set(_build_type_services())
+    assert covered == services, (
+        "有服务既不算拉取型也不算构建型，两条 digest 判据都够不着: "
+        f"{sorted(services - covered)!r}"
+    )
+
+
 def test_project_name_is_explicit():
     """T4-1：显式项目名。
 
@@ -68,7 +83,13 @@ def test_api_depends_on_db_being_healthy():
     """T4-1b：必须是 condition 形式，不是裸列表。
 
     裸 `depends_on: [db]` 只保证「db 容器启动了」，不保证「PG 能接受连接」。
-    NAS 断电重启时 api 会先起来 → create_pool 抛错 → FastAPI startup 失败。
+    api 先起来 → create_pool 抛错 → FastAPI startup 失败 → 容器退出。
+
+    ⚠️ 两条腿分工要记清，别把功劳记错：
+      - `depends_on` + healthcheck 只覆盖**一次 `docker compose up` 内部的启动次序**；
+      - 宿主（NAS）断电重启后，是 Docker 守护进程按 restart 策略把容器拉起来的，
+        这条路**不走** `depends_on` —— 那一半由 `restart: unless-stopped` 覆盖
+        （见 test_api_has_restart_policy）。
     """
     depends = _services()["api"]["depends_on"]
     assert isinstance(depends, dict), f"depends_on 必须是映射形式，实际: {depends!r}"
@@ -86,6 +107,25 @@ def test_api_host_port_defaults_to_loopback():
     assert any(str(p).startswith("${API_BIND_HOST:-127.0.0.1}:") for p in ports), (
         f"api 的宿主端口绑定默认值不是 127.0.0.1: {ports!r}"
     )
+
+
+def test_every_published_host_port_defaults_to_loopback():
+    """T4-2 / C1-4 的**整族**版：任何服务发布到宿主的端口都必须默认绑回环。
+
+    上面那条只守 api。而 db 同样把端口发布到宿主
+    （`${DB_BIND_HOST:-127.0.0.1}:5433:5432`），它前面挡着的是 postgres 超级用户密码 ——
+    把那个默认值翻成 `0.0.0.0`，在只守 api 的情况下**不会有任何测试变红**。
+    本仓的规矩是判据要按「判据本身」修整族，不是只修被报出来的那一处。
+    """
+    examined: list[str] = []
+    for name, svc in _services().items():
+        for entry in svc.get("ports") or []:
+            text = str(entry)
+            examined.append(text)
+            assert text.startswith("${") and ":-127.0.0.1}:" in text, (
+                f"服务 {name} 的宿主端口绑定默认值不是 127.0.0.1: {text!r}"
+            )
+    assert examined, "没有任何服务发布宿主端口 —— 本条判据恒真通过，已失效"
 
 
 def test_training_sets_mount_is_readonly_at_fixed_container_path():

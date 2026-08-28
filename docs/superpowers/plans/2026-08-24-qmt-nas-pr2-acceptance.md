@@ -8,10 +8,11 @@
 
 | 动作 | 预期 | 通过条件 |
 |---|---|---|
-| 粘贴：`cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-pr2/backend"` | 没有任何输出 | 光标回到新的一行 |
+| 打开终端，先输入 `cd ` （一个字母 c、一个字母 d、再一个空格，**先别按回车**）。然后打开「访达」，找到你电脑上存放本项目的那个文件夹，进去以后把里面那个名叫 `backend` 的子文件夹**用鼠标直接拖进终端窗口**——终端会自动把它的完整路径补在 `cd ` 后面——这时再按回车 | 没有任何输出 | 光标回到新的一行 |
+| 粘贴：`pwd` | 屏幕上打印出一行文件夹路径 | 打印出来的那一行的**最后一段**是 `backend`（也就是整行以 `/backend` 这五个字符结尾）。如果不是，说明刚才拖错了文件夹，回到上一步重做 |
 | 粘贴：`cp .env.example .env` | 没有任何输出 | 光标回到新的一行，且这个文件夹里多出一个名叫 `.env` 的文件（可能被系统隐藏，需要开启"显示隐藏文件"才看得到） |
 
-⚠️ 下面每一步都假设你已经站在这个 `backend` 文件夹里、并且已经做过上面两步；如果中途关掉终端重新打开，请先重新做一次这两步。
+⚠️ 下面每一步都假设你已经站在这个 `backend` 文件夹里、并且已经做过上面这三步；如果中途关掉终端重新打开，请先重新做一次这三步。
 
 这个 `.env` 文件里现在装的是 `.env.example` 里写的示例值，不是真实的数据库密码或 NAS 地址——这没关系：下面 A1 到 A6 都不会真的启动服务、也不会真的连接数据库，A3 只是把镜像构建出来，A4 到 A6 只是把配置文字展开或校验，都用不到真实的值。这份本地 `.env` 只是为了让下面这几项检查能跑起来，**不是**将来真正部署时要用的那一份。
 
@@ -42,10 +43,13 @@
 
 | 动作 | 预期 | 通过条件 |
 |---|---|---|
-| **A3.** 粘贴以下这一整行并回车：`docker compose build` | 屏幕上会刷出一长串构建（把程序打包成镜像）过程中的文字，需要一点时间 | 最后能看到一行文字里包含 `Image kline-trainer-api Building`；从头到尾**没有**出现 `failed to solve` 这几个字 |
+| **A3.** 粘贴以下这一整行并回车：`docker compose build > /tmp/pr2-build.log 2>&1 && echo BUILD_OK || echo BUILD_FAILED` | 屏幕上**不会**刷出构建（把程序打包成镜像）过程中的文字——它们全被写进了 `/tmp/pr2-build.log` 这个日志文件里。屏幕会安静地停一会儿（第一次构建要下载东西，可能几分钟），结束时只打印出**一个单词** | 屏幕上打印出来的那个单词是 `BUILD_OK`。如果是 `BUILD_FAILED`，就是没通过，停下来找负责人 |
+| **A3b.** 粘贴以下这一整行并回车：`grep -c 'failed to solve' /tmp/pr2-build.log` | 屏幕上只打印出**一个数字**——这是在数刚才那份构建日志里出现过多少次 `failed to solve`（构建失败的报错字样） | 那个数字是 `0` |
 | **A4.** 粘贴以下这一整行并回车：`docker compose config` | 屏幕上打印出展开后的完整编排内容（把所有配置和变量都代入之后，实际会拿去运行的完整设置） | 命令执行后**没有**出现任何报错文字；打印出来的**第一行**就是 `name: kline-trainer` |
 | **A5.** 用文本编辑器打开 `.env` 这个文件，找到 `DATABASE_URL=` 开头的那一整行，把这一整行**整行删除**并保存文件。然后回到终端，粘贴以下这一整行并回车：`docker compose config` | 这一次命令应该**报错**，而不是正常打印出编排内容 | 屏幕上出现这一整段文字：`error while interpolating services.api.environment.DATABASE_URL: required variable DATABASE_URL is missing a value: DATABASE_URL 未设或为空 —— 后端会静默回落 InMemory 假件，拒绝启动`。确认看到之后，**把刚才删掉的那一整行原样加回** `.env` 并保存，再重新粘贴一次 `docker compose config`，应该恢复成 A4 那样正常打印、不报错 |
 | **A6.** 用文本编辑器打开 `.env` 这个文件，找到 `DATABASE_URL=` 这一行，**保留 `DATABASE_URL=` 这几个字不删**，只把等号后面的内容全部删掉（这一行变成只剩 `DATABASE_URL=`），保存文件。然后回到终端，粘贴以下这一整行并回车：`docker compose config` | 这一次命令同样应该**报错**，报错内容与 A5 一样 | 屏幕上出现与 A5 完全相同的那一整段文字：`error while interpolating services.api.environment.DATABASE_URL: required variable DATABASE_URL is missing a value: DATABASE_URL 未设或为空 —— 后端会静默回落 InMemory 假件，拒绝启动`。确认看到之后，**把 `DATABASE_URL=` 这一行恢复成原来完整的内容**（等号后面的原始值原样填回）并保存，再重新粘贴一次 `docker compose config`，应该恢复成正常打印、不报错 |
+
+⚠️ A3、A3b 为什么要绕一圈写进日志文件再去数：`failed to solve` 这几个字往往出现在很长的构建日志**中间**，让人从头翻到尾去确认「某几个字一次都没出现过」是靠不住的（漏看一行就判错了）。改成让机器去数，屏幕上只留一个数字，看一眼就能对。
 
 ⚠️ **A5、A6 做完之后，一定要按表格里写的把 `.env` 改回原样**，否则接下来任何需要用到这份编排的操作都会启动不了。
 

@@ -32,11 +32,19 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     # $$ 转义：让 pg_isready 读**容器自己**的环境变量，而不是被 compose 先插值掉。
+    # ⚠️ `-h 127.0.0.1` 不是可选的：不带 -h 时 pg_isready 走 **Unix socket**，而官方 postgres
+    #    entrypoint 在首次初始化（initdb）期间会先跑一个 `listen_addresses=''` 的**临时服务器**
+    #    —— 只有 socket、没有 TCP 监听。探针落在那个窗口里会答「accepting connections」，
+    #    compose 就把 db 判成健康并放行 api，而 api 的 create_pool 走的是 db:5432 **TCP**，
+    #    当场被拒。这一条 healthcheck 存在的意义就是「等 PG 真的能接受连接」，
+    #    所以它必须问的是**调用方真正会走的那条路**。
+    # start_period：首次启动 initdb 要花时间，这段不计入重试预算，避免 retries 被提前耗光。
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   api:
     # 构建型服务（有 build）→ 供应链固定由 Dockerfile 的 FROM …@sha256: 承担（C1-8②）。
@@ -58,7 +66,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 未设或为空 —— 后端会静默回落 InMemory 假件，拒绝启动}
     depends_on:
       # condition 形式（C1-3b）：等 PG 真的能接受连接，不只是「容器起来了」。
-      # NAS 断电重启时 api 先起 → create_pool 抛错 → FastAPI startup 失败 → 容器退出。
+      # api 先起 → create_pool 抛错 → FastAPI startup 失败 → 容器退出。
+      # ⚠️ 分工要记清，两条腿缺一不可：
+      #    - depends_on + healthcheck 只覆盖**一次 `docker compose up` 内部的启动次序**；
+      #    - NAS 断电后宿主重启，是 Docker 守护进程按 restart 策略把容器拉起来的，
+      #      这条路**不走** depends_on —— 那一半由上面的 `restart: unless-stopped` 覆盖。
+      #    删掉 restart 而以为 depends_on 顶得住重启，是这里最容易犯的错。
       db:
         condition: service_healthy
     ports:
