@@ -89,6 +89,18 @@ services:
     volumes:
       # 只读挂载（C1-5）。容器内路径固定为 /data/training-sets —— training_sets.file_path
       # 存的就是这个路径，宿主目录怎么变都不用改数据库（D3）。
+      #
+      # ⚠️ 已知遗留（codex PR2-R2 high，**本切片范围外**，不要以为已解决）：
+      #    `file_path` 存**容器内绝对路径**是 D3 第 4 条的选定；本次部署的 3 行由 runbook P11
+      #    **手写 INSERT** 直接写入正确的容器内路径（D3 第 3 条选它而非 pg_dump 的理由就是这个）。
+      #    但 `generate_training_sets.py` 是在**宿主机**上跑的，它把**宿主机绝对路径**登记进
+      #    `file_path`（它自己那道 `--output` 必须绝对的守卫也只解决「相对 vs 绝对」，
+      #    解决不了「宿主 vs 容器」）。所以：**将来谁直接拿它往这套部署里生成训练组，
+      #    产出的行在容器内会全部 404** —— 生产者与消费者对「路径是谁的路径」没有共识。
+      #    本切片不改：那要动 file_path 语义（牵连 lease_repo / routes / 生成器 / 调度器
+      #    与已在库的 3 行），属 spec 级重新设计，不是容器化。
+      #    推荐方向（codex 给的，认同）：`file_path` 改存**相对训练组根目录**的路径，
+      #    由 API 侧按配置的容器根解析 —— 这样宿主/容器两侧都不用各自记住对方的绝对路径。
       - ${TRAINING_SETS_HOST_DIR:?TRAINING_SETS_HOST_DIR 未设 —— 训练组 zip 宿主目录必须显式指定}:/data/training-sets:ro
 
 volumes:
