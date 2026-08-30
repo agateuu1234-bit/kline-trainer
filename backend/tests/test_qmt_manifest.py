@@ -2368,3 +2368,74 @@ def test_full_round_trip_stock_commits_then_final(tmp_path):
         assert "fetch_fatal_error" not in read_manifest(fd)
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b 收口：机械化全量 sweep 挖出的「无任何测试隔离守护」的四条判据
+#
+# sweep 做法：把模块里每个 `_require*` 调用的第一个实参改成恒真值，各跑一遍。
+# 84 个判据里 12 条变异后仍绿，逐条核归因后分四类：
+#   ① 邻居兜底（6 条）——非法值撞不过下游那条更强的判据，登记不修：
+#      L262/L449 sha 格式（两处必须相等）、L330 层内 idx 唯一（code 唯一 + 交叉核对）、
+#      L395/L397 files 的 code/period（文件名解析一致性）、L623 存根 sha 格式（须等于重算值）
+#   ② 等价变异（1 条）——L324「后缀与层一致」与交叉核对结构上重叠，S2a 已登记（M19）
+#   ③ 已写明的恒真断言（1 条）——L644 两趟聚合相等，S2a 变异证实，保留作防御性冗余
+#   ④ **真的没人守（4 条）**——结构上造得出专属档，按纪律就该补，即下面四条
+#
+# ⚠️ 为什么 984 组合那条整族扫描探不到它们：它只断言「若抛异常则必须是本模块的族」，
+# **不断言「必须抛」**。守卫被变空之后不抛任何异常，那条扫描照样绿。
+# 且它做的是「替换值」，从不做「删键」——L263 那种缺键的形态它够不着。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_source_snapshot_without_universe_is_rejected_not_a_raw_keyerror():
+    """L263：缺 `source_snapshot.universe` 必须是 ManifestInvalidError。
+
+    判别力：把那条 `_require("universe" in snap, …)` 变空，本条必红——
+    且红的形态是**原始 KeyError**，恢复指引一个字都印不出来（S2-F9 同族）。
+    """
+    m = _valid_manifest()
+    del m["source_snapshot"]["universe"]
+    with pytest.raises(ManifestInvalidError, match="universe"):
+        validate_manifest(m)
+
+
+def test_fatal_relative_path_must_not_be_empty():
+    """L507：`fetch_fatal_error.relative_path` 为空串必须被拒。
+
+    空串是「写侧只落了一半」的典型形态——四字段都在、值却是空的，
+    恢复指引会印出「路径 ''」这种什么都没说的东西。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    m["fetch_fatal_error"]["relative_path"] = ""
+    with pytest.raises(ManifestInvalidError, match="relative_path"):
+        validate_manifest(m)
+
+
+def test_fatal_component_must_not_be_empty():
+    """L508：`fetch_fatal_error.component` 为空串必须被拒。
+
+    `component` 是「哪一段被换掉了」——空串等于没记，
+    而它正是操作者唯一能据以定位现场的字段。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    m["fetch_fatal_error"]["component"] = ""
+    with pytest.raises(ManifestInvalidError, match="component"):
+        validate_manifest(m)
+
+
+def test_evidence_pass_completed_at_must_not_be_empty():
+    """L627：`passes[].completed_at` 为空串必须被拒。
+
+    R16-F1 造这份存根的全部理由是证明那两趟**真的跑过**；
+    没有时间戳的一趟，「跑过」这件事就没有任何可核对的痕迹。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest()
+    m["source_verification_evidence"]["passes"][0]["completed_at"] = ""
+    with pytest.raises(ManifestInvalidError, match="completed_at"):
+        validate_manifest(m)
