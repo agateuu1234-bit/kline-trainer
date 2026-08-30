@@ -2848,3 +2848,90 @@ def test_a_source_escape_may_replace_another_source_escape():
     m = _commit_cycle(_valid_manifest(), _source_escape("a/x.csv", "a"))
     m = _commit_cycle(m, _source_escape("b/y.csv", "b"))
     assert m["fetch_fatal_error"]["relative_path"] == "b/y.csv"
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R4 [high]：清除闸仍按 `kind` 判「严不严」，漏掉 staging_recheck_failed
+#
+# ⚠️ **这是我自己的修复动作留下的洞**（本仓已栽过多次的形态：
+#    「结构性改动后要重核原来成立的东西」）：
+#    R3 那轮我为「哪些状态必须做过 staging 全量复校才能清」抽出了
+#    `_needs_staging_recheck`，把它用在了**覆盖闸**上，却忘了**清除闸**
+#    ——而清除闸正是它本来要服务的地方。
+#    同一件事判两次、改了一处忘了另一处 ⇒ 修完必须留**机械守卫**。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_failed_staging_recheck_cannot_be_cleared_without_a_passing_one():
+    """⭐⭐ [R4 high] 两次运行：source 逃逸 → 复校失败 → 干净跑完（未复校）。
+
+    第一步产出的 `(stopped_reason="staging_recheck_failed", kind="source_path_escape")`
+    **是本代码自己产出的合法状态**（O4-F3 解耦 + 本片 D5 把「复校失败」提到
+    kind 判断之前）。而清除闸只看 `kind`，于是第二次运行不做任何 staging 复校
+    就把「上次复校没通过」和 fatal **一起抹掉** ——
+    一棵已被证明与账本对不上的 staging 拿到干净账本。
+
+    判别力：把清除闸换回 `prev_fatal["kind"] == "staging_path_escape"`，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="failed"))
+    assert m["stopped_reason"] == "staging_recheck_failed"
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_a_failed_staging_recheck_clears_after_a_passing_one():
+    """方向②：真做了全量复校并通过，就必须解得开——否则这棵 staging 死锁。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="failed"))
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason" not in m
+
+
+def test_only_one_place_decides_whether_a_staging_recheck_is_required():
+    """⭐ 机械守卫：「这个状态要不要 staging 全量复校」**只许在一处判定**。
+
+    R4 那条 high 的根因就是同一件事判在两处、改了一处忘了另一处。
+    本守卫用 AST 找出所有与字面量 `"staging_path_escape"` 的比较，
+    断言它们只出现在 `_needs_staging_recheck` 里。
+
+    ⚠️ 用 AST 而不是 grep：**注释与 docstring 里出现这个字面量是正常的**
+    （承重注释要引用它），文本扫描会被自己的注释打红，而绕过方式是删注释
+    ——那正是本仓立过的「源码守卫读哪份文本是判据的一部分」。
+
+    ⚠️ **防空转**：同时断言至少找到 1 处。若 AST 遍历哪天被改坏、一处都找不到，
+    这条守卫会「零违规」通过而实际什么都没查。
+    """
+    import ast as _ast
+    import inspect
+    import pathlib
+    import qmt_manifest as _qm
+
+    # 用 inspect 取被测模块**自己**的源文件路径，不靠相对层级拼——
+    # 拼错了这条守卫就变成「永远因为路径错而红」，与它要查的东西无关。
+    src = pathlib.Path(inspect.getsourcefile(_qm))
+    tree = _ast.parse(src.read_text(encoding="utf-8"))
+
+    found = []
+    for fn in _ast.walk(tree):
+        if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Compare) and any(
+                    isinstance(c, _ast.Constant) and c.value == "staging_path_escape"
+                    for c in node.comparators):
+                found.append(fn.name)
+
+    assert found, ("AST 遍历一处都没找到——守卫可能被改坏了，"
+                   "这次运行对本判据零判别力")
+    assert set(found) == {"_needs_staging_recheck"}, (
+        "「这个状态要不要 staging 全量复校」只许在 _needs_staging_recheck 里判定，"
+        f"但下列函数也在直接比 kind：{sorted(set(found) - {'_needs_staging_recheck'})}"
+        "——同一件事判在两处，改了一处忘了另一处正是 codex R4 那条 high 的根因")

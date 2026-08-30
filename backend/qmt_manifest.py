@@ -1126,7 +1126,17 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
         return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
                 "stopped_reason": "staging_recheck_failed"}
 
-    if prev_fatal["kind"] == "staging_path_escape":
+    # ⚠️ **必须用 `_needs_staging_recheck`，不能只看 `kind`**（codex R4 [high]）：
+    # `staging_recheck_failed` 同样是「必须做过全量复校才能清」的状态，而它的
+    # `kind` 可以是 `source_path_escape`（O4-F3 解耦，且本函数上面那一支正是
+    # 这么产出的）。只看 kind 的话，「上次复校没通过」这个结论会在下一次
+    # 不做任何复校的干净运行里被无条件抹掉。
+    #
+    # ⚠️ 这是**我自己在 R3 那轮抽出这个 helper 却漏了这个调用点**造成的：
+    # 同一件事判在两处、改了一处忘了另一处。已配机械守卫
+    # `test_only_one_place_decides_whether_a_staging_recheck_is_required`
+    # 钉住「只许在 `_needs_staging_recheck` 里判定」。
+    if _needs_staging_recheck(prev_reason, prev_fatal):
         # 前提②（无条件，不受任何 flag 影响，P2-F3）
         if outcome.staging_recheck is None:
             raise SkipVerifyWithEscapeError(
