@@ -52,7 +52,6 @@ jobs:
         id: changes
         run: |
           set -euo pipefail
-          git fetch origin main --depth=50
           CHANGED=$(git diff --name-only origin/main...HEAD)
           echo "$CHANGED" | tee /tmp/h6-changed.txt
           if echo "$CHANGED" | grep -qE '^(\.claude/hooks/(stop-response-check|skill-invoke-check)\.sh|\.claude/config/skill-invoke-enforced\.json|\.claude/settings\.json|\.claude/workflow-rules\.json|tests/hooks/test_(stop_response_check|skill_invoke_check)\.py|scripts/acceptance/hardening_6_framework\.sh|\.github/workflows/hardening_6_gate\.yml)$'; then
