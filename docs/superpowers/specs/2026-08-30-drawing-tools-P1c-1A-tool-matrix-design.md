@@ -83,6 +83,9 @@
 **⛔ 上游 D105 不变量 4「不得存在用户无法解除的归档死锁」在本 spec 中被降为「知情接受的残留」**，理由三条：
 
 1. **那道门今天就在跑着，本片一行不改** —— 取消 1B 不是「拆掉安全网」，而是「不给已存在的门配钥匙」。合并后 main 上的行为与今天**逐字节相同**。
+   **⚠️ 但必须把这个残留的真实代价写准**（codex R2-high 的事实半边，**已核实为真**；本 spec 上一稿只写「一局白打」，**说轻了**）：撞上时，`结算入账失败` 弹窗只有两个按钮（`UI/TrainingView.swift:169-176`）——「重试」撞同一道门**永远失败**，「放弃」走 `discardSession()` → **`pendingRepo.clearPending()`**（`TrainingSessionCoordinator.swift:1000-1018`）**永久删除整局 pending**，含那些未来数据的原始字节。
+   ⇒ 残留的准确表述是：**「用户被界面推向一个破坏性动作，而被删掉的这一局，在他按下去之前本来是可以靠装回较新版本的 App 完整救回来的。」** 界面上唯一的非破坏性出路是**强行退出 App、不去碰它**。
+   ⇒ 因此那道门的实际作用是**把「静默的永久丢失」换成「用户亲手选择的永久丢失」**，它**并不阻止**丢失。⛔ 后续任何人不得把它描述成「已经保住了数据」。
 2. **⛔ 绝不得反过来把那道门拆掉** —— 它的存在理由是「未来数据随 pending 永久丢失」（`TrainingSessionCoordinator.swift:696-703` 的大注释）。拆门 = 一次不可逆的数据丢失（上游记录的 codex R1-high 方向），本 spec **不授权任何人这么做**。
 3. **将来想补不会变贵**：那道门还在、`.unknownRaw` 与已知条的未来字段都是**原文照抄**（`LossyDrawingArray.swift:348 / :355`）不会丢失 ⇒ 任何时候补「可分辨信号 + 恢复通道」都是纯增量，不存在「现在不做以后就补不上」的缝。
 
@@ -353,6 +356,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 - **`CONTRACT_VERSION` bump / m01 矩阵改动 / `user_version` 变更 / 任何迁移**（D114）；
 - **归档阻塞判据一行不改、一条不加**（§2 硬约束 1、2）；
 - 四个新工具的几何 / 注册 / 图标；节点；手势；多锚；折线；
+- **`minAnchors` / `DefaultDrawingInputController.swift` 一个字都不改**（D119：锚数的单一真相是 `DrawingTool.requiredAnchors`，由第 4 片落实）；
 - `DrawingLabelLayout.swift:66` 与 `KLineView+Drawing.swift:33` 两处 `.horizontal` 写死（属第 4 片起，D116）；
 - 复盘侧的等价能力（属 P5）。
 
@@ -482,6 +486,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 | ~~**Q9**~~ | ~~不变量 1 无直接行为测试~~ —— **本条撤销**（codex R1-medium）：该覆盖一直存在且被 CI 必需门逐条点名，见 D115 订正段。⚠️ 第 2 片新增节点渲染时仍须按既有规矩办：**新增 UIKit-gated 测试 → 同步 `catalyst-uikit-baseline.txt`（用 `uikit-expected-tests.py` 重新生成，不得手打测试名）+ 核对总数基线** | ~~第 2 片~~ 已撤销 | — |
 | **Q10** | `Drawing/DrawingLabelLayout.swift:66` 与 `Render/KLineView+Drawing.swift:33` 两处写死 `.horizontal`（价格标签的内容与绘制分支）。新工具要不要标签、标签怎么摆，是每工具的几何问题 | **第 4 片** | 第 4 片写第一条非水平线时必须回答 |
 | **Q11** | **归档死锁的恢复通道**（上游 D105 不变量 4 / §2B 整片）已按 D113 记为**知情接受的残留**。若日后 App 上架后真有用户反馈，补它的最小形态是「可分辨的失败信号 + 一句诚实文案」，**⛔ 届时必须按五处核对 `.dbCorrupted` 消费方**（D114 的表），不是上游写的三处 | **未排期** | 记录在此，防止日后照上游三处清单漏核两处 |
+| **Q12** | **锚数的单一真相**（D119）：仓里现有**两份**同一个数字 —— `HorizontalLineTool.requiredAnchors`（`1...1`，`HorizontalLineTool.swift:13`）与 `DefaultDrawingInputController` 的 enum→锚数映射（`:42-48`，其注释自认是 MVP 权宜）。第 4 片按上游既定方案改成经工具注册表读 `DrawingTool.requiredAnchors`，一次性消灭重复。**⛔ 第 4 片不得反过来把锚数塞回样式表** —— 那正是本片 D119 拒绝的形状 | **第 4 片** | 第 4 片是第一个真正需要「每工具不同锚数」的片；再拖就会有第三份 |
 | Q1 / Q2 / Q3 / Q4 / Q5 / Q6 / Q7 | 上游 §10 的七个遗留问题**原样有效**，归属不变（Q2 原属第 1B 片 ⇒ **随 1B 一并取消**） | 见上游 §10 | — |
 
 ---
