@@ -50,7 +50,7 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 
 ## 实施轮偏离登记（2026-08-30，实施者核实后逐条订正）
 
-> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**十四处偏离全部朝
+> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**十五处偏离全部朝
 > 「坏状态不可表达」方向，每条各配专属档并由控制者亲手做过变异验证。
 > 与本文件代码块 diff 不上的地方，以**仓库代码 + 本表**为准。
 
@@ -72,6 +72,8 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 
 | D13 | Task 15/16/18 的落盘路径 | `_write_manifest` **不校验就落盘** → 提交入口能写出一份自己读不回来的账本，一次 per-stock 提交就能把几百只股的 staging 变成砖头，而调用返回成功（codex R2 [high]，已登记为 spec **S2-F13**）| 落盘前先跑 `validate_manifest`，**且必须排在 `atomic_write_json` 之前**（排在之后好账本已被 replace 换掉）|
 | D14 | Task 17 / 读侧生命周期 | `stopped_reason` 与 `fetch_fatal_error` 之间**没有取值级配对判据** → `reason=staging_path_escape` 配 `kind=source_path_escape` 被放行，而决策表只看 `kind` ⇒ 绕过 P2-F3 的 staging 全量复校清掉 fatal（codex R2 [high]，已登记为 spec **S2-F12**）；按判据穷尽又挖出同族两条 | 抽出 `_require_escape_pairing`，读侧与决策表共用；三条判据分别配专属档，方向②由 `staging_recheck_failed` 的正向档承担 |
+
+| D15 | Task 17 决策表分支① | 「本次又撞 escape → 覆盖上一次的」照抄 spec，而它会**抹掉未解除的粘性信任证据**：`staging → source → 干净(未复校)` 三步就把一棵从未证明恢复过的 staging 洗成干净账本（codex R3 [high]，已登记为 spec **S2-F14**）| 覆盖改为「同级或升级才许，绝不许降级」；严格性 = 「清除它是否需要 staging 全量复校」，同时看 `kind` 与 `stopped_reason`（`staging_recheck_failed` 的 kind 可以是 source，只按 kind 判会漏）。三种安全覆盖各配放行档 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1491,6 +1493,7 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
 |---|---|---|
 | **R1** | needs-attention（3 high）| 三条**同一形态**：结构性保证被「可变的嵌套状态」与「没被校验的字段」绕过。①`lifecycle_snapshot` 浅拷贝 → 取完快照改嵌套 `fetch_fatal_error` 照样落盘，且 `kind` 被改成 `source_path_escape` 后只需前提①即可清除 → 完整洗白链；②`revisited_fatal_path` 未校验类型（`"false"` 是真值）+ `escape` 可变 + `kind↔escape` 配对未校验；③`os.replace` 之后只有普通 `fsync(目录)`，断电可丢改名。**三条均本机端到端复现后才修**，修完再复现证明已堵，各配专属档 + 7 条变异全部命中 |
 | **R2** | needs-attention（2 high）| ①**读侧接受了写侧根本产不出的生命周期组合** —— `reason=staging_path_escape` 配 `kind=source_path_escape` 被放行，而决策表只看 `kind` ⇒ 绕过 P2-F3 无条件要求的 staging 全量复校、直接清掉粘性 fatal（改 6 个字符即可，而「有人动过 staging」正是威胁模型）。按判据穷尽又挖出同族两条评审没报的。②**提交入口能写出自己读不回来的账本** —— `_write_manifest` 不校验就落盘，一次 per-stock 提交能把几百只股的 staging 变成砖头而调用返回成功。**两条均本机端到端复现后才修**，6 条变异全部命中；连带订正三条既有测试的判别力（含 984 探测的 base 自身变非法会掩盖整条扫描）|
+| **R3** | needs-attention（1 high）| **一次后来的逃逸会抹掉未解除的粘性信任证据** —— spec 自己的两句话（「本次又撞 escape → 覆盖上一次的」与「`fetch_fatal_error` 是**粘性**的信任状态」）在 `staging → source` 这个次序上直接冲突：清除 staging 逃逸要过两道前提，清除 source 逃逸只要一道，用后者覆盖前者等于把那道门取消。**本机三次运行端到端复现**。控制者按判据穷尽又挖出同族变体（`staging_recheck_failed` 同样会被抹掉，而它的 kind 可以是 source）。3 条变异全部命中，含一条专门证明「没修过头」的方向②档；连带订正一条既有测试——它原样编码的正是被证明有洞的那个覆盖方向 |
 
 > ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；
@@ -1505,6 +1508,11 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
 > ②字段**之间**的组合——写侧能产出哪些、读侧收了哪些？（读侧多收的那些，
 >   就是「畸形被放行·安静」那一半）
 > ③写出去的东西，自己**读得回来**吗，而且是在**写之前**就知道？
+
+> ⚠️⚠️ **R3 是第四个层级：状态机的「时间维度」**。R1/R2 问的都是「**一个**状态合不合法」，
+> R3 问的是「**状态之间的转移**安不安全」——一个单看每一步都合法的序列，整体却能把安全结论洗掉。
+> 判据补第四问：**④凡「新事件覆盖旧状态」的规则，新状态是不是至少和旧状态一样严？**
+> 配套纪律：状态机测试必须**跨多次运行**，只测单步转移看不见这类洞。
 
 ---
 

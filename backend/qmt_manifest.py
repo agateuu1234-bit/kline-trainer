@@ -1022,6 +1022,21 @@ def escape_stop(*, kind: str, relative_path: str, component: str,
     })
 
 
+def _needs_staging_recheck(reason: object, fatal: object) -> bool:
+    """这个既有状态要清除，是否**必须**先做一次 staging 全量复校（前提②）？
+
+    两种状态都要：`fetch_fatal_error.kind == "staging_path_escape"`（P2-F3 原文），
+    以及 `stopped_reason == "staging_recheck_failed"`（上次复校就没通过）。
+    **后者的 `kind` 可以是 `source_path_escape`**（O4-F3 的解耦），
+    所以只按 `kind` 判会漏掉它——一次 source 逃逸就能把「上次复校没通过」
+    这个结论抹掉。
+    """
+    if fatal is None:
+        return False
+    kind = fatal.get("kind") if isinstance(fatal, dict) else None
+    return kind == "staging_path_escape" or reason == "staging_recheck_failed"
+
+
 def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
     """**收尾提交**时三个生命周期字段的完整新值（纯函数；缺席的键表示该字段应被删除）。
 
@@ -1056,10 +1071,34 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
     # 处理」——那正是 codex R2 [high] 被利用的那条路径。
     _require_escape_pairing(prev_reason, prev_fatal)
 
-    # ① 本次撞了 escape → 覆盖为本次的（secondary 清掉）
+    # ① 本次撞了 escape → 覆盖为本次的（secondary 清掉）。
+    #
+    # ⚠️⚠️ **但覆盖只许「同级或升级」，绝不许降级**（codex R3 [high]）：
+    # spec 原文写「本次又撞 escape → 覆盖上一次的」，而 O4-F1 同时又说
+    # `fetch_fatal_error` 是**粘性的信任状态**。两句话在「staging → source」
+    # 这个次序上直接冲突——清除 staging 逃逸要过**两道**前提（另加全量复校，
+    # P2-F3），清除 source 逃逸只要一道；用后者覆盖前者等于把那道门取消了。
+    #
+    # **本机三次运行端到端复现**：Run1 撞 staging → Run2 撞 source（staging
+    # 证据没了）→ Run3 干净跑完、重走过源路径、**没做 staging 全量复校**
+    # → fatal 被清除。一棵从未证明恢复过的 staging 拿到了干净账本。
+    #
+    # 严格性的定义 = 「清除它是否需要 staging 全量复校」，故要同时看
+    # `kind` 与 `stopped_reason`：`staging_recheck_failed` 的 kind 可以是
+    # `source_path_escape`（O4-F3 解耦），只按 kind 判会漏掉它。
+    #
+    # ⚠️ **已接受的残留**：本次这一起 source 逃逸不会被记进 manifest
+    # （schema 里只有一条 `fetch_fatal_error`，不引入新字段）。本次运行的失败
+    # 由 S4/S5 在**运行级**输出（rc≠0 + 报告）承担；manifest 保留的是**更难
+    # 清除的那个结论**，方向是 fail-closed。
     if outcome.kind == "escape":
         assert outcome.escape is not None
-        return {"stopped_reason": outcome.escape["kind"],
+        new_kind = outcome.escape["kind"]
+        if new_kind == "source_path_escape" and _needs_staging_recheck(
+                prev_reason, prev_fatal):
+            return {"stopped_reason": prev_reason,
+                    "fetch_fatal_error": copy.deepcopy(prev_fatal)}
+        return {"stopped_reason": new_kind,
                 "fetch_fatal_error": dict(outcome.escape)}
 
     # ② 上次没有 fatal → 只写本次的停止原因

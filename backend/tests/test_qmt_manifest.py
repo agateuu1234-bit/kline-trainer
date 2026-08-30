@@ -2025,14 +2025,25 @@ def test_clean_finish_drops_a_stale_max_bytes_reason():
 
 # ── 本次撞 escape ─────────────────────────────────────────────
 def test_escape_stop_overwrites_everything():
-    out = escape_stop(kind="source_path_escape",
+    """本次又撞 escape → 写入本次的四字段并清掉 secondary。
+
+    ⚠️ 2026-08-30 订正方向：原本测的是 `staging → source`，而那恰恰是
+    **唯一不许覆盖**的方向（codex R3 [high]：清除 staging 逃逸另需全量复校，
+    用只需一道前提的 source 逃逸覆盖它 = 把那道门取消）。原样保留这条断言
+    等于把一个被证明有洞的行为焊死成回归钉。
+    改用 `source → staging`（升级方向，新状态更严），
+    「覆盖」这件事照样被钉住；不许覆盖的那个方向由
+    `test_a_source_escape_never_replaces_an_unresolved_staging_escape` 承担。
+    """
+    out = escape_stop(kind="staging_path_escape",
                       relative_path="1分钟K线_前复权/x.csv",
                       component="1分钟K线_前复权", errno="ENOTDIR")
     got = resolve_final_lifecycle(
-        _prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"), out)
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape",
+              secondary="max_bytes"), out)
     assert got == {
-        "stopped_reason": "source_path_escape",
-        "fetch_fatal_error": {"kind": "source_path_escape",
+        "stopped_reason": "staging_path_escape",
+        "fetch_fatal_error": {"kind": "staging_path_escape",
                               "relative_path": "1分钟K线_前复权/x.csv",
                               "component": "1分钟K线_前复权", "errno": "ENOTDIR"},
     }
@@ -2716,3 +2727,124 @@ def test_a_refused_commit_leaves_the_previous_manifest_byte_identical(tmp_path):
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]   # 无临时残留
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R3 [high]：一次**后来的**逃逸会把未解除的粘性信任证据覆盖掉
+#
+# spec 原文写「本次又撞了 escape → 覆盖上一次的」，而 O4-F1 同时又说
+# `fetch_fatal_error` 是**粘性的信任状态**。两句话在「staging → source」
+# 这个次序上直接冲突：staging 逃逸要清除得过**两道**前提（另加全量复校，
+# P2-F3），source 逃逸只要一道。用后者覆盖前者，等于把那道门取消了。
+#
+# 本机三次运行端到端复现：Run1 撞 staging → Run2 撞 source（staging 证据没了）
+# → Run3 干净跑完、重走过源路径、**没做 staging 全量复校** → fatal 被清除。
+# 一棵从未证明恢复过的 staging 拿到干净账本。
+#
+# 判据升级为「**新状态必须至少和旧状态一样严**才允许覆盖」，
+# 严格性 = 「清除它是否需要 staging 全量复校」。
+# ═════════════════════════════════════════════════════════════
+
+
+def _commit_cycle(m, outcome):
+    """模拟一次收尾提交（纯内存）：剥掉三键、塞回决策表输出、并过一遍读侧。"""
+    new = resolve_final_lifecycle(m, outcome)
+    out = {k: v for k, v in m.items() if k not in LIFECYCLE_KEYS}
+    out.update(new)
+    return validate_manifest(out)
+
+
+def _staging_escape(path="1分钟K线_前复权/a.csv", comp="1分钟K线_前复权"):
+    return escape_stop(kind="staging_path_escape", relative_path=path,
+                       component=comp, errno="ELOOP")
+
+
+def _source_escape(path="日K线_前复权/b.csv", comp="日K线_前复权"):
+    return escape_stop(kind="source_path_escape", relative_path=path,
+                       component=comp, errno="ENOTDIR")
+
+
+def test_a_source_escape_never_replaces_an_unresolved_staging_escape():
+    """⭐⭐ [R3 high] 降级不许：`source_path_escape` 不得覆盖尚未解除的
+    `staging_path_escape`。
+
+    判别力：把这条守卫删掉，本条必红。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    assert m["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    assert m["stopped_reason"] == "staging_path_escape"
+
+
+def test_a_source_escape_never_replaces_an_unresolved_staging_recheck_failure():
+    """⭐ 同族变体（控制者按判据穷尽挖出，评审只报了上一条）：
+    `staging_recheck_failed` 也是「必须做过全量复校才能清」的状态，
+    而它的 `fetch_fatal_error.kind` 可以是 `source_path_escape`（O4-F3 解耦）。
+
+    只按 `kind` 判「严不严」会漏掉它：一次 source 逃逸就能把
+    「上次复校没通过」这个结论抹掉。判据必须同时看 `stopped_reason`。
+
+    判别力：把守卫里那半条 `prev_reason == "staging_recheck_failed"` 删掉，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert m["stopped_reason"] == "staging_recheck_failed"
+    m = _commit_cycle(m, _source_escape())
+    assert m["stopped_reason"] == "staging_recheck_failed"      # 未被覆盖
+
+
+def test_the_staging_then_source_then_clean_chain_cannot_launder():
+    """⭐⭐ [R3 high] 完整的三次运行洗白链必须走不通。
+
+    修好后第三次运行会当场撞上 P2-F3：「这棵 staging 带着 escape 记录，
+    而你跳过了既有文件复校，两者互斥」——正是它该给出的那句话。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_the_same_chain_clears_after_a_passing_staging_recheck():
+    """方向②：真做了全量复校就必须能清掉，否则这棵 staging 永远解不开。"""
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason" not in m
+
+
+def test_a_staging_escape_may_replace_a_source_escape():
+    """方向②：**升级**方向必须放行 —— 新状态更严，覆盖是安全的。"""
+    m = _commit_cycle(_valid_manifest(), _source_escape())
+    m = _commit_cycle(m, _staging_escape())
+    assert m["fetch_fatal_error"]["kind"] == "staging_path_escape"
+
+
+def test_a_staging_escape_may_replace_another_staging_escape_on_a_different_path():
+    """方向②：同类覆盖必须放行。
+
+    只留最新那条路径**不构成信息损失**：清除 `staging_path_escape` 的前提②是
+    对 manifest 里**所有已记录的 staging 文件**做存在性 + sha256 全量复校
+    ——它是**路径无关**的，先前那条路径的损坏一样会被它抓到。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape("a/x.csv", "a"))
+    m = _commit_cycle(m, _staging_escape("b/y.csv", "b"))
+    assert m["fetch_fatal_error"]["relative_path"] == "b/y.csv"
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+
+
+def test_a_source_escape_may_replace_another_source_escape():
+    """方向②：同类覆盖放行（新状态与旧状态一样严）。
+
+    没有这一条，一个「source 逃逸永远不许覆盖任何东西」的过严实现也能让
+    上面那批档全绿，而它会让 manifest 一直指向**第一次**出事的那条路径。
+    """
+    m = _commit_cycle(_valid_manifest(), _source_escape("a/x.csv", "a"))
+    m = _commit_cycle(m, _source_escape("b/y.csv", "b"))
+    assert m["fetch_fatal_error"]["relative_path"] == "b/y.csv"
