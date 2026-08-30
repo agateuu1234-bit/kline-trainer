@@ -1634,3 +1634,203 @@ def test_no_field_of_any_json_type_can_escape_as_a_raw_exception():
     assert not escapes, (
         "以下字段的坏值逃出了 fail-closed，抛的是原始异常而不是 "
         "ManifestInvalidError：\n  " + "\n  ".join(escapes))
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 15：read_manifest —— 逐段无跟随读回并校验
+# ═════════════════════════════════════════════════════════════
+import fcntl
+import os
+import stat as _stat
+import json as _json_rw
+
+from qmt_fsroot import open_root, PathEscapeError
+from qmt_manifest import read_manifest, lifecycle_snapshot, MANIFEST_NAME
+
+
+def _staging(tmp_path, manifest=None, *, raw=None):
+    """造一个 staging 目录并返回 `(path, stg_fd)`。调用方负责 `os.close`。"""
+    d = tmp_path / "staging"
+    d.mkdir()
+    if raw is not None:
+        (d / MANIFEST_NAME).write_text(raw, encoding="utf-8")
+    elif manifest is not None:
+        (d / MANIFEST_NAME).write_text(
+            _json_rw.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    return d, open_root(str(d))
+
+
+def test_read_manifest_round_trips_a_valid_one(tmp_path):
+    """正向放行档。
+
+    ⚠️ 每一族「全是拒了」的档都必须配一条正向放行档，否则一个**恒抛**的
+    实现会让整族看起来都在工作（本仓栽过）。
+    """
+    m = _valid_manifest()
+    _d, fd = _staging(tmp_path, m)
+    try:
+        assert read_manifest(fd) == m
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_returns_none_when_absent(tmp_path):
+    """⭐ 引导态：manifest 不存在 ≠ manifest 坏了。
+
+    判别力：把「不存在」也抛成 ManifestInvalidError，本条必红——而那会让
+    「崩在归属标记落盘与首份 manifest 之间」这一档无法与畸形区分，
+    一棵本可继续初始化的 staging 变成人工才能清理的状态（R60-F3）。
+    """
+    _d, fd = _staging(tmp_path)
+    try:
+        assert read_manifest(fd) is None
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_truncated_json(tmp_path):
+    """⭐ 截断的 manifest 往往仍是合法 JSON 的**前缀片段**。
+
+    静默消费它 = 把 manifest 损坏伪装成「候选就这么多」（R1-F4）。
+    """
+    good = _json_rw.dumps(_valid_manifest(), ensure_ascii=False)
+    _d, fd = _staging(tmp_path, raw=good[: len(good) // 2])
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_empty_file(tmp_path):
+    _d, fd = _staging(tmp_path, raw="")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_a_json_array(tmp_path):
+    """合法 JSON 但不是对象。"""
+    _d, fd = _staging(tmp_path, raw="[1,2,3]")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_oversized_file(tmp_path, monkeypatch):
+    """⭐ 不可信输入的大小上限（本片新增，非 spec 条款）：manifest 决定整棵
+    staging 可不可信，读到 EOF 为止意味着一个被植入的几 GB 文件能把进程 OOM 掉，
+    而不是得到一个干净的拒绝。与 S1 给归属标记设 `_MARKER_MAX_BYTES` 同源。
+
+    判别力：删掉上限检查，本条必红。
+    ⚠️ **本条区分不了「读中计数」与「只查 st_size 早拒」两种实现**（如实登记）：
+    静态大文件两条路都拦得住。实现取**读中计数**——与 S1 逐字同规格，理由见
+    `read_manifest` 的 docstring（`st_size` 是打开那一刻的快照，文件可以边读边长）。
+    """
+    import qmt_manifest as qm
+    monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 100)
+    _d, fd = _staging(tmp_path, _valid_manifest())      # 远超 100 字节
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "过大" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_refuses_a_fifo_manifest_without_hanging(tmp_path):
+    """⭐⭐ manifest 被换成 FIFO —— 必须**当场拒绝**，绝不能挂起。
+
+    `open(O_RDONLY)` 打开 FIFO 会**一直阻塞等写入方**。本机实测（S2b Step 0
+    M-S0-c）：去掉 `O_NONBLOCK` 后本条不是变红，而是 15 秒被闹钟杀掉、
+    日志 0 字节——**工具永久挂起且不打印任何提示**，比崩溃更糟。
+    这是「凡是本工具要打开的、可能被篡改的路径都必须经 open_regular_probe」
+    的第四个执行点（S1 已有取锁 / 探测 / 读标记三个）。
+
+    判别力：把 `open_regular_probe` 换回裸 `open_under(flags=O_RDONLY)`，
+    本条**挂死**（而不是变红）。
+    """
+    d = tmp_path / "staging"
+    d.mkdir()
+    os.mkfifo(str(d / MANIFEST_NAME))
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "普通文件" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_refuses_a_directory_manifest(tmp_path):
+    """⭐ manifest 被换成**目录** —— 必须得到干净的 ManifestInvalidError。
+
+    本机实测：目录能被 `O_RDONLY|O_NOFOLLOW` 成功打开（`st_size=64`），
+    随后 `os.read` 抛原始 `IsADirectoryError`——一份自称 fail-closed 的读侧
+    校验于是带着原始 traceback 崩掉，`ManifestInvalidError` 那句恢复指引
+    一个字都印不出来。**守卫自己被它该抓的那种损坏弄坏了**（S2-F9 同族，
+    只是这次坏的不是 JSON 值的类型，而是磁盘对象的类型）。
+
+    判别力：删掉 `S_ISREG` 检查，本条必红（抛 IsADirectoryError 而非本模块异常）。
+    """
+    d = tmp_path / "staging"
+    d.mkdir()
+    (d / MANIFEST_NAME).mkdir()
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "普通文件" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_lets_path_escape_bubble_up(tmp_path):
+    """⭐ manifest 被换成指向 staging 之外的符号链接 → `open_under` 逐段
+    `O_NOFOLLOW` 撞 ELOOP → **PathEscapeError 原样上浮**，不被降级成
+    「manifest 畸形」。
+
+    判别力：把 open_under 的异常 catch 成 ManifestInvalidError，本条必红——
+    而那会把一次**信任边界破坏**报成「账本坏了」，恢复指引整个走错
+    （R94-F2 同族）。处置（stopped_reason: staging_path_escape + rc≠0）由 S4/S5 负责。
+    """
+    outside = tmp_path / "outside.json"
+    outside.write_text(_json_rw.dumps(_valid_manifest(), ensure_ascii=False),
+                       encoding="utf-8")
+    d = tmp_path / "staging"
+    d.mkdir()
+    (d / MANIFEST_NAME).symlink_to(outside)
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(PathEscapeError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_propagates_version_error_not_invalid(tmp_path):
+    """版本三档必须原样穿过 read_manifest（两族异常不许在这一层被抹平）。"""
+    _d, fd = _staging(tmp_path, _valid_manifest(manifest_version=99))
+    try:
+        with pytest.raises(ManifestVersionError) as ei:
+            read_manifest(fd)
+        assert ei.value.kind == "newer"
+    finally:
+        os.close(fd)
+
+
+def test_lifecycle_snapshot_captures_only_the_three_keys():
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal(),
+                        stopped_reason_secondary="max_bytes")
+    snap = lifecycle_snapshot(m)
+    assert set(snap) == {"stopped_reason", "fetch_fatal_error",
+                         "stopped_reason_secondary"}
+
+
+def test_lifecycle_snapshot_of_a_clean_manifest_is_empty():
+    assert lifecycle_snapshot(_valid_manifest()) == {}

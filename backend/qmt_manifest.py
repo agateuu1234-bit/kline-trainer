@@ -18,10 +18,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from typing import Iterable
 
-from qmt_fsroot import PathDisciplineError, split_relative_components
+from qmt_fsroot import (
+    PathDisciplineError,
+    open_regular_probe,
+    split_relative_components,
+)
 from qmt_normalize import QmtSchemaError, parse_qmt_filename
 
 # ── 版本 ─────────────────────────────────────────────────────
@@ -87,6 +93,13 @@ FATAL_ERRNOS = frozenset({"ELOOP", "ENOTDIR"})
 # 写侧曾只写三字段、读侧要四字段，会让一个合规的写者产出的 manifest
 # 被读者判非法。
 FATAL_FIELDS = ("kind", "relative_path", "component", "errno")
+
+# manifest 是**不可信输入**（它决定整棵 staging 可不可信），故读入有上限。
+# **本片新增，非 spec 条款**——与 S1 给归属标记设 `_MARKER_MAX_BYTES` 同一条判据：
+# 读到 EOF 为止意味着一个被植入的几 GB 文件能把进程 OOM 掉，而不是得到一个干净的
+# `ManifestInvalidError`。64 MiB 宽松到不可能误伤：5608 只股的完整 universe +
+# 800 条 files 实测量级约 0.5 MB。
+_MANIFEST_MAX_BYTES = 64 * 1024 * 1024
 
 
 class ManifestInvalidError(Exception):
@@ -671,3 +684,91 @@ def validate_manifest(payload: object) -> dict:
     # 永久毁掉**。S3/S4 的 failures / batches / inflight_rollbacks / quota
     # 正是靠这条通道流转，因此它们**不需要 bump manifest_version**。
     return payload
+
+
+# ── 落盘层（S2b）────────────────────────────────────────────
+# 以下三个函数是 manifest 与磁盘之间的**唯一**通道。上面的全部校验是纯函数，
+# 这里才第一次碰文件系统，且全部走 S1 `qmt_fsroot` 的逐段无跟随原语。
+
+
+def lifecycle_snapshot(manifest: dict) -> dict:
+    """捕获生命周期三字段的当前值，供 per-stock 提交逐字回写。
+
+    **这是 per-stock 提交够不到那三个字段的实现手段**（R95-F2 + spec §9-3s
+    「使规则可机械检验」）：`commit_stock` 把 manifest 里的同名键一律剥掉，
+    再把本快照塞回去——**调用方即使污染了内存里的 manifest，也写不进磁盘**。
+    """
+    return {k: manifest[k] for k in LIFECYCLE_KEYS if k in manifest}
+
+
+def read_manifest(stg_fd: int) -> dict | None:
+    """相对 `stg_fd` **逐段无跟随**读回 manifest 并过全套读侧校验。
+
+    返回校验通过的 manifest；**文件不存在返回 `None`**（引导态——崩在归属标记
+    落盘与首份 manifest 之间，spec 明写它允许从头继续初始化，R60-F3）。
+    把「不存在」与「坏了」混成一个异常，会让引导态这一档无法与畸形区分。
+
+    抛：
+
+    - `ManifestInvalidError` —— 不是普通文件（FIFO / 目录 / 设备）/ 空文件 /
+      截断 / 不是 JSON 对象 / 超过大小上限 / 任一读侧判据不过；
+    - `ManifestVersionError` —— 版本三档（**不在本层抹平成 Invalid**）；
+    - `PathEscapeError` —— manifest 这一段被换成符号链接（`open_under` 逐段
+      `O_NOFOLLOW` 撞 `ELOOP` / `ENOTDIR`）。**原样上浮，不降级成「manifest 畸形」**：
+      那是一次**信任边界破坏**，处置是 `stopped_reason: staging_path_escape` +
+      顶层 `fetch_fatal_error` + rc≠0（S4/S5 负责），报成「账本坏了」会让恢复指引
+      整个走错。
+
+    ⚠️ **必须经 `open_regular_probe`（带 `O_NONBLOCK`）而不是裸 `open_under`**：
+    `open(O_RDONLY)` 打开 FIFO 会**一直阻塞等写入方**，于是一个被篡改的 staging
+    让工具**永久挂起**而不是 fail-closed（本机实测：裸 open 时该档 15 秒被闹钟
+    杀掉、日志 0 字节）。S1 的 `_open_regular_probe` 已为取锁 / 探测 / 读标记三处
+    立了这条纪律，本函数是**第四个**打开点——「同一条纪律只落在其中一处」就是没立。
+
+    ⚠️ **大小上限卡在读取过程中，不是只查 `st_size`**（与 S1 逐字同规格）：
+    `st_size` 是打开那一刻的快照，文件完全可以**边读边长**，只查它会被绕过；
+    而叠一道 `st_size` 早拒**无法被任何测试单独钉住**（读取本身每次上限 1 MiB、
+    累计到上限即停，两条路的实际读取量同量级），一道钉不住的守卫是负债不是资产。
+    """
+    try:
+        fd, st = open_regular_probe(stg_fd, MANIFEST_NAME, flags=os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(st.st_mode):
+            # FIFO / 目录 / 设备 / socket：**先探类型再读**。目录能被
+            # O_RDONLY|O_NOFOLLOW 成功打开，随后 os.read 抛原始 IsADirectoryError；
+            # FIFO 则让裸 open 永久阻塞。两者都会让这份自称 fail-closed 的校验
+            # 在最该工作的时候印不出一个字的恢复指引。
+            raise ManifestInvalidError(
+                f"{MANIFEST_NAME} 存在但不是普通文件——拒绝。"
+                "这棵 staging 已被动过，请换新 staging + 新 seed 重拉。"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                break
+            total += len(block)
+            if total > _MANIFEST_MAX_BYTES:
+                raise ManifestInvalidError(
+                    f"{MANIFEST_NAME} 过大（读取过程中已超过上限 "
+                    f"{_MANIFEST_MAX_BYTES} 字节）——它决定整棵 staging 可不可信，"
+                    "拒绝把一个来路不明的巨型文件读进内存"
+                )
+            chunks.append(block)
+    finally:
+        os.close(fd)
+
+    data = b"".join(chunks)
+    if not data:
+        raise ManifestInvalidError(f"{MANIFEST_NAME} 是空文件")
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ManifestInvalidError(
+            f"{MANIFEST_NAME} 不是合法 JSON：{e}。"
+            "这通常意味着上一次写入被打断（文件被截断）。"
+        ) from e
+    return validate_manifest(payload)
