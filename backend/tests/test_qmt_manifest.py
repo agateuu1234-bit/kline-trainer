@@ -1970,3 +1970,277 @@ def test_commit_stock_is_atomic_leaving_no_tmp_files(tmp_path):
     finally:
         os.close(fd)
     assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 17：收尾生命周期决策表（纯函数）
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import (
+    FinalOutcome, clean_finish, max_bytes_stop, escape_stop,
+    resolve_final_lifecycle, SkipVerifyWithEscapeError,
+)
+
+
+def _prev(fatal=None, reason=None, secondary=None):
+    m = _valid_manifest()
+    if reason is not None:
+        m["stopped_reason"] = reason
+    if fatal is not None:
+        m["fetch_fatal_error"] = fatal
+    if secondary is not None:
+        m["stopped_reason_secondary"] = secondary
+    return m
+
+
+# ── 上次没有 fatal ────────────────────────────────────────────
+def test_clean_finish_on_a_clean_manifest_clears_stopped_reason():
+    assert resolve_final_lifecycle(_prev(), clean_finish()) == {}
+
+
+def test_max_bytes_on_a_clean_manifest_records_max_bytes():
+    assert resolve_final_lifecycle(_prev(), max_bytes_stop()) == {
+        "stopped_reason": "max_bytes"}
+
+
+def test_clean_finish_drops_a_stale_max_bytes_reason():
+    """上次是干净的容量停止，这次跑完了 → 那条 stopped_reason 该消失。"""
+    assert resolve_final_lifecycle(_prev(reason="max_bytes"), clean_finish()) == {}
+
+
+# ── 本次撞 escape ─────────────────────────────────────────────
+def test_escape_stop_overwrites_everything():
+    out = escape_stop(kind="source_path_escape",
+                      relative_path="1分钟K线_前复权/x.csv",
+                      component="1分钟K线_前复权", errno="ENOTDIR")
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"), out)
+    assert got == {
+        "stopped_reason": "source_path_escape",
+        "fetch_fatal_error": {"kind": "source_path_escape",
+                              "relative_path": "1分钟K线_前复权/x.csv",
+                              "component": "1分钟K线_前复权", "errno": "ENOTDIR"},
+    }
+    assert "stopped_reason_secondary" not in got
+
+
+# ── ⭐⭐ max_bytes 绝不洗白 escape（O4-F1）────────────────────
+def test_max_bytes_never_launders_a_retained_escape():
+    """⭐⭐ 本片最危险的一档：Run1 撞 escape，Run2 触顶。
+
+    若把 stopped_reason 改写成 max_bytes，pilot 读到就放行，那 56 只从未被
+    复校过的股照常消费——一次被证明破坏的信任边界被一次容量停止洗白成
+    合法凭据。
+
+    判别力：把实现写成「max_bytes 一律覆盖 stopped_reason」，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"), max_bytes_stop())
+    assert got["stopped_reason"] == "staging_path_escape"      # 未被覆盖
+    assert got["fetch_fatal_error"] == _fatal()                # 原样保留
+    assert got["stopped_reason_secondary"] == "max_bytes"      # 只作诊断附注
+
+
+# ── ⭐ 清除的谓词是「证明干净」而非「本次没撞」（O2-F7）───────
+def test_clean_finish_without_revisiting_the_fatal_path_keeps_the_fatal():
+    """⭐ 反例场景：上次 staging_path_escape 记了 56 只股，操作者重建目录，
+    本次新股走**新建目录**全部成功、收尾复校只对**源**重算——
+    从不回读那 56 只股。「本次没撞 escape」成立，但什么都没被证明干净。
+
+    判别力：把清除条件写成「本次没撞 escape」，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=False))
+    assert got["fetch_fatal_error"] == _fatal()
+    assert got["stopped_reason"] == "staging_path_escape"
+
+
+def test_source_escape_clears_after_revisiting_that_path():
+    """source_path_escape 只要前提①（重走过那条路径）——
+    前提②（staging 全量复校）是 staging_path_escape **另加**的。"""
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+        clean_finish(revisited_fatal_path=True))
+    assert got == {}
+
+
+def test_staging_escape_clears_only_after_a_passing_full_recheck():
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="passed"))
+    assert got == {}
+
+
+def test_staging_escape_with_failing_recheck_keeps_fatal_and_renames_reason():
+    """⭐ P2-F3：此前完全未定义 → 不可解 staging。
+    保留 fatal、覆盖 stopped_reason 为 staging_recheck_failed。
+
+    ⭐ 这一档也是 `kind` 与 `stopped_reason` **必须解耦**的唯一理由（O4-F3）：
+    kind 仍是 staging_path_escape，reason 已换成 recheck_failed。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert got["fetch_fatal_error"] == _fatal()
+    assert got["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    assert got["stopped_reason"] == "staging_recheck_failed"
+
+
+def test_a_failing_staging_recheck_blocks_clearing_even_for_a_source_escape():
+    """⭐ 计划原文照抄会留一个洞（spec 对这一格没写）：上次是 source_path_escape、
+    本次重走过那条路径，但操作者跑的 staging 全量复校**失败了** ——
+    计划的分支次序（先判 kind 再判复校结果）会走到 `return {}`，
+    **把 fatal 清掉、且把复校失败这个信号一起丢掉**，
+    于是一棵已被证明与账本对不上的 staging 拿到干净标签。
+
+    改法是把「复校失败」提到 kind 判断**之前**：复校失败一律不清除。
+    双向都问过：①它只增加拒绝，畸形溜不过去；②被它拦下的唯一新情形就是
+    「staging 复校失败却要清 fatal」，那不是合法状态。
+
+    判别力：把这两句挪回 kind 判断之后，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert got["fetch_fatal_error"]["kind"] == "source_path_escape"
+    assert got["stopped_reason"] == "staging_recheck_failed"
+
+
+def test_skipping_the_recheck_on_a_staging_escape_manifest_is_refused():
+    """⭐ P2-F3：--skip-existing-verify 与「manifest 带 escape 记录」互斥。
+
+    不拒的话：第 1 次带 flag 跑清掉 fatal、标 partial（看似安全），
+    第 2 次不带 flag 跑时收尾复校**只重算源、从不回读 staging** →
+    **一棵被证明动过、且从未被复校过的 staging 拿到了出货级 full 标签**。
+
+    判别力：把这一档实现成「当作 passed 清除」或「当作没重走过保留」，
+    本条必红——前者是那条出货级假凭据，后者会让 fatal 永远清不掉。
+    """
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(
+            _prev(fatal=_fatal(), reason="staging_path_escape"),
+            clean_finish(revisited_fatal_path=True, staging_recheck=None))
+
+
+# ── 输入自相矛盾时不许产出非法 manifest ──────────────────────
+def test_resolve_refuses_a_manifest_with_a_fatal_but_no_stopped_reason():
+    """⭐ 写侧/读侧配对家族的第 N 次：读侧明写「有 fetch_fatal_error 却没有
+    stopped_reason」非法。计划原文用 `if prev_reason is not None:` 兜着，
+    于是这种自相矛盾的输入会**安静地产出一份读侧判非法的 manifest**
+    ——一个合规的写者写出自己读不回来的账本。
+
+    改为当场拒绝：真实路径上 prev 来自 read_manifest（已保证配对成立），
+    故这一条不会误杀任何合法状态；而那两个 `is not None` 分支本身
+    **没有任何测试钉得住**（S1：一道钉不住的守卫是负债不是资产）。
+
+    判别力：把这条守卫删掉，本条必红。
+    """
+    for outcome in (clean_finish(), max_bytes_stop(),
+                    clean_finish(revisited_fatal_path=True, staging_recheck="passed")):
+        with pytest.raises(ManifestInvalidError, match="stopped_reason"):
+            resolve_final_lifecycle({"fetch_fatal_error": _fatal()}, outcome)
+
+
+# ── 构造期就排除非法组合 ──────────────────────────────────────
+def test_escape_stop_rejects_a_kind_outside_the_enum():
+    for bad in ("staging_recheck_failed", "max_bytes", ""):
+        with pytest.raises(ValueError):
+            escape_stop(kind=bad, relative_path="x", component="c", errno="ELOOP")
+
+
+def test_escape_stop_rejects_an_errno_outside_the_enum():
+    with pytest.raises(ValueError):
+        escape_stop(kind="staging_path_escape", relative_path="x",
+                    component="c", errno="EACCES")
+
+
+def test_escape_stop_rejects_non_string_path_fields():
+    """⭐ 「非法组合在构造期就被排除」这句话必须对**类型**也成立。
+
+    只查 `not relative_path` 时，`relative_path=123` 一路通过构造、通过决策表，
+    直到 `commit_final` 把它写上磁盘，才在**下一次读**时被判非法 ——
+    又一次「一个合规的写者产出的 manifest 被读者判非法」。
+
+    判别力：把 isinstance 检查删掉，本条必红。
+    """
+    for bad in (123, None, ["x"], {"a": 1}, True):
+        with pytest.raises(ValueError):
+            escape_stop(kind="staging_path_escape", relative_path=bad,
+                        component="c", errno="ELOOP")
+        with pytest.raises(ValueError):
+            escape_stop(kind="staging_path_escape", relative_path="x",
+                        component=bad, errno="ELOOP")
+
+
+def test_clean_finish_rejects_an_unknown_recheck_verdict():
+    for bad in ("ok", "PASSED", True):
+        with pytest.raises(ValueError):
+            clean_finish(revisited_fatal_path=True, staging_recheck=bad)
+
+
+def test_final_outcome_rejects_a_kind_outside_the_three():
+    """⭐ `FinalOutcome` 是公开的 dataclass，可以被直接构造。
+
+    不校验 kind 的话，`FinalOutcome(kind="whatever")` 会一路落到「上次没 fatal
+    → 返回 {}」那一支，被**静默当成干净跑完**——安静的那种错。
+
+    判别力：删掉 __post_init__ 的校验，本条必红。
+    """
+    for bad in ("whatever", "", "Clean", None):
+        with pytest.raises(ValueError):
+            FinalOutcome(kind=bad)
+    for good in ("clean", "max_bytes"):
+        assert FinalOutcome(kind=good).kind == good
+
+
+def test_max_bytes_stop_takes_no_clearing_preconditions():
+    """⭐ 计划原文给 `max_bytes_stop` 也开了 revisited_fatal_path /
+    staging_recheck 两个参数，而决策表对 max_bytes 这一支**根本不看它们**
+    （O4-F1：容量停止一律不清除）。可传而被静默忽略 = 安静的错。
+
+    正确做法是让它**不可表达**：这两个参数从签名里去掉。
+
+    判别力：把参数加回去，本条必红。
+    """
+    with pytest.raises(TypeError):
+        max_bytes_stop(revisited_fatal_path=True)
+    with pytest.raises(TypeError):
+        max_bytes_stop(staging_recheck="passed")
+
+
+def test_every_resolved_state_passes_the_read_side_validator():
+    """⭐⭐ 写侧/读侧配对钉：决策表吐出的**每一种**状态，塞回 manifest 后
+    都必须能过读侧校验。
+
+    这是 R94-F2 / O4-F13 / S2-F3 / S2-F4 那个家族（写侧形状与读侧要求不配对）
+    的**机械防线**：任何一支的输出若读侧不认，一个合规的写者就会产出被自己
+    判非法的 manifest。
+    """
+    cases = [
+        (_prev(), clean_finish()),
+        (_prev(), max_bytes_stop()),
+        (_prev(reason="max_bytes"), clean_finish()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"), max_bytes_stop()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"),
+         max_bytes_stop()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=False)),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="passed")),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="failed")),
+        (_prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+         clean_finish(revisited_fatal_path=True)),
+        (_prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="failed")),
+        (_prev(), escape_stop(kind="staging_path_escape", relative_path="a/b.csv",
+                              component="a", errno="ELOOP")),
+        (_prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"),
+         escape_stop(kind="source_path_escape", relative_path="a/b.csv",
+                     component="a", errno="ENOTDIR")),
+    ]
+    for prev, outcome in cases:
+        new_lc = resolve_final_lifecycle(prev, outcome)
+        merged = {k: v for k, v in prev.items() if k not in LIFECYCLE_KEYS}
+        merged.update(new_lc)
+        assert validate_manifest(merged) is merged

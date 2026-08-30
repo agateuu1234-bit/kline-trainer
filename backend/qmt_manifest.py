@@ -21,6 +21,7 @@ import json
 import os
 import re
 import stat
+from dataclasses import dataclass
 from typing import Iterable
 
 from qmt_fsroot import (
@@ -827,3 +828,162 @@ def commit_stock(stg_fd: int, manifest: dict, *, lifecycle: dict) -> dict:
     payload.update(lifecycle)
     _write_manifest(stg_fd, payload)
     return payload
+
+
+# ── 收尾生命周期决策表（S2b Task 17）──────────────────────────
+
+_FINAL_KINDS = frozenset({"clean", "max_bytes", "escape"})
+_RECHECK_VERDICTS = (None, "passed", "failed")
+
+
+class SkipVerifyWithEscapeError(Exception):
+    """`--skip-existing-verify` 撞上「manifest 带 escape 记录」——拒绝启动（P2-F3）。
+
+    **不拒的具体后果**：第 1 次带 flag 跑清掉 fatal、标 `partial`（看似安全），
+    第 2 次不带 flag 跑时收尾复校**只重算「源」、从不回读 staging** →
+    **一棵被证明动过、且从未被复校过的 staging 拿到了出货级 `full` 标签**。
+    """
+
+
+@dataclass(frozen=True)
+class FinalOutcome:
+    """本次运行的**收尾事件**。用三个工厂函数构造，非法组合在构造期就被排除。
+
+    - `kind`：`clean`（正常跑完）/ `max_bytes`（干净的配额触顶）/ `escape`（撞了逃逸）
+    - `escape`：`kind == "escape"` 时的四字段
+    - `revisited_fatal_path`：本次是否**重新遍历过**上次 fatal 所指的那条路径（前提①）
+    - `staging_recheck`：`staging_path_escape` 另加的全量复校结果（前提②），
+      `"passed"` / `"failed"` / `None`（未做）
+
+    ⚠️ `kind` 在 `__post_init__` 里校验：本类是公开的 dataclass，可以被直接构造，
+    不校验的话 `FinalOutcome(kind="whatever")` 会一路落到「上次没 fatal → 返回 {}」
+    那一支，被**静默当成干净跑完**。
+    """
+    kind: str
+    escape: dict | None = None
+    revisited_fatal_path: bool = False
+    staging_recheck: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or self.kind not in _FINAL_KINDS:
+            raise ValueError(
+                f"FinalOutcome.kind 必须是 {sorted(_FINAL_KINDS)} 之一，"
+                f"收到 {self.kind!r}"
+            )
+        if self.staging_recheck not in _RECHECK_VERDICTS:
+            raise ValueError(
+                "staging_recheck 只能是 None/'passed'/'failed'，"
+                f"收到 {self.staging_recheck!r}"
+            )
+
+
+def clean_finish(*, revisited_fatal_path: bool = False,
+                 staging_recheck: str | None = None) -> FinalOutcome:
+    """本次正常跑完整批。"""
+    return FinalOutcome(kind="clean", revisited_fatal_path=revisited_fatal_path,
+                        staging_recheck=staging_recheck)
+
+
+def max_bytes_stop() -> FinalOutcome:
+    """干净的 `--max-bytes` 触顶（R44-F2：**终止条件，不是这只股的失败**）。
+
+    ⚠️ **本函数不收「清除前提」两个参数**：决策表对 max_bytes 这一支根本不看它们
+    （O4-F1：容量停止一律不清除、escape 的 `stopped_reason` 一律不得被覆盖）。
+    可传而被静默忽略是**安静的那种错**，故让它**不可表达**。
+    """
+    return FinalOutcome(kind="max_bytes")
+
+
+def escape_stop(*, kind: str, relative_path: str, component: str,
+                errno: str) -> FinalOutcome:
+    """本次撞了逃逸（源树或 staging 树的路径分量被换）。
+
+    ⚠️ 四个字段**连类型一起**在构造期校验：只查「非空」时 `relative_path=123`
+    会一路通过构造、通过决策表，直到被写上磁盘，才在**下一次读**时被判非法
+    ——又一次「一个合规的写者产出的 manifest 被读者判非法」（R94-F2 家族）。
+    """
+    if not isinstance(kind, str) or kind not in FATAL_KINDS:
+        raise ValueError(f"kind 必须是 {sorted(FATAL_KINDS)} 之一，收到 {kind!r}")
+    if not isinstance(errno, str) or errno not in FATAL_ERRNOS:
+        raise ValueError(f"errno 必须是 {sorted(FATAL_ERRNOS)} 之一，收到 {errno!r}")
+    for name, value in (("relative_path", relative_path), ("component", component)):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{name} 必须是非空字符串，收到 {value!r}")
+    return FinalOutcome(kind="escape", escape={
+        "kind": kind, "relative_path": relative_path,
+        "component": component, "errno": errno,
+    })
+
+
+def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
+    """**收尾提交**时三个生命周期字段的完整新值（纯函数；缺席的键表示该字段应被删除）。
+
+    ⚠️ **两种朴素做法都错**（R95-F2）：**就地合并式更新**会让操作者修好树、
+    重跑成功之后，陈旧 fatal 永远留着、**pilot 永远拒绝启动**；**启动即清除**
+    则会在「重试崩在中途」时**抹掉唯一的持久证据**，下一次看到的是一份
+    看起来干净、实则来自被污染源树的 staging。把清除与「本次已干净收尾」绑进
+    **同一次原子提交**，两种坏结局都不可表达。
+
+    ⚠️ **清除的谓词不是「本次没撞 escape」，而是「已证明受影响的路径确实干净」**
+    （O2-F7）：上次 `staging_path_escape` 记了 56 只股，操作者重建目录后重跑，
+    新股走**新建目录**全部成功、收尾复校只对**源**重算 sha256（从不回读那 56 只股）
+    ——「本次没撞」成立，而什么都没被证明干净。
+
+    ⚠️ **`max_bytes` 绝不许洗白 escape**（O4-F1）：Run2 的累计字节含 Run1，
+    触顶几乎必然；把 `stopped_reason` 改写成 `max_bytes` 会让 pilot 放行那批
+    从未被复校过的股——**一次被证明破坏的信任边界被一次容量停止洗白成合法凭据**。
+    """
+    prev_fatal = manifest.get("fetch_fatal_error")
+    prev_reason = manifest.get("stopped_reason")
+
+    # 输入自相矛盾就当场拒绝，绝不安静地产出一份读侧判非法的 manifest：
+    # 读侧明写「有 fetch_fatal_error 却没有 stopped_reason——写侧只落了一半」。
+    # 真实路径上 manifest 来自 read_manifest（配对已被保证），故不会误杀。
+    if prev_fatal is not None and prev_reason is None:
+        raise ManifestInvalidError(
+            "输入 manifest 有 fetch_fatal_error 却没有 stopped_reason——"
+            "读侧明令这是非法配对，决策表拒绝在它之上产出新状态"
+        )
+
+    # ① 本次撞了 escape → 覆盖为本次的（secondary 清掉）
+    if outcome.kind == "escape":
+        assert outcome.escape is not None
+        return {"stopped_reason": outcome.escape["kind"],
+                "fetch_fatal_error": dict(outcome.escape)}
+
+    # ② 上次没有 fatal → 只写本次的停止原因
+    if prev_fatal is None:
+        return {"stopped_reason": "max_bytes"} if outcome.kind == "max_bytes" else {}
+
+    # ③ 上次有 fatal，本次是 max_bytes 触顶 → 一律保留，只加诊断附注（O4-F1）。
+    if outcome.kind == "max_bytes":
+        return {"fetch_fatal_error": prev_fatal,
+                "stopped_reason": prev_reason,
+                "stopped_reason_secondary": "max_bytes"}
+
+    # ④ 上次有 fatal，本次干净跑完 —— 清除与否取决于「有没有证明干净」
+    if not outcome.revisited_fatal_path:                    # 前提① 不满足
+        return {"fetch_fatal_error": prev_fatal, "stopped_reason": prev_reason}
+
+    # ⚠️ **「复校失败」先于 kind 判断**：spec 只在 staging_path_escape 的语境里
+    # 定义了这一档，但「staging 全量复校失败」是一个与 fatal 种类无关的事实。
+    # 放在 kind 判断之后，则「上次是 source escape + 本次复校失败」会走到
+    # `return {}`，把 fatal 与复校失败这两个信号一起丢掉——一棵已被证明与账本
+    # 对不上的 staging 拿到干净标签。本判据只增加拒绝，不会误杀合法状态。
+    # ⭐ 这也是 `kind` 与 `stopped_reason` 解耦的唯一理由（O4-F3）。
+    if outcome.staging_recheck == "failed":
+        return {"fetch_fatal_error": prev_fatal,
+                "stopped_reason": "staging_recheck_failed"}
+
+    if prev_fatal["kind"] == "staging_path_escape":
+        # 前提②（无条件，不受任何 flag 影响，P2-F3）
+        if outcome.staging_recheck is None:
+            raise SkipVerifyWithEscapeError(
+                "这棵 staging 的 manifest 里带着 staging_path_escape 记录，"
+                "而本次跳过了既有文件复校。两者互斥：跳过复校就无法证明那些"
+                "已记录的文件还在、还是原来的字节。请去掉 --skip-existing-verify "
+                "重跑，或换新 staging + 新 seed 重拉。"
+            )
+
+    # 已证明干净 → 清除（source_path_escape 只需前提①）
+    return {}
