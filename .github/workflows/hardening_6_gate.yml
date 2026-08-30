@@ -5,9 +5,17 @@ name: hardening-6 framework gate
 # status → required check waits forever → branch protection deadlocks all
 # unrelated PRs. Fix: always run on every PR; the job itself short-circuits
 # (fast pass) when no relevant file changed.
+# 2026-08-25 fix: REMOVED pull_request.branches filter + ADDED explicit
+# types incl. `edited`. Stacked PRs (A<-B<-C) open with base = the upstream
+# branch, so `branches: [main]` skipped them entirely; GitHub retargets them
+# to main once the upstream merges, and that retarget DOES emit a
+# pull_request `edited` event -- but `edited` is not in the default activity
+# types, so nothing re-ran. Both gaps together = required check never
+# reports = permanently BLOCKED. Removing `branches` makes it report early;
+# `edited` forces a fresh run against the new base. DO NOT drop either line.
 on:
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
