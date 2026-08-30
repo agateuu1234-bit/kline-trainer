@@ -27,9 +27,9 @@ __all__ = [
     # 路径规则
     "normalize_abs_path", "split_components", "split_relative_components",
     # 逐段无跟随
-    "open_root", "open_under", "parent_fd_under",
+    "open_root", "open_under", "parent_fd_under", "open_regular_probe",
     # 耐久提交
-    "fsync_dir", "full_fsync",
+    "fsync_dir", "full_fsync", "atomic_write_json",
     # 锁
     "acquire_lock", "probe_unclaimed_dir", "assert_lock_still_held",
     # 归属
@@ -636,7 +636,8 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         os.close(lock_fd)
 
 
-def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
+def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+                       full_sync: bool = False) -> None:
     """原子写一份 JSON：`lstat` 守卫 → 唯一名 `O_EXCL` 临时文件 → `fsync(文件)`
     → `os.replace` → `fsync(目录)`。**本模块唯一的文件写入路径。**
 
@@ -649,6 +650,13 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
 
     临时名带 pid 与随机后缀，故崩溃留下的旧临时文件不会被静默复用；
     失败路径把它 unlink 掉。
+
+    `full_sync=True` 时**文件内容**改用 `full_fsync()`（macOS 上即
+    `fcntl(fd, F_FULLFSYNC)`）——**manifest 提交专用**（O4-F11 定案：断电在威胁
+    模型之内，而本平台的 `fsync(2)` man page 明写它既不保证断电耐久、也不保证
+    跨设备写序）。**默认 `False`**：归属标记等其余落地点保留 `fsync`，行为不变
+    （全都升级会让 400 股量级付出不必要的代价）。
+    **目录项一律走 `fsync_dir`**——`F_FULLFSYNC` 对目录 fd 的语义未经实测，不外推。
     """
     try:
         st = os.lstat(name, dir_fd=dir_fd)
@@ -671,7 +679,10 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
     try:
         try:
             _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-            os.fsync(fd)
+            if full_sync:
+                full_fsync(fd)
+            else:
+                os.fsync(fd)
         finally:
             os.close(fd)
         # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
@@ -683,6 +694,28 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
             pass
         raise
     fsync_dir(dir_fd)
+
+
+def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+                      full_sync: bool = False) -> None:
+    """公开入口，语义与 `_atomic_write_json` 逐字相同。
+
+    manifest 提交走它并传 `full_sync=True`（O4-F11）；模块内部（归属标记、锁持有者
+    记录）继续走私有名与默认刷盘。
+    """
+    _atomic_write_json(dir_fd, name, payload, full_sync=full_sync)
+
+
+def open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600):
+    """公开入口，语义与 `_open_regular_probe` 逐字相同：返回 `(fd, st)`。
+
+    **凡是本工具要打开的、可能被篡改的路径都必须经它**——`open(O_RDONLY)` 打开
+    FIFO 会一直阻塞等写入方，于是「打开在先、查类型在后」的写法会让一个被篡改的
+    目录把工具**永久挂起**，而不是 fail-closed。调用方拿到 `st` 后自行按各自语义
+    `S_ISREG` 拒掉。S1 已有三个打开点（取锁、探测、读标记）走它，
+    `qmt_manifest.read_manifest` 是第四个。
+    """
+    return _open_regular_probe(dir_fd, name, flags=flags, mode=mode)
 
 
 def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:

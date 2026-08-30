@@ -1457,3 +1457,134 @@ def test_split_relative_components_rejects_escapes(bad):
     """七个坏档**已实测**（2026-08-24 在 `_split_rel` 上真跑过）全部被拒。"""
     with pytest.raises(PathDisciplineError):
         split_relative_components(bad)
+
+
+# ─────────────────────────────────────────────────────────────
+# S2b Task 15 Step 0：把 manifest 落盘要用的两个原语从私有转公开
+#
+# 这半边小改原本排在 S2a 的 Task 1，但它在 S2a 里**零使用者**（落盘在 S2b），
+# 故随第一个真使用者一起落地。
+# ─────────────────────────────────────────────────────────────
+import stat as stat_module
+from qmt_fsroot import atomic_write_json, open_regular_probe
+
+
+def _fcntl_cmd_spy(monkeypatch) -> list:
+    """记录本次经过 `fcntl.fcntl` 的所有 cmd（用于证明走没走 F_FULLFSYNC）。"""
+    calls = []
+    real = fcntl.fcntl
+    monkeypatch.setattr(
+        fcntl, "fcntl",
+        lambda fd, cmd, *a: (calls.append(cmd), real(fd, cmd, *a))[1],
+    )
+    return calls
+
+
+def test_atomic_write_json_with_full_sync_uses_F_FULLFSYNC(tmp_path: Path, monkeypatch):
+    """`full_sync=True` 时文件内容必须走 `F_FULLFSYNC`（O4-F11：断电在威胁模型之内）。
+
+    判别力：把 `full_sync` 分支去掉（恒走 `os.fsync`），本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上本条**无判别力**（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+    else:
+        assert fsynced          # Linux：fsync 就是该平台最强的那个原语
+
+
+def test_atomic_write_json_without_full_sync_does_not_use_F_FULLFSYNC(
+        tmp_path: Path, monkeypatch):
+    """默认 `full_sync=False` **不得**走 `F_FULLFSYNC`。
+
+    没有这一条，「默认不改行为」那句话就是空的——把默认值翻成 True 也一样绿。
+    ⚠️ Linux 上两条路都是 `os.fsync`，该平台上本条无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_atomic_write_json_full_sync_survives_a_platform_without_F_FULLFSYNC(
+        tmp_path: Path, monkeypatch):
+    """CI 跑 ubuntu-latest，那里 `fcntl` 根本没有这个常量——不得抛 `AttributeError`。
+
+    本档在**任何平台**上都真跑（藏掉常量），不是 skip：本仓 CI 把任何 skip 判失败。
+    """
+    monkeypatch.delattr(fcntl, "F_FULLFSYNC", raising=False)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+    assert json.loads((tmp_path / "m.json").read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_write_owner_marker_still_does_not_use_F_FULLFSYNC(tmp_path: Path, monkeypatch):
+    """⭐ 回归钉：归属标记等其余落地点保留 `fsync`，行为一个字节都不变。
+
+    O4-F11 只把 **manifest 提交**与顺序屏障两处升级为 `F_FULLFSYNC`
+    （每股 1~2 次，400 股量级可接受）；全都升级会让量级付出不必要的代价。
+    没有这一条钉着，`_atomic_write_json` 的默认值被翻成 True 不会有任何测试红。
+    ⚠️ Linux 上无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "staging_dir": str(tmp_path)})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_open_regular_probe_refuses_a_fifo_without_blocking(tmp_path: Path):
+    """⭐ 公开 `open_regular_probe` 的**全部理由**：`open(O_RDONLY)` 打开 FIFO 会
+    **一直阻塞等写入方**——一个被篡改的 staging 于是让工具**永久挂起**，
+    而不是 fail-closed 报错。带 `O_NONBLOCK` 打开、再由调用方按 `S_ISREG` 拒掉。
+
+    S1 的 docstring 已明写「三个打开点（取锁、探测、读标记）统一走本函数，
+    避免『同一条纪律只落在其中一处』」；`read_manifest` 是**第四个**打开点。
+
+    判别力：把 `O_NONBLOCK` 去掉，本条会**挂死**（pytest 超时/需人工中断），
+    而不是变红——这正是「比崩溃更糟」的那种失败形态。
+    """
+    os.mkfifo(str(tmp_path / "as_fifo"))
+    root = open_root(str(tmp_path))
+    try:
+        fd, st = open_regular_probe(root, "as_fifo", flags=os.O_RDONLY)
+        try:
+            assert not stat_module.S_ISREG(st.st_mode)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
+
+
+def test_open_regular_probe_clears_nonblock_on_a_regular_file(tmp_path: Path):
+    """普通文件必须把 `O_NONBLOCK` 清掉再交出去——否则后续 `os.read` 的语义变了。"""
+    (tmp_path / "f.json").write_text("{}", encoding="utf-8")
+    root = open_root(str(tmp_path))
+    try:
+        fd, st = open_regular_probe(root, "f.json", flags=os.O_RDONLY)
+        try:
+            assert stat_module.S_ISREG(st.st_mode)
+            assert not (fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
