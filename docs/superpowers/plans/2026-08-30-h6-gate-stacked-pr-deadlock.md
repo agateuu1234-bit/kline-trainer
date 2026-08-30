@@ -281,7 +281,12 @@ git commit -m "fix(ci): 删掉 hardening-6 闸门的 branches 过滤器并显式
 永不上报 = 永久 BLOCKED。
 
 删 branches 让它一开 PR 就上报；加 edited 让 retarget 那一刻针对新 base
-强制重跑一次（从而不会拿 retarget 前的陈旧绿灯去满足闸门）。
+强制重跑一次。
+
+注意措辞：这不等于「陈旧绿灯不可能满足闸门」。从 retarget 发生到新运行
+被注册为 pending 之间有约 3 秒窗口，期间旧结果仍然有效。该窗口已作为
+残留风险 R9 记账并被接受（本仓无 auto-merge、无合并队列；实测
+retarget→合并间隔 431 秒与 833 秒，比窗口大两个数量级）。
 
 edited 会在 retarget 时触发这一点，已由 PR #170 与 #172 两次真实
 retarget 的生产数据实证（详见 spec F18-F21）。
