@@ -1246,6 +1246,10 @@ resolve 必须在任何写入之前求值：P2-F3 那一档要抛，而它的规
 > export PY="/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python"
 > ```
 >
+> ⚠️ **后面每次用它都写成 `"$PY"`（带双引号）**。这个路径里有一个空格，
+> 不加引号会被终端拆成两半，报 `/Users/maziming/Coding/Prj_Kline: No such file or directory`。
+> 本清单初稿五处全是裸 `$PY`，2026-08-30 真跑时当场报错，已逐处修正。
+>
 > 再进 worktree 的 backend 目录：
 >
 > ```
@@ -1274,7 +1278,7 @@ git branch --show-current && git rev-parse --short HEAD && pwd
 **动作**
 
 ```
-$PY -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
+"$PY" -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
 ```
 
 **期望**：最后一行形如 `NNN passed in XX.XXs`，**没有** `failed`、**没有** `skipped`、**没有** `error`。
@@ -1294,7 +1298,7 @@ $PY -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
 **动作**
 
 ```
-$PY -c "import xml.etree.ElementTree as E;r=E.parse('/tmp/s2-accept.xml').getroot();f=lambda k:sum(int(s.get(k,0)) for s in r.iter('testsuite'));print('总数',f('tests'),'跳过',f('skipped'),'失败',f('failures'),'错误',f('errors'))"
+"$PY" -c "import xml.etree.ElementTree as E;r=E.parse('/tmp/s2-accept.xml').getroot();f=lambda k:sum(int(s.get(k,0)) for s in r.iter('testsuite'));print('总数',f('tests'),'跳过',f('skipped'),'失败',f('failures'),'错误',f('errors'))"
 ```
 
 **期望**：`跳过 0 失败 0 错误 0`，且`总数`与 A2 的数字一致。
@@ -1320,7 +1324,7 @@ printf 'import fcntl\ndef pytest_configure(config):\n    if hasattr(fcntl, "F_FU
 ```
 
 ```
-PYTHONPATH=/tmp/nofs $PY -m pytest tests/ -q -p nofullfsync
+PYTHONPATH=/tmp/nofs "$PY" -m pytest tests/ -q -p nofullfsync
 ```
 
 **期望**：与 A2 相同的通过数，**没有** `failed` / `skipped` / `error`。
@@ -1338,7 +1342,7 @@ PYTHONPATH=/tmp/nofs $PY -m pytest tests/ -q -p nofullfsync
 **动作**
 
 ```
-$PY -c "
+"$PY" -c "
 import sys; sys.path.insert(0,'tests')
 from test_qmt_manifest import _valid_manifest, _recompute_evidence
 from qmt_manifest import validate_manifest, ManifestInvalidError, ManifestVersionError
@@ -1373,7 +1377,7 @@ except ManifestVersionError as e: print('④ 版本更高：拦住了 ✅ ——
 **动作**
 
 ```
-$PY -c "
+"$PY" -c "
 import sys; sys.path.insert(0,'tests')
 from test_qmt_manifest import _valid_manifest, _fatal
 from qmt_manifest import resolve_final_lifecycle, max_bytes_stop, clean_finish
