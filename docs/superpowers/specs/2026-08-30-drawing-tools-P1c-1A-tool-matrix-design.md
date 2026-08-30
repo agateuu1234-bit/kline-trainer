@@ -54,23 +54,33 @@
 |---|---|
 | **全仓零账号、零登录** —— `signIn` / `login` / `logout` / `userId` / `accountId` / `authToken` / `AppleID` / `ASAuthorization` 全仓（排除 `.build`、排除测试）**零命中** | 全仓 grep |
 | **训练记录与画线全在手机本地**，存 `app.sqlite`，位于 **Application Support** 目录 | `ios/KlineTrainer/KlineTrainer/KlineTrainerApp.swift:14-16` |
-| **无任何跨设备同步**：`iCloud` / `CloudKit` / `NSUbiquitous` / `isExcludedFromBackup` 全仓**零命中** | 全仓 grep |
+| **无任何跨设备同步机制**：`iCloud` / `CloudKit` / `NSUbiquitous` 全仓**零命中** | 全仓 grep |
+| ⚠️ **但 `app.sqlite` 会随整机备份走**：它在 Application Support（iOS 备份**默认包含**该目录；默认被排除的是 Caches），且全仓**没有任何** `isExcludedFromBackup` 标记 | `KlineTrainerApp.swift:14-16` + 全仓 grep 零命中 |
 | **后端只下载、不上传**：API 一共三个 —— 训练组清单 `training-sets/meta`、下载 `training-set/{id}/download`、下载完成回执 `training-set/{id}/confirm`。**没有任何接口上传训练记录或画线** | `ios/Contracts/Sources/KlineTrainerPersistence/DefaultAPIClient.swift:33 / :49 / :69` |
 
-⇒ **数据跟着手机走，不跟账号走。** 「更新版本写的数据被旧版本读到」只能经以下四条路径发生：
+⇒ **数据不跟账号走**（无账号、无云同步、后端不上传）。
+
+**⚠️ 但「数据只留在这一台手机上」是错的**（codex R1-high，**已核实为真**；本 spec 上一稿写作「数据跟着手机走」，措辞错误，据此修正）：整机备份**会**把 `app.sqlite` 一起带走，恢复到另一台设备上。
+
+**⇒ 因此判据不是「数据会不会离开这台手机」（会），而是「数据落地的那台设备上，App 版本是不是比写它的那个版本旧」。**
+
+**⚠️ 常规换机 / 恢复备份并不产生版本错位**：iOS 恢复时 App 是**由 App Store 重新下载该设备可用的最新版**，不是把备份里那台设备当时的旧二进制搬过去。所以「数据比 App 新」只在下表这几种情况下出现：
 
 | # | 路径 | 判断 | user 的应对（2026-08-30 逐条给出） |
 |---|---|---|---|
 | a | **开发 / 真机验收阶段**：第 4 片之后回头验收前面几片的构建、或切分支跑测试 | 几乎必然 | 「删掉 App 重新装就好了」 |
 | b | **TestFlight 版 → 装回 App Store 正式旧版** | 可能 | 「基本上也就是我自己用」 |
-| c | **老系统设备恢复备份**：App Store 对系统版本过老的设备只提供「最后一个兼容的旧版」 | 窄，但真实存在 | 「让用户升级就好了」 |
+| c | **备份 / 迁移落到一台只装得到更旧版本的设备**：App Store 对系统版本过老的设备只提供「最后一个兼容的旧版」 | 窄，但真实存在 | 「让用户升级就好了」 |
 | d | 第三方降级工具 | 罕见 | 「不考虑」 |
+| **e** | **开发者主动把 App Store 上可下载的版本回退到更早的二进制**（撤下新版、重新发布旧构建）后，用户恢复备份时拿到那个更旧的二进制 | 极窄，且**完全在开发者自己控制之下** | **本 spec 新增**（上一稿漏列）。应对 = 真要回退版本时，先确认没有跨版本数据 |
 
 **⛔ 上游 D105 不变量 4「不得存在用户无法解除的归档死锁」在本 spec 中被降为「知情接受的残留」**，理由三条：
 
 1. **那道门今天就在跑着，本片一行不改** —— 取消 1B 不是「拆掉安全网」，而是「不给已存在的门配钥匙」。合并后 main 上的行为与今天**逐字节相同**。
 2. **⛔ 绝不得反过来把那道门拆掉** —— 它的存在理由是「未来数据随 pending 永久丢失」（`TrainingSessionCoordinator.swift:696-703` 的大注释）。拆门 = 一次不可逆的数据丢失（上游记录的 codex R1-high 方向），本 spec **不授权任何人这么做**。
 3. **将来想补不会变贵**：那道门还在、`.unknownRaw` 与已知条的未来字段都是**原文照抄**（`LossyDrawingArray.swift:348 / :355`）不会丢失 ⇒ 任何时候补「可分辨信号 + 恢复通道」都是纯增量，不存在「现在不做以后就补不上」的缝。
+
+**⛔ 一处必须澄清的因果**（针对 codex R1-high 的措辞「会把正常兼容状态变成不可归档或数据丢失」）：**不成立。** 本片对那道门与它的全部行为**一行不改**，合并后与今天 `main` 上的表现**逐字节相同** —— D113 只是**不去新增**一个恢复出口，而不是新造一个失败。真正会造成数据丢失的动作是**拆掉那道门**，本 spec §2 硬约束 1 明令禁止，且本片不碰它。
 
 **⚠️ 这一条与已记录的项目原则「App 可能公开上架 → 持久化按公开发布标准做、版本错位真会发生、勿按单用户简化」存在张力。** 本条**不推翻**那条原则（持久化保真、契约、迁移纪律一律照旧），只对**这一个具体出口**做了成本/触发面权衡：user 在拿到上表四条路径的实测结论后作出判断。**记录在此，便于日后复核。**
 
@@ -130,15 +140,22 @@
 | 不变量 3 未来字段逐字节保留 | ✅ 已有 | `:274` |
 | 不变量 3 删别的已知条后未来条仍在原位 | ✅ 已有 | `:456` |
 | 不变量 3（持久层两条路） | ✅ 已有 | `Tests/KlineTrainerPersistenceTests/PendingLossyTests.swift`、`CoordinatorLossyPreserveTests.swift`、`ReviewArchiveRepositoryTests.swift` |
-| **不变量 1「未注册工具不渲染」** | ⚠️ **无直接行为测试** | 判据在 `Render/KLineView+Drawing.swift:25`，整个文件 `#if canImport(UIKit)`（`:7`） |
+| **不变量 1「未注册工具不渲染」**（空注册表 → 渲染器零调用） | ✅ **已有，且是 UIKit 真跑档** | `Tests/.../Drawing/DrawDrawingsDispatchTests.swift:49`（`§5.3 #16 missing tool in dictionary skips silently`） |
+| 不变量 1 **正向对照**（注册了的工具 → 渲染器恰好一次、且拿到的就是那条 drawing） | ✅ 已有 | 同文件 `:30`（`§5.3 #15`） |
+| 不变量 1 **空列表对照** | ✅ 已有 | 同文件 `:17`（`§5.3 #14`） |
+| **「生产渲染注册表里确实没有 `.trend`」**（把「模拟旧构建」这个前提本身钉死） | ✅ 已有 | `Tests/.../Render/KLineViewCompileTests.swift:39`（`L8c 契约`） |
 
-**唯一缺口是不变量 1，本片仍不补**，理由三条（**⚠️ 这是一条经过论证的取舍，不是遗漏**）：
+⇒ **四条不变量与结构损坏边界全部已有测试覆盖，本片一条都不补。**
 
-1. **命中侧有真的行为测试**（上表第 8 行），且带反向对照；
-2. **有源码守卫把两侧焊在一起**：`DrawingHitTesterTests.swift:61-80` 钉死「命中入口在 `Sources/` 中只有一处」且「命中列表必须来自 `RenderStateBuilder.visibleDrawings`」。谁想让渲染与命中走岔，该守卫当场红；
-3. 补它要新增 `#if canImport(UIKit)` 测试 ⇒ 按仓内规矩必须**同步四处 Catalyst 基线**、且喂闸门的日志必须冷构建 —— 成本与它挡住的风险不成比例。
+**⚠️ 上面最后四行是 codex R1-medium 逼出来的订正 —— 本 spec 上一稿把不变量 1 写成「无直接行为测试」，那是错的。** 记下经过，因为它是一个会重犯的检索错误：我当时的搜索词是 `unregistered` / `未注册` / `无渲染器` / `notRegistered`，而那条测试叫 **`drawDrawingsMissingToolSkipsSilently`**（用的是 `Missing`）。**按「概念」搜而不按「该概念在本仓的全部书写形态」搜，会把已存在的覆盖判成缺口，进而写出重复测试或错误的取舍论证。**
 
-**⛔ 本条只对本片有效。** 第 2 片起要动渲染层（节点绘制），届时**必须重新评估**这条缺口（见 §8-Q9）。
+**这四条不但存在，还被 CI 必需门逐条点名**（比「存在」强一个量级）：
+
+- `.github/scripts/catalyst-uikit-baseline.txt` 逐行列着 `§5.3 #14 / #15 / #16` 与 `L8c 契约: 生产渲染注册表里确实没有 .trend`；
+- 闸门 `catalyst-gate.sh` 的 G8 逐测试判据读这份**签入仓库、与当前源码解耦**的基线（`catalyst-uikit-baseline-reader.py` 头注逐字说明为何不能对当前 checkout 活推导：那是循环论证），日志里找不到对应 `passed` 行就 FAIL 并点名；
+- 而 CI 的 Catalyst job **早已是真跑 `xcodebuild test`**，不是只编译 —— `catalyst-build.yml:23-24` 逐字：「名字里的 "build-for-testing" 是历史遗留：本 job 现在**真跑 test**」。
+
+⇒ 每个 PR 都在真执行这四条并要求它们 passed。**本片不需要为不变量 1 做任何事，但 §7.2 的三绿门必须跟着改**（见那一节）。
 
 ---
 
@@ -182,7 +199,7 @@
 
 | # | 事实 | 判据在哪 | 被哪些测试锁住 |
 |---|---|---|---|
-| F1 | **不渲染** | `Render/KLineView+Drawing.swift:25` | ⚠️ 无直接行为测试（D115），靠 F2 + 源码守卫间接锁 |
+| F1 | **不渲染** | `Render/KLineView+Drawing.swift:25` | `DrawDrawingsDispatchTests.swift:49`（空注册表 → 渲染器零调用）+ `:30` 正向对照 + `:17` 空列表对照；另有 `KLineViewCompileTests.swift:39` 钉死「生产注册表里确实没有 `.trend`」。**四条均在 `catalyst-uikit-baseline.txt` 被逐条点名，CI 每个 PR 真跑并要求 passed** |
 | F2 | **不可命中**，与渲染 dispatch **逐字同判据** | `Drawing/DrawingHitTester.swift:26`（`:23` 注释逐字写明同判据） | `DrawingHitTesterTests.swift:51-58`（含反向对照）+ `:61-80`（源码守卫：命中入口唯一 + 必来自 `visibleDrawings`） |
 | F3 | **不被普通保存覆盖**：`.known` 未编辑 → 原样 `raw`；`.unknownRaw` → 原位保留 | `Persistence/LossyDrawingArray.swift:348` / `:355` | `DrawingModelP1aTests.swift:236 / :274 / :456` + `PendingLossyTests` / `CoordinatorLossyPreserveTests` / `ReviewArchiveRepositoryTests` |
 | F4 | **`.unknownRaw` 恒等于「正面识别的未来工具记录」**：须同时满足①合法 JSON 对象 ②非空 `toolType` 字符串 ③该名不在本构建枚举里；任一不满足 → 抛 `.dbCorrupted` | `Persistence/LossyDrawingArray.swift:143-147` | `DrawingModelP1aTests.swift:139 / :147 / :155 / :163 / :174 / :182 / :217`（正反两档齐） |
@@ -410,9 +427,12 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ### 7.2 三绿门（作者亲核，clean build）
 
-- **本片是纯 host 片**（零 UI、零新增 `#if canImport(UIKit)` 测试）⇒ Catalyst **`build-for-testing` 即可**，不需要真执行、**不需要动四处 Catalyst 基线**。
-- ⚠️ **但必须实跑确认**「本片确实没有新增 UIKit-gated 测试」—— 一旦新增，四处基线同步立刻变成必做项。
-- **§5-T3 点名的八个测试文件已逐个实测：`canImport(UIKit)` 出现次数全为 0**（含 `Render/DrawingStylePanelSourceGuardTests.swift` —— 它虽然扫的是一个 UIKit-gated 的**源文件文本**，但扫描本身在 host 上跑）⇒ T3 那一整组回归验证**都能在 host `swift test` 里真执行**，不必上 Catalyst。
+- **⛔ Catalyst 必须 `xcodebuild test` 真执行，不得只 `build-for-testing`**（codex R1-medium 订正）。两条理由：
+  ① 本片新增的产物**不是**唯一被验的东西 —— D115 认定「不变量 1 已被覆盖」所依赖的那四条档（`DrawDrawingsDispatchTests` 三条 + `KLineViewCompileTests` L8c）**全是 UIKit-gated**，只编译不跑等于把本片赖以成立的证据放着不验；
+  ② CI 的 Catalyst job **本来就是真跑**（`catalyst-build.yml:23-24 / :58 / :65`），作者的三绿门若比 CI 松，就会出现「本地判绿、CI 才红」。
+- **本片零新增 UIKit-gated 测试** ⇒ **`catalyst-uikit-baseline.txt` 不需要改**（它只列 UIKit-gated 测试名）。
+- ⚠️ **但 `catalyst-total-baseline.txt`（当前 `1864`）必须实测核对**：它是**全部** swift-testing 用例的总数，host 测试在 Catalyst 上同样执行 ⇒ 本片新增的 T1/T2 会把它推高。闸门容差是 **±30**（`catalyst-gate.sh:227` `DELTA=30`，且注释逐字要求「有意的大幅增减请同步更新基线文件并在 PR 说明，而不是放宽 delta」）。**plan 阶段必须实测本片的用例增量**：落在 ±30 内 → 基线不动；超出 → **同步更新 `catalyst-total-baseline.txt` 并在 PR 描述里说明**。
+- **§5-T3 点名的八个测试文件已逐个实测：`canImport(UIKit)` 出现次数全为 0** ⇒ T3 那一整组回归验证在 host `swift test` 里就能真执行（Catalyst 上同样会跑，不冲突）。
 - Catalyst 必须用 `-scheme KlineTrainerContracts-Package`（library scheme **不编译 testTarget**），且 `set -o pipefail`（`tee` 会吞退出码）。
 - 判绿读**输出内容 / 执行量**，⛔ 不读「SUCCEEDED」字样、⛔ 不用 `tail` 截断。
 - 每条闸门命令必须**同时打印 branch 与 HEAD**。
@@ -434,7 +454,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 | # | 问题 | 归属 | 为什么不能拖 |
 |---|---|---|---|
 | **Q8** | **样式面板三处写死横线规则**（`UI/DrawingStyleParams.swift:39 / :46 / :142`）必须改成 tool-aware。该 View 目前**收不到 `toolType`**，泛化要改它的参数签名。**⛔ 第 4 片不得只加趋势线的图标而不改这三处** —— 否则趋势线的线型/标注会按**水平线规则**置灰（如趋势线的「线段」会被灰掉，而线段正是趋势线的三种子类之一） | **第 4 片** | 第 4 片一落地就会露出错误的灰态 |
-| **Q9** | **不变量 1「未注册工具不渲染」至今无直接行为测试**（D115）。第 2 片要动渲染层（画节点），届时**必须重新评估**：是补一条 Catalyst 行为测试，还是继续靠「命中侧行为测试 + 同判据源码守卫」间接锁 | **第 2 片** | 第 2 片是第一个动渲染层的片，评估成本最低的时机 |
+| ~~**Q9**~~ | ~~不变量 1 无直接行为测试~~ —— **本条撤销**（codex R1-medium）：该覆盖一直存在且被 CI 必需门逐条点名，见 D115 订正段。⚠️ 第 2 片新增节点渲染时仍须按既有规矩办：**新增 UIKit-gated 测试 → 同步 `catalyst-uikit-baseline.txt`（用 `uikit-expected-tests.py` 重新生成，不得手打测试名）+ 核对总数基线** | ~~第 2 片~~ 已撤销 | — |
 | **Q10** | `Drawing/DrawingLabelLayout.swift:66` 与 `Render/KLineView+Drawing.swift:33` 两处写死 `.horizontal`（价格标签的内容与绘制分支）。新工具要不要标签、标签怎么摆，是每工具的几何问题 | **第 4 片** | 第 4 片写第一条非水平线时必须回答 |
 | **Q11** | **归档死锁的恢复通道**（上游 D105 不变量 4 / §2B 整片）已按 D113 记为**知情接受的残留**。若日后 App 上架后真有用户反馈，补它的最小形态是「可分辨的失败信号 + 一句诚实文案」，**⛔ 届时必须按五处核对 `.dbCorrupted` 消费方**（D114 的表），不是上游写的三处 | **未排期** | 记录在此，防止日后照上游三处清单漏核两处 |
 | Q1 / Q2 / Q3 / Q4 / Q5 / Q6 / Q7 | 上游 §10 的七个遗留问题**原样有效**，归属不变（Q2 原属第 1B 片 ⇒ **随 1B 一并取消**） | 见上游 §10 | — |
