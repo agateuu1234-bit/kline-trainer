@@ -4,13 +4,15 @@
 
 **Goal:** 把 S2a 建好的 manifest 结构落到磁盘：逐段无跟随读回、**两个权限不等价的提交入口**（per-stock / 收尾），以及 `stopped_reason` / `fetch_fatal_error` 的生命周期决策表。
 
-**⚠️ 前置：S2a 必须已合进 main。**本片从**新的 main** 切分支，**不叠 PR**（user 2026-08-25 拍板，避开「改 base 静默丢门」与「前片 squash 后必然冲突」两个已踩过的坑）。开工前先确认 `backend/qmt_manifest.py` 里已有 `validate_manifest` / `aggregate_sha256` / `LIFECYCLE_KEYS`，且 `backend/qmt_fsroot.py` 已公开 `atomic_write_json`。
+**⚠️ 前置：S2a 必须已合进 main。**本片从**新的 main** 切分支，**不叠 PR**（user 2026-08-25 拍板，避开「改 base 静默丢门」与「前片 squash 后必然冲突」两个已踩过的坑）。开工前先确认 `backend/qmt_manifest.py` 里已有 `validate_manifest` / `aggregate_sha256` / `LIFECYCLE_KEYS`。⚠️ **原文还写着「且 `qmt_fsroot.py` 已公开 `atomic_write_json`」——那是错的**：公开它正是本片 Task 15 的 **Step 0**（S2a 里它零使用者，故没做）。2026-08-30 实施前核实并订正。
 
 **Architecture:** 落盘复用 S1 `qmt_fsroot` 的逐段无跟随 + 原子写 + 耐久提交（manifest 提交走 `F_FULLFSYNC`）。生命周期规则做成**纯函数决策表**；两个提交入口对它的权限**结构上不等价**——per-stock 提交在写入路径上根本够不到那三个字段。
 
 **Tech Stack:** Python 3.11+、标准库、pytest。**零新依赖**。
 
-**Spec:** `docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md` §4.5（含文末「S2 实施轮」四条更正，已随 S2a 落地）。
+**Spec:** `docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md` §4.5（含文末「S2 实施轮」的**全部** `S2-F*` 更正——写本计划时是四条，S2a 期间加到九条，S2b 期间加到十一条。**别写死条数**，写死的计数本身就是腐烂源；核对办法见验收清单 A7）。
+
+> ⚠️ **对 S2b 有直接约束的三条**：**S2-F6**（读侧路径判据用**分量规则**而非 `resolve()`；§4.5:430 的 `.inflight.json` 形状校验仍写着 `resolve()`，那是 **S4** 范围但已预先登记——照原文实现会放行一条破坏性恢复路径删到边界之外）、**S2-F10**（读回口必须对**磁盘对象的类型**安全）、**S2-F11**（决策表里「source escape + 复校失败」那一格 spec 从未定义）。
 
 ## Global Constraints
 
@@ -45,6 +47,38 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 
 ---
 
+
+## 实施轮偏离登记（2026-08-30，实施者核实后逐条订正）
+
+> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**九处偏离全部朝
+> 「坏状态不可表达」方向，每条各配专属档并由控制者亲手做过变异验证。
+> 与本文件代码块 diff 不上的地方，以**仓库代码 + 本表**为准。
+
+| # | 偏离处 | 计划原文的问题 | 处置 |
+|---|---|---|---|
+| D1 | Task 15 `read_manifest` 的打开方式 | 用裸 `open_under(flags=O_RDONLY)`。**实测**：manifest 被换成 FIFO 时 `open` 一直阻塞——变异后那条测试不是变红而是 15 秒被闹钟杀掉、日志 0 字节、退出码 142；被换成目录时 `os.read` 抛原始 `IsADirectoryError` | 改经 S1 的 `open_regular_probe`（`O_NONBLOCK` + `S_ISREG`）。已登记为 spec **S2-F10** |
+| D2 | Task 15 的大小上限 | 只查 `st_size` 早拒，且自称「与 S1 给归属标记设上限同源」——而 S1 **恰恰明确未采纳** `st_size` 早拒（`st_size` 是打开那一刻的快照，文件可边读边长；且那道守卫钉不住，是负债不是资产） | 改为**读取过程中计数**，与 S1 逐字同规格。该档区分不了两种实现，已在测试 docstring 里如实登记 |
+| D3 | Task 15 Step 0 的两个公开入口 | 只公开 `atomic_write_json` | 连同 `open_regular_probe` 一起公开（D1 的前提）；另加一条**回归钉**——`write_owner_marker` 仍不得走 `F_FULLFSYNC`，否则「默认不改行为」是空话 |
+| D4 | Task 16 `commit_stock` 的 `lifecycle` 参数 | 不校验键名。`payload.update(lifecycle)` 是一条通往**任意顶层键**的走私通道（`lifecycle={"files": []}` 就能在这个自称「够不到生命周期字段」的入口里清空实拷清单）| 加 `_require_lifecycle_only` 白名单；docstring 如实登记它**挡不住**「调用方传伪造快照」（那需要每次提交回读磁盘） |
+| D5 | Task 17 决策表分支次序 | 「staging 复校失败」写在 `fatal.kind` 判断**之后** → 「上次 source escape + 本次复校失败」走到 `return {}`，把 fatal 与复校失败一起丢掉 | 提到 `kind` 判断**之前**。已登记为 spec **S2-F11** |
+| D6 | Task 17 对「有 fatal 却没 stopped_reason」的输入 | 用 `if prev_reason is not None:` 兜着 → 安静产出一份读侧判非法的 manifest（写侧/读侧不配对家族又一次），且那两个分支本身没有任何测试钉得住 | 当场抛 `ManifestInvalidError`，两处改为无条件回写 |
+| D7 | Task 17 `FinalOutcome` | 公开 dataclass 却不校验 `kind` → `FinalOutcome(kind="whatever")` 落到「上次没 fatal → 返回 {}」，**被静默当成干净跑完** | `__post_init__` 校验 `kind` 与 `staging_recheck` |
+| D8 | Task 17 `escape_stop` | 只查「非空」不查类型 → `relative_path=123` 一路通过构造与决策表、写上磁盘，到**下一次读**才被判非法 | 连类型一起在构造期校验 |
+| D9 | Task 17 `max_bytes_stop` | 开了 `revisited_fatal_path` / `staging_recheck` 两个参数，而决策表对 max_bytes 这一支**根本不看它们**（O4-F1）→ 可传而被静默忽略 | 两个参数从签名里去掉，让它**不可表达** |
+
+**另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
+（决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
+并断言它必须被剥掉——变异实测：不剥时三条档一起变红。
+
+**收尾机械化 sweep 的结果**：84 个 `_require*` 判据、**73 条变红、8 条仍绿**。
+8 条全部有明确归因（6 条邻居兜底 / 1 条等价变异 / 1 条代码里已写明的恒真断言），
+零条「不明原因仍绿」。首轮 12 条仍绿里那 4 条**真的没人守**的已补上专属档
+（缺 `source_snapshot.universe`、`fetch_fatal_error` 的 `relative_path`/`component` 为空串、
+存根 `completed_at` 为空串）。
+⚠️ 984 组合那条整族扫描探不到它们，因为它只断言「若抛异常则必须是本模块的族」、
+**不断言「必须抛」**，且只做「替换值」从不做「删键」。
+
+---
 
 ## Task 15: S1 小改（另一半）+ `read_manifest` —— 逐段无跟随读回并校验
 
@@ -1215,7 +1249,7 @@ resolve 必须在任何写入之前求值：P2-F3 那一档要抛，而它的规
 > 再进 worktree 的 backend 目录：
 >
 > ```
-> cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s2/backend"
+> cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s2b/backend"
 > ```
 
 ### A1 · 确认你在对的地方
@@ -1226,7 +1260,7 @@ resolve 必须在任何写入之前求值：P2-F3 那一档要抛，而它的规
 git branch --show-current && git rev-parse --short HEAD && pwd
 ```
 
-**期望**：三行依次是 `feat/qmt-4b-s2-manifest`、一个 7 位提交号、以 `.dev/worktree/qmt-4b-s2/backend` 结尾的路径。
+**期望**：三行依次是 `feat/qmt-4b-s2b-commit`、一个 7 位提交号、以 `.dev/worktree/qmt-4b-s2b/backend` 结尾的路径。
 
 **通过判定**：分支名完全一致 → 通过；不一致 → 不通过（说明开了别的窗口或切错分支，**先别继续**）。
 
@@ -1247,8 +1281,8 @@ $PY -m pytest tests/ -q --junitxml=/tmp/s2-accept.xml
 
 **通过判定**：出现 `passed`、且**没有** `failed` / `skipped` / `error` 字样 → 通过。
 
-> 数字本身只作参考：本片开工前的基线是 **937**，做完后应当明显更多（新增约 160 条）。
-> 若数字**比 937 还少**，说明有测试没被收集到——那是不通过，请把完整输出贴出来。
+> 数字本身只作参考：**本片开工前在 `origin/main` (`1437529`) 上实测的基线是 1106**（写本计划时写的 937 是 S2a 之前的旧数，已作废）。做完后应当明显更多。
+> 若数字**比 1106 还少**，说明有测试没被收集到——那是不通过，请把完整输出贴出来。
 
 ---
 
@@ -1361,21 +1395,31 @@ print('⑤ 真的重走过且全量复查通过：', '✅ 警报解除' if not r
 
 ---
 
-### A7 · 确认 spec 的四处更正真的写进去了
+### A7 · 确认 spec 的更正都真的写进去了
 
-**动作**
+> ⚠️ 路径是 `../docs/`（**两个点**）。本清单初稿写成了 `../../../docs/`，
+> 那会退到仓库外面去，跑出来是 `No such file` —— 已实测并修正。
+>
+> ⚠️ 判据**不写死条数**：写死的计数本身就是腐烂源，以后每加一条更正都得回来改它。
+> 下面两条命令**互相印证**，所以不用记住今天是几条。
+
+**动作**（两行，逐行执行）
 
 ```
-git log --oneline -1 -- ../../../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
+grep -o 'S2-F[0-9]\+' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md | sort -u -V
 ```
 
 ```
-grep -c 'S2-F1\|S2-F2\|S2-F3\|S2-F4' ../../../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
+grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
 ```
 
-**期望**：第一条显示一次 `docs(4b): S2 实施前核实` 的提交；第二条输出的数字 ≥ 10。
+**期望**：第一条输出一串**从 `S2-F1` 开始、连号不跳**的编号（今天到 `S2-F11`，以后还会更多）；
+第二条输出的数字**等于第一条的行数**。
 
-**通过判定**：两条都满足 → 通过。
+**通过判定**：编号连号不跳、且两条数字相等 → 通过。任一不满足 → 不通过。
+
+> ⚠️ 注意 `S2-F[0-9]\+` 的 `\+`：S2a 版写的是 `S2-F[0-9]`（只匹配一位数），
+> 到 `S2-F10` 就会把它截成 `S2-F1`、造成「看起来连号其实少了一条」的假绿。
 
 ---
 
