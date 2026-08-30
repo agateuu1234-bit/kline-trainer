@@ -50,7 +50,7 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 
 ## 实施轮偏离登记（2026-08-30，实施者核实后逐条订正）
 
-> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**十二处偏离全部朝
+> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**十四处偏离全部朝
 > 「坏状态不可表达」方向，每条各配专属档并由控制者亲手做过变异验证。
 > 与本文件代码块 diff 不上的地方，以**仓库代码 + 本表**为准。
 
@@ -69,6 +69,9 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D10 | Task 15 Step 0 的耐久提交 | `full_sync` 只施加在**临时文件**上，`os.replace` 之后仍只有普通 `fsync(目录)` → 断电可能丢掉那次改名，manifest 停在旧版本而按股 CSV 已是新状态（codex R1 [high]）| `full_sync=True` 时改名后改走 `full_fsync`。依据是**本机 `man 2 fcntl` 原文**：`F_FULLFSYNC`「arg is ignored」「drains the entire queue of the device and acts as a barrier」「implemented on … APFS」⇒ 它是**设备级**屏障，与 fd 指向文件还是目录无关，不是「对目录 fd 的外推」|
 | D11 | Task 15 `lifecycle_snapshot` | 只拷顶层映射，`fetch_fatal_error` 仍是**同一个可变 dict**；取完快照再改它照样写进磁盘，Task 16 的核心不变量当场作废（codex R1 [high]，本机端到端复现整条洗白链）| 改深拷贝；同族一并修：决策表保留 fatal 时也不再递出输入那个对象 |
 | D12 | Task 17 `FinalOutcome` | `revisited_fatal_path` 从未校验类型（`"false"` 是真值 → 无凭无据清 fatal）；`escape` 是可变 dict 塞进 frozen dataclass（构造完再改就绕过校验）；`kind` 与 `escape` 的配对从未校验（只剩决策表里一句 `assert`，`-O` 下会被剥掉）（codex R1 [high]）| 全部不变量移进 `__post_init__`（**守卫立在工厂而对象能绕过工厂构造 = 守卫不存在**），`escape` 冻成 `MappingProxyType`，`escape_stop` 退化为便利入口 |
+
+| D13 | Task 15/16/18 的落盘路径 | `_write_manifest` **不校验就落盘** → 提交入口能写出一份自己读不回来的账本，一次 per-stock 提交就能把几百只股的 staging 变成砖头，而调用返回成功（codex R2 [high]，已登记为 spec **S2-F13**）| 落盘前先跑 `validate_manifest`，**且必须排在 `atomic_write_json` 之前**（排在之后好账本已被 replace 换掉）|
+| D14 | Task 17 / 读侧生命周期 | `stopped_reason` 与 `fetch_fatal_error` 之间**没有取值级配对判据** → `reason=staging_path_escape` 配 `kind=source_path_escape` 被放行，而决策表只看 `kind` ⇒ 绕过 P2-F3 的 staging 全量复校清掉 fatal（codex R2 [high]，已登记为 spec **S2-F12**）；按判据穷尽又挖出同族两条 | 抽出 `_require_escape_pairing`，读侧与决策表共用；三条判据分别配专属档，方向②由 `staging_recheck_failed` 的正向档承担 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1487,13 +1490,21 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
 | 轮 | 判决 | 内容 |
 |---|---|---|
 | **R1** | needs-attention（3 high）| 三条**同一形态**：结构性保证被「可变的嵌套状态」与「没被校验的字段」绕过。①`lifecycle_snapshot` 浅拷贝 → 取完快照改嵌套 `fetch_fatal_error` 照样落盘，且 `kind` 被改成 `source_path_escape` 后只需前提①即可清除 → 完整洗白链；②`revisited_fatal_path` 未校验类型（`"false"` 是真值）+ `escape` 可变 + `kind↔escape` 配对未校验；③`os.replace` 之后只有普通 `fsync(目录)`，断电可丢改名。**三条均本机端到端复现后才修**，修完再复现证明已堵，各配专属档 + 7 条变异全部命中 |
+| **R2** | needs-attention（2 high）| ①**读侧接受了写侧根本产不出的生命周期组合** —— `reason=staging_path_escape` 配 `kind=source_path_escape` 被放行，而决策表只看 `kind` ⇒ 绕过 P2-F3 无条件要求的 staging 全量复校、直接清掉粘性 fatal（改 6 个字符即可，而「有人动过 staging」正是威胁模型）。按判据穷尽又挖出同族两条评审没报的。②**提交入口能写出自己读不回来的账本** —— `_write_manifest` 不校验就落盘，一次 per-stock 提交能把几百只股的 staging 变成砖头而调用返回成功。**两条均本机端到端复现后才修**，6 条变异全部命中；连带订正三条既有测试的判别力（含 984 探测的 base 自身变非法会掩盖整条扫描）|
 
-> ⚠️ **R1 三条的共同根因值得记住**：我校验了「想到的那几个字段」（`kind` /
+> ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；
 > 我拷贝了「顶层的三个键」，漏了它们**里面**那一层。
 > 这正是 [[feedback_read_side_predicate_both_directions]] 那条
 > 「按**字段**穷尽而不是按**判据句**穷尽」——只是这次对象从「读侧校验的字段」
 > 换成了「构造期校验的字段」与「拷贝边界」。
+
+> ⚠️⚠️ **R2 与 R1 是同一根因的两个层级**：R1 是「**对象内部**的字段与拷贝深度
+> 没穷尽」，R2 是「**字段之间的取值组合**没穷尽」。判据要升级成三问：
+> ①每个字段都校验了吗？
+> ②字段**之间**的组合——写侧能产出哪些、读侧收了哪些？（读侧多收的那些，
+>   就是「畸形被放行·安静」那一半）
+> ③写出去的东西，自己**读得回来**吗，而且是在**写之前**就知道？
 
 ---
 
