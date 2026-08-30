@@ -644,3 +644,44 @@ R7 确系坚持同一点 ⇒ 依该授权 override。
 而不是只改我当时正在看的那一段。** R6 时我改了 D1 正文与 R1 记录，
 却漏掉了①对照表里同义的 ✅ 与②计划里预写的提交信息 —— 两处都在复述那句已被推翻的话。
 （`feedback_fix_the_whole_predicate_family_not_the_reported_site`）
+
+---
+
+### R8 · codex `adversarial-review` · 2026-08-30 · HEAD `551100c`（**已含实施代码**）→ **needs-attention**（1 条 high）→ **user override 收口**
+
+**本轮是实施后的整支评审 —— 对实施本身零新发现。**
+唯一的 finding 指向 `.github/workflows/hardening_6_gate.yml:16-18`（即 `on:` 块本身），
+内容与 R6 / R7 **完全相同**：非 main base 上发布必需 context `acceptance`，
+使 retarget 前的成功结果可在约 3 秒窗口内满足闸门。
+
+**这是同一条分歧的第三次重述**（R6 → R7 → R8），无新论据、无新证据。
+
+**收口方式：user override**（依据同 R7 —— 使用者 2026-08-30 的明确裁决：
+「维持现方案，跑 R7 收口；若 codex 仍坚持同一点则按 override 收口」）。
+
+> **override 的确切含义（与 R7 相同，重申以免含糊）**：
+> 本条 [high] **未被修复**；R9 描述的 3 秒竞态窗口**依然存在**。
+> **本线自 R2 之后再无 codex 真 approve**，账本**无 R3–R8 任何条目**。
+> PR 正文已写明本条 override 及其全部理由与量化数据。
+
+**轮次统计（截至收口）**：R1 needs-attention → R2 **approve**（spec 阶段）→
+R3 / R4 / R5 needs-attention（**均成立且已修**）→ R6 / R7 / R8 needs-attention
+（**同一条设计分歧的三次重述，user override**）。
+
+> 依据 `feedback_codex_round6_self_contradiction`：轮次达 6+ 且开始复述已接受的
+> residual 时应停止循环并上报使用者 —— 已于 R6 后照做，R7 / R8 为授权范围内的确认轮。
+
+---
+
+## 12. 收口状态（本 spec 的最终结论）
+
+| 项 | 状态 |
+|---|---|
+| 死锁根因 | 已定位为**两条件合取**（`branches` 过滤器 + 默认活动类型不含 `edited`），两条均已拆除 |
+| 实施 | 已完成，仅改 `.github/workflows/hardening_6_gate.yml`：删 2 行 + 加 1 行 `types:` + 加 8 行英文注释 |
+| 机械验证 | 九条断言在**五个时点**全部实测通过；diff 恰好 2 减 9 加；actionlint 零输出且经变异验证有真判别力 |
+| 回滚 | 已实测：只 revert 后一个提交**不够**；逆序 revert 两个可**逐字节**回到基线 |
+| **叠罗汉路径本身** | ⚠️ **未实证 · 待下一个叠罗汉 PR 验证**（本 PR 自己 base=main，物理上验不了） |
+| **残留风险 R9（3 秒竞态窗口）** | ⚠️ **未修复 · 已量化 · user 明示接受** |
+| codex 评审 | spec 阶段 R2 真 approve；**实施阶段无 approve，以 user override 收口** |
+
