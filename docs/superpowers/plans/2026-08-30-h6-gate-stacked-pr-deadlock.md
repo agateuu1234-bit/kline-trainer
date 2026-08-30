@@ -80,7 +80,7 @@ chk G5rc "$RC" 0
 chk G5out "$(printf '%s' "$OUT" | wc -c | tr -d ' ')" 0
 [ "$RC" != "0" ] && echo "---- actionlint 输出 ----" && echo "$OUT"
 
-DEL=$(git diff --numstat main...HEAD -- "$F" | awk '{print $2}')
+DEL=$(git diff --numstat "$(git merge-base main HEAD)" -- "$F" | awk '{print $2}')
 chk G7 "${DEL:-无改动}" 2
 SCRIPT
 chmod +x /tmp/h6plan/assert.sh
@@ -97,7 +97,37 @@ chmod +x /tmp/h6plan/assert.sh
 | G5 | actionlint 退出码 0 **且**输出零字节 | YAML 与 workflow schema 合法（已实测：塞入非法活动类型会退出 1 并精确报错，此闸门有真判别力） |
 | G6 | 注释里含**精确整句** `DO NOT drop either line` | D3 要求：防止后人把 `types` 当成多余样板删掉。用整句而非计数，措辞微调不会误伤 |
 | G8 | 注释行里提到 `edited` 的**至少 1 行** | `edited` 的存在理由被写进了注释（实测终态为 3 行，故用「≥1」而非等值，避免脆） |
-| G7 | 该文件相对**共同祖先**的删除行数恰好 2（`main...HEAD` 三点式） | 只删了预期的两行，没顺手删别的（实测 numstat = `9	2`：新增 9、删除 2）。**必须用三点** —— 两点式 `main..HEAD` 比的是两个分支顶端，`main` 一旦前进就会把 main 独有的改动一起算进来 |
+| G7 | 该文件相对**共同祖先**的删除行数恰好 2 | 只删了预期的两行，没顺手删别的（实测 numstat = `9	2`：新增 9、删除 2）。<br>**写法有两处讲究，缺一不可**：<br>① 基准必须是**共同祖先**（`git merge-base main HEAD`），不能用两点式 `main..HEAD` —— 后者比的是两个分支顶端，`main` 一旦前进就会把 main 独有的改动一起算进来（实测两点式返回 26 路径、三点式返回 2）；<br>② 比较对象必须是**工作区**（`git diff <祖先> -- 文件`，不写第二个提交），不能用 `main...HEAD` —— 后者只看**已提交**内容，而本计划每个 Task 都是「改完先跑断言、再提交」，用它会在改完还没提交时读到旧值（实测：工作区删了一行时，`main...HEAD` 返回空，`git diff $(git merge-base main HEAD)` 返回 `0	1`） |
+
+---
+
+## 全流程 dry-run 证据（codex R4 要求，已完成）
+
+本计划的**完整两步序列已在一个一次性 worktree 里端到端跑过**（跑完即销毁，真分支零污染）。
+下表每一格都是**真实输出**，不是推演：
+
+| 阶段 | 对应计划位置 | G1 | G2 | G3 | G4 | G6 | G8 | G5rc | G5out | G7 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ① 基线 | Task1 Step1 | ✗1 | ✗0 | ✗1 | ✓ | ✗0 | ✗0 | ✓ | ✓ | ✗无改动 |
+| ② Task1 改完·**未提交** | Task1 Step4 | ✓ | ✓ | ✗1 | ✓ | ✓ | ✓3 | ✓ | ✓ | ✗**1** |
+| ③ Task1 已提交 | Task2 Step1 | ✓ | ✓ | ✗1 | ✓ | ✓ | ✓3 | ✓ | ✓ | ✗1 |
+| ④ Task2 改完·**未提交** | Task2 Step3 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓3 | ✓ | ✓ | ✓**2** |
+| ⑤ 全部提交后 | Task3 Step3 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓3 | ✓ | ✓ | ✓2 |
+
+**④ 与 ⑤ 均为九条全绿** —— 即计划要求的终态可达。
+
+**②→④ 的 G7 是本次 dry-run 的关键**：它证明修好后的 G7 写法能看见**尚未提交**的改动。
+修之前用的是 `git diff --numstat main...HEAD`，在 ② 与 ④ 都只看得到已提交内容，
+④ 会读到 1 而非 2，**九条全绿永远不可达**（codex R4 的 [medium]，成立）。
+
+其余同批实测：
+
+| 项 | 实测结果 |
+|---|---|
+| Task2 Step4 的人眼 diff | 减号行**恰好 2**（`branches: [main]`、`git fetch ... --depth=50`），加号行**恰好 9**（1 行 `types:` + 8 行注释） |
+| Task3 Step1 `git status --short` | 零输出 |
+| Task3 Step1 提交数 | 基数 5 → 实施后 **7**，正好 +2 |
+| Task3 Step2 `git diff --name-only main...HEAD` | 恰好 3 行：workflow + spec + 本计划 |
 
 ---
 
@@ -347,8 +377,12 @@ PASS G7  (实际=2)
 - [ ] **Step 4: 人眼复核完整 diff**
 
 ```bash
-git diff main..HEAD -- .github/workflows/hardening_6_gate.yml
+git diff "$(git merge-base main HEAD)" -- .github/workflows/hardening_6_gate.yml
 ```
+
+> ⚠️ **这里也必须用「共同祖先 vs 工作区」的写法。** 此刻 Task 2 的改动还没提交，
+> 若写成 `git diff main..HEAD` 或 `main...HEAD`，你看到的是**上一次提交的旧内容**，
+> 会漏掉你刚删的那一行 —— 等于人眼复核了个寂寞。
 
 **逐条核对**（这是机械断言够不着的部分）：
 

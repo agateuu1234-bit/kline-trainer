@@ -447,3 +447,33 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 
 **本轮的方法论教训**：`main` 会在长流程中前进。**任何「本分支改了什么」的判据都必须相对共同祖先（三点式）**，
 否则闸门会在某天 `main` 一动就静默失真 —— 而且失真方向是**变松还是变紧取决于 main 改了什么**，无法预测。
+
+---
+
+### R4 · codex `adversarial-review` · 2026-08-30 · HEAD `6485007` → **needs-attention**（1 条 medium）
+
+**Finding [medium]**：计划的 G7 用 `git diff --numstat main...HEAD`，
+它比的是「共同祖先 vs **已提交的** HEAD」，**看不见工作区里尚未提交的改动**；
+而两个 Task 都是「改完 → 立刻跑断言 → 才提交」，
+故 Task 2 Step 3 永远只能读到 1，**计划要求的九条全绿不可达**。
+
+**判定：成立，且是阻塞级的。** 处置：
+
+1. G7 改为 `git diff --numstat "$(git merge-base main HEAD)" -- "$F"`
+   —— 基准仍是共同祖先，但比较对象变成**工作区**。
+   实证：工作区删掉一行时，`main...HEAD` 返回空，新写法返回 `0	1`。
+2. **顺着同一条判据把整族查了一遍**，发现 codex 未点名的第二处同病：
+   Task 2 Step 4 给人眼复核的 `git diff main..HEAD -- <file>` 同样只看已提交内容，
+   在该时点会漏掉刚删的那一行 —— 已一并改为共同祖先对工作区的写法。
+   （遵循 `feedback_fix_the_whole_predicate_family_not_the_reported_site`：
+   修判据要按「判据本身」穷尽，而不是只修被点名的那一处。）
+3. 按 codex 的第二条 next-step，**完成了全流程端到端 dry-run**（一次性 worktree，跑完销毁）：
+   五个阶段的九条断言输出全部与计划文档逐字符吻合，
+   Task2 Step3 与 Task3 Step3 **均为九条全绿**，diff 恰好 2 减 9 加。
+   证据表已写入计划正文的「全流程 dry-run 证据」一节。
+
+**本轮的方法论教训**：**「计划里嵌的检查命令」本身也必须被 dry-run。**
+本计划的断言脚本此前只在**单一时点**（未改动的基线）验过，
+而它要在**五个不同时点**被调用 —— 只验一个时点，等于只走了路的一半
+（`feedback_spec_all_paths_must_reach_the_chokepoint`）。
+正确做法是把每个调用时点都真跑一遍，这次照做后立刻发现终态不可达。
