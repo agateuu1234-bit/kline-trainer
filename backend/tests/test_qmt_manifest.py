@@ -1050,8 +1050,16 @@ def test_escape_reasons_pass_with_a_well_formed_fatal_error(reason):
     """正向放行档：带上合规的四字段就必须通过。
 
     没有这一条，一个「凡带 stopped_reason 就拒」的实现也能让上一条绿。
+
+    ⚠️ 2026-08-30 订正：原本三档都固定用 `_fatal()`（kind 恒为
+    `staging_path_escape`），于是 `source_path_escape` 那一档其实是一份
+    **reason 与 kind 不配对**的 manifest —— 它当时能过，正说明读侧漏了
+    那条配对判据（codex R2 [high]）。现在 escape 两档各自带同名 kind；
+    `staging_recheck_failed` 仍固定用默认 kind，因为它正是 spec 明写的
+    **唯一**一种合法解耦（O4-F3），这一档同时充当那条解耦的正向放行档。
     """
-    m = _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal())
+    kind = reason if reason in FATAL_KINDS else "staging_path_escape"
+    m = _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal(kind=kind))
     assert validate_manifest(m) == m
 
 
@@ -1068,12 +1076,18 @@ def test_fetch_fatal_error_needs_exactly_four_fields():
 
 
 def test_fatal_kind_must_be_in_the_kind_enum():
+    """⚠️ 2026-08-30 订正 stopped_reason：原本用 `staging_path_escape`，
+    而新增的「escape 类 reason 必须等于 kind」配对判据会**抢先**把这些坏 kind
+    接住 → 本档对 kind 枚举本身**零判别力**（机械 sweep 实测：把枚举判据变空后
+    本档仍绿）。改用 `staging_recheck_failed` —— 那是配对判据**够不着**的
+    唯一一种合法 reason（O4-F3 的解耦档），于是只剩枚举判据能拒它。
+    """
     for bad in ("staging_recheck_failed", "max_bytes", "whatever", ""):
         f = _fatal()
         f["kind"] = bad
         with pytest.raises(ManifestInvalidError):
             validate_manifest(_valid_manifest(
-                stopped_reason="staging_path_escape", fetch_fatal_error=f))
+                stopped_reason="staging_recheck_failed", fetch_fatal_error=f))
 
 
 def test_fatal_errno_must_be_eloop_or_enotdir():
@@ -1601,8 +1615,10 @@ def test_no_field_of_any_json_type_can_escape_as_a_raw_exception():
     """
     bases = [
         _valid_manifest(),
+        # ⚠️ kind 必须与 reason 相等，否则这个 base 自身即非法，
+        # 新增的配对判据会**掩盖整条扫描**（上游判据掩盖下游档的老形态）。
         _valid_manifest(stopped_reason="source_path_escape",
-                        fetch_fatal_error=_fatal()),
+                        fetch_fatal_error=_fatal(kind="source_path_escape")),
     ]
     for base in bases:
         _recompute_evidence(base)
@@ -2560,3 +2576,143 @@ def test_final_outcome_validates_escape_evidence_on_direct_construction():
     with pytest.raises(ValueError):
         FinalOutcome(kind="escape", escape=dict(ok, extra=1))     # 多余字段
     assert FinalOutcome(kind="escape", escape=ok).escape["kind"] == "staging_path_escape"
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R2 的两条 high（本机复现后修复），外加按判据穷尽挖出的同族两条
+#
+# 家族 A：**读侧接受了写侧根本产不出的生命周期组合**（S2-F7 那个方向：
+#         畸形被放行 · 安静）。修法是把「写侧能产出哪些组合」列全，
+#         读侧照单收口。
+# 家族 B：**提交入口能写出一份自己读不回来的账本**（R94-F2/O4-F13/S2-F3/
+#         S2-F4/S2-F5 那个家族的第六次，只是这次跨的是「写入口与读入口」）。
+#         修法是落盘前先过一遍读侧校验——让坏状态不可表达，而不是靠调用方小心。
+# ═════════════════════════════════════════════════════════════
+
+
+def _pair(reason, kind):
+    return _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal(kind=kind))
+
+
+def test_reader_rejects_an_escape_reason_that_disagrees_with_the_fatal_kind():
+    """⭐⭐ [R2 high #1] `stopped_reason="staging_path_escape"` 配
+    `fetch_fatal_error.kind="source_path_escape"` 此前**被放行**。
+
+    后果（本机复现）：决策表只看 `kind`，于是这份账本走
+    `clean_finish(revisited_fatal_path=True, staging_recheck=None)` 时
+    **绕过了 staging 全量复校**（那是 P2-F3 无条件要求的）直接 `return {}`，
+    把粘性的 fatal 证据删掉 —— 一棵被证明动过的树拿到干净标签。
+    改一个字段的 6 个字符就能做到，而「有人动过 staging」正是本模块的威胁模型。
+
+    判别力：删掉这条配对判据，本条必红。
+    """
+    for reason, kind in [("staging_path_escape", "source_path_escape"),
+                         ("source_path_escape", "staging_path_escape")]:
+        with pytest.raises(ManifestInvalidError, match="fetch_fatal_error.kind"):
+            validate_manifest(_pair(reason, kind))
+
+
+def test_reader_still_accepts_the_one_legitimately_decoupled_pair():
+    """⭐ 方向②（合法状态不得被判死）：`staging_recheck_failed` 是 spec 明写的
+    **唯一**一种 `kind` 与 `stopped_reason` 解耦的状态（O4-F3）——
+    「保留 fatal + 换 stopped_reason」在「kind 恒等于 reason」下结构上不可表达。
+
+    两种 kind 都必须放行：复校失败这件事与「上次为什么出事」无关。
+    """
+    for kind in ("staging_path_escape", "source_path_escape"):
+        m = _pair("staging_recheck_failed", kind)
+        assert validate_manifest(m) is m
+
+
+def test_reader_rejects_a_fatal_paired_with_a_reason_that_does_not_require_it():
+    """⭐ 同族（按判据穷尽挖出，非评审报告的那一处）：
+    读侧只查了「reason 要求 fatal ⇒ fatal 在」，**反向没查**——
+    于是 `(stopped_reason="max_bytes", fetch_fatal_error=…)` 被放行，
+    而决策表任何一支都产不出它。
+
+    方向②：写侧带 fatal 时，reason 只可能是那三个之一
+    （分支①写 escape 值、复校失败那支写 staging_recheck_failed、
+    其余分支原样保留上一次的），故不误杀。
+
+    判别力：删掉这条，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="stopped_reason"):
+        validate_manifest(_valid_manifest(stopped_reason="max_bytes",
+                                          fetch_fatal_error=_fatal()))
+
+
+def test_reader_rejects_a_secondary_without_a_fatal():
+    """⭐ 同族第三条：`stopped_reason_secondary` 只在「上次有 fatal + 本次容量
+    触顶」那一支产生（O4-F1），没有 fatal 时它是无源之水。
+
+    判别力：删掉这条，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="stopped_reason_secondary"):
+        validate_manifest(_valid_manifest(stopped_reason_secondary="max_bytes"))
+
+
+def test_resolve_refuses_a_mismatched_escape_pair():
+    """⭐ [R2 high #1 的纵深] 决策表是**公开的纯函数**，可以不经 read_manifest
+    直接调用。读侧堵上之后它仍要自己 fail closed，而不是「把不匹配的当成
+    source escape 处理」——那正是被利用的那条路径。
+
+    判别力：删掉决策表里那句配对检查，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="fetch_fatal_error.kind"):
+        resolve_final_lifecycle(_pair("staging_path_escape", "source_path_escape"),
+                                clean_finish(revisited_fatal_path=True))
+
+
+def test_commit_stock_refuses_to_publish_a_manifest_its_own_reader_would_reject(tmp_path):
+    """⭐⭐ [R2 high #2] 提交入口此前**不校验**就落盘。
+
+    本机复现：`commit_stock(..., lifecycle={"stopped_reason": "source_path_escape"})`
+    过了键白名单、写入**报告成功**，而下一次 `read_manifest` 判它非法
+    （那个 reason 必须带 fetch_fatal_error）→ **整棵 staging 读不回来**，
+    而干成这件事的那次调用返回的是成功。一次 per-stock 提交就能把
+    已经拉了几百只股的 staging 变成砖头。
+
+    判别力：把 `_write_manifest` 里的 `validate_manifest` 删掉，本条必红。
+    """
+    _d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, _valid_manifest(),
+                         lifecycle={"stopped_reason": "source_path_escape"})
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_refuses_to_publish_a_manifest_its_own_reader_would_reject(tmp_path):
+    """同上，另一个入口。决策表的输出恒合法（已有配对钉），故这里用一份
+    本身就残缺的入参 manifest —— S3/S4 组装到一半就调提交是完全可能的。
+    """
+    broken = _valid_manifest()
+    del broken["seed"]
+    _d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ManifestInvalidError, match="seed"):
+            commit_final(fd, broken, outcome=clean_finish())
+    finally:
+        os.close(fd)
+
+
+def test_a_refused_commit_leaves_the_previous_manifest_byte_identical(tmp_path):
+    """⭐⭐ 「拒绝」必须是**一个字节都不写**，而不是「写坏了再报错」。
+
+    校验必须排在 `atomic_write_json` **之前**：排在之后的话，上一份好账本
+    已经被 `os.replace` 换掉了，报不报错都救不回来。
+
+    判别力：把 `validate_manifest` 挪到 `atomic_write_json` 之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), lifecycle={})
+        before = (d / MANIFEST_NAME).read_bytes()
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, _valid_manifest(),
+                         lifecycle={"stopped_reason": "source_path_escape"})
+        assert (d / MANIFEST_NAME).read_bytes() == before
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]   # 无临时残留
+    finally:
+        os.close(fd)

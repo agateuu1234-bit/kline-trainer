@@ -454,6 +454,39 @@ def _validate_staged_export_log(sel: object, export_log_sha256: str) -> None:
              "——同一份字节的两处记录对不上，这份 manifest 自相矛盾")
 
 
+def _require_escape_pairing(reason: object, fatal: object) -> None:
+    """`stopped_reason` 与 `fetch_fatal_error` 的**取值级**配对（形状另有判据）。
+
+    ⚠️ **读侧此前只查了单向**（「reason 要求 fatal ⇒ fatal 在」），于是接受了一批
+    **写侧根本产不出**的组合（codex R2 [high] + 控制者按判据穷尽挖出的同族两条）。
+    最危险的一条：`stopped_reason="staging_path_escape"` 配
+    `fetch_fatal_error.kind="source_path_escape"` —— 决策表只看 `kind`，
+    于是这份账本绕过 P2-F3 **无条件要求**的 staging 全量复校直接清掉 fatal，
+    **一棵被证明动过的树拿到干净标签**。改一个字段的 6 个字符即可，
+    而「有人动过 staging」正是本模块的威胁模型。
+
+    **写侧带 fatal 时只可能产出三种 reason**：分支①写 escape 值（此时 reason
+    恒等于 kind）、复校失败那支写 `staging_recheck_failed`、其余分支原样保留
+    上一次的。故下面两条判据在方向②（合法状态会不会被判死）上不误杀。
+
+    **`staging_recheck_failed` 是 spec 明写的唯一一种解耦状态**（O4-F3）：
+    「保留 fatal + 换 stopped_reason」在「kind 恒等于 reason」下结构上不可表达。
+    """
+    if fatal is None:
+        return
+    _require(reason in REASONS_REQUIRING_FATAL,
+             f"有 fetch_fatal_error 时 stopped_reason 只能是 "
+             f"{sorted(REASONS_REQUIRING_FATAL)} 之一，读到 {reason!r}"
+             "——写侧任何一支都产不出这种组合")
+    if reason in FATAL_KINDS:
+        kind = fatal.get("kind") if isinstance(fatal, dict) else None
+        _require(kind == reason,
+                 f"stopped_reason = {reason!r} 与 fetch_fatal_error.kind = "
+                 f"{kind!r} 不一致。escape 类的 stopped_reason 必须与 kind 相等"
+                 "（唯一允许解耦的是 staging_recheck_failed，O4-F3）"
+                 "——否则一份被改过 kind 的账本能绕过 staging 全量复校清掉 fatal")
+
+
 def _validate_lifecycle(payload: dict) -> None:
     """`stopped_reason` / `fetch_fatal_error` / `stopped_reason_secondary` 的形状与配对。
 
@@ -518,6 +551,8 @@ def _validate_lifecycle(payload: dict) -> None:
                  "fetch_fatal_error——它才是那个粘性的信任状态，"
                  "stopped_reason 会被后续运行的 max_bytes 洗掉")
 
+    _require_escape_pairing(reason, fatal)
+
     # 同理：显式 null 与键缺失是两回事，判据用键是否存在。
     secondary = payload.get("stopped_reason_secondary")
     if "stopped_reason_secondary" in payload:
@@ -525,6 +560,11 @@ def _validate_lifecycle(payload: dict) -> None:
                  "stopped_reason_secondary 只允许 'max_bytes'（纯人读附注："
                  "Run1 撞 escape、Run2 触顶时，escape 的 stopped_reason "
                  f"不得被覆盖），读到 {secondary!r}")
+        # 它只在「上次有 fatal + 本次容量触顶」那一支产生（O4-F1），
+        # 没有 fatal 时是无源之水——同样是写侧产不出的组合。
+        _require(fatal is not None,
+                 "有 stopped_reason_secondary 却没有 fetch_fatal_error："
+                 "这个附注只在「上次留着 fatal、本次又撞容量上限」时产生")
 
 
 def _validate_verification_inputs(payload: dict) -> str:
@@ -793,7 +833,21 @@ def _write_manifest(stg_fd: int, payload: dict) -> None:
 
     ⚠️ **绝不就地截断重写**——「原子」（`os.replace` 不会看到半截）与「耐久」
     （崩溃后仍在）是两件事，两者都要（R45-F2）。
+
+    ⚠️⚠️ **落盘前先过一遍读侧校验，且必须排在任何写入之前**（codex R2 [high]）：
+    否则一次提交就能写出一份**自己读不回来**的账本——本机复现过
+    `commit_stock(..., lifecycle={"stopped_reason": "source_path_escape"})`：
+    它过了键白名单、写入**报告成功**，而下一次 `read_manifest` 判它非法
+    → **整棵 staging 读不回来**，而干成这件事的那次调用返回的是成功。
+    一次 per-stock 提交就能把已经拉了几百只股的 staging 变成砖头。
+
+    这是「写侧形状与读侧要求必须逐字相同」那个家族（R94-F2 / O4-F13 /
+    S2-F3 / S2-F4 / S2-F5）的第六次，只是这次跨的是**写入口与读入口**。
+    修法不是「调用方小心点」，而是让坏状态**不可表达**：写不出去。
+    校验排在 `atomic_write_json` **之前**是判据的一部分——排在之后的话，
+    上一份好账本已经被 `os.replace` 换掉了，报不报错都救不回来。
     """
+    validate_manifest(payload)          # ← 必须在任何写入之前
     atomic_write_json(stg_fd, MANIFEST_NAME, payload, full_sync=True)
 
 
@@ -997,6 +1051,10 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
             "输入 manifest 有 fetch_fatal_error 却没有 stopped_reason——"
             "读侧明令这是非法配对，决策表拒绝在它之上产出新状态"
         )
+    # 纵深防御：本函数是**公开的纯函数**，可以不经 read_manifest 直接调用。
+    # 读侧堵上之后它仍要自己 fail closed，而不是「把不匹配的当成 source escape
+    # 处理」——那正是 codex R2 [high] 被利用的那条路径。
+    _require_escape_pairing(prev_reason, prev_fatal)
 
     # ① 本次撞了 escape → 覆盖为本次的（secondary 清掉）
     if outcome.kind == "escape":
