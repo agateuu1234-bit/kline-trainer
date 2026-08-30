@@ -278,11 +278,13 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ```
 一行 = 一个工具，本构建懂它的哪些【样式语义】：
-    lineSubTypeEnabled : (LineSubType) -> Bool             // 哪些线型子类可用
-    labelModeEnabled   : (LabelMode, LineSubType) -> Bool   // 哪些标注可用
+    renderableLineSubType : (LineSubType) -> Bool             // 【有效性】这个值会不会让线画不出来 ⇒ 该不该拒收
+    labelModeEnabled      : (LabelMode, LineSubType) -> Bool   // 【归一化】不可用的标注回落 .hidden
 
 今天表里只有一行：.horizontal → (横线子类规则, 横线标注规则)
 ```
+
+**⛔ 第一列的命名是 load-bearing 的，见紧随其后的 D120 —— 它是「有效性」，不是「UI 灰态」。**
 
 改法：
 
@@ -312,6 +314,41 @@ if !effectiveLossy.unknownRaw.isEmpty
 **决定**：本片**完全不碰** `DefaultDrawingInputController` 与 `minAnchors`。锚数留在原地，由第 4 片按上游既定方案改成读 `DrawingTool.requiredAnchors`（经工具注册表），一次性消灭重复。
 
 **⛔ 不得援引本条把锚数重复当成「可接受」** —— 它是**已登记的待消除重复**（§8-Q12），只是不归本片。
+
+### D120　线型子类那一列**只表达「有效性」，绝不是 UI 灰态判据**（codex R3-high）
+
+**codex R3-high 指出的缺陷，逐条核实为真**：一个布尔装不下两种含义。
+
+| 实测事实 | 出处 |
+|---|---|
+| 母 spec §3.1 的**箱体**行 = `灰 / 灰 / 灰`（三个线型全灰）；**折线**行同样 `灰 / 灰 / 灰` | `2026-07-04-drawing-tools-expansion-design.md:100 / :106` |
+| `DrawingObject.lineSubType` **非可选**，每条线都必带一个值（默认 `.straight`） | `Models/Models.swift:249 / :269` |
+| `isRenderableSubType(_:toolType:)` 今天的消费方**全是写入闸、零个 UI**：落线 ×2（`guard … else { return false }`）、`withStyle`（`else { return nil }`）、`sanitized`（不可渲染则回落 `.straight`） | `TrainingEngine.swift:1157 / :1265 / :1299-1300`、`DrawingObjectStyleEdit.swift:17`、`DrawingEnums.swift:58` |
+| 面板的灰态判据**是另一条路** —— 直接调横线专用函数，不经这个共享单点 | `UI/DrawingStyleParams.swift:39` |
+
+⇒ 若把这一列同时当作 UI 灰态判据，箱体落地时只能二选一地坏掉：
+
+- 箱体那行写成**三个全 false** → 它自带的 `.straight` 过不了 `TrainingEngine.swift:1157` 那道 `guard` → **箱体根本画不出来**（静默落线失败）；
+- 写成 `.straight` 为 true 好让写入通过 → 面板会把「直线」显示成**可点** → 违反母 spec §3.1 的「整块灰」。
+
+**⚠️ 今天看不出这个矛盾**，因为水平线的两件事**恰好重合**（`.segment` 既确实画不出、也确实该灰）。**只有「整块灰、但数据仍须能存」的工具才会暴露它** —— 箱体（第 5 片）与折线（第 6 片）正是。
+
+**决定**：本表的线型子类列**语义严格限定为「有效性」** —— 回答的是「**这个值会不会让线画不出来、该不该拒收这条数据**」，命名与文档都必须体现（如 `renderableLineSubType`）。
+**⛔ 任何人不得把这一列接到样式面板的灰态上。** UI 灰态是**另一个维度**，今天独立存在于面板内（`DrawingStyleParams.swift:39`），由第 4 片正式建立（§8-Q14）。
+
+**可表达性演算（证明这个形状真装得下未来四个工具，不是嘴上说说）**：
+
+| 工具 | 有效性列（会不会拒收） | UI 灰态（另一维，第 4 片起） | 母 spec §3.1 |
+|---|---|---|---|
+| 水平线（今天唯一一行） | 直✅ 射✅ 段❌ | 直✅ 射✅ **段灰** | **两者重合** ⇒ 今天看不出问题 |
+| 趋势线（第 4 片） | 直✅ 射✅ 段✅ | 直✅ 射✅ 段✅ | 重合 |
+| 通道线（第 5 片） | 直✅ 射✅ 段✅ | 同上 | 重合 |
+| **箱体**（第 5 片） | **全 ✅** —— 该工具**忽略**这个字段，**不得据此拒收数据** | **全灰** | **必须分离** |
+| **折线**（第 6 片） | **全 ✅**（同上） | **全灰** | **必须分离** |
+
+**⚠️ 标注那一列没有这个毛病，⛔ 不要「顺手一起改」**：它喂的是 `normalizedLabelMode` —— 一个**归一化**函数（不可用就回落 `.hidden`），**不是拒收**。箱体/折线的标注整块灰 ⇒ 归一到 `.hidden` 即可，数据一条都不会被拒。**两列的机制不同，故只有线型那一列需要区分「有效性 / 灰态」。**
+
+---
 
 ### D118　给 `DrawingToolType` 加 `CaseIterable`（纯加法，为了让 T1 的穷举是**真**断言）
 
@@ -414,6 +451,17 @@ if !effectiveLossy.unknownRaw.isEmpty
 - 扫描必须**剥注释、剥字符串字面量**（复用既有的 `squeezedText` / `squeeze` 共享扫描器，`DrawingObjectStyleEditTests.swift:187-196`）；
 - 必须配**反向自检**：锚点失效（比如文件被改名、调用形状被改写）时守卫要**报错**，不能静默变成「零命中 ⇒ 通过」。
 
+### T2b　钉死「有效性列没有被接到 UI 上」（D120 的落地闸门，**不可省**）
+
+**结构断言**：`isRenderableSubType(` 在 `Sources/` 中的消费方**恰好是那四处写入闸**，且**一处都不在 UI 层**（`Sources/KlineTrainerContracts/UI/` 目录下命中数 == 0）。
+
+⚠️ **两条配套要求**：
+
+1. **必须配反向自检** —— 断言那四处确实**各自命中**（`TrainingEngine.swift` / `DrawingObjectStyleEdit.swift` / `DrawingEnums.swift`）。只写「UI 目录零命中」会与「这个函数被整个删掉」这种坏实现**同时为绿**；
+2. 扫描同样**剥注释、剥字符串字面量**（复用 `squeezedText`）。
+
+**它挡的是什么**：D120 那个矛盾（箱体要么画不出、要么面板错误可点）**只有在第 5 片才会暴露**。本条把「别把有效性当灰态用」在**四片之前**就变成一条会当场变红的机械判据。
+
 ### T3　既有闸门不回归（**逐条实跑，不得只靠推理**）
 
 改完之后 §3.2 那四条约束对应的既有测试必须仍绿，且**必须在 plan 阶段就实跑一次**确认新增的表没有把源码守卫的计数打乱。⚠️ 本组**必须额外包含** `Tests/.../Drawing/DrawingProtocolTests.swift` 与 `HorizontalLineToolTests.swift`（`requiredAnchors` 契约档）—— 本片虽不碰锚数，但它们是 D119 边界没被破掉的现成证据：
@@ -504,6 +552,8 @@ if !effectiveLossy.unknownRaw.isEmpty
 | ~~**Q9**~~ | ~~不变量 1 无直接行为测试~~ —— **本条撤销**（codex R1-medium）：该覆盖一直存在且被 CI 必需门逐条点名，见 D115 订正段。⚠️ 第 2 片新增节点渲染时仍须按既有规矩办：**新增 UIKit-gated 测试 → 同步 `catalyst-uikit-baseline.txt`（用 `uikit-expected-tests.py` 重新生成，不得手打测试名）+ 核对总数基线** | ~~第 2 片~~ 已撤销 | — |
 | **Q10** | `Drawing/DrawingLabelLayout.swift:66` 与 `Render/KLineView+Drawing.swift:33` 两处写死 `.horizontal`（价格标签的内容与绘制分支）。新工具要不要标签、标签怎么摆，是每工具的几何问题 | **第 4 片** | 第 4 片写第一条非水平线时必须回答 |
 | **Q11** | **归档死锁的恢复通道**（上游 D105 不变量 4 / §2B 整片）已按 D113 记为**知情接受的残留**。若日后 App 上架后真有用户反馈，补它的最小形态是「可分辨的失败信号 + 一句诚实文案」，**⛔ 届时必须按五处核对 `.dbCorrupted` 消费方**（D114 的表），不是上游写的三处 | **未排期** | 记录在此，防止日后照上游三处清单漏核两处 |
+| **Q14** | **UI 灰态必须另立一维**（D120）。母 spec §3.1 要求箱体/折线「三个线型全灰」，而它们的数据仍须能存 ⇒ 灰态**不能**复用有效性列。第 4 片接线样式面板时（与 Q8 同一动作）必须：① 建立 `lineSubType` 的**可选性**维度；② 把面板三处（`DrawingStyleParams.swift:39 / :46 / :142`）接到它上面；③ 为箱体/折线各配一条测试：**数据落线成功 + 三个线型按钮全灰**（两半都要，只测一半会被两种坏实现分别蒙混）。⛔ 不得把灰态塞回有效性列 | **第 4 片**（与 Q8 同一动作） | 第 5 片（箱体）一落地矛盾就爆发；第 4 片是最后一个能从容建立这一维的时机 |
+| **Q15** | **有效性列的默认取值纪律**：⛔ 默认应是**全 ✅**，只有该工具**真的画不出**某个值才写 ❌（今天唯一已知的真·画不出是水平线的 `.segment`）。⚠️ 连带风险：`sanitized(for:)` 在「不可渲染」时回落 `.straight`（`DrawingEnums.swift:58`），这**隐含假设 `.straight` 恒有效**；若日后有工具把 `.straight` 标成 ❌（母 spec §3.1 里黄金率/波浪尺的「直线」是灰的），`sanitized` 会产出一个**仍然无效**的值 → 落线照样被拒。届时必须同时改 `sanitized` 的回退目标，或坚持「有效性列全 ✅、灰态交给另一维」 | **第 4 片起每片自查**（P2 工具尤甚） | 表的形状定在本片，故纪律必须写在本片 |
 | **Q13** | **⚠️ 与 P1c 无关的既有缺陷（本片只登记、不修）**：`结算入账失败` 弹窗的正文写着「进度保留至最近存档」（`UI/TrainingView.swift:180`），而「放弃」按钮实际执行 `discardSession()` → `pendingRepo.clearPending()`（`TrainingSessionCoordinator.swift:1000-1018`）**永久删除整局 pending**。⇒ **用户看到的话与按钮做的事相反**，会让他放心点下破坏性动作。触发面**不限于**未支持数据 —— 上表原因 5（磁盘满 / DB 损坏 / IO 错误）是现实可达的。⛔ **不得并进 P1c 任何一片**（它属结算流程，与划线无关）；最小修法可能只是**把那句文案改对**（如「放弃将丢弃本局进度」），未必需要改行为 | **未排期 · 独立 bug** | 登记在此防止随本轮讨论一起被遗忘；user 2026-08-30 明确要求与 P1c 分开 |
 | **Q12** | **锚数的单一真相**（D119）：仓里现有**两份**同一个数字 —— `HorizontalLineTool.requiredAnchors`（`1...1`，`HorizontalLineTool.swift:13`）与 `DefaultDrawingInputController` 的 enum→锚数映射（`:42-48`，其注释自认是 MVP 权宜）。第 4 片按上游既定方案改成经工具注册表读 `DrawingTool.requiredAnchors`，一次性消灭重复。**⛔ 第 4 片不得反过来把锚数塞回样式表** —— 那正是本片 D119 拒绝的形状 | **第 4 片** | 第 4 片是第一个真正需要「每工具不同锚数」的片；再拖就会有第三份 |
 | Q1 / Q2 / Q3 / Q4 / Q5 / Q6 / Q7 | 上游 §10 的七个遗留问题**原样有效**，归属不变（Q2 原属第 1B 片 ⇒ **随 1B 一并取消**） | 见上游 §10 | — |
