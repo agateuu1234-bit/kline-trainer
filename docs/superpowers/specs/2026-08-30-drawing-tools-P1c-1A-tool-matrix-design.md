@@ -13,7 +13,9 @@
 
 ## 0. 本片是什么
 
-**一句话**：把「本构建对每个划线工具知道些什么」从**散落在五处的写死判据**收成**一张表**，表的内容一行不变（今天仍只有水平线）⇒ **对用户零可见变化**，但第 4/5/6 片每加一个工具从「改五处代码」变成「加一行」。
+**一句话**：把「本构建懂每个划线工具的哪些**样式语义**」从**散落在四处的写死判据**收成**一张表**，表的内容一行不变（今天仍只有水平线）⇒ **对用户零可见变化**，但第 4/5/6 片每加一个工具从「改四处代码」变成「加一行」。
+
+> ⚠️ 上游 §2A.1 第 5 项列的是「五处」，本片只做**样式那四处**；第五处（落锚的 `minAnchors`）**不属于样式**，且与既有的 `DrawingTool.requiredAnchors` 契约冲突 ⇒ 移交第 4 片，见 **D119**。
 
 **本片不产生任何用户可见变化。**
 
@@ -36,7 +38,7 @@
 | **1** | **样式矩阵结构泛化** | **本片** |
 | 2 | 节点显示 + 选中态终局 | 不变 |
 | 3 | 拖节点 + §14 手势分支 | 不变 |
-| 4 | 多锚落点泛化 + 趋势线 | 不变（**新增两项交接**，见 D116 与 §8） |
+| 4 | 多锚落点泛化 + 趋势线 | 不变（**新增三项交接**：样式面板三处 D116、`minAnchors` 单一真相 D119、标签布局 Q10；见 §8） |
 | 5 | 通道线 + 箱体 | 不变 |
 | 6 | 折线 + 临时 4 键 + 删单节点 | 不变 |
 
@@ -238,38 +240,57 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ## 3. 本片做什么
 
-### D117　泛化的目标形状：**一张按工具查的表**，五处都从它取值
+### D117　泛化的目标形状：**一张按工具查的样式表**，**四处**从它取值
 
-**今天的形状（三处写死 `.horizontal` + 两处派生）**：
+> **⚠️ 本条较上一稿窄化：锚数（`minAnchors`）已移出本片**，理由见紧随其后的 **D119**（codex R2-medium，**已核实为真**）。上游 §2A.1 第 5 项列的是「五处」，本片只做其中**四处**（全部是样式语义），第 5 处（锚数）归第 4 片。
+
+**今天的形状（两处写死 `.horizontal` + 两处派生）**：
 
 | # | 位置 | 今天怎么写的 |
 |---|---|---|
 | ① | `Drawing/DrawingStyleAvailability.swift:19` | `guard toolType == .horizontal else { return true }` 之后套横线子类规则 |
 | ② | `Drawing/DrawingStyleAvailability.swift:60` | `guard toolType == .horizontal else { return current }` 之后套横线 labelMode 规则 |
-| ③ | `Drawing/DefaultDrawingInputController.swift:44-48` | `switch tool { case .horizontal: return 1; default: return Int.max }` |
-| ④ | `Drawing/DrawingStyleAvailability.swift:30` | `static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]`（**第二份**写死的工具清单） |
-| ⑤ | `Drawing/DrawingStyleAvailability.swift:48-49` | `isEditableToolType` = `implemented.contains ∧ toolsWithStyleMatrix.contains` |
+| ③ | `Drawing/DrawingStyleAvailability.swift:30` | `static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]`（**第二份**写死的工具清单） |
+| ④ | `Drawing/DrawingStyleAvailability.swift:48-49` | `isEditableToolType` = `implemented.contains ∧ toolsWithStyleMatrix.contains` |
 
 **目标形状（示意，具体由 plan 定）**：
 
 ```
-一行 = 一个工具，本构建对它知道的全部：
-    lineSubTypeEnabled : (LineSubType) -> Bool          // 哪些线型子类可用
-    labelModeEnabled   : (LabelMode, LineSubType) -> Bool // 哪些标注可用
-    minAnchors         : Int                             // 最少几个锚点才提交
+一行 = 一个工具，本构建懂它的哪些【样式语义】：
+    lineSubTypeEnabled : (LineSubType) -> Bool             // 哪些线型子类可用
+    labelModeEnabled   : (LabelMode, LineSubType) -> Bool   // 哪些标注可用
 
-今天表里只有一行：.horizontal → (横线子类规则, 横线标注规则, 1)
+今天表里只有一行：.horizontal → (横线子类规则, 横线标注规则)
 ```
 
 改法：
 
 - ① → 查表；**表里没有这个工具 → 返回 `true`**（与今天 `guard ... else { return true }` 逐字等价）
 - ② → 查表；**表里没有 → 原样返回 `current`**（与今天逐字等价）
-- ③ → **保留 `implemented` 那道守卫**（codex WB R2-high 的单一真相要求，`DefaultDrawingInputController.swift:39-43` 头注逐字记录），然后查表；表里没有 → `Int.max`
-- ④ → **从表的键派生**（`Set(表.keys)`），不再是第二份写死清单
-- ⑤ → 表达式**一字不改**（它读的 `toolsWithStyleMatrix` 现在是派生值）
+- ③ → **从表的键派生**（`Set(表.keys)`），不再是第二份写死清单
+- ④ → 表达式**一字不改**（它读的 `toolsWithStyleMatrix` 现在是派生值）
 
-**⚠️ 表放在哪（D117 的子决策）**：建议**新建一个中性命名的文件**（如 `Drawing/DrawingToolMatrix.swift`）承载这张表，而不是塞进 `DrawingStyleAvailability`。理由：表里含 `minAnchors`（**落锚**，不是样式），让 `DefaultDrawingInputController` 去一个叫「样式可用性」的类型里取锚数会误导后来者，也会招来「顺手改回去」的重构。**⛔ 但横线的两条规则函数体必须留在 `DrawingStyleAvailability.swift` 原地**（§3.2 硬约束 1）。
+**⚠️ 表放在哪**：锚数移出后，这张表**纯粹是样式语义** ⇒ **就放在 `DrawingStyleAvailability` 里**，**不新建文件**（上一稿建议新建中性命名文件，唯一理由是「表里含锚数、放在『样式可用性』里会误导」；该理由随 D119 一并消失）。这样也免掉「新文件出现在源码守卫的 grep 命中里」这一层需要额外实跑确认的风险。**⛔ 横线的两条规则函数体仍必须留在 `DrawingStyleAvailability.swift` 原地**（§3.2 硬约束 1）。
+
+---
+
+### D119　`minAnchors` **移出本片**，锚数的单一真相是 `DrawingTool.requiredAnchors`（第 4 片落实）
+
+**codex R2-medium 指出的冲突，逐条核实为真**：
+
+| 实测事实 | 出处 |
+|---|---|
+| `DrawingTool` 协议**早就有** `requiredAnchors: ClosedRange<Int>` | `Drawing/DrawingTool.swift:17` |
+| `HorizontalLineTool` **已实现**它，值为 `1...1` | `Drawing/HorizontalLineTool.swift:13` |
+| 已有测试断言它 | `Tests/.../Drawing/HorizontalLineToolTests.swift:23`、`DrawingProtocolTests.swift:20 / :30-33` |
+| `DefaultDrawingInputController` 里那份 enum→锚数映射**自己的注释就承认是重复的**：「MVP 显式映射 enum→最小锚数（`requiredAnchors` 是 tool 实例属性、非 enum 可达）」 | `DefaultDrawingInputController.swift:4` / `:38` |
+| 上游 P1c 拆分补充把「**`requiredAnchors` 单一真相**」明确划给**第 4 片** | 上游 D109 第 4 片行 / §5.1 |
+
+⇒ 若本片把锚数放进新表，仓里会同时存在**三份**同一个数字（协议实现 `1...1` / controller 映射 / 新表），而且本片的 T2 结构守卫会把「新表是权威」**钉死** —— 第 4 片必须先拆掉这条守卫才能兑现它的单一真相。**两片的要求直接互斥。**
+
+**决定**：本片**完全不碰** `DefaultDrawingInputController` 与 `minAnchors`。锚数留在原地，由第 4 片按上游既定方案改成读 `DrawingTool.requiredAnchors`（经工具注册表），一次性消灭重复。
+
+**⛔ 不得援引本条把锚数重复当成「可接受」** —— 它是**已登记的待消除重复**（§8-Q12），只是不归本片。
 
 ### D118　给 `DrawingToolType` 加 `CaseIterable`（纯加法，为了让 T1 的穷举是**真**断言）
 
@@ -288,7 +309,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 **⛔ 边界**：**只加协议遵从**。不得顺手改 case 名、次序、raw value，也不得动 `implemented` 的内容 —— 次序改变会改变 `allCases` 的顺序；legacy 的 `ray` / `time` 必须留在原位（`Models.swift:40-41` 的注释逐字说明它们是历史 blob 的容忍解码通道）。
 
-### 3.1 等价性论证（为什么这五处改完行为一字不变）
+### 3.1 等价性论证（为什么这四处改完行为一字不变）
 
 三条改法的等价性**都依赖同一个前提**：**表的键恰好等于 `{.horizontal}`**。
 
@@ -307,9 +328,9 @@ if !effectiveLossy.unknownRaw.isEmpty
 | 3 | `horizontalLineSubTypeEnabled(` **不得**出现在 `TrainingEngine.swift` / `DrawingObjectStyleEdit.swift`；`horizontalLabelModeEnabled(` **不得**出现在 `DrawingObjectStyleEdit.swift`；两个写入边界必须经共享单点 `isRenderableSubType(` | `:227-241` |
 | 4 | `withStyle` 里必须出现整段调用形状 `lineSubType: s.lineSubType, toolType: toolType`（锚点必须取整段，只锚 `toolType: toolType` 是恒真的） | `:220-224` |
 
-**⚠️ 新增的表文件会让 `horizontalLineSubTypeEnabled(` / `horizontalLabelModeEnabled(` 各多出一处「引用」** —— 守卫只禁止它们出现在上表点名的**那两个文件**里，且只对 `func …(` 定义计数，故新文件引用**不会打红**。**这一点 plan 阶段必须实跑确认，不得只靠推理。**
+**⚠️ 表就建在 `DrawingStyleAvailability.swift` 内部**（D117）⇒ 对 `horizontalLineSubTypeEnabled(` / `horizontalLabelModeEnabled(` 的引用**仍落在它们自己的定义文件里**，既有守卫的「各恰好 1 处 `func …(` 定义」与「不得出现在 `TrainingEngine.swift` / `DrawingObjectStyleEdit.swift`」两类判据都不受影响。**即便如此，plan 阶段仍必须把 §5-T3 那组守卫实跑一次，不得只靠推理。**
 
-### 3.3 五处之外的**已知消费方**（改完必须逐个复核语义没变）
+### 3.3 四处之外的**已知消费方**（改完必须逐个复核语义没变）
 
 **⚠️ 守则：「有 N 个调用点」≠「这 N 处语义都一样」，必须逐个打开看。**
 
@@ -320,7 +341,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 | `normalizedLabelMode(current:lineSubType:)`（两参横线版） | `UI/DrawingStyleParams.swift:46`（**本片不动**，D116） |
 | `isEditableToolType(_:)` | `TrainingEngine.swift:1193`（编辑门）、`Drawing/DrawingEditRouter.swift:81` |
 | `horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled` | `UI/DrawingStyleParams.swift:39` / `:142`（**本片不动**，D116） |
-| `minAnchors(for:)` | `DefaultDrawingInputController.swift:50-52`（`shouldCommit`），经 `Render/ChartContainerView.swift` 的落锚路径消费 |
+| ~~`minAnchors(for:)`~~ | **本片不碰**（D119）—— `DefaultDrawingInputController.swift` 一个字都不改 |
 
 ---
 
@@ -354,17 +375,17 @@ if !effectiveLossy.unknownRaw.isEmpty
 | T1c | `normalizedLabelMode(current:lineSubType:toolType: .horizontal)` 的 **`LabelMode` × `LineSubType` 全笛卡尔积**，逐格给出期望值（`.show` 恒落 `.hidden`；`.left` 在 `.ray` 下落 `.hidden`，其余原样；`.hidden` / `.right` 恒原样） | 4×3 = 12 |
 | T1d | 同上对**其余十二个**工具：**恒原样返回 `current`** | 12×12 = 144 |
 | T1e | `isEditableToolType`：`.horizontal` ✅，其余十二个 ❌ | 13 |
-| T1f | `minAnchors(for:)`（经 `shouldCommit` 观测）：`.horizontal` 需 1 个锚即可提交；其余十二个**任意锚数都不提交** | 13+ |
+| T1f | **本片不做**（D119：锚数移交第 4 片）。改为一条**范围守卫**：断言 `DefaultDrawingInputController.swift` 在本片 branch-diff 中**零改动**，且 `Sources/` 中 `minAnchors` 的定义仍**恰好 1 处**、仍在该文件内 —— 防止实施者「顺手也泛化了锚数」把 D119 的边界破掉 | 2 |
 
 **⚠️ 防空转三条（缺一不可）**：
 
 1. **真值表必须同时含 ✅ 与 ❌**（T1a 的 `.segment`、T1c 的 `.show`）—— 全 ✅ 的套件会与「实现恒返 true」这种坏实现同时为绿；
-2. **必须显式断言表的键恰好是 `{.horizontal}`** —— 否则表被误扩时 T1b/T1d/T1e/T1f 会**静默改变含义**却仍然绿；
+2. **必须显式断言表的键恰好是 `{.horizontal}`** —— 否则表被误扩时 T1b/T1d/T1e 会**静默改变含义**却仍然绿；
 3. **必须断言 `DrawingToolType.allCases.count == 13`** —— 防「遍历拿到空集 / 少数几个 → 循环次数不足 → 恒绿」。⚠️ 该断言只有在遍历源是**生产枚举**（`allCases`）时才有意义；若改用测试文件里手写的数组，这条就退化成「测试断言自己写的字面量」= 恒真空转（见 D118）。
 
 ### T2　单一真相守卫（**结构计数，⛔ 不得写成禁词黑名单**）
 
-断言这五处**确实都从同一张表取值**。判据用**结构计数**（如「查表调用形状在 `Sources/` 中恰好出现 N 处，且分布在预期的那几个文件」），**不得**写成「某某文件里不许出现 `.horizontal` 这个词」——后者可被删注释/改写法绕过，也会被自己的承重注释误伤。
+断言这四处**确实都从同一张表取值**。判据用**结构计数**（如「查表调用形状在 `Sources/` 中恰好出现 N 处，且分布在预期的那几个文件」），**不得**写成「某某文件里不许出现 `.horizontal` 这个词」——后者可被删注释/改写法绕过，也会被自己的承重注释误伤。
 
 **⚠️ 两条配套要求**：
 
@@ -373,7 +394,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ### T3　既有闸门不回归（**逐条实跑，不得只靠推理**）
 
-改完之后 §3.2 那四条约束对应的既有测试必须仍绿，且**必须在 plan 阶段就实跑一次**确认新增的表文件没有把源码守卫的计数打乱：
+改完之后 §3.2 那四条约束对应的既有测试必须仍绿，且**必须在 plan 阶段就实跑一次**确认新增的表没有把源码守卫的计数打乱。⚠️ 本组**必须额外包含** `Tests/.../Drawing/DrawingProtocolTests.swift` 与 `HorizontalLineToolTests.swift`（`requiredAnchors` 契约档）—— 本片虽不碰锚数，但它们是 D119 边界没被破掉的现成证据：
 
 - `DrawingObjectStyleEditTests.swift:172`（N5 源码守卫，含 §3.2 全部四条）
 - `DrawingObjectStyleEditTests.swift:82`（`implemented == toolsWithStyleMatrix` 漂移告警）
@@ -390,7 +411,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 | 变异 | 预期变红的档 |
 |---|---|
-| 把表里 `.horizontal` 那行的 `minAnchors` 从 1 改成 2 | T1f |
+| 把 `isEditableToolType` 的 `∧` 改成 `∨` | T1e（⚠️ **已知它今天区分不了**：两个集合恰好相等 ⇒ 这条变异**预期不红**。故必须由「表的键恰好是 `{.horizontal}`」+ 既有漂移告警 `DrawingObjectStyleEditTests.swift:82` 共同承担，**plan 必须把这条等价变异显式登记为「已识别的等价变异」**，不得当成测试失效） |
 | 把「表里没有的工具 → 返回 true」改成「→ 返回 false」 | T1b（**不是** T1a —— 若 T1a 也红说明判据串了） |
 | 把「表里没有的工具 → 原样返回 current」改成「→ 落 `.hidden`」 | T1d |
 | 把表多加一行（如 `.trend`） | T1 防空转第 2 条 + `:82` 漂移告警 |
