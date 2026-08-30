@@ -117,9 +117,12 @@ def test_download_has_content_md5_header():
     assert "Content-MD5" in headers
 
 
-CONTRACT_FIXTURES_DIR = (
-    Path(__file__).parent.parent.parent / "tests" / "contract-fixtures"
-)
+# 本模块读到 `backend/` **之外**的东西：仓库根的契约样例目录。
+# 由 `test_ci_paths_cover_external_inputs.py` 静态收集（这一条今天已经被 CI 的
+# paths 覆盖，声明它是为了让那张外部输入表如实反映全套件，而不是只列本次新补的两条）。
+EXTERNAL_INPUTS = ("tests/contract-fixtures",)
+
+CONTRACT_FIXTURES_DIR = Path(__file__).parent.parent.parent / EXTERNAL_INPUTS[0]
 
 
 def _load_fixture(name: str) -> dict:

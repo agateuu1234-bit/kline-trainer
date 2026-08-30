@@ -32,6 +32,14 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 
+# 本模块读到 `backend/` **之外**的东西：iOS 那份 Swift 契约常量（跨语言漂移钉）。
+# 由 `test_ci_paths_cover_external_inputs.py` 静态收集，保证 CI 的
+# `pull_request.paths` 覆盖它 —— 否则只改 Models.swift 的 PR 不触发本套件，
+# 那条漂移钉就有了一条静默旁路。读取处必须用这个常量本身（下面 `_REPO /
+# EXTERNAL_INPUTS[0]`）；元组里刻意写**字面量**而不是引一个变量名，因为那个静态
+# 扫描器只认字面量，遇到变量名会 fail-closed 抛异常（实测确认）。
+EXTERNAL_INPUTS = ("ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift",)
+
 # 假件自检要「真的发一次写标记语句」，故直接引生产常量，不另抄一份文本
 from qmt_pilot_db import _WRITE_MARKER_SQL as _WRITE_MARKER_SQL_FOR_FAKE  # noqa: E402
 
@@ -831,7 +839,7 @@ def test_contract_version_matches_swift_source_of_truth():
     """跨语言契约漂移钉：Python 侧的常量必须与 Swift 那份逐字相等。
     一次与 pilot 无关的 iOS 迁移 bump 会让复用闸对既有库全判失配——那是预期行为，
     但两边必须**同时**改，不能一边悄悄漂。"""
-    swift = (_REPO / "ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift").read_text()
+    swift = (_REPO / EXTERNAL_INPUTS[0]).read_text()
     assert f'CONTRACT_VERSION = "{CONTRACT_VERSION}"' in swift
 
 

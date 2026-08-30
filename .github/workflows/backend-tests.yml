@@ -2,10 +2,19 @@ name: Backend Tests
 
 on:
   pull_request:
+    # ⚠️ 这张 paths 表**必须覆盖后端测试套件读到的每一处 backend/ 之外的文件**。
+    # 漏一条 = 只改那些文件的 PR 根本不跑本套件：守卫还在，但多了一条静默旁路，
+    # 红要等合进 main 之后由 push 触发才暴露（本仓在 Catalyst 闸门上踩过同型的坑）。
+    # 由 backend/tests/test_ci_paths_cover_external_inputs.py 机械守卫，改动前先看它。
+    #   - scripts/**：test_env_example_coverage.py 递归扫 scripts/ 下的 .sh（当前 30 个）
+    #   - Models.swift：test_qmt_pilot_db.py 的跨语言 CONTRACT_VERSION 漂移钉；
+    #     刻意只钉这一个文件而不是 ios/**，免得每个 iOS 改动都去跑后端全套。
     paths:
       - 'backend/**'
       - 'pytest.ini'
+      - 'scripts/**'
       - 'tests/contract-fixtures/**'
+      - 'ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift'
       - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
