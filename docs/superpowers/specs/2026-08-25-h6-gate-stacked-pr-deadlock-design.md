@@ -129,6 +129,10 @@ base 是上游分支（例如 `feat/drawing-session-default-persistence`），�
 | **F19** | **同一形态在 PR #170 上独立复现** —— `automatic_base_change_succeeded` @ `06:35:11Z` → `06:35:14Z` 仅 `check-bootstrap-used-once` 运行 | 同上，分支 `feat/drawing-p1b-autoselect` |
 | **F20** | 上述两个时刻**其它活动类型均被排除**：head sha 未变（⇒ 无 `synchronize`）、非新开（⇒ 无 `opened`）、`closed`/`reopened` 均发生在其**之后**（#172 = `06:49:30` / `06:49:34`；#170 = `06:39:04` / `06:39:08`）、PR 非草稿（⇒ 无 `ready_for_review`）⇒ **触发动作只可能是 `edited`** | 同上两份 timeline 全事件流 |
 | **F21** | 手工 close / reopen 之后（#172 `06:49:36Z`、#170 `06:39:10Z`）**8 个 workflow 全部运行**，其中含 `hardening-6 framework gate` —— 这就是当时唯一让 `acceptance` 上报的途径 | 同上两份 `gh run list` |
+| **F22** | **检查结果挂在 PR 的 head sha 上，不是挂在临时合并提交上；retarget 不作废 retarget 之前的检查结果。** PR #172 head sha `526a0ca…` 上，必需检查 **`collect` 只在 `06:25:39Z`（早于 retarget 的 `06:49:06Z`）跑过一次、其后从未重跑**，而该 PR 于 `06:56:17Z` **成功合并** ⇒ 一次 retarget 前的运行满足了 retarget 后的必需检查 | `gh api repos/.../commits/526a0ca6e5bcd5917085a88e0d34f331e2943145/check-runs` 全量列表（2026-08-30 查） |
+| **F23** | 依赖安装三步（`Install jq` / `Set up Python` / `Install Python test dependencies`）在 job 中**排在 `Detect relevant changes` 之前**，故短路 PR 同样付出该成本 | 读文件步骤顺序：基线第 22–41 行 vs 第 43 行 |
+| **F24** | 短路（`relevant=false`）时该 job 实测**整体 25 秒**，其中依赖安装约 **15 秒**（jq 5s + Set up Python 1s + pip 9s）；检测步骤与其后所有步骤各 **0 秒** | `gh api .../actions/runs/32817127092/jobs` 逐步骤时间戳（2026-08-25，分支 `feat/qmt-nas-backend`） |
+| **F25** | 本仓为 **PUBLIC** 仓库 ⇒ GitHub Actions 标准 runner 分钟数**免费且无限额** | `gh repo view --json visibility` → `PUBLIC` |
 
 ---
 
@@ -162,6 +166,14 @@ on:
 即使将来 GitHub 不再于 retarget 时发 `edited`，已删掉的 `branches` 仍保证有检查上报，
 **不会退回死锁**；反过来「只加 `edited`」把全部赌注押在单一 GitHub 行为上。
 
+> **末行成立的前提，已用生产数据锁死（F22）**：codex R3 曾主张此行是错的，理由是
+> 「`pull_request` 运行以临时合并提交为 `GITHUB_SHA`，retarget 会产生新的合并提交，
+> 故 retarget 前的结果无法满足新状态」。**该主张已被推翻。**
+> `GITHUB_SHA`（workflow **内部**看到的提交）与**检查结果挂在哪个提交上**是两回事：
+> 检查挂在 PR 的 **head sha** 上。实证 —— PR #172 的必需检查 `collect`
+> **只在 retarget 之前跑过一次、其后从未重跑**，而该 PR 仍成功合并。
+> 即：**一次 retarget 前的运行确实满足了 retarget 后的必需检查。**
+
 **codex R1 的 [high] 是怎么被封掉的**：下游 PR 要够到 `main`，**只有两条路** ——
 ① 自动 retarget（上游分支被删）；② 有人手工把 base 改成 `main`。
 **两条都会发出 `pull_request` / `edited`**（①见 F18–F20；②是同一事件、`changes.base` 字段）。
@@ -172,7 +184,13 @@ on:
 
 1. **job 自带短路（F8）**。没碰第 50 行相关名单里那 8 个治理文件的 PR，
    `relevant=false`，跳到「Skip when nothing relevant changed」echo 一句成功收场。
-   增量成本 ≈ 一次 ubuntu runner 启动。
+
+   > ⚠️ **本条的成本估算初稿写错过，已按 codex R3 更正**（轮次记录见 §11）。
+   > 初稿写的是「增量成本 ≈ 一次 ubuntu runner 启动」。**这低估了** ——
+   > 依赖安装三步排在检测步骤**之前**（F23），所以短路 PR 也要付这笔钱。
+   > **实测真值（F24）**：短路时整个 job **25 秒**，其中依赖安装约 **15 秒**。
+   > 该成本可接受的依据是 F25（本仓 PUBLIC，标准 runner 免费无限额），
+   > **不是**「成本约等于零」。详见 R8 与 §8 方案 E。
 2. **作者早就预期它会在非 main-base 的 PR 上跑（F9）**。第 87 行的
    `base.ref == 'main'` 是**步骤级**判断 —— 如果这个 workflow 永远只在 main-base
    的 PR 上运行，这个判断恒真、毫无意义。它存在本身就是「预期会在别的 base 上跑」的证据。
@@ -335,6 +353,7 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 | **R5** | `enforcement_mode` 当前为 `drift-log`（F17），故第 58–75 行那一步里的 `--final` 分支与第 86–121 行的 advisory 步骤当前均不生效 | 本次改动不触碰这两处逻辑；将来翻到 `block` 时，第 87 行的 base 判断会让 advisory 步骤在叠罗汉 PR 上按原设计跳过 | 接受，无需动作 |
 | **R6** | **retarget 之前跑出的绿灯被复用来满足闸门** —— 下游 PR 从未针对最终 `main` 状态验证过（**codex R1 的 [high]**） | **已由 D1 的 `edited` 封掉**：下游 PR 够到 `main` 只有「自动 retarget」与「人工改 base」两条路，**两条都发 `pull_request`/`edited`** ⇒ 必然产生一次针对新 base 的新运行，其 pending 期间 PR 不可合并 | **已处置**（D1 修订版） |
 | **R7** | 残留的陈旧面：`strict_required_status_checks_policy = false`（F6）⇒ 检查通过后 `main` 仍可继续前进，合并时的 `main` 未必是验证时的 `main` | **仓库级既有配置，非本次引入** —— 本仓**任何** PR（不只叠罗汉）都同样如此。codex R1 称此配置「特别放大」本次风险，该定性不成立：R6 封掉后，叠罗汉 PR 的陈旧面与普通 PR 同级 | 接受，**超出本次范围**（要改需动 ruleset，属独立决策） |
+| **R8** | 订阅 `edited` 后，**任何 PR 的标题 / 正文编辑**都会触发一次完整 job；而依赖安装排在短路判定之前（F23），故每次都要付约 15 秒安装成本（**codex R3 的 [medium]**） | 实测单次 job **25 秒**（F24）；本仓 PUBLIC，标准 runner 分钟数**免费无限额**（F25）⇒ **无配额、无费用影响**。绝对量级为「每次 PR 描述编辑 25 秒机器时间」 | **接受**；重排步骤顺序的方案已评估并否决，见 §8 方案 **E** |
 
 ---
 
@@ -358,6 +377,9 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 | **B** | **保留** `branches: [main]`，**只**增加 `types: [opened, synchronize, reopened, edited]` | **其机制已被 D1 采纳**（`edited` 那一半），但作为**替代方案**仍否决：① 从 PR 开出到上游合并的整段时间里必需检查一直缺失，评审期间**看不到闸门会不会过**，最后一刻才知道；② 一旦 GitHub 改掉 retarget 行为则**死锁复发**，而删掉 `branches` 的方案只退化为「陈旧检查」；③ 与 F7 的同仓样式不一致。<br>⚠️ **初稿的否决理由之一「无法离线证实 `edited` 是否触发」现已作废** —— F18–F20 已用生产数据证实它确实触发 |
 | **C** | 把 `acceptance` 从 ruleset 必需名单里摘掉 | 等于关掉治理闸门，方向相反，违背 `CLAUDE.md` 治理 backstop 第 1 条的精神 |
 | **D** | 把 `git fetch origin main --depth=50` 改成完整 fetch（而非删除） | 由 F12 已证 `origin/main` 本就存在且完整，改成完整 fetch 仍是纯冗余动作；删除更简单，符合 `CLAUDE.md` §2「最少代码」 |
+| **E** | 把 `Detect relevant changes` 提到 checkout 之后，并给三个依赖安装步骤加 `if: steps.changes.outputs.relevant == 'true'`（codex R3 的建议） | **否决**：① 收益实测仅 **约 15 秒 / 次**（F24），而本仓 PUBLIC、runner 免费无限额（F25），既无配额也无费用压力；② 代价是**重排一个承重治理闸门的步骤顺序**，改动量从 3 行涨到约 10 行，且要重新论证「acceptance 那一步仍拿得到 jq 与 python」；③ 属**成本优化**而非**正确性修复**，与本次「修死锁」的请求无直接追溯关系（`CLAUDE.md` §3：每一行改动都要能追溯到用户请求）。**留作独立 backlog 项。** |
+| **F** | 用 job 级 `if` 把 `edited` 事件限制为「只有 base 变化时才跑」（如 `github.event.changes.base`） | **否决，且这条有真实危险**：job 被 `if` 跳过时，检查以 `skipped` 结论上报，而「`skipped` 算不算满足必需检查」在 ruleset 下语义不确定 —— 一旦不算，**就重新造出本次要修的那个死锁**。用「可能重新引入死锁」的手段去省 15 秒，风险收益比不成立 |
+| **G** | 加 `concurrency` + `cancel-in-progress` 避免重复排队（codex R3 的次要建议） | **否决**：被取消的运行以 `cancelled` 结论上报，同样触及「必需检查拿到非成功结论」的风险面；而实测 job 仅 25 秒（F24），排队堆积在本仓不是真实问题 |
 
 ---
 
@@ -403,3 +425,25 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 **本轮的方法论教训**：初稿把「我无法离线证实」直接当成了「不可证实」，
 据此否决了方案 B 的机制。实际上仓内**已有生产数据**可证（#170/#172 的 timeline + run 列表），
 只是我没想到去查。⇒ **判定「无法证实」之前，先问一遍「历史数据里有没有现成的自然实验」。**
+
+---
+
+### R2 · codex `adversarial-review` · 2026-08-25 · HEAD `718d54e` → **approve**
+
+零 material finding。账本已写入，条目 `branch:fix/h6-gate-stacked-pr@718d54ed…`，
+`kind=branch`（整支、无窄化），已 **Read 文件逐字段核实** `head_sha` / `base_sha`。
+
+---
+
+### R3 · codex `adversarial-review` · 2026-08-30 · HEAD `3cd531f`（含实施计划）→ **needs-attention**（3 条 medium）
+
+> ⚠️ 本轮 base 已不是 `a018a7f` —— `main` 在此期间前进到 `1437529`（多 4 个提交）。
+
+| # | Finding | 判定 | 处置 |
+|---|---|---|---|
+| 1 | 「retarget 产生新的合并提交，故 retarget 前的检查无法满足新状态 ⇒ `edited` 是硬依赖而非保险」 | **不成立 · 已用生产数据推翻** | 把 `GITHUB_SHA` 与「检查挂在哪个 sha」区分开；证据落为 **F22**（#172 的 `collect` 只在 retarget 前跑过一次仍成功合并），并写进 D1 对照表下的说明块。**D1 末行维持原判。** |
+| 2 | 「计划的交付检查用了两点式 `main..HEAD`，必然失败」 | **成立** | 计划已改：G7 与范围核对全部改用三点式 `main...HEAD`；提交数期望 4 → **5**；新增全局约束第 9 条并写明「实测两点式返回 26 路径、三点式返回 2 路径」 |
+| 3 | 「所谓快速短路其实要先装完全部依赖，成本估算错误」 | **成立（成本陈述部分）· 补救措施否决** | D1 论证 1 的成本估算已更正为**实测 25 秒 / 其中依赖安装约 15 秒**（F23/F24）；接受该成本的依据改为 F25（PUBLIC 仓、runner 免费无限额），并新增 **R8**。其三条补救建议（重排步骤 / `changes.base` 门控 / 并发取消）分别记为 §8 的方案 **E / F / G** 并逐条写明否决理由 —— 其中方案 **F 有真实危险**：job 被 `if` 跳过会以 `skipped` 上报，可能重新造出本次要修的死锁。 |
+
+**本轮的方法论教训**：`main` 会在长流程中前进。**任何「本分支改了什么」的判据都必须相对共同祖先（三点式）**，
+否则闸门会在某天 `main` 一动就静默失真 —— 而且失真方向是**变松还是变紧取决于 main 改了什么**，无法预测。

@@ -33,6 +33,11 @@
 6. **⛔ 诚实性硬约束（spec D6 / §5.3）**：叠罗汉路径本 PR **无法自证**（本 PR 自己的 base 就是 `main`）。提交信息、PR 正文、任何汇报中，对「叠罗汉 PR 现在能拿到 acceptance」一律写「**未实证 · 待下一个叠罗汉 PR 验证**」，**不得写成已验证**。
 7. **判绿纪律**：所有闸门一律**读输出内容**判定，不靠管道后的 `$?`（`cmd | tail` 之后的 `$?` 是尾部命令的退出码）。断言脚本中**不使用 `set -e`**（`grep -c` 命中 0 次时退出码为 1，会误杀整个脚本）。
 8. **push 与开 PR 由用户在自己的终端执行**，Claude 不执行这两步。
+9. **⛔ 所有「本分支改了什么」的比对一律用三点式 `main...HEAD`（从共同祖先算起），禁用两点式 `main..HEAD`。**
+   原因：`main` 在本工作进行期间**已经前进过**（建分支时 `a018a7f` → 现在 `1437529`，多了 4 个提交）。
+   两点式比的是两个分支的顶端，会把 `main` 独有的改动一并算成「本分支的改动」——
+   实测此刻两点式返回 **26 个路径**，三点式返回正确的 **2 个**。
+   （`git rev-list --count main..HEAD` 是例外：它统计「在 HEAD 不在 main 的提交」，本就是正确语义。）
 
 ---
 
@@ -75,7 +80,7 @@ chk G5rc "$RC" 0
 chk G5out "$(printf '%s' "$OUT" | wc -c | tr -d ' ')" 0
 [ "$RC" != "0" ] && echo "---- actionlint 输出 ----" && echo "$OUT"
 
-DEL=$(git diff --numstat main..HEAD -- "$F" | awk '{print $2}')
+DEL=$(git diff --numstat main...HEAD -- "$F" | awk '{print $2}')
 chk G7 "${DEL:-无改动}" 2
 SCRIPT
 chmod +x /tmp/h6plan/assert.sh
@@ -92,7 +97,7 @@ chmod +x /tmp/h6plan/assert.sh
 | G5 | actionlint 退出码 0 **且**输出零字节 | YAML 与 workflow schema 合法（已实测：塞入非法活动类型会退出 1 并精确报错，此闸门有真判别力） |
 | G6 | 注释里含**精确整句** `DO NOT drop either line` | D3 要求：防止后人把 `types` 当成多余样板删掉。用整句而非计数，措辞微调不会误伤 |
 | G8 | 注释行里提到 `edited` 的**至少 1 行** | `edited` 的存在理由被写进了注释（实测终态为 3 行，故用「≥1」而非等值，避免脆） |
-| G7 | 该文件相对 `main` 的**删除行数恰好 2** | 只删了预期的两行，没顺手删别的（实测 numstat = `9	2`：新增 9、删除 2） |
+| G7 | 该文件相对**共同祖先**的删除行数恰好 2（`main...HEAD` 三点式） | 只删了预期的两行，没顺手删别的（实测 numstat = `9	2`：新增 9、删除 2）。**必须用三点** —— 两点式 `main..HEAD` 比的是两个分支顶端，`main` 一旦前进就会把 main 独有的改动一起算进来 |
 
 ---
 
@@ -393,15 +398,17 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/fix-h6-gate-stacked-p
 pwd; git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD; git status --short; git rev-list --count main..HEAD
 ```
 
-**期望**：路径是 worktree、分支 `fix/h6-gate-stacked-pr`、`git status --short` **零输出**、提交数 **4**（spec 2 个 + Task 1 与 Task 2 各 1 个）。
+**期望**：路径是 worktree、分支 `fix/h6-gate-stacked-pr`、`git status --short` **零输出**、提交数 **5**（spec 2 个 + 本计划 1 个 + Task 1 与 Task 2 各 1 个）。
 
 ---
 
 - [ ] **Step 2: 确认本次只碰了允许碰的文件**
 
 ```bash
-git diff --name-only main..HEAD
+git diff --name-only main...HEAD
 ```
+
+> ⚠️ **三个点，不是两个点。** 两点式此刻会返回 26 个路径（含 `main` 独有的 QMT 改动），三点式才是「本分支相对共同祖先加了什么」。
 
 **期望恰好三行，多一行少一行都要停下来查：**
 
@@ -517,8 +524,8 @@ echo "已生成，行数：$(wc -l < /tmp/h6plan/pr-body.md)"
 
 | # | 动作 | 期望看到 | 通过 / 不通过 |
 |---|---|---|---|
-| 1 | 敲 `git rev-list --count main..HEAD` | 数字 **4** | ☐ / ☐ |
-| 2 | 敲 `git diff --name-only main..HEAD` | **恰好 3 行**：一个 `.github/workflows/hardening_6_gate.yml`，一个 specs 下的文件，一个 plans 下的文件 | ☐ / ☐ |
+| 1 | 敲 `git rev-list --count main..HEAD` | 数字 **5** | ☐ / ☐ |
+| 2 | 敲 `git diff --name-only main...HEAD`（**三个点**） | **恰好 3 行**：一个 `.github/workflows/hardening_6_gate.yml`，一个 specs 下的文件，一个 plans 下的文件 | ☐ / ☐ |
 | 3 | 敲 `git status --short` | **一个字都不输出**（空白） | ☐ / ☐ |
 | 4 | 敲 `grep -c 'branches: \[main\]' .github/workflows/hardening_6_gate.yml` | 数字 **0**（那行已删掉） | ☐ / ☐ |
 | 5 | 敲 `grep -c 'types: \[opened, synchronize, reopened, edited\]' .github/workflows/hardening_6_gate.yml` | 数字 **1**（新那行已加上） | ☐ / ☐ |
