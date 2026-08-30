@@ -385,8 +385,59 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 
 ## 9. 回滚方案
 
-单文件、纯触发条件与冗余命令的改动，**回滚 = `git revert` 该提交**。
-回滚后行为完全回到 `a018a7f` 的状态（叠罗汉 PR 重新需要 close / reopen 手工补触发）。
+> ⚠️ **本节初稿写错过，已按 codex R5 更正**（轮次记录见 §11）。
+> 初稿写的是「回滚 = `git revert` **该提交**」（单数）。**这是错的** ——
+> 实施计划**刻意产生两个提交**（Task 1 触发条件 / Task 2 冗余 fetch），
+> 只 revert 最后一个会**留下触发条件的改动仍然生效**。
+
+**实测反例（一次性 worktree 真跑，见 §11 R5）：**
+
+| 操作 | 文件 md5 | 与基线一致？ |
+|---|---|---|
+| 只 revert Task 2（初稿的做法） | `47942ada…` | **否** —— `branches: [main]` 仍缺失、`types:` 仍生效 |
+| 逆序 revert Task 2 → Task 1 | `16ebdafc…` | **是，逐字节一致** ✅ |
+
+### 9.1 已合并进 `main` 之后回滚（最常见）
+
+本仓近期 PR 多以 **squash 合并**落地（`#174`–`#178` 均为单提交、标题带 `(#NNN)` 后缀），
+此时整个 PR 在 `main` 上表现为**一个**提交：
+
+```bash
+git revert --no-edit <该 squash 提交的 sha>
+```
+
+若该 PR 以 **merge commit** 方式落地（本仓也有此形态，如 `#172`），则必须指定主线父提交：
+
+```bash
+git revert --no-edit -m 1 <merge 提交的 sha>
+```
+
+### 9.2 尚未合并、在分支上回滚
+
+必须 **revert 两个实施提交，且按逆序**（先 Task 2，再 Task 1）：
+
+```bash
+git revert --no-edit <Task 2 的 sha>
+git revert --no-edit <Task 1 的 sha>
+```
+
+> ⛔ `git revert` **没有 `-q` / `--quiet` 选项**。写了会直接报 usage 并**什么都不做**，
+> 而后续的 `grep` 断言仍会照常输出数字 —— 看起来像「回滚了但没生效」，
+> 极易误判成「revert 不管用」。（本条是 R5 dry-run 首次尝试时真踩到的。）
+
+### 9.3 回滚后必须逐条核实，不能只看 revert 命令是否成功
+
+```bash
+grep -c '^    branches: \[main\]$' .github/workflows/hardening_6_gate.yml
+grep -c '^    types: \[opened, synchronize, reopened, edited\]$' .github/workflows/hardening_6_gate.yml
+grep -c 'git fetch origin main --depth=50' .github/workflows/hardening_6_gate.yml
+grep -c 'DO NOT drop either line' .github/workflows/hardening_6_gate.yml
+```
+
+**四条期望值依次为 `1` / `0` / `1` / `0`**（实测：逆序 revert 两个提交后四条全部对上）。
+四条全部对上，才算真正回到基线。
+
+**回滚后的行为**：叠罗汉 PR 重新需要 close / reopen 手工补触发。
 无数据迁移、无状态残留、无需改 ruleset。
 
 ---
@@ -477,3 +528,25 @@ codex R1 建议：「新增一次性叠罗汉集成测试：在下游检查通�
 而它要在**五个不同时点**被调用 —— 只验一个时点，等于只走了路的一半
 （`feedback_spec_all_paths_must_reach_the_chokepoint`）。
 正确做法是把每个调用时点都真跑一遍，这次照做后立刻发现终态不可达。
+
+---
+
+### R5 · codex `adversarial-review` · 2026-08-30 · HEAD `0a890a9` → **needs-attention**（3 条 medium）
+
+**三条全部成立**，无争议项。
+
+| # | Finding | 处置 |
+|---|---|---|
+| 1 | 计划 Task 3 里，**开 PR 的那步用了 `--body-file`，而生成该文件的步骤排在它后面** ⇒ 干净环境下必然失败；若 `/tmp/h6plan` 是上一轮遗留的，会**静默提交过期的 PR 正文** | 两步对调：先生成正文（新 Step 5）再交付 push/PR（新 Step 6）；并在生成后加 `[ -s ... ]` 非空校验与顺序告诫 |
+| 2 | 验收清单第 9 项与排障表**仍在用两点式** `git diff main..HEAD`，与本 spec 自己确立的「main 会独立前进」相矛盾 | 第 9 项（此时已全部提交）改三点式 `main...HEAD`；排障表（此时改动多半未提交）改 `git diff "$(git merge-base main HEAD)"`，并写明为何两点式与三点式在排障场景都不行 |
+| 3 | §9 回滚方案说「revert **该提交**」，但计划**刻意产生两个提交**，只 revert 后一个会留下触发条件改动仍生效 | §9 完全重写：分「已合并到 main」与「分支上回滚」两种情形给出确切回滚单元 + 四条核实断言；并附实测 md5 对照表 |
+
+**已按 codex 的 next-step 完成回滚 dry-run**（一次性 worktree，跑完销毁）：
+只 revert Task 2 时 md5 = `47942ada…`（≠ 基线，`branches` 仍缺、`types` 仍在）；
+逆序 revert 两个后 md5 = `16ebdafc…`，与基线**逐字节一致**，四条核实断言全部对上。
+
+**本轮额外收获（dry-run 首次尝试时踩到的真坑）**：`git revert` **没有 `-q` 选项**。
+误写后 git 只打印 usage、**什么都不做**，而后面的 `grep` 断言照常输出数字 ——
+输出看上去像「revert 执行了但没效果」，差点让我把「逆序 revert 也没用」当成结论。
+⇒ **判绿必须读命令自身的输出，不能只读后续断言的数字**
+（`feedback_gate_pipe_swallows_exit_code` 的同族形态）。已写入 §9.2 的告诫。

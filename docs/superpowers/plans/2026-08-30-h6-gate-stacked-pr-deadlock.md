@@ -493,21 +493,7 @@ bash /tmp/h6plan/assert.sh
 
 ---
 
-- [ ] **Step 5: 交给用户 push 与开 PR**
-
-Claude **不执行**这两步。把下列命令交给用户，在他自己的终端里**一行一条**执行：
-
-```
-cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/fix-h6-gate-stacked-pr"
-git push -u origin fix/h6-gate-stacked-pr
-gh pr create --base main --head fix/h6-gate-stacked-pr --title "修复 hardening-6 闸门在叠罗汉 PR 上的永久死锁" --body-file /tmp/h6plan/pr-body.md
-```
-
-PR 正文（中文）在 Step 6 生成到 `/tmp/h6plan/pr-body.md`。
-
----
-
-- [ ] **Step 6: 生成 PR 正文文件**
+- [ ] **Step 5: 先生成 PR 正文文件（必须早于 Step 6）**
 
 ```bash
 mkdir -p /tmp/h6plan
@@ -562,6 +548,29 @@ BODY
 echo "已生成，行数：$(wc -l < /tmp/h6plan/pr-body.md)"
 ```
 
+**生成后立刻校验非空** —— 空文件会让开 PR 的命令产出一个正文空白的 PR：
+
+```bash
+[ -s /tmp/h6plan/pr-body.md ] && echo "OK 非空，$(wc -l < /tmp/h6plan/pr-body.md) 行" || echo "FAIL 文件为空或不存在"
+```
+
+---
+
+- [ ] **Step 6: 交给用户 push 与开 PR**
+
+Claude **不执行**这两步。把下列命令交给用户，在他自己的终端里**一行一条**执行：
+
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/fix-h6-gate-stacked-pr"
+git push -u origin fix/h6-gate-stacked-pr
+gh pr create --base main --head fix/h6-gate-stacked-pr --title "修复 hardening-6 闸门在叠罗汉 PR 上的永久死锁" --body-file /tmp/h6plan/pr-body.md
+```
+
+> ⚠️ **本步依赖 Step 5 已生成 `/tmp/h6plan/pr-body.md`，顺序不可颠倒。**
+> 干净环境下该文件不存在会让开 PR 的命令直接失败；更糟的是若 `/tmp/h6plan`
+> 是上一轮遗留的，会**静默提交一份过期的 PR 正文**。
+
+
 ---
 
 ## 验收清单（用户自己动手，不需要懂代码）
@@ -580,7 +589,7 @@ echo "已生成，行数：$(wc -l < /tmp/h6plan/pr-body.md)"
 | 6 | 敲 `grep -c 'depth=50' .github/workflows/hardening_6_gate.yml` | 数字 **0**（浅化那行已删掉） | ☐ / ☐ |
 | 7 | 敲 `grep -c 'git diff --name-only origin/main' .github/workflows/hardening_6_gate.yml` | 数字 **1**（紧挨着的那行**没被误删**） | ☐ / ☐ |
 | 8 | 敲 `actionlint .github/workflows/hardening_6_gate.yml` | **一个字都不输出**（这个工具专门检查这类配置文件写得对不对，不出声就是没毛病） | ☐ / ☐ |
-| 9 | 敲 `git diff main..HEAD -- .github/workflows/hardening_6_gate.yml` 然后用眼睛看 | 只有**两行前面带减号**（被删的），**九行前面带加号**（新增的：1 行配置 + 8 行英文说明）；其余全无改动 | ☐ / ☐ |
+| 9 | 敲 `git diff main...HEAD -- .github/workflows/hardening_6_gate.yml`（**三个点**）然后用眼睛看 | 只有**两行前面带减号**（被删的），**九行前面带加号**（新增的：1 行配置 + 8 行英文说明）；其余全无改动 | ☐ / ☐ |
 | 10 | PR 开出来后，在 GitHub 页面上看这个 PR 的检查列表 | 里面有一项叫 **`acceptance`**，最终是**绿的对勾** | ☐ / ☐ |
 | 11 | 点开 `acceptance` 那项的运行日志，找「Run hardening-6 acceptance」那一步 | 能看到脚本**真的跑起来的输出**；**不应该**看到 `No hardening-6 framework files touched in this PR` 那句话 | ☐ / ☐ |
 
@@ -596,6 +605,6 @@ echo "已生成，行数：$(wc -l < /tmp/h6plan/pr-body.md)"
 |---|---|---|
 | 断言 G4 变成 FAIL | 删 `git fetch` 那行时把紧挨着的 `git diff` 那行也删了 | 把 `CHANGED=$(git diff --name-only origin/main...HEAD)` 那行加回去 |
 | 断言 G5 有输出 | `types` 里某个词拼错了（actionlint 会指名道姓说哪个非法） | 照它报的位置改回 `opened, synchronize, reopened, edited` |
-| 断言 G7 不等于 2 | 除了预期的两行还删了别的 | 跑 `git diff main..HEAD -- .github/workflows/hardening_6_gate.yml` 逐行看减号行 |
+| 断言 G7 不等于 2 | 除了预期的两行还删了别的 | 跑 `git diff "$(git merge-base main HEAD)" -- .github/workflows/hardening_6_gate.yml` 逐行看减号行（**必须用这个写法** —— 排障时改动往往还没提交，`main..HEAD` / `main...HEAD` 都看不见） |
 | PR 上 `acceptance` 显示「No hardening-6 framework files touched」 | 相关文件名单没匹配上本文件 | 停下来查名单那行正则，**不要**为了让它过而去改名单（Global Constraints 第 3 条禁止） |
 | codex 给出 needs-attention | 正常，评审就是干这个的 | 逐条技术核实，**成立就改、不成立就带理由写进 spec 的评审轮次记录**，不要为了过审而盲改 |
