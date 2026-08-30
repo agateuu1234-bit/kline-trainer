@@ -1,0 +1,15 @@
+# API 容器专用依赖（spec §4-D2 / C1-1）。
+# 恰好三项：读 backend/app/*.py 的 import 得到 —— API 运行只需要这些。
+# ⚠️ 刻意**不含** pandas-ta（那是数据导入脚本用的，且是已知安装陷阱）。
+# ⚠️ 每个 pin 必须与 backend/requirements.txt 中同名包逐字相同，
+#    由 tests/test_requirements_api.py 双向锁定（改任一侧都会红）。
+#    同名包与 backend/requirements-test.txt（CI 真正安装的那份）也一起锁定。
+# ⚠️ 说准一点：下面三行只钉死了这三个**直接**依赖。它们的**间接（传递）**依赖
+#    ——fastapi 带的 starlette / pydantic / pydantic-core / anyio / typing-extensions，
+#    uvicorn 带的 click / h11——**没有**钉死，装的是安装当时 PyPI 上解析到的版本。
+#    也就是说：同一个 commit 隔几个月各装一次，这条线以下拿到的代码可能不同。
+#    连传递依赖一起钉死需要 lock 文件，会改变实际装进去的包集合、要单独验证，
+#    本 PR 不做，记为残留项。
+fastapi==0.115.12
+uvicorn==0.34.2
+asyncpg==0.30.0
