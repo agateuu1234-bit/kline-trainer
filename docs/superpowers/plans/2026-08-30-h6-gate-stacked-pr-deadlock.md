@@ -398,7 +398,21 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/fix-h6-gate-stacked-p
 pwd; git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD; git status --short; git rev-list --count main..HEAD
 ```
 
-**期望**：路径是 worktree、分支 `fix/h6-gate-stacked-pr`、`git status --short` **零输出**、提交数 **5**（spec 2 个 + 本计划 1 个 + Task 1 与 Task 2 各 1 个）。
+**期望**：路径是 worktree、分支 `fix/h6-gate-stacked-pr`、`git status --short` **零输出**。
+
+**提交数不写死**（`main` 与本分支都可能因评审轮次继续增长）。判据是**相对的**：
+
+> **实施后的提交数 = 开始 Task 1 之前的提交数 + 2**（Task 1 与 Task 2 各一次提交）。
+
+所以 Task 1 的第一步就该先记下基数：
+
+```bash
+git rev-list --count main..HEAD
+```
+
+> 本计划成文时该数为 **4**（spec 2 次 + 本计划 1 次 + R3 修订 1 次），故彼时实施完应为 **6**。
+> **若你实际看到的基数不是 4，以你看到的为准 +2** —— 不要拿这里的 6 去对。
+> （教训来源：本计划先写 4、再改 5，两次都因为又多了一次评审修订提交而当场过期。）
 
 ---
 
@@ -524,7 +538,7 @@ echo "已生成，行数：$(wc -l < /tmp/h6plan/pr-body.md)"
 
 | # | 动作 | 期望看到 | 通过 / 不通过 |
 |---|---|---|---|
-| 1 | 敲 `git rev-list --count main..HEAD` | 数字 **5** | ☐ / ☐ |
+| 1 | 敲 `git rev-list --count main..HEAD` | 一个数字。它应当**正好比动手改代码之前大 2**（因为只多了 Task 1、Task 2 两次提交）。**不要对照本文里写死的数字** —— main 和本分支都可能因评审又长了提交 | ☐ / ☐ |
 | 2 | 敲 `git diff --name-only main...HEAD`（**三个点**） | **恰好 3 行**：一个 `.github/workflows/hardening_6_gate.yml`，一个 specs 下的文件，一个 plans 下的文件 | ☐ / ☐ |
 | 3 | 敲 `git status --short` | **一个字都不输出**（空白） | ☐ / ☐ |
 | 4 | 敲 `grep -c 'branches: \[main\]' .github/workflows/hardening_6_gate.yml` | 数字 **0**（那行已删掉） | ☐ / ☐ |
