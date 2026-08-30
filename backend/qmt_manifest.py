@@ -987,3 +987,22 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
 
     # 已证明干净 → 清除（source_path_escape 只需前提①）
     return {}
+
+
+def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome) -> dict:
+    """**收尾提交** —— 全流程中**唯一**能写入或清除生命周期三字段的入口
+    （R95-F2）。返回真正写出去的那份。
+
+    与 `commit_stock` 的差别不在「记不记得改」，而在**能不能改**：
+    per-stock 提交把那三个键剥掉再回填启动快照，本函数把它们剥掉再回填
+    **决策表的输出**。两者都不从调用方内存里那份 manifest 直接取值。
+
+    ⚠️ **`resolve_final_lifecycle` 必须在任何写入之前求值**：它可能抛
+    `SkipVerifyWithEscapeError`（P2-F3），而那一档的规定是「拒绝启动、
+    一个字节都不写」；也可能抛 `ManifestInvalidError`（输入自相矛盾）。
+    """
+    new_lifecycle = resolve_final_lifecycle(manifest, outcome)   # ← 可能抛，必须在写之前
+    payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
+    payload.update(new_lifecycle)
+    _write_manifest(stg_fd, payload)
+    return payload

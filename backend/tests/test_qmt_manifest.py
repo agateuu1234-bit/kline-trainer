@@ -2244,3 +2244,127 @@ def test_every_resolved_state_passes_the_read_side_validator():
         merged = {k: v for k, v in prev.items() if k not in LIFECYCLE_KEYS}
         merged.update(new_lc)
         assert validate_manifest(merged) is merged
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 18：commit_final —— 唯一能动生命周期字段的落盘入口
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import commit_final
+
+
+def test_commit_final_writes_a_readable_manifest(tmp_path):
+    """正向放行档。"""
+    _d, fd = _staging(tmp_path)
+    try:
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish())
+        assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_clears_the_fatal_when_proven_clean(tmp_path):
+    """⭐ 与 commit_stock 的权限差：收尾提交**能**清除。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True))
+        on_disk = read_manifest(fd)
+        assert "fetch_fatal_error" not in on_disk
+        assert "stopped_reason" not in on_disk
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_keeps_the_fatal_when_not_proven(tmp_path):
+    m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=False))
+        on_disk = read_manifest(fd)
+        assert on_disk["fetch_fatal_error"] == _fatal()
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_ignores_lifecycle_fields_already_in_the_passed_manifest(tmp_path):
+    """⭐ 与 commit_stock 同源的结构性保证：写出去的三个字段**只能**来自决策表，
+    绝不来自调用方内存里那份 manifest 的直接赋值。
+
+    这里内存里带着 escape、本次是容量触顶——磁盘上应当出现的是「保留 escape +
+    另记 secondary」，因为决策表看的是 manifest 里**上一次**的 fatal。
+
+    判别力：把实现写成 `payload = dict(manifest)` 而不先剥 LIFECYCLE_KEYS，
+    `stopped_reason_secondary` 那条断言仍会绿（决策表塞得回去），但把它改成
+    「内存里预先带一个假的 secondary」就能分辨——故本档预置一个假 secondary。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(),
+                        stopped_reason="staging_path_escape")
+    m["stopped_reason_secondary"] = "max_bytes"        # 内存里预置的陈旧附注
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True,
+                                                 staging_recheck="passed"))
+        on_disk = read_manifest(fd)
+        assert "fetch_fatal_error" not in on_disk
+        assert "stopped_reason" not in on_disk
+        # ⭐ 决策表这一支返回 {}，故内存里那条陈旧的 secondary 必须被剥掉
+        assert "stopped_reason_secondary" not in on_disk
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_uses_full_fsync(tmp_path, monkeypatch):
+    """manifest 提交按 O4-F11 定案走 F_FULLFSYNC。
+
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_final(fd, _valid_manifest(), outcome=clean_finish())
+    finally:
+        os.close(fd)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+    else:
+        assert fsynced
+
+
+def test_commit_final_refuses_skip_verify_with_escape_and_writes_nothing(tmp_path):
+    """⭐ P2-F3 的落盘侧：拒绝时**一个字节都不写**。
+
+    判别力：把 resolve 的调用放在写入之后，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
+    d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(SkipVerifyWithEscapeError):
+            commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True))
+        assert not (d / MANIFEST_NAME).exists()
+    finally:
+        os.close(fd)
+
+
+def test_full_round_trip_stock_commits_then_final(tmp_path):
+    """⭐⭐ 端到端不变量：一次带着 escape 记录的运行里，
+    **任意多次 per-stock 提交都动不了 fatal，只有收尾那一次能**。
+    """
+    start = _valid_manifest(fetch_fatal_error=_fatal(),
+                            stopped_reason="staging_path_escape")
+    snap = lifecycle_snapshot(start)
+    _d, fd = _staging(tmp_path)
+    try:
+        for _ in range(3):                       # 三次 per-stock 提交
+            commit_stock(fd, start, lifecycle=snap)
+            assert read_manifest(fd)["fetch_fatal_error"] == _fatal()
+        commit_final(fd, start,
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="passed"))
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
