@@ -656,7 +656,11 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
     模型之内，而本平台的 `fsync(2)` man page 明写它既不保证断电耐久、也不保证
     跨设备写序）。**默认 `False`**：归属标记等其余落地点保留 `fsync`，行为不变
     （全都升级会让 400 股量级付出不必要的代价）。
-    **目录项一律走 `fsync_dir`**——`F_FULLFSYNC` 对目录 fd 的语义未经实测，不外推。
+    **`full_sync=True` 时，`os.replace` 之后的目录项也走 `full_fsync`**：
+    `man 2 fcntl` 原文写明 `F_FULLFSYNC`「arg is ignored」且「drains the entire
+    queue of the device and acts as a barrier」——它是**设备级**屏障，与该 fd 指向
+    文件还是目录无关。只给临时文件下屏障、改名却只 `fsync`，等于把「原子」做足了
+    而「耐久」漏在最后一步（codex R1 [high]）。默认路径仍走 `fsync_dir`。
     """
     try:
         st = os.lstat(name, dir_fd=dir_fd)
@@ -693,7 +697,25 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
         except FileNotFoundError:
             pass
         raise
-    fsync_dir(dir_fd)
+    if full_sync:
+        # ⚠️ **改名本身也要过屏障**（codex R1 [high]）：`full_fsync` 只施加在临时
+        # 文件上、而 `os.replace` 发生在它**之后**，于是一次断电可能丢掉那次改名
+        # ——manifest 停在旧版本或干脆不存在，而按股 CSV 已是新状态，
+        # 按股事务与崩溃恢复的地基同时塌掉。
+        #
+        # 依据是**本机 `man 2 fcntl` 原文**（非推测，也不是「对目录 fd 的外推」）：
+        # 「… asks the drive to flush all buffered data to the permanent storage
+        #  device (**arg is ignored**). As this **drains the entire queue of the
+        #  device and acts as a barrier**, data that had been fsync'd on the same
+        #  device before is **guaranteed to be persisted** when this call returns.
+        #  … currently implemented on HFS, MS-DOS (FAT), UDF and **APFS**.」
+        # ⇒ 它是**设备级**屏障，`arg` 被忽略，与该 fd 指向文件还是目录无关；
+        #   本机 staging 所在卷实测为 APFS。
+        # `full_fsync` 在没有 F_FULLFSYNC 的平台退回 `os.fsync`，与 `fsync_dir`
+        # 等价，故 Linux 上行为一个字节不变。
+        full_fsync(dir_fd)
+    else:
+        fsync_dir(dir_fd)
 
 
 def atomic_write_json(dir_fd: int, name: str, payload: dict, *,

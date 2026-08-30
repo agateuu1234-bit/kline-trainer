@@ -16,13 +16,15 @@ Spec: `docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md` §4.4 + §4
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import stat
 from dataclasses import dataclass
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 from qmt_fsroot import (
     PathDisciplineError,
@@ -699,8 +701,14 @@ def lifecycle_snapshot(manifest: dict) -> dict:
     **这是 per-stock 提交够不到那三个字段的实现手段**（R95-F2 + spec §9-3s
     「使规则可机械检验」）：`commit_stock` 把 manifest 里的同名键一律剥掉，
     再把本快照塞回去——**调用方即使污染了内存里的 manifest，也写不进磁盘**。
+
+    ⚠️ **必须深拷贝**（codex R1 [high]）：只拷顶层映射时 `fetch_fatal_error`
+    仍是**同一个可变 dict**，取完快照再改它一样会被写进磁盘——不变量当场作废。
+    本机端到端复现过整条洗白链：把 `kind` 由 `staging_path_escape` 改成
+    `source_path_escape` 后仍能过读侧校验，而 source escape 的清除**只要前提①**
+    （不需要 staging 全量复校）→ 下一次收尾提交就把它清掉了。
     """
-    return {k: manifest[k] for k in LIFECYCLE_KEYS if k in manifest}
+    return {k: copy.deepcopy(manifest[k]) for k in LIFECYCLE_KEYS if k in manifest}
 
 
 def read_manifest(stg_fd: int) -> dict | None:
@@ -845,6 +853,33 @@ class SkipVerifyWithEscapeError(Exception):
     """
 
 
+def _validated_escape(escape: object) -> dict:
+    """校验 escape 证据的**四字段外延 + 每个字段的类型与取值**，返回一份新 dict。
+
+    ⚠️ **连类型一起校验**：只查「非空」时 `relative_path=123` 会一路通过构造、
+    通过决策表，直到被写上磁盘，才在**下一次读**时被判非法——又一次
+    「一个合规的写者产出的 manifest 被读者判非法」（R94-F2 家族）。
+    """
+    if not isinstance(escape, Mapping):
+        raise ValueError(f"escape 必须是映射，收到 {type(escape).__name__}")
+    ev = dict(escape)
+    if set(ev) != set(FATAL_FIELDS):
+        raise ValueError(
+            f"escape 的键必须恰为 {list(FATAL_FIELDS)}，收到 {sorted(ev)}"
+            "——多余的键会被原样写进 manifest 而读侧不认识它"
+        )
+    if not isinstance(ev["kind"], str) or ev["kind"] not in FATAL_KINDS:
+        raise ValueError(
+            f"escape.kind 必须是 {sorted(FATAL_KINDS)} 之一，收到 {ev['kind']!r}")
+    if not isinstance(ev["errno"], str) or ev["errno"] not in FATAL_ERRNOS:
+        raise ValueError(
+            f"escape.errno 必须是 {sorted(FATAL_ERRNOS)} 之一，收到 {ev['errno']!r}")
+    for name in ("relative_path", "component"):
+        if not isinstance(ev[name], str) or not ev[name]:
+            raise ValueError(f"escape.{name} 必须是非空字符串，收到 {ev[name]!r}")
+    return ev
+
+
 @dataclass(frozen=True)
 class FinalOutcome:
     """本次运行的**收尾事件**。用三个工厂函数构造，非法组合在构造期就被排除。
@@ -865,16 +900,42 @@ class FinalOutcome:
     staging_recheck: str | None = None
 
     def __post_init__(self) -> None:
+        # ⚠️ **全部不变量都落在这里，不落在三个工厂里**（codex R1 [high]）：
+        # 本类是公开的 frozen dataclass，可以被**直接构造**——守卫立在工厂而
+        # 对象能绕过工厂构造，等于守卫不存在（本仓已栽过同形态：守卫立在调用方
+        # 而 `open()` 发生在被调方）。
         if not isinstance(self.kind, str) or self.kind not in _FINAL_KINDS:
             raise ValueError(
                 f"FinalOutcome.kind 必须是 {sorted(_FINAL_KINDS)} 之一，"
                 f"收到 {self.kind!r}"
+            )
+        # ⚠️ 必须是**真正的 bool**：非空字符串是真值，`clean_finish(
+        # revisited_fatal_path="false")` 会被当成「重走过那条路径」，
+        # **无凭无据就把 fatal 清掉**。命令行/配置传进来的 "false" 正是这个形态。
+        if not isinstance(self.revisited_fatal_path, bool):
+            raise ValueError(
+                "revisited_fatal_path 必须是 True/False（真正的布尔值），"
+                f"收到 {self.revisited_fatal_path!r}"
+                "——它是「已证明受影响的路径确实干净」的唯一凭据，"
+                "非空字符串等真值会让 fatal 被无凭无据地清除"
             )
         if self.staging_recheck not in _RECHECK_VERDICTS:
             raise ValueError(
                 "staging_recheck 只能是 None/'passed'/'failed'，"
                 f"收到 {self.staging_recheck!r}"
             )
+        # 跨字段配对：kind == "escape" ⟺ 带着证据。
+        if (self.kind == "escape") != (self.escape is not None):
+            raise ValueError(
+                f"kind={self.kind!r} 与 escape={self.escape!r} 不配对："
+                "escape 事件必须带四字段证据，非 escape 事件不得携带证据"
+                "（否则那份证据被静默忽略）"
+            )
+        if self.escape is not None:
+            ev = _validated_escape(self.escape)
+            # 冻结：dict 塞进 frozen dataclass 仍可变，构造期校验会被
+            # 「构造完再改一下」绕过（本机复现改成了 bogus）。
+            object.__setattr__(self, "escape", MappingProxyType(ev))
 
 
 def clean_finish(*, revisited_fatal_path: bool = False,
@@ -898,17 +959,9 @@ def escape_stop(*, kind: str, relative_path: str, component: str,
                 errno: str) -> FinalOutcome:
     """本次撞了逃逸（源树或 staging 树的路径分量被换）。
 
-    ⚠️ 四个字段**连类型一起**在构造期校验：只查「非空」时 `relative_path=123`
-    会一路通过构造、通过决策表，直到被写上磁盘，才在**下一次读**时被判非法
-    ——又一次「一个合规的写者产出的 manifest 被读者判非法」（R94-F2 家族）。
+    ⚠️ 校验本身在 `FinalOutcome.__post_init__` 里，本函数只是个便利入口——
+    **直接构造的那条路必须同样安全**。
     """
-    if not isinstance(kind, str) or kind not in FATAL_KINDS:
-        raise ValueError(f"kind 必须是 {sorted(FATAL_KINDS)} 之一，收到 {kind!r}")
-    if not isinstance(errno, str) or errno not in FATAL_ERRNOS:
-        raise ValueError(f"errno 必须是 {sorted(FATAL_ERRNOS)} 之一，收到 {errno!r}")
-    for name, value in (("relative_path", relative_path), ("component", component)):
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{name} 必须是非空字符串，收到 {value!r}")
     return FinalOutcome(kind="escape", escape={
         "kind": kind, "relative_path": relative_path,
         "component": component, "errno": errno,
@@ -957,13 +1010,14 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
 
     # ③ 上次有 fatal，本次是 max_bytes 触顶 → 一律保留，只加诊断附注（O4-F1）。
     if outcome.kind == "max_bytes":
-        return {"fetch_fatal_error": prev_fatal,
+        return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
                 "stopped_reason": prev_reason,
                 "stopped_reason_secondary": "max_bytes"}
 
     # ④ 上次有 fatal，本次干净跑完 —— 清除与否取决于「有没有证明干净」
     if not outcome.revisited_fatal_path:                    # 前提① 不满足
-        return {"fetch_fatal_error": prev_fatal, "stopped_reason": prev_reason}
+        return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
+                "stopped_reason": prev_reason}
 
     # ⚠️ **「复校失败」先于 kind 判断**：spec 只在 staging_path_escape 的语境里
     # 定义了这一档，但「staging 全量复校失败」是一个与 fatal 种类无关的事实。
@@ -972,7 +1026,7 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
     # 对不上的 staging 拿到干净标签。本判据只增加拒绝，不会误杀合法状态。
     # ⭐ 这也是 `kind` 与 `stopped_reason` 解耦的唯一理由（O4-F3）。
     if outcome.staging_recheck == "failed":
-        return {"fetch_fatal_error": prev_fatal,
+        return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
                 "stopped_reason": "staging_recheck_failed"}
 
     if prev_fatal["kind"] == "staging_path_escape":

@@ -2439,3 +2439,124 @@ def test_evidence_pass_completed_at_must_not_be_empty():
     m["source_verification_evidence"]["passes"][0]["completed_at"] = ""
     with pytest.raises(ManifestInvalidError, match="completed_at"):
         validate_manifest(m)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R1 的三条 high（本机端到端复现后修复）
+#
+# 共同形态：**结构性保证被「可变的嵌套状态」与「没被校验的字段」绕过**。
+# 这是「按字段穷尽而非按判据句穷尽」的又一次——我校验了想到的那几个字段
+# （kind / staging_recheck / relative_path / component），漏了 revisited_fatal_path；
+# 我拷贝了顶层的三个键，漏了它们**里面**那一层。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_lifecycle_snapshot_does_not_alias_the_manifests_nested_fatal(tmp_path):
+    """⭐⭐ [high #1] 快照只拷了顶层映射，`fetch_fatal_error` 仍是**同一个**可变 dict。
+
+    端到端复现（本机真跑）：取完快照后改 `manifest["fetch_fatal_error"]["kind"]`，
+    per-stock 提交把改过的值**写进了磁盘**——Task 16 那条「调用方即使污染了内存里
+    的 manifest 也写不进磁盘」的核心不变量被绕过。
+
+    后果链不止于此：`kind` 从 `staging_path_escape` 被改成 `source_path_escape`
+    之后仍能过读侧校验，而 source escape 的清除**只要前提①**（不需要 staging 全量
+    复校）→ 下一次收尾提交就能把它清掉。**一棵被证明动过的树被洗成干净凭据。**
+
+    判别力：把 `lifecycle_snapshot` 改回浅拷贝，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    snap = lifecycle_snapshot(m)
+    assert snap["fetch_fatal_error"] is not m["fetch_fatal_error"]
+
+    m["fetch_fatal_error"]["kind"] = "source_path_escape"      # 取完快照后再污染
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, m, lifecycle=snap)
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_resolve_final_lifecycle_does_not_alias_the_input_fatal():
+    """[high #1 同族] 决策表保留 fatal 时不得把**输入那个对象**递出去。
+
+    否则调用方改一下输入，已经算好的「新状态」跟着变——纯函数的结论
+    在被写盘之前就可能被改掉。
+
+    判别力：把两处 `deepcopy(prev_fatal)` 改回 `prev_fatal`，本条必红。
+    """
+    prev = _prev(fatal=_fatal(), reason="staging_path_escape")
+    for outcome in (max_bytes_stop(), clean_finish(revisited_fatal_path=False),
+                    clean_finish(revisited_fatal_path=True, staging_recheck="failed")):
+        got = resolve_final_lifecycle(prev, outcome)
+        assert got["fetch_fatal_error"] is not prev["fetch_fatal_error"]
+        assert got["fetch_fatal_error"] == _fatal()
+
+
+def test_revisited_fatal_path_must_be_a_real_bool():
+    """⭐⭐ [high #2] `revisited_fatal_path` 从来没被校验过类型。
+
+    本机复现：`clean_finish(revisited_fatal_path="false")` 被接受，
+    而非空字符串是**真值** → 决策表当成「重走过那条路径」→
+    **无凭无据就把 source escape 的 fatal 清掉了**。
+    命令行/配置里传进来的 `"false"` 是这条路上最自然的形态。
+
+    判别力：删掉 bool 校验，本条必红。
+    """
+    for bad in ("false", "true", "", 0, 1, None, [], {}):
+        with pytest.raises(ValueError, match="revisited_fatal_path"):
+            clean_finish(revisited_fatal_path=bad)
+    for good in (True, False):
+        assert clean_finish(revisited_fatal_path=good).revisited_fatal_path is good
+
+
+def test_escape_evidence_cannot_be_mutated_after_construction():
+    """⭐ [high #2 同族] `escape` 是个可变 dict 塞进 frozen dataclass ——
+    构造期校验形同虚设：构造完再改一下就绕过去了（本机复现改成了 `bogus`）。
+
+    判别力：把 MappingProxyType 换回裸 dict，本条必红。
+    """
+    e = escape_stop(kind="staging_path_escape", relative_path="a/b.csv",
+                    component="a", errno="ELOOP")
+    with pytest.raises(TypeError):
+        e.escape["kind"] = "bogus"
+    assert e.escape["kind"] == "staging_path_escape"
+
+
+def test_final_outcome_enforces_the_kind_escape_pairing():
+    """⭐ [high #2 同族] 跨字段不变量必须在 `__post_init__` 里兑现，
+    否则**直接构造**这条路上全部校验都不存在。
+
+    - `kind="escape"` 却没带证据 → 决策表里只剩一句 `assert`（`python -O` 下会被剥掉）；
+    - `kind="clean"` 却带着证据 → 那份证据被**静默忽略**。
+
+    判别力：删掉这两条配对校验，本条必红。
+    """
+    with pytest.raises(ValueError, match="escape"):
+        FinalOutcome(kind="escape")
+    with pytest.raises(ValueError, match="escape"):
+        FinalOutcome(kind="clean", escape={"kind": "staging_path_escape",
+                                           "relative_path": "a", "component": "a",
+                                           "errno": "ELOOP"})
+
+
+def test_final_outcome_validates_escape_evidence_on_direct_construction():
+    """⭐ [high #2 同族] 校验必须落在 `__post_init__`，不能只落在 `escape_stop`。
+
+    「守卫立在工厂而对象可以绕过工厂构造 = 守卫不存在」——本仓已栽过同形态
+    （守卫立在调用方而 open() 发生在被调方）。
+
+    判别力：把校验搬回 escape_stop、只留工厂那一份，本条必红。
+    """
+    ok = {"kind": "staging_path_escape", "relative_path": "a/b.csv",
+          "component": "a", "errno": "ELOOP"}
+    for key, bad in [("kind", "max_bytes"), ("errno", "EACCES"),
+                     ("relative_path", ""), ("component", 123),
+                     ("relative_path", None)]:
+        broken = dict(ok, **{key: bad})
+        with pytest.raises(ValueError):
+            FinalOutcome(kind="escape", escape=broken)
+    with pytest.raises(ValueError):
+        FinalOutcome(kind="escape", escape=dict(ok, extra=1))     # 多余字段
+    assert FinalOutcome(kind="escape", escape=ok).escape["kind"] == "staging_path_escape"

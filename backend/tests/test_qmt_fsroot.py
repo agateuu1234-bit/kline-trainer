@@ -1588,3 +1588,86 @@ def test_open_regular_probe_clears_nonblock_on_a_regular_file(tmp_path: Path):
             os.close(fd)
     finally:
         os.close(root)
+
+
+# ─────────────────────────────────────────────────────────────
+# codex R1 [high] #3：manifest 的**改名**在断电模型下不耐久
+#
+# `full_fsync` 只施加在临时文件上，`os.replace` 之后却只有普通 `fsync(目录)`。
+# 本模块自己写着「macOS 的 fsync 既不保证断电耐久、也不保证跨设备写序」，
+# 于是一次断电可能丢掉那次改名：manifest 停在旧版本或干脆不存在，而按股 CSV
+# 已是新状态——按股事务与崩溃恢复的地基同时塌掉。
+#
+# 处置依据是**本机 man 2 fcntl 原文**（非推测）：
+#   「Does the same thing as fsync(2) then asks the drive to flush all buffered
+#    data to the permanent storage device (**arg is ignored**). As this **drains
+#    the entire queue of the device and acts as a barrier**, data that had been
+#    fsync'd on the same device before is **guaranteed to be persisted** when
+#    this call returns. … currently implemented on HFS, MS-DOS (FAT), UDF and
+#    **APFS**.」
+# ⇒ 它是**设备级屏障**、与 fd 是文件还是目录无关；本机 staging 所在卷实测为 APFS。
+# ─────────────────────────────────────────────────────────────
+
+
+def test_atomic_write_json_full_sync_barriers_after_the_rename(tmp_path: Path, monkeypatch):
+    """⭐⭐ 判据不是「调用了几次」，而是**改名之后还有没有那道屏障**。
+
+    只数次数的断言挡不住「两次屏障都下在 replace 之前」这种实现。
+    这里按**时序**记事件，断言序列里 `replace` 之后仍有一次 `F_FULLFSYNC`。
+
+    判别力：把 replace 之后那次改回 `fsync_dir`，本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 退回 `os.fsync`，故该平台按 `os.fsync` 记同一条时序。
+    """
+    events = []
+    real_fcntl = fcntl.fcntl
+    real_fsync = os.fsync
+    real_replace = os.replace
+    has_ff = hasattr(fcntl, "F_FULLFSYNC")
+
+    def spy_fcntl(fd, cmd, *a):
+        if has_ff and cmd == fcntl.F_FULLFSYNC:
+            events.append("barrier")
+        return real_fcntl(fd, cmd, *a)
+
+    def spy_fsync(fd):
+        if not has_ff:                       # Linux：fsync 就是该平台最强的原语
+            events.append("barrier")
+        else:
+            events.append("fsync")
+        return real_fsync(fd)
+
+    def spy_replace(*a, **kw):
+        events.append("replace")
+        return real_replace(*a, **kw)
+
+    monkeypatch.setattr(fcntl, "fcntl", spy_fcntl)
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+
+    assert "replace" in events, events
+    after = events[events.index("replace") + 1:]
+    assert "barrier" in after, (
+        f"os.replace 之后没有任何设备级屏障，事件时序={events}——"
+        "改名本身在断电后可能丢失")
+
+
+def test_atomic_write_json_without_full_sync_has_no_barrier_after_rename(
+        tmp_path: Path, monkeypatch):
+    """反向档：默认路径（归属标记等）**不得**因为本次修改而升级刷盘代价。
+
+    ⚠️ Linux 上无判别力（两条路都是 os.fsync），如实登记。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
