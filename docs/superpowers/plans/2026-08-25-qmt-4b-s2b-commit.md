@@ -50,7 +50,7 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 
 ## 实施轮偏离登记（2026-08-30，实施者核实后逐条订正）
 
-> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**九处偏离全部朝
+> **下面各 Task 的代码块是写计划时的草案，不是最终实现。**十二处偏离全部朝
 > 「坏状态不可表达」方向，每条各配专属档并由控制者亲手做过变异验证。
 > 与本文件代码块 diff 不上的地方，以**仓库代码 + 本表**为准。
 
@@ -65,6 +65,10 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D7 | Task 17 `FinalOutcome` | 公开 dataclass 却不校验 `kind` → `FinalOutcome(kind="whatever")` 落到「上次没 fatal → 返回 {}」，**被静默当成干净跑完** | `__post_init__` 校验 `kind` 与 `staging_recheck` |
 | D8 | Task 17 `escape_stop` | 只查「非空」不查类型 → `relative_path=123` 一路通过构造与决策表、写上磁盘，到**下一次读**才被判非法 | 连类型一起在构造期校验 |
 | D9 | Task 17 `max_bytes_stop` | 开了 `revisited_fatal_path` / `staging_recheck` 两个参数，而决策表对 max_bytes 这一支**根本不看它们**（O4-F1）→ 可传而被静默忽略 | 两个参数从签名里去掉，让它**不可表达** |
+
+| D10 | Task 15 Step 0 的耐久提交 | `full_sync` 只施加在**临时文件**上，`os.replace` 之后仍只有普通 `fsync(目录)` → 断电可能丢掉那次改名，manifest 停在旧版本而按股 CSV 已是新状态（codex R1 [high]）| `full_sync=True` 时改名后改走 `full_fsync`。依据是**本机 `man 2 fcntl` 原文**：`F_FULLFSYNC`「arg is ignored」「drains the entire queue of the device and acts as a barrier」「implemented on … APFS」⇒ 它是**设备级**屏障，与 fd 指向文件还是目录无关，不是「对目录 fd 的外推」|
+| D11 | Task 15 `lifecycle_snapshot` | 只拷顶层映射，`fetch_fatal_error` 仍是**同一个可变 dict**；取完快照再改它照样写进磁盘，Task 16 的核心不变量当场作废（codex R1 [high]，本机端到端复现整条洗白链）| 改深拷贝；同族一并修：决策表保留 fatal 时也不再递出输入那个对象 |
+| D12 | Task 17 `FinalOutcome` | `revisited_fatal_path` 从未校验类型（`"false"` 是真值 → 无凭无据清 fatal）；`escape` 是可变 dict 塞进 frozen dataclass（构造完再改就绕过校验）；`kind` 与 `escape` 的配对从未校验（只剩决策表里一句 `assert`，`-O` 下会被剥掉）（codex R1 [high]）| 全部不变量移进 `__post_init__`（**守卫立在工厂而对象能绕过工厂构造 = 守卫不存在**），`escape` 冻成 `MappingProxyType`，`escape_stop` 退化为便利入口 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1475,6 +1479,21 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
   仍绿是预期」，并在 `source_snapshot` 那一侧补了**真有**专属档的 `test_universe_code_suffix...`。
 
 其余符号：`_valid_manifest` / `_sha` / `_file_rec` / `_recompute_evidence` / `_with_universe`（Task 5）→ 后续全用；`_fatal`（Task 11）→ Task 15/17/18 用；`_evidence` / `_agg_of` / `_GMT`（Task 12）→ Task 13 用；`_staging`（Task 15）→ Task 16/18 用；`_prev`（Task 17）→ Task 17 内用。**定义均早于首次使用。**
+
+---
+
+# 评审轮次记录
+
+| 轮 | 判决 | 内容 |
+|---|---|---|
+| **R1** | needs-attention（3 high）| 三条**同一形态**：结构性保证被「可变的嵌套状态」与「没被校验的字段」绕过。①`lifecycle_snapshot` 浅拷贝 → 取完快照改嵌套 `fetch_fatal_error` 照样落盘，且 `kind` 被改成 `source_path_escape` 后只需前提①即可清除 → 完整洗白链；②`revisited_fatal_path` 未校验类型（`"false"` 是真值）+ `escape` 可变 + `kind↔escape` 配对未校验；③`os.replace` 之后只有普通 `fsync(目录)`，断电可丢改名。**三条均本机端到端复现后才修**，修完再复现证明已堵，各配专属档 + 7 条变异全部命中 |
+
+> ⚠️ **R1 三条的共同根因值得记住**：我校验了「想到的那几个字段」（`kind` /
+> `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；
+> 我拷贝了「顶层的三个键」，漏了它们**里面**那一层。
+> 这正是 [[feedback_read_side_predicate_both_directions]] 那条
+> 「按**字段**穷尽而不是按**判据句**穷尽」——只是这次对象从「读侧校验的字段」
+> 换成了「构造期校验的字段」与「拷贝边界」。
 
 ---
 
