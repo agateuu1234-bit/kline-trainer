@@ -25,6 +25,7 @@ from typing import Iterable
 
 from qmt_fsroot import (
     PathDisciplineError,
+    atomic_write_json,
     open_regular_probe,
     split_relative_components,
 )
@@ -772,3 +773,57 @@ def read_manifest(stg_fd: int) -> dict | None:
             "这通常意味着上一次写入被打断（文件被截断）。"
         ) from e
     return validate_manifest(payload)
+
+
+def _write_manifest(stg_fd: int, payload: dict) -> None:
+    """manifest 的**唯一**落盘路径：tmp → `F_FULLFSYNC(文件)` → `os.replace` →
+    `fsync(目录)`。
+
+    文件内容走 **`F_FULLFSYNC`**（O4-F11 定案：断电在威胁模型之内，而本平台的
+    `fsync(2)` man page 明写它既不保证断电耐久、也不保证跨设备写序）。
+
+    ⚠️ **绝不就地截断重写**——「原子」（`os.replace` 不会看到半截）与「耐久」
+    （崩溃后仍在）是两件事，两者都要（R45-F2）。
+    """
+    atomic_write_json(stg_fd, MANIFEST_NAME, payload, full_sync=True)
+
+
+def _require_lifecycle_only(lifecycle: dict, where: str) -> None:
+    """`lifecycle` 只许携带生命周期三字段。
+
+    不拦的话 `payload.update(lifecycle)` 是一条通往**任意顶层键**的走私通道：
+    `lifecycle={"files": []}` 就能在一个自称「够不到生命周期字段」的入口里
+    把实拷清单清空。这条守卫让「剥 + 塞」真的闭合在那三个键上。
+    """
+    extra = sorted(set(lifecycle) - LIFECYCLE_KEYS)
+    if extra:
+        raise ValueError(
+            f"{where} 的 lifecycle 只许携带 {sorted(LIFECYCLE_KEYS)}，"
+            f"多出 {extra}——它会经 update 写进 manifest 的任意顶层键"
+        )
+
+
+def commit_stock(stg_fd: int, manifest: dict, *, lifecycle: dict) -> dict:
+    """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
+
+    ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段**：manifest 里的
+    `stopped_reason` / `stopped_reason_secondary` / `fetch_fatal_error`
+    一律被**剥掉**，再把 `lifecycle`（启动时从磁盘捕获的快照）逐字塞回去。
+    调用方即使污染了内存里的 manifest，也写不进磁盘。
+
+    这不是纪律而是结构：spec §9-3s 要求「per-stock 提交一律不动这两个字段，
+    **使规则可机械检验**」。靠「实施者记得别改」的实现无法被机械检验，
+    而这两个字段是 pilot 的 fail-closed 判据——被 per-stock 提交洗掉一次，
+    一棵**已被证明动过**的 staging 就会拿到干净标签。
+
+    ⚠️ **这条结构保证的边界（如实登记，不许对外说过头）**：它挡住的是
+    「调用方污染了内存里那份 manifest」与「借 `lifecycle` 参数走私其它顶层键」。
+    它**挡不住**「调用方故意传一个伪造的快照」——那需要每次提交都回读磁盘，
+    代价与 per-stock 的调用频次不成比例。正确用法是启动时 `lifecycle_snapshot()`
+    取一次、整轮传同一个对象，由 S4 的拷贝循环承担。
+    """
+    _require_lifecycle_only(lifecycle, "commit_stock")
+    payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
+    payload.update(lifecycle)
+    _write_manifest(stg_fd, payload)
+    return payload

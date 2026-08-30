@@ -1834,3 +1834,139 @@ def test_lifecycle_snapshot_captures_only_the_three_keys():
 
 def test_lifecycle_snapshot_of_a_clean_manifest_is_empty():
     assert lifecycle_snapshot(_valid_manifest()) == {}
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 16：commit_stock —— per-stock 提交够不到生命周期三字段
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import commit_stock
+
+
+def _fcntl_cmd_spy(monkeypatch) -> list:
+    """记录本次经过 `fcntl.fcntl` 的所有 cmd（用于证明走没走 F_FULLFSYNC）。"""
+    calls = []
+    real = fcntl.fcntl
+    monkeypatch.setattr(
+        fcntl, "fcntl",
+        lambda fd, cmd, *a: (calls.append(cmd), real(fd, cmd, *a))[1],
+    )
+    return calls
+
+
+def test_commit_stock_writes_a_readable_manifest(tmp_path):
+    """正向放行档：写出去的必须读得回来。"""
+    m = _valid_manifest()
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, m, lifecycle={})
+        assert read_manifest(fd) == m
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_cannot_change_lifecycle_fields(tmp_path):
+    """⭐⭐ 核心不变量：即使调用方**故意**改了内存里的三个字段，
+    磁盘上写出去的仍是 lifecycle 快照里的值。
+
+    判别力：把实现写成 `atomic_write_json(fd, NAME, manifest)`（直接写入参），
+    本条必红。这就是 spec §9-3s 说的「使规则可机械检验」——不是靠实施者记得别改。
+    """
+    prev = {"stopped_reason": "staging_path_escape",
+            "fetch_fatal_error": _fatal()}
+    poisoned = _valid_manifest(**prev)
+    snap = lifecycle_snapshot(poisoned)
+
+    # 调用方「不小心」把 fatal 洗掉了
+    del poisoned["fetch_fatal_error"]
+    poisoned["stopped_reason"] = "max_bytes"
+
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, poisoned, lifecycle=snap)
+        on_disk = read_manifest(fd)
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+        assert on_disk["fetch_fatal_error"] == _fatal()
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_cannot_invent_lifecycle_fields(tmp_path):
+    """反向档：一份**干净的** manifest，调用方硬塞一个 stopped_reason 进去 ——
+    磁盘上必须仍然干净。
+
+    没有这一条，「只在 lifecycle 有值时覆盖」的实现也能让上一条绿。
+    **「剥」与「塞」是两个动作，各配一档，缺一会互相掩盖。**
+    """
+    poisoned = _valid_manifest(stopped_reason="max_bytes")
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, poisoned, lifecycle={})       # 启动时磁盘上是干净的
+        assert "stopped_reason" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_refuses_a_lifecycle_carrying_foreign_keys(tmp_path):
+    """⭐ 把「剥 + 塞」这条结构闭合掉：`lifecycle` 只许携带生命周期三字段。
+
+    不拦的话 `payload.update(lifecycle)` 是一条通往**任意顶层键**的走私通道 ——
+    `lifecycle={"files": []}` 就能在 per-stock 提交里把实拷清单清空，
+    而这个入口自称「够不到生命周期字段」，读者会以为它什么都动不了。
+
+    双向各问一次：①畸形（含任何非生命周期键）必须被拒；
+    ②合法状态不得被判死 —— `lifecycle_snapshot()` 的输出恒为三字段的子集，
+    空 dict 也是子集，上面三条正向/反向档就是这一侧的证据。
+    """
+    _d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="lifecycle"):
+            commit_stock(fd, _valid_manifest(), lifecycle={"files": []})
+        assert not (_d / MANIFEST_NAME).exists()      # 拒绝时一个字节都不写
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_preserves_unknown_top_level_keys(tmp_path):
+    """S3/S4 的 failures / batches 等经 per-stock 提交流转，不得被剥掉（O4-F10）。"""
+    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}],
+                        committed_bytes=123)
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, m, lifecycle={})
+        on_disk = read_manifest(fd)
+        assert on_disk["failures"] == [{"stock_code": "600004.SH", "attempts": 1}]
+        assert on_disk["committed_bytes"] == 123
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_uses_full_fsync(tmp_path, monkeypatch):
+    """manifest 提交按 O4-F11 定案走 F_FULLFSYNC（断电在威胁模型之内）。
+
+    判别力：把 `full_sync=True` 去掉，本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上无判别力（如实登记）。
+    **按平台分支，绝不 skip**——本仓 CI 把任何 skip 判失败。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), lifecycle={})
+    finally:
+        os.close(fd)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+    else:
+        assert fsynced
+
+
+def test_commit_stock_is_atomic_leaving_no_tmp_files(tmp_path):
+    """走 tmp → replace，落地后目录里不得有残留临时文件。"""
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), lifecycle={})
+    finally:
+        os.close(fd)
+    assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
