@@ -1,0 +1,448 @@
+# 划线工具扩充 · P1c 第 1 片 spec：样式矩阵结构泛化（为四个新工具让路）
+
+- **上游母 spec**：`docs/superpowers/specs/2026-07-04-drawing-tools-expansion-design.md`（D1–D22）
+- **上游 P1b 拆分补充**：`docs/superpowers/specs/2026-07-10-drawing-tools-P1b-split-addendum.md`（D23–D43）
+- **上游 P1c 拆分补充**：`docs/superpowers/specs/2026-08-25-drawing-tools-P1c-split-addendum.md`（D104–D111，PR #176 已合入 main）
+- **本 spec 新增决策编号：D112 起。**
+
+**基线**：`origin/main` @ `1437529`（2026-08-30）。本文件所有「实测」陈述均在该 commit 上核实，逐条给出 `文件:行`。
+
+> ⚠️ 上游 P1c 拆分补充的基线是 `a018a7f`。main 此后走过 `ad84865` / `25424fd` / `1437529` 三次合并，**行号已漂移**。本 spec 引用的一律是 `1437529` 上重新核过的行号，**不得回头照抄上游行号**。
+
+---
+
+## 0. 本片是什么
+
+**一句话**：把「本构建对每个划线工具知道些什么」从**散落在五处的写死判据**收成**一张表**，表的内容一行不变（今天仍只有水平线）⇒ **对用户零可见变化**，但第 4/5/6 片每加一个工具从「改五处代码」变成「加一行」。
+
+**本片不产生任何用户可见变化。**
+
+---
+
+## 1. 本 spec 对上游 P1c 拆分补充的取代（D112–D116）
+
+> ⛔ **上游拆分补充 §2A / §2B / D105 不变量 4 / D109c 关于第 1 片的内容，在下列范围内被本 spec 取代。**
+> 上游文件已合入 main（PR #176），**不修改它**；后续任何实现者读到那几节时，一律以本节为准。
+> 取代的授权来源：上游 §12 逐字「⛔ 任何实现者都不得把 P1c 的任意两片合并成一个 PR，**除非重走一次本文件这样的拆分论证并拿到 user 同意**」—— 本节就是那次论证，user 已于 2026-08-30 逐条拍板。
+
+### D112　范围重定：第 1 片从「跨版本兼容地基」缩为「样式矩阵结构泛化」
+
+**上游 §2A.1 列了六项**。本 spec 保留**第 5 项**，删除其余五项（逐条理由见 D113–D115）。
+
+**片名同步改**：「1A 兼容地基（零 UI）」→ **「第 1 片：样式矩阵结构泛化」**。第 1B 片取消（D113）⇒ **七片变六片**：
+
+| # | 片名 | 状态 |
+|---|---|---|
+| **1** | **样式矩阵结构泛化** | **本片** |
+| 2 | 节点显示 + 选中态终局 | 不变 |
+| 3 | 拖节点 + §14 手势分支 | 不变 |
+| 4 | 多锚落点泛化 + 趋势线 | 不变（**新增两项交接**，见 D116 与 §8） |
+| 5 | 通道线 + 箱体 | 不变 |
+| 6 | 折线 + 临时 4 键 + 删单节点 | 不变 |
+
+**依赖链**：1 → 2 → 3 → 4 → 5 → 6。上游 D109/D109b 关于第 2–6 片的全部结论**原样有效**，本 spec 一字不改。
+
+---
+
+### D113　取消第 1B 片；归档死锁记为**知情接受的残留**（user 2026-08-30 拍板）
+
+**上游的设计**：那道「未支持数据挡住归档」的门（`TrainingSessionCoordinator.swift:741-745`）会把用户卡死且无出口 ⇒ 1A 造一个「持久删除 API」，1B 给它接上界面（提示 + 删除入口 + 结算失败弹窗第三动作）。
+
+**推翻的依据**：user 要求先量清楚「这个死锁到底什么时候会真发生」。逐条实测的结论是**触发面比上游隐含的窄得多**：
+
+| 实测事实 | 出处 |
+|---|---|
+| **全仓零账号、零登录** —— `signIn` / `login` / `logout` / `userId` / `accountId` / `authToken` / `AppleID` / `ASAuthorization` 全仓（排除 `.build`、排除测试）**零命中** | 全仓 grep |
+| **训练记录与画线全在手机本地**，存 `app.sqlite`，位于 **Application Support** 目录 | `ios/KlineTrainer/KlineTrainer/KlineTrainerApp.swift:14-16` |
+| **无任何跨设备同步**：`iCloud` / `CloudKit` / `NSUbiquitous` / `isExcludedFromBackup` 全仓**零命中** | 全仓 grep |
+| **后端只下载、不上传**：API 一共三个 —— 训练组清单 `training-sets/meta`、下载 `training-set/{id}/download`、下载完成回执 `training-set/{id}/confirm`。**没有任何接口上传训练记录或画线** | `ios/Contracts/Sources/KlineTrainerPersistence/DefaultAPIClient.swift:33 / :49 / :69` |
+
+⇒ **数据跟着手机走，不跟账号走。** 「更新版本写的数据被旧版本读到」只能经以下四条路径发生：
+
+| # | 路径 | 判断 | user 的应对（2026-08-30 逐条给出） |
+|---|---|---|---|
+| a | **开发 / 真机验收阶段**：第 4 片之后回头验收前面几片的构建、或切分支跑测试 | 几乎必然 | 「删掉 App 重新装就好了」 |
+| b | **TestFlight 版 → 装回 App Store 正式旧版** | 可能 | 「基本上也就是我自己用」 |
+| c | **老系统设备恢复备份**：App Store 对系统版本过老的设备只提供「最后一个兼容的旧版」 | 窄，但真实存在 | 「让用户升级就好了」 |
+| d | 第三方降级工具 | 罕见 | 「不考虑」 |
+
+**⛔ 上游 D105 不变量 4「不得存在用户无法解除的归档死锁」在本 spec 中被降为「知情接受的残留」**，理由三条：
+
+1. **那道门今天就在跑着，本片一行不改** —— 取消 1B 不是「拆掉安全网」，而是「不给已存在的门配钥匙」。合并后 main 上的行为与今天**逐字节相同**。
+2. **⛔ 绝不得反过来把那道门拆掉** —— 它的存在理由是「未来数据随 pending 永久丢失」（`TrainingSessionCoordinator.swift:696-703` 的大注释）。拆门 = 一次不可逆的数据丢失（上游记录的 codex R1-high 方向），本 spec **不授权任何人这么做**。
+3. **将来想补不会变贵**：那道门还在、`.unknownRaw` 与已知条的未来字段都是**原文照抄**（`LossyDrawingArray.swift:348 / :355`）不会丢失 ⇒ 任何时候补「可分辨信号 + 恢复通道」都是纯增量，不存在「现在不做以后就补不上」的缝。
+
+**⚠️ 这一条与已记录的项目原则「App 可能公开上架 → 持久化按公开发布标准做、版本错位真会发生、勿按单用户简化」存在张力。** 本条**不推翻**那条原则（持久化保真、契约、迁移纪律一律照旧），只对**这一个具体出口**做了成本/触发面权衡：user 在拿到上表四条路径的实测结论后作出判断。**记录在此，便于日后复核。**
+
+**受此影响一并取消的**：上游 §2A.1b 全节（持久删除 API 七条硬要求）、§2A.3 的 N10 / N11 / N11b / N12 / N13 / N14 / N15 / N16、§2B 全节、§8 表格中「③ → 1A 建立事实 + 1B 兑现机制」那一行的 1B 半边。
+
+---
+
+### D114　不引入可分辨的失败信号；因此**不 bump** `CONTRACT_VERSION`
+
+上游 §2A.1 第 3 项要求：那道门不得继续复用 `.dbCorrupted`，须引入一个可分辨的新信号，好让 UI 判断该不该给「第三个按钮」。
+
+**取消理由**：那个信号的**唯一消费方**就是 1B 的第三个按钮。1B 取消后，**没有任何代码会读它** —— 落地即死代码，且它是 1A 唯一改变既有语义的一项，反而要付「逐个核对五处 `.dbCorrupted` 消费方」的举证成本。
+
+**⚠️ 顺带订正上游一处不准确**：上游 §2A.1 第 3 项与 §2A.3-N5 点名的「靠丢弃来恢复」的 `.dbCorrupted` 消费方是**三处**（`SettingsStore.swift:126`、`TrainingSessionCoordinator.swift:873`、`:1385`）。**实测是五处** —— 上游漏了两处经 `AppError.isDBCorrupted`（`AppError.swift:130`）间接匹配的：
+
+| # | 消费方 | 丢弃动作 |
+|---|---|---|
+| 1 | `Settings/SettingsStore.swift:125`（`isDBCorrupted`，用于 `:169` / `:185`） | 写回默认设置 |
+| 2 | `TrainingSessionCoordinator.swift:389` | `clearWorking`（清复盘草稿列） |
+| 3 | `TrainingSessionCoordinator.swift:448` | `clearSaved`（清复盘定稿列） |
+| 4 | `TrainingSessionCoordinator.swift:873` | 清损坏的 pending 槽 |
+| 5 | `TrainingSessionCoordinator.swift:1385`（`isCorruptTrainingSet`） | 删训练组缓存文件 + `clearReplay` |
+
+**⛔ 将来若有人重启这个信号，必须按五处核，不是三处。** 本条记录在此就是为了那一天。
+
+**因此不 bump**：上游 §11.1 把 bump 的**唯一**触发理由写成「1A 改变了 `finalize` 未支持数据的处置语义（m01 §Bump 策略 A 类）」。该语义改动取消 ⇒ 触发条件不成立。本片对照 m01 §Bump 策略逐条核：
+
+| Bump 触发条件 | 本片是否命中 |
+|---|---|
+| 影响 DDL / 新表 / DML 清理 migration | ❌ 无任何迁移，`user_version` 维持 **8** |
+| 跨系统字段 / OpenAPI 变更 | ❌ 不碰后端 |
+| Codable 字段变更 | ❌ 不增删任何 `DrawingObject` / `PendingTraining` / `PendingReplay` 字段 |
+| 扩展 / 收缩枚举值域 | ❌ `DrawingToolType` **十三个** case 一字不改（`Models.swift:39` 的十一个目标工具 + `:41` 的两个 legacy `ray` / `time`）；`implemented` 仍是 `[.horizontal]`（`Models.swift:50`） |
+| 改既有语义 | ❌ **本片全部改动行为等价**（§5-T1 穷举举证） |
+
+⇒ **`CONTRACT_VERSION` 维持 `"1.13"`，m01 矩阵不动、不写 bump 记录。**
+
+**⛔ 不得援引本条把上游「①记账义务」当成被永久豁免**：它只是**没有触发**，不是被取消。第 4 片首次写出 `.trend` 时是否触发，由那一片按 m01 §Bump 策略自行论证（上游 §11.1 已给出「不该单独触发」的逐条理由，本 spec 不改那个结论）。
+
+---
+
+### D115　不变量 1–3 与结构损坏边界：**实测已被现有测试覆盖，本片不补**
+
+上游 §2A.1 第 1、2 项要求补测锁死三条不变量与「`.unknownRaw` 恒等于正面识别的未来工具记录」。逐条去现有测试里找对应后，**绝大部分已经存在**：
+
+| 上游要求的档 | 现有测试 | 出处 |
+|---|---|---|
+| N6 —— `[not-json]` → 抛 `.dbCorrupted` | ✅ 已有 | `Tests/.../Drawing/DrawingModelP1aTests.swift:139` |
+| N6 —— 标量 `[123]` | ✅ 已有 | `:147` |
+| N6 —— 空对象 `[{}]`（无 toolType） | ✅ 已有 | `:155` |
+| N6 —— 已知工具缺必填字段 | ✅ 已有 | `:174` |
+| N6 —— 已知工具字段类型错 | ✅ 已有 | `:182` |
+| N6 **正向档**（真·未来工具 → 确归 `.unknownRaw`） | ✅ 已有 | `:163` |
+| N6 **反向对照**（已知工具真损坏 → 仍 `.dbCorrupted`，不被放宽） | ✅ 已有 | `:217` |
+| 不变量 2「未注册工具不可命中」**含反向对照** | ✅ 已有（`unregisteredToolNeverHits`，`:58` 是防「一律不命中」骗过的反向档） | `Tests/.../Drawing/DrawingHitTesterTests.swift:51-58` |
+| 不变量 3 保序 | ✅ 已有 | `DrawingModelP1aTests.swift:236` |
+| 不变量 3 未来字段逐字节保留 | ✅ 已有 | `:274` |
+| 不变量 3 删别的已知条后未来条仍在原位 | ✅ 已有 | `:456` |
+| 不变量 3（持久层两条路） | ✅ 已有 | `Tests/KlineTrainerPersistenceTests/PendingLossyTests.swift`、`CoordinatorLossyPreserveTests.swift`、`ReviewArchiveRepositoryTests.swift` |
+| **不变量 1「未注册工具不渲染」** | ⚠️ **无直接行为测试** | 判据在 `Render/KLineView+Drawing.swift:25`，整个文件 `#if canImport(UIKit)`（`:7`） |
+
+**唯一缺口是不变量 1，本片仍不补**，理由三条（**⚠️ 这是一条经过论证的取舍，不是遗漏**）：
+
+1. **命中侧有真的行为测试**（上表第 8 行），且带反向对照；
+2. **有源码守卫把两侧焊在一起**：`DrawingHitTesterTests.swift:61-80` 钉死「命中入口在 `Sources/` 中只有一处」且「命中列表必须来自 `RenderStateBuilder.visibleDrawings`」。谁想让渲染与命中走岔，该守卫当场红；
+3. 补它要新增 `#if canImport(UIKit)` 测试 ⇒ 按仓内规矩必须**同步四处 Catalyst 基线**、且喂闸门的日志必须冷构建 —— 成本与它挡住的风险不成比例。
+
+**⛔ 本条只对本片有效。** 第 2 片起要动渲染层（节点绘制），届时**必须重新评估**这条缺口（见 §8-Q9）。
+
+---
+
+### D116　「五处」实测是「五处 + 样式面板三处」；面板三处**交接给第 4 片**
+
+上游 §2A.1 第 5 项列了**五处**要泛化。实测：这五处之外，**常驻样式面板里还有三处直接套了水平线专用规则**：
+
+| # | 位置 | 调的是哪个（水平线专用）版本 |
+|---|---|---|
+| 面板① | `UI/DrawingStyleParams.swift:39` | `horizontalLineSubTypeEnabled($0)` —— 线型组的灰态判据 |
+| 面板② | `UI/DrawingStyleParams.swift:46` | `normalizedLabelMode(current:lineSubType:)`（**两参**横线版） |
+| 面板③ | `UI/DrawingStyleParams.swift:142` | `horizontalLabelModeEnabled(mode, lineSubType:)` —— 标注组的灰态判据 |
+
+**本片不动它们**，三条理由：
+
+1. **它是界面**：`DrawingStyleParams.swift:9` 是 `#if canImport(UIKit)` 的 SwiftUI `View`。本片零 UI。
+2. **泛化不动**：该 View **根本不知道自己在编辑哪种工具** —— 它只收 `style: DrawingDefaultStyle` 与 `enabled: Bool`（`:16` / `:20`），没有 `toolType`。要泛化必须改它的参数签名 = 真界面手术 + Catalyst 基线同步。
+3. **第 4 片本来就必须改它**：第 4 片要让面板显示趋势线的三种线型子类，非改不可。现在改一半、那时再改一次，反而是两次手术。
+
+⇒ **作为硬约束交接给第 4 片**（§8-Q8）。**今天不构成缺陷**：表里只有水平线，面板拿横线规则算横线，结果正确。
+
+**另有两处写死 `.horizontal` 明确不在本片范围**（它们不是样式矩阵，是**每工具几何/标签布局**，属第 4 片起的工作）：
+
+- `Drawing/DrawingLabelLayout.swift:66` —— `guard drawing.toolType == .horizontal else { return nil }`（价格标签内容）
+- `Render/KLineView+Drawing.swift:33` —— `if drawing.toolType == .horizontal`（渲染层画价格标签的分支）
+
+---
+
+## 2. 跨版本兼容现状核实表（交接材料，零代码）
+
+> **本节不要求本片写任何代码。** 它是把上游第 1 片本来打算「用测试钉死」的那些事实，改成**一份核实过的清单**交给第 2–6 片。上游 §2A.1 第 1、2 项被 D115 取消后，这份表就是它们的替代物。
+
+**「本版本不支持的画线」有两类**（沿用上游 D105 的分类，**分类本身没有变**）：
+
+| 类别 | 成因 | 本构建的表现 |
+|---|---|---|
+| **(a) 可解码、本构建无渲染器** | `toolType` 是**已声明**的枚举 case（`Models.swift:39` 十一个目标工具 + `:41` 两个 legacy，共 **13** 个），但 `KLineView.drawingTools` 注册表里没有它 | 渲染 dispatch 静默跳过（`Render/KLineView+Drawing.swift:25`）；`DrawingHitTester.firstHit` 恒返 false（`Drawing/DrawingHitTester.swift:26`） |
+| **(b) 本构建不认识这个工具名** | `toolType` 不在本构建枚举里 → 进 `LossyDrawingArray` 的 `.unknownRaw` 分支 | 连 `engine.drawings`（已知投影）都进不去 |
+
+**四条事实（逐条在 `1437529` 上核实）**：
+
+| # | 事实 | 判据在哪 | 被哪些测试锁住 |
+|---|---|---|---|
+| F1 | **不渲染** | `Render/KLineView+Drawing.swift:25` | ⚠️ 无直接行为测试（D115），靠 F2 + 源码守卫间接锁 |
+| F2 | **不可命中**，与渲染 dispatch **逐字同判据** | `Drawing/DrawingHitTester.swift:26`（`:23` 注释逐字写明同判据） | `DrawingHitTesterTests.swift:51-58`（含反向对照）+ `:61-80`（源码守卫：命中入口唯一 + 必来自 `visibleDrawings`） |
+| F3 | **不被普通保存覆盖**：`.known` 未编辑 → 原样 `raw`；`.unknownRaw` → 原位保留 | `Persistence/LossyDrawingArray.swift:348` / `:355` | `DrawingModelP1aTests.swift:236 / :274 / :456` + `PendingLossyTests` / `CoordinatorLossyPreserveTests` / `ReviewArchiveRepositoryTests` |
+| F4 | **`.unknownRaw` 恒等于「正面识别的未来工具记录」**：须同时满足①合法 JSON 对象 ②非空 `toolType` 字符串 ③该名不在本构建枚举里；任一不满足 → 抛 `.dbCorrupted` | `Persistence/LossyDrawingArray.swift:143-147` | `DrawingModelP1aTests.swift:139 / :147 / :155 / :163 / :174 / :182 / :217`（正反两档齐） |
+
+**归档阻塞的真实判据**（`TrainingSessionCoordinator.swift:741-743`，本片**一行不改也不新增**）：
+
+```swift
+if !effectiveLossy.unknownRaw.isEmpty
+    || effectiveLossy.hasKnownFutureFields(liveIds: liveIds)
+    || effectiveLossy.hasKnownFutureEnumValues(liveIds: liveIds) {
+    throw AppError.persistence(.dbCorrupted)
+}
+```
+
+**⛔ 三条硬约束（沿用上游，第 2–6 片一律适用）**：
+
+1. **不得拆掉这道门** —— 拆门 = 未来数据随 pending 永久丢失（D113 理由 2）。
+2. **不得新增以「有没有渲染器」为判据的阻塞** —— 那会造出一个今天并不存在的死锁（上游 codex R2-high 点名的失败形态）。
+3. **不得把这类数据的用户文案说成「读不懂 / 损坏」** —— 准确说法是：**读得出这是一条画线，只是不认识它用的工具**（上游 D105）。
+
+**为什么这道门只在正常训练局生效（实测，上游未写）**：
+
+| 对局 | 画线最终存到哪 | 该处能否承载 `.unknownRaw` | 会不会撞到这道门 |
+|---|---|---|---|
+| **正常训练** | 永久记录表 `drawings`，**逐字段列**：`id / record_id / tool_type / panel_position / is_extended / anchors / reveal_tick / style_json / draw_uuid`（`AppDBMigrations.swift:219-229`） | ❌ 它存的是**解码后的已知投影**；`.unknownRaw` 从不进入 `engine.drawings`，未来字段在解码时即被忽略 | ✅ **会**（门就在 `finalize` 里） |
+| **回放** | `pending_replay` 槽，画线是**一整段 JSON 原文** | ✅ 原样进出 | ❌ `finalize` 首行对 `shouldSaveRecord()==false` 提前返回（`TrainingSessionCoordinator.swift:686`；`ReplayFlow.shouldSaveRecord()==false`，`TrainingFlowController.swift:106`）⇒ **永远撞不到** |
+| **复盘** | 记录上的 `saved` / `working` 两列，**一整段原文**（`Persistence/ReviewArchiveRepository.swift:100` 逐字：「接收完整 lossy（含 unknownRaw 有序），原样保真回写」） | ✅ 原样进出 | ❌ 全仓 `unknownRaw` 判据**只有** `TrainingSessionCoordinator.swift:741` 一处 |
+
+⇒ **分界线不是「存不存档」，而是「存进去的那个地方是否原文照抄」。**
+
+---
+
+## 3. 本片做什么
+
+### D117　泛化的目标形状：**一张按工具查的表**，五处都从它取值
+
+**今天的形状（三处写死 `.horizontal` + 两处派生）**：
+
+| # | 位置 | 今天怎么写的 |
+|---|---|---|
+| ① | `Drawing/DrawingStyleAvailability.swift:19` | `guard toolType == .horizontal else { return true }` 之后套横线子类规则 |
+| ② | `Drawing/DrawingStyleAvailability.swift:60` | `guard toolType == .horizontal else { return current }` 之后套横线 labelMode 规则 |
+| ③ | `Drawing/DefaultDrawingInputController.swift:44-48` | `switch tool { case .horizontal: return 1; default: return Int.max }` |
+| ④ | `Drawing/DrawingStyleAvailability.swift:30` | `static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]`（**第二份**写死的工具清单） |
+| ⑤ | `Drawing/DrawingStyleAvailability.swift:48-49` | `isEditableToolType` = `implemented.contains ∧ toolsWithStyleMatrix.contains` |
+
+**目标形状（示意，具体由 plan 定）**：
+
+```
+一行 = 一个工具，本构建对它知道的全部：
+    lineSubTypeEnabled : (LineSubType) -> Bool          // 哪些线型子类可用
+    labelModeEnabled   : (LabelMode, LineSubType) -> Bool // 哪些标注可用
+    minAnchors         : Int                             // 最少几个锚点才提交
+
+今天表里只有一行：.horizontal → (横线子类规则, 横线标注规则, 1)
+```
+
+改法：
+
+- ① → 查表；**表里没有这个工具 → 返回 `true`**（与今天 `guard ... else { return true }` 逐字等价）
+- ② → 查表；**表里没有 → 原样返回 `current`**（与今天逐字等价）
+- ③ → **保留 `implemented` 那道守卫**（codex WB R2-high 的单一真相要求，`DefaultDrawingInputController.swift:39-43` 头注逐字记录），然后查表；表里没有 → `Int.max`
+- ④ → **从表的键派生**（`Set(表.keys)`），不再是第二份写死清单
+- ⑤ → 表达式**一字不改**（它读的 `toolsWithStyleMatrix` 现在是派生值）
+
+**⚠️ 表放在哪（D117 的子决策）**：建议**新建一个中性命名的文件**（如 `Drawing/DrawingToolMatrix.swift`）承载这张表，而不是塞进 `DrawingStyleAvailability`。理由：表里含 `minAnchors`（**落锚**，不是样式），让 `DefaultDrawingInputController` 去一个叫「样式可用性」的类型里取锚数会误导后来者，也会招来「顺手改回去」的重构。**⛔ 但横线的两条规则函数体必须留在 `DrawingStyleAvailability.swift` 原地**（§3.2 硬约束 1）。
+
+### D118　给 `DrawingToolType` 加 `CaseIterable`（纯加法，为了让 T1 的穷举是**真**断言）
+
+**实测**：`DrawingToolType`（`Models.swift:37`）今天**不是** `CaseIterable` —— 它的遵从列表只有 `String, Codable, Equatable, Sendable`。而同一族的 `LineSubType`（`DrawingEnums.swift:6`）与 `LabelMode`（`:18`）**都是** `CaseIterable`。
+
+**为什么这一个协议是 load-bearing 的**：T1 的全部价值在于「对**每一个**工具都断言了期望值」。若遍历源是测试文件里手写的十三元素数组：
+
+1. 「数量 == 13」就退化成「测试断言自己写的那个字面量」= **恒真空转**（已知的七种撞法之一：自检本身空转）；
+2. 第 4–6 片加工具时 T1 **不会**自动覆盖新工具 —— 它会安静地继续只测那 13 个，而漏掉的恰恰是新加的那一个。
+
+加 `CaseIterable` 后 `allCases` 由编译器合成 ⇒ 数量断言是对**生产枚举**的真断言，且后续加工具自动进入覆盖面。
+
+**为什么安全**：无关联值的 `String` raw-value 枚举，`allCases` 合成是机械的；纯加法的协议遵从，**不改任何既有行为**、不影响 `Codable` 编解码、不影响任何既有 `switch` 的穷尽性。
+
+**不触发 bump**（补 D114 那张表）：`CaseIterable` **不扩展枚举的值域**（一个 case 都没加），也不属于 DDL / 跨系统字段 / Codable 字段变更 / 既有语义变更中的任何一类。
+
+**⛔ 边界**：**只加协议遵从**。不得顺手改 case 名、次序、raw value，也不得动 `implemented` 的内容 —— 次序改变会改变 `allCases` 的顺序；legacy 的 `ray` / `time` 必须留在原位（`Models.swift:40-41` 的注释逐字说明它们是历史 blob 的容忍解码通道）。
+
+### 3.1 等价性论证（为什么这五处改完行为一字不变）
+
+三条改法的等价性**都依赖同一个前提**：**表的键恰好等于 `{.horizontal}`**。
+
+- 前提今天成立：`toolsWithStyleMatrix` 今天就是 `[.horizontal]`（`:30`），`implemented` 也是 `[.horizontal]`（`Models.swift:50`）。
+- 前提由**既有的漂移告警**继续守着：`DrawingObjectStyleEditTests.swift:82` 断言 `DrawingToolType.implemented == toolsWithStyleMatrix`。第 4 片若只把新工具加进 `implemented` 而没在表里加行，该断言当场红。
+- 本片另加一条**穷举真值表测试**（§5-T1）把等价性直接钉死，不靠推理。
+
+### 3.2 必须守住的既有闸门（改动不得让它们变红）
+
+**⛔ 这四条不是建议，是本片的编译期/测试期边界。** 它们全部实测于 `DrawingObjectStyleEditTests.swift:172-241` 那条源码守卫与 `:82` 的漂移告警：
+
+| # | 约束 | 出处 |
+|---|---|---|
+| 1 | `func horizontalLineSubTypeEnabled(` 与 `func horizontalLabelModeEnabled(` 在 `Sources/` 中**各恰好 1 处**，且都必须在 `DrawingStyleAvailability.swift` ⇒ **不得改名、不得删除、不得移文件** | `:198-201` |
+| 2 | `func normalizedLabelMode(` **恰好 2 处**（两参横线版 + 三参 tool-aware 版），都在 `DrawingStyleAvailability.swift` ⇒ **两参版必须保留**（面板② 还在用它，D116） | `:203-204` / `UI/DrawingStyleParams.swift:46` |
+| 3 | `horizontalLineSubTypeEnabled(` **不得**出现在 `TrainingEngine.swift` / `DrawingObjectStyleEdit.swift`；`horizontalLabelModeEnabled(` **不得**出现在 `DrawingObjectStyleEdit.swift`；两个写入边界必须经共享单点 `isRenderableSubType(` | `:227-241` |
+| 4 | `withStyle` 里必须出现整段调用形状 `lineSubType: s.lineSubType, toolType: toolType`（锚点必须取整段，只锚 `toolType: toolType` 是恒真的） | `:220-224` |
+
+**⚠️ 新增的表文件会让 `horizontalLineSubTypeEnabled(` / `horizontalLabelModeEnabled(` 各多出一处「引用」** —— 守卫只禁止它们出现在上表点名的**那两个文件**里，且只对 `func …(` 定义计数，故新文件引用**不会打红**。**这一点 plan 阶段必须实跑确认，不得只靠推理。**
+
+### 3.3 五处之外的**已知消费方**（改完必须逐个复核语义没变）
+
+**⚠️ 守则：「有 N 个调用点」≠「这 N 处语义都一样」，必须逐个打开看。**
+
+| 被改的函数 | 生产消费方 |
+|---|---|
+| `isRenderableSubType(_:toolType:)` | `TrainingEngine.swift:1157`（append 门）、`:1265`（append 门）、`:1299-1300`（私有 helper）、`Drawing/DrawingObjectStyleEdit.swift:17`（`withStyle` 可用性闸）、`Models/DrawingEnums.swift:58`（`sanitized(for:)`） |
+| `normalizedLabelMode(current:lineSubType:toolType:)` | `Drawing/DrawingObjectStyleEdit.swift:37`、`Models/DrawingEnums.swift:65` |
+| `normalizedLabelMode(current:lineSubType:)`（两参横线版） | `UI/DrawingStyleParams.swift:46`（**本片不动**，D116） |
+| `isEditableToolType(_:)` | `TrainingEngine.swift:1193`（编辑门）、`Drawing/DrawingEditRouter.swift:81` |
+| `horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled` | `UI/DrawingStyleParams.swift:39` / `:142`（**本片不动**，D116） |
+| `minAnchors(for:)` | `DefaultDrawingInputController.swift:50-52`（`shouldCommit`），经 `Render/ChartContainerView.swift` 的落锚路径消费 |
+
+---
+
+## 4. 本片不做
+
+- **任何界面改动**（样式面板三处写死横线规则 → 第 4 片，D116）；
+- **不变量 1–3 与结构损坏边界的补测**（已有覆盖，D115）；
+- **可分辨的失败信号 / 持久删除 API / 恢复通道 UI**（D113、D114 取消）；
+- **`CONTRACT_VERSION` bump / m01 矩阵改动 / `user_version` 变更 / 任何迁移**（D114）；
+- **归档阻塞判据一行不改、一条不加**（§2 硬约束 1、2）；
+- 四个新工具的几何 / 注册 / 图标；节点；手势；多锚；折线；
+- `DrawingLabelLayout.swift:66` 与 `KLineView+Drawing.swift:33` 两处 `.horizontal` 写死（属第 4 片起，D116）；
+- 复盘侧的等价能力（属 P5）。
+
+**⛔ 本片明确不解除归档死锁**（D113）。**spec / plan / PR 描述一律不得声称满足了上游 D105 的不变量 4。**
+
+---
+
+## 5. 必须存在的测试
+
+> **纪律**：写每条断言先自问「**如果被测的那件事根本没发生，这条断言还会通过吗？**」已知的七种撞法：撞 no-op 守卫 / 撞出厂默认值 / 撞空栈 / 撞三元写法 / 撞终态相同 / 撞大小写 / 自检本身空转。
+
+### T1　行为等价穷举真值表（**本片的核心举证，不可省**）
+
+**不得**写成「泛化前后结果相同」（同一个构建里跑不出「前」）。**必须逐格断言具体期望值**，构成一张冻结的真值表：
+
+| 分组 | 断言 | 格数 |
+|---|---|---|
+| T1a | `isRenderableSubType(sub, toolType: .horizontal)`：`.straight`✅ `.ray`✅ `.segment`❌ | 3 |
+| T1b | `isRenderableSubType(sub, toolType: t)` 对**其余十二个** `DrawingToolType` × 三个 `LineSubType` **恒 true** | 36 |
+| T1c | `normalizedLabelMode(current:lineSubType:toolType: .horizontal)` 的 **`LabelMode` × `LineSubType` 全笛卡尔积**，逐格给出期望值（`.show` 恒落 `.hidden`；`.left` 在 `.ray` 下落 `.hidden`，其余原样；`.hidden` / `.right` 恒原样） | 4×3 = 12 |
+| T1d | 同上对**其余十二个**工具：**恒原样返回 `current`** | 12×12 = 144 |
+| T1e | `isEditableToolType`：`.horizontal` ✅，其余十二个 ❌ | 13 |
+| T1f | `minAnchors(for:)`（经 `shouldCommit` 观测）：`.horizontal` 需 1 个锚即可提交；其余十二个**任意锚数都不提交** | 13+ |
+
+**⚠️ 防空转三条（缺一不可）**：
+
+1. **真值表必须同时含 ✅ 与 ❌**（T1a 的 `.segment`、T1c 的 `.show`）—— 全 ✅ 的套件会与「实现恒返 true」这种坏实现同时为绿；
+2. **必须显式断言表的键恰好是 `{.horizontal}`** —— 否则表被误扩时 T1b/T1d/T1e/T1f 会**静默改变含义**却仍然绿；
+3. **必须断言 `DrawingToolType.allCases.count == 13`** —— 防「遍历拿到空集 / 少数几个 → 循环次数不足 → 恒绿」。⚠️ 该断言只有在遍历源是**生产枚举**（`allCases`）时才有意义；若改用测试文件里手写的数组，这条就退化成「测试断言自己写的字面量」= 恒真空转（见 D118）。
+
+### T2　单一真相守卫（**结构计数，⛔ 不得写成禁词黑名单**）
+
+断言这五处**确实都从同一张表取值**。判据用**结构计数**（如「查表调用形状在 `Sources/` 中恰好出现 N 处，且分布在预期的那几个文件」），**不得**写成「某某文件里不许出现 `.horizontal` 这个词」——后者可被删注释/改写法绕过，也会被自己的承重注释误伤。
+
+**⚠️ 两条配套要求**：
+
+- 扫描必须**剥注释、剥字符串字面量**（复用既有的 `squeezedText` / `squeeze` 共享扫描器，`DrawingObjectStyleEditTests.swift:187-196`）；
+- 必须配**反向自检**：锚点失效（比如文件被改名、调用形状被改写）时守卫要**报错**，不能静默变成「零命中 ⇒ 通过」。
+
+### T3　既有闸门不回归（**逐条实跑，不得只靠推理**）
+
+改完之后 §3.2 那四条约束对应的既有测试必须仍绿，且**必须在 plan 阶段就实跑一次**确认新增的表文件没有把源码守卫的计数打乱：
+
+- `DrawingObjectStyleEditTests.swift:172`（N5 源码守卫，含 §3.2 全部四条）
+- `DrawingObjectStyleEditTests.swift:82`（`implemented == toolsWithStyleMatrix` 漂移告警）
+- `DrawingObjectStyleEditTests.swift:56`（工具门：未实现的已知工具不可编辑）
+- `DrawingObjectStyleEditTests.swift:108` / `:121`（tool-aware 归一化的行为档）
+- `DrawingStyleAvailabilityTests.swift`（三条横线规则档）
+- `DrawingDefaultStyleSanitizeTests.swift`
+- `DrawingEditRouterTests.swift`
+- `Render/DrawingStylePanelSourceGuardTests.swift`（面板守卫 —— 本片不动面板，但它扫的是面板对灰态判据的消费，必须确认没被牵动）
+
+### T4　变异验证（**逐条关门看红，实施者自报「验过了」不算数**）
+
+至少三组，每组必须回答「**红的是哪一条测试名**」：
+
+| 变异 | 预期变红的档 |
+|---|---|
+| 把表里 `.horizontal` 那行的 `minAnchors` 从 1 改成 2 | T1f |
+| 把「表里没有的工具 → 返回 true」改成「→ 返回 false」 | T1b（**不是** T1a —— 若 T1a 也红说明判据串了） |
+| 把「表里没有的工具 → 原样返回 current」改成「→ 落 `.hidden`」 | T1d |
+| 把表多加一行（如 `.trend`） | T1 防空转第 2 条 + `:82` 漂移告警 |
+
+**纪律**：先提交实现、再跑变异；复原一律 `cp` 往返，⛔ 禁止 `git checkout <file>`。
+
+---
+
+## 6. 非程序员验收清单（本片 plan 补齐细节）
+
+**本片对用户零可见变化**，所以每一条的预期都是「跟以前一模一样」。
+
+| # | 动作 | 预期 | 通过/不通过 |
+|---|---|---|---|
+| 1 | 进入训练，画三条水平线 | 与本片之前**完全一样**，能正常画出来 | ☐ 通过 ☐ 不通过 |
+| 2 | 选中其中一条，把颜色、粗细、线样式各改一遍 | 与本片之前**完全一样**，改哪个变哪个 | ☐ 通过 ☐ 不通过 |
+| 3 | 在样式面板里点「线型」那一组 | 「直线」「射线」可选，**「线段」是灰的** —— 与本片之前一模一样 | ☐ 通过 ☐ 不通过 |
+| 4 | 选「射线」之后再看「标注」那一组 | **「左」变灰**，且原来如果选的就是「左」，会自动回到「隐藏」—— 与本片之前一模一样 | ☐ 通过 ☐ 不通过 |
+| 5 | 锁定一条线、解锁、删除、撤销 | 与本片之前**完全一样** | ☐ 通过 ☐ 不通过 |
+| 6 | 打完一整局并结算入账 | 与本片之前**完全一样**，能正常写进历史记录 | ☐ 通过 ☐ 不通过 |
+| 7 | 打开历史记录做一次复盘，在复盘里画线、改样式 | 与本片之前**完全一样** | ☐ 通过 ☐ 不通过 |
+| 8 | 退出 App 再进来，看上面画的线还在不在、样式对不对 | 与本片之前**完全一样**，一条不少、一字不差 | ☐ 通过 ☐ 不通过 |
+
+> ⚠️ **只要有任何一条「跟以前不一样」，就是不通过** —— 本片的全部承诺就是「什么都没变，只是内部结构换了」。
+
+---
+
+## 7. 契约 / 闸门 / 交付
+
+### 7.1 契约
+
+| 项 | 本片 |
+|---|---|
+| `CONTRACT_VERSION` | **不变（`"1.13"`）**，逐条论证见 D114 |
+| `user_version` | **不变（8）** |
+| 迁移 | **无** |
+| m01 矩阵 / bump 记录 | **不动** |
+
+### 7.2 三绿门（作者亲核，clean build）
+
+- **本片是纯 host 片**（零 UI、零新增 `#if canImport(UIKit)` 测试）⇒ Catalyst **`build-for-testing` 即可**，不需要真执行、**不需要动四处 Catalyst 基线**。
+- ⚠️ **但必须实跑确认**「本片确实没有新增 UIKit-gated 测试」—— 一旦新增，四处基线同步立刻变成必做项。
+- **§5-T3 点名的八个测试文件已逐个实测：`canImport(UIKit)` 出现次数全为 0**（含 `Render/DrawingStylePanelSourceGuardTests.swift` —— 它虽然扫的是一个 UIKit-gated 的**源文件文本**，但扫描本身在 host 上跑）⇒ T3 那一整组回归验证**都能在 host `swift test` 里真执行**，不必上 Catalyst。
+- Catalyst 必须用 `-scheme KlineTrainerContracts-Package`（library scheme **不编译 testTarget**），且 `set -o pipefail`（`tee` 会吞退出码）。
+- 判绿读**输出内容 / 执行量**，⛔ 不读「SUCCEEDED」字样、⛔ 不用 `tail` 截断。
+- 每条闸门命令必须**同时打印 branch 与 HEAD**。
+- `@Observable` 类若增删存储属性 → 先 `rm -rf ios/Contracts/.build` 再下结论（本片预计不涉及）。
+
+### 7.3 交付方式
+
+- **worktree**：`.dev/worktree/drawing-p1c-1a`，分支 `feat/drawing-p1c-1a`，base = `origin/main` @ `1437529`。
+- **评审命令固定**：`.claude/scripts/codex-attest.sh --scope branch-diff --head feat/drawing-p1c-1a --base origin/main`。⛔ 不得传任何未知参数（含 `--help` —— 兜底分支会把它当 focus 目标，产出假 approve + 脏账本）。
+- 评审只读**本地 git** ⇒ 每轮只需 commit，**不需 push**。
+- push / 开 PR 由 user 在自己终端执行；给 user 的命令**一行以上一律落成 `/tmp/*.sh`**。
+- 本片另带 `docs/superpowers/acceptance/2026-08-30-drawing-p1c-1-tool-matrix.md`（§6 那张表的正式版）。
+- 逐片合入 `main`，不叠罗汉。**本片合进 main 之前，第 2 片不开工。**
+
+---
+
+## 8. 遗留问题（交接给后续片，⛔ 不得默默跳过）
+
+| # | 问题 | 归属 | 为什么不能拖 |
+|---|---|---|---|
+| **Q8** | **样式面板三处写死横线规则**（`UI/DrawingStyleParams.swift:39 / :46 / :142`）必须改成 tool-aware。该 View 目前**收不到 `toolType`**，泛化要改它的参数签名。**⛔ 第 4 片不得只加趋势线的图标而不改这三处** —— 否则趋势线的线型/标注会按**水平线规则**置灰（如趋势线的「线段」会被灰掉，而线段正是趋势线的三种子类之一） | **第 4 片** | 第 4 片一落地就会露出错误的灰态 |
+| **Q9** | **不变量 1「未注册工具不渲染」至今无直接行为测试**（D115）。第 2 片要动渲染层（画节点），届时**必须重新评估**：是补一条 Catalyst 行为测试，还是继续靠「命中侧行为测试 + 同判据源码守卫」间接锁 | **第 2 片** | 第 2 片是第一个动渲染层的片，评估成本最低的时机 |
+| **Q10** | `Drawing/DrawingLabelLayout.swift:66` 与 `Render/KLineView+Drawing.swift:33` 两处写死 `.horizontal`（价格标签的内容与绘制分支）。新工具要不要标签、标签怎么摆，是每工具的几何问题 | **第 4 片** | 第 4 片写第一条非水平线时必须回答 |
+| **Q11** | **归档死锁的恢复通道**（上游 D105 不变量 4 / §2B 整片）已按 D113 记为**知情接受的残留**。若日后 App 上架后真有用户反馈，补它的最小形态是「可分辨的失败信号 + 一句诚实文案」，**⛔ 届时必须按五处核对 `.dbCorrupted` 消费方**（D114 的表），不是上游写的三处 | **未排期** | 记录在此，防止日后照上游三处清单漏核两处 |
+| Q1 / Q2 / Q3 / Q4 / Q5 / Q6 / Q7 | 上游 §10 的七个遗留问题**原样有效**，归属不变（Q2 原属第 1B 片 ⇒ **随 1B 一并取消**） | 见上游 §10 | — |
+
+---
+
+## 9. 本 spec 不做
+
+四个工具各自的几何设计（各片自己的 spec）；任何实施细节（属 plan）；第 2–6 片的范围调整（上游 D109/D109b 原样有效）；P2 的五个工具；P3 标注；P4 放大镜与吸附；P5 复盘集成；P6 主页全局默认设置。
+
+**⛔ 与上游 §12 同一条纪律：任何实现者都不得把 P1c 的任意两片合并成一个 PR**，除非重走一次拆分论证并拿到 user 同意。
