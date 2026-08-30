@@ -14,7 +14,8 @@ Catalyst 闸门上踩过同型的坑（后合 PR 引红 main）。
   ② 本模块用 AST 静态扫描全部测试模块，收集所有 `EXTERNAL_INPUTS`（不是手抄一张
      清单：有人给守卫加第三个扫描根时，常量一改，这里的覆盖要求自动跟着变）；
   ③ 每一条声明都必须被 workflow 的 paths 列表覆盖 —— 目录要覆盖到**任意深度**，
-     因为扫描器本身是递归的。
+     因为扫描器本身是递归的。判定方式是**结构比对**而非模拟 GitHub 的通配符匹配，
+     理由见下方 §③ 的注释（上一版模拟法有两个已复现的假绿）。
 
 ⚠️ 已知盲区（明写，不假装闭合）：一个测试模块如果读了 `backend/` 之外的东西却**没
 声明** `EXTERNAL_INPUTS`，本守卫看不见。无启发式的静态识别做不到 —— 同一个字符串
@@ -26,7 +27,6 @@ Catalyst 闸门上踩过同型的坑（后合 PR 引红 main）。
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
@@ -125,51 +125,80 @@ def _workflow_pull_request_paths() -> list[str]:
 
 
 # ── ③ 覆盖判据 ──────────────────────────────────────────────────────────
-# GitHub 的 paths 过滤器语法：`*` 匹配零或多个字符但**不跨 `/`**；`**` 跨 `/`。
-# 其余元字符（`?` 除外）本匹配器建模不了 —— 遇到就抛，不猜。
-_UNSUPPORTED_GLOB_CHARS = set("[]{}()|+")
+# GitHub 的 paths 过滤器语法**不是**普通 glob（官方 filter pattern cheat sheet）：
+#   *   零或多个字符，不跨 `/`
+#   **  零或多个任意字符（跨 `/`）
+#   ?   **前一个字符**出现 0 或 1 次   ← 数量词，不是「任意一个字符」
+#   +   **前一个字符**出现 1 或多次    ← 同上
+#   []  方括号里的一个字符
+#   !   置于开头时取反，从前面已匹配的结果里**减掉**
+#
+# 上一版守卫自己实现了一套 glob→正则、再拿两个固定探针去试，两处都翻车（codex R1，
+# 两条本地都复现过）：
+#   ① 有限个探针证明不了「任意深度」——`scripts/*` + `scripts/*/*` 同时满足
+#      一层探针和两层探针，却盖不住 `scripts/a/b/c.sh`，而扫描器用 rglob 读任意深度；
+#   ② `?` 被按「任意一个字符」翻译，与 GitHub 的数量词语义相反，于是
+#      `Model?.swift` 被判成盖得住 `Models.swift`，GitHub 实际不匹配。
+#
+# 结论：**别再模拟 GitHub 的匹配**。只认两种结构上无歧义的条目：
+#   - 字面路径（不含任何元字符）；
+#   - 规范递归前缀 `<字面前缀>/**`，以及全仓通配 `**`。
+# 认不出的条目一律**不授予覆盖**，而不是报错：paths 是并集，多一条只会让触发面更大，
+# 所以「不据它授予覆盖」的方向是**更严**，不可能造成假绿；真红时会把这些条目列出来
+# 解释为什么没算数，作者要么改成规范写法、要么按 GitHub 的确切语义扩本守卫。
+# ⚠️ 唯一的例外是 `!`：它从并集里**减掉**东西，忽略它就不再保守 → 直接抛。
+_GLOB_META = set("*?+[]{}()|!")
 
 
-def _entry_regex(entry: str) -> re.Pattern[str]:
-    if entry.startswith("!"):
-        raise AssertionError(f"否定式 paths 条目 {entry!r}：本匹配器建模不了，请改本守卫")
-    bad = sorted(set(entry) & _UNSUPPORTED_GLOB_CHARS)
-    if bad:
-        raise AssertionError(
-            f"paths 条目 {entry!r} 含本匹配器建模不了的元字符 {bad}，请改本守卫"
-        )
-    out: list[str] = []
-    i = 0
-    while i < len(entry):
-        if entry.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif entry[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif entry[i] == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(entry[i]))
-            i += 1
-    return re.compile("".join(out) + r"\Z")
+def _has_meta(text: str) -> bool:
+    return any(ch in _GLOB_META for ch in text)
 
 
-def _probes(rel: str) -> list[str]:
-    """要证明「改这个输入会触发 CI」，得拿哪些具体路径去问 paths 过滤器。
-
-    目录：递归扫描面 ⇒ 一层和多层各探一次（`scripts/*` 能过第一探、过不了第二探，
-    而扫描器真的会读 `scripts/governance/*.sh` —— 这个区分必须留住）。
-    """
-    if (REPO_ROOT / rel).is_dir():
-        return [f"{rel}/__probe__", f"{rel}/__probe_dir__/__probe__"]
-    return [rel]
+def _recursive_prefix(entry: str) -> str | None:
+    """`<字面前缀>/**` → 该前缀；`**` → `""`（全仓）；不是规范递归写法 → None。"""
+    if entry == "**":
+        return ""
+    if entry.endswith("/**"):
+        prefix = entry[: -len("/**")]
+        if prefix and not _has_meta(prefix):
+            return prefix
+    return None
 
 
 def _uncovered(rel: str, entries: list[str]) -> list[str]:
-    regexes = [_entry_regex(e) for e in entries]
-    return [p for p in _probes(rel) if not any(r.match(p) for r in regexes)]
+    """rel 未被覆盖时返回「为什么」的说明行；已覆盖则返回空列表。"""
+    for entry in entries:
+        if entry.startswith("!"):
+            raise AssertionError(
+                f"paths 里有否定式条目 {entry!r}：它会从触发面里**减掉**内容，"
+                "本守卫的保守近似（忽略认不出的条目）对它不成立。"
+                "请改本守卫按 GitHub 的确切语义处理否定式，再判覆盖。"
+            )
+    is_dir = (REPO_ROOT / rel).is_dir()
+    unusable: list[str] = []
+    for entry in entries:
+        prefix = _recursive_prefix(entry)
+        if prefix is not None and (
+            prefix == "" or rel == prefix or rel.startswith(prefix + "/")
+        ):
+            return []
+        # 目录声明**不能**由字面条目满足：paths 里一个字面 `scripts` 匹配的是
+        # 「一个叫 scripts 的文件」，不是该目录下的内容。
+        if not is_dir and prefix is None and not _has_meta(entry) and entry == rel:
+            return []
+        if prefix is None and _has_meta(entry):
+            unusable.append(entry)
+    want = (
+        f"`{rel}/**`（或一条包住它的上级 `<目录>/**`）"
+        if is_dir
+        else f"`{rel}` 本身（或一条包住它的 `<目录>/**`）"
+    )
+    reason = [f"{rel}：paths 里没有 {want}"]
+    if unusable:
+        reason.append(
+            f"    这些条目含元字符、本守卫不据以授予覆盖（改成规范写法或扩本守卫）：{unusable}"
+        )
+    return reason
 
 
 # ── 防空转 ──────────────────────────────────────────────────────────────
@@ -208,35 +237,75 @@ def test_declared_external_inputs_are_well_formed():
         )
 
 
-# ── 匹配器自检（反向判别力）──────────────────────────────────────────────
+# ── 覆盖判据自检（反向判别力）────────────────────────────────────────────
+_SWIFT = "ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift"
+_FIXTURES = "tests/contract-fixtures"
+
+
 @pytest.mark.parametrize(
-    "entry,candidate,expected",
+    "rel,entries,covered",
     [
-        ("scripts/**", "scripts/a.sh", True),
-        ("scripts/**", "scripts/governance/a.sh", True),
-        # 关键判别：单星不跨 `/`。扫描器递归读 scripts/governance/*.sh，
-        # 所以 `scripts/*` **不算**覆盖 —— 这一条区分不出来，整条守卫就废了。
-        ("scripts/*", "scripts/a.sh", True),
-        ("scripts/*", "scripts/governance/a.sh", False),
-        ("backend/**", "scripts/a.sh", False),
-        ("scripts/**", "backend/a.sh", False),
-        # 前缀不能当命中：`scripts/**` 不该覆盖 `scripts-extra/a.sh`
-        ("scripts/**", "scripts-extra/a.sh", False),
-        # 精确文件条目
-        ("ios/x/M.swift", "ios/x/M.swift", True),
-        ("ios/x/M.swift", "ios/x/N.swift", False),
-        ("ios/x/M.swift", "ios/x/M.swiftx", False),
+        # —— 目录声明：只有规范递归前缀算数 ——
+        ("scripts", ["scripts/**"], True),
+        ("scripts", ["**"], True),
+        # 单星不跨 `/`，而扫描器递归读 scripts/governance/*.sh
+        ("scripts", ["scripts/*"], False),
+        # 只盖住某个子目录 ≠ 盖住整个目录
+        ("scripts", ["scripts/governance/**"], False),
+        # 字面条目匹配的是「一个叫 scripts 的文件」，不是目录内容
+        ("scripts", ["scripts"], False),
+        # 前缀不是边界：scripts-extra 跟 scripts 无关
+        ("scripts", ["scripts-extra/**"], False),
+        ("scripts", ["backend/**"], False),
+        (_FIXTURES, ["tests/contract-fixtures/**"], True),
+        (_FIXTURES, ["tests/**"], True),
+        (_FIXTURES, ["tests/contract-fixtures"], False),
+        # —— 文件声明：字面相等，或被某条递归前缀包住 ——
+        (_SWIFT, [_SWIFT], True),
+        (_SWIFT, ["ios/**"], True),
+        (_SWIFT, ["ios/Contracts/Sources/KlineTrainerContracts/Models/**"], True),
+        (_SWIFT, ["ios/Contracts/Sources/KlineTrainerContracts/Models/*"], False),
+        (_SWIFT, ["ios/Contracts/Sources/KlineTrainerContracts/Models/Other.swift"], False),
+        (_SWIFT, ["ios/Contracts/Sources/KlineTrainerContracts/Models"], False),
+        # —— 认不出的条目不授予覆盖，但也不该把本来成立的覆盖弄没 ——
+        ("scripts", ["scripts/[ab]*", "scripts/**"], True),
+        ("scripts", ["scripts/[ab]*"], False),
     ],
 )
-def test_glob_matcher_discriminates(entry, candidate, expected):
-    assert bool(_entry_regex(entry).match(candidate)) is expected
+def test_coverage_is_structural(rel, entries, covered):
+    assert (_uncovered(rel, entries) == []) is covered
 
 
-@pytest.mark.parametrize("entry", ["!scripts/**", "scripts/[ab]*", "s/+(a|b)", "a/{x,y}"])
-def test_matcher_refuses_patterns_it_cannot_model(entry):
-    """建模不了就抛，不静默当成「不匹配」（那会造成假红）或「匹配」（假绿）。"""
+def test_negation_entry_is_refused():
+    """`!` 从触发面里**减掉**内容，「忽略认不出的条目」这个保守近似对它不成立。
+
+    别的元字符条目被忽略只会让判据更严（顶多误红），`!` 却能让判据更松（假绿），
+    所以它必须走抛异常这条路，不能跟其它元字符一样被忽略。
+    """
     with pytest.raises(AssertionError):
-        _entry_regex(entry)
+        _uncovered("scripts", ["scripts/**", "!scripts/governance/**"])
+
+
+# ── 反例（codex R1 提出，已本地复现）────────────────────────────────────
+def test_split_star_entries_do_not_cover_a_recursive_directory():
+    """`scripts/*` + `scripts/*/*` 不算覆盖一个**递归**扫描的目录。
+
+    两条加起来能满足「一层」和「两层」，但扫描器用 rglob 读任意深度，
+    `scripts/a/b/c.sh` 就漏在外面。有限个探针证明不了无限深度 —— 这正是
+    R1 指出的假绿：workflow 写成这样能过守卫，而只改深层脚本的 PR 静默跳过全套。
+    """
+    assert _uncovered("scripts", ["scripts/*", "scripts/*/*"]) != []
+
+
+def test_question_mark_entry_does_not_cover_the_swift_file():
+    """GitHub 的 `?` 是「前一个字符出现 0 或 1 次」的**数量词**，不是任意字符。
+
+    故 `Model?.swift` 实际匹配 `Mode.swift` / `Model.swift`，**不匹配**
+    `Models.swift`。守卫若按「任意字符」理解就会发出一张 GitHub 不认的通行证。
+    """
+    swift = "ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift"
+    near_miss = "ios/Contracts/Sources/KlineTrainerContracts/Models/Model?.swift"
+    assert _uncovered(swift, [near_miss]) != []
 
 
 # ── 主判据 ──────────────────────────────────────────────────────────────
@@ -247,13 +316,15 @@ def test_ci_paths_cover_every_declared_external_input():
     for rel, modules in sorted(_declared_external_inputs().items()):
         gaps = _uncovered(rel, entries)
         if gaps:
-            misses.append(f"  {rel}  （声明于 {', '.join(modules)}）未覆盖: {gaps}")
+            detail = "\n".join(gaps)
+            misses.append(f"  （声明于 {', '.join(modules)}）{detail}")
     assert not misses, (
         "以下外部输入没被 CI 的 pull_request.paths 覆盖 —— 只改这些文件的 PR "
         "不会触发后端测试套件，守卫存在但有静默旁路：\n"
         + "\n".join(misses)
         + f"\n当前 paths: {entries}\n"
-        "修法：往 .github/workflows/backend-tests.yml 的 paths 里补条目"
-        "（目录用 `<dir>/**`，单文件写全路径）。"
+        "修法：往 .github/workflows/backend-tests.yml 的 paths 里补条目 —— "
+        "目录写 `<目录>/**`，单文件写全路径。本守卫只认这两种无歧义写法，"
+        "别的元字符写法即使在 GitHub 上成立，这里也不会算作覆盖（保守方向，见上方注释）。"
         "注意该文件对 Claude 是硬 deny，须走 ceremony 由 user 落地。"
     )
