@@ -621,12 +621,29 @@ if !effectiveLossy.unknownRaw.isEmpty
 | 4 | `TrainingEngine/TrainingSessionCoordinator.swift:331` | **正常局**断点续训种子 |
 | 5 | `TrainingEngine/TrainingSessionCoordinator.swift:943` | **回放局**续局种子 |
 
-**第 4 片必须定一条「工具 × 默认样式」不变量，且必须对上表 5 处全部成立**（选一并给出理由）：
+**⛔⛔ 不变量的对象是一个二元组 `(activeDrawingTool, defaultStyle)`，不是「默认样式」一个字段**（codex R9-high，**已核实为真**；本 spec 上一稿把推荐方案写成「收口在 `setDefaultStyle` 里」，**那是错的** —— 它只盯住了二元组的一半）。
 
-- **(i) 收口在唯一写入函数里**（**推荐**）：`DrawingSession.setDefaultStyle` 内部对当前 `activeDrawingTool` 做归一化 ⇒ **5 处由构造保证全覆盖**，日后新增第 6 个写入点也自动被罩住（符合仓内「让坏状态不可表达」的一贯做法）。⚠️ 代价：撤销 / 重做恢复的是「**对当前工具合法的最近值**」而非逐字节原值 —— 这个语义变化必须在第 4 片的 spec 里写明并被接受；
+**上一稿错在哪（记录下来，因为它是个很容易重犯的形状）**：`DrawingSession.activate(tool:)`（`:201-208`）**改工具时根本不碰 `defaultStyle`，也就不会经过 `setDefaultStyle`**：
+
+```swift
+guard activeDrawingTool != tool else { return }
+activeDrawingTool = tool
+discardPendingAnchors()          // ← 全程没有触碰 defaultStyle
+```
+
+⇒ 趋势线 `.segment` → 切水平线：默认样式一个字没动，归一化**一次都没被触发** ⇒ **照上一稿的推荐方案实现，会正好过不了本条自己列的第 ① 条测试**。
+**⇒ 归一化必须在「二元组的任一半发生变化」时运行，而不是只在「默认样式被写」时运行。**
+
+**第 4 片必须定一条「工具 × 默认样式」不变量，且必须对下列**全部**触发点成立**（选一并给出理由）：
+
+- **(i) 一个共享归一化 helper，从两类触发点各调一次**（**推荐**）：
+  - **默认样式变化侧** —— `DrawingSession.setDefaultStyle` 内部调（⇒ 罩住上表 5 个写入点，含撤销 / 重做，日后新增第 6 个也自动被罩）；
+  - **工具变化侧** —— `DrawingSession.activate(tool:)` 在 `activeDrawingTool = tool` **之后**调。⚠️ **注意那道 `guard activeDrawingTool != tool else { return }` 早返**：工具没变时提前返回是对的（无需归一化），但这意味着 helper **必须放在早返之后、赋值之后**，⛔ 放在函数开头等于每次点类型行都白跑一次、且掩盖真正的触发点；
+  - **⚠️ 必须显式定义「resume 时还没有活跃工具」的行为**：`TrainingSessionCoordinator.swift:331 / :943` 种子默认样式时，画线会话尚未开启、`activeDrawingTool` 为 nil。**本 spec 的裁决：此时不归一化、推迟到 `activate` 那一次**（安全性依据：进入画线模式**必经** `activate`，且首次 `activate` 时 `activeDrawingTool` 为 nil ≠ 目标工具 ⇒ 一定越过那道早返、一定触发归一化）。⛔ 第 4 片若改动这条路径，必须重新论证该依据仍成立。
+  - ⚠️ 代价（不变，仍须在第 4 片 spec 明写并被接受）：撤销 / 重做恢复的是「**对当前工具合法的最近值**」而非逐字节原值。
 - **(ii) 按工具各存一份默认**，并把「当前工具」一起持久化，撤销快照带上工具身份 ⇒ 语义最干净，但**改动面大得多**（持久化格式 + 撤销结构都要动，可能触发契约 bump）。
 
-⛔ **不得只在 `activate` 一处加归一化就收工** —— 那正是本条要挡的形状。
+⛔ **不得只在 `activate` 一处加**（漏掉撤销 / 重做那个后门），⛔ **也不得只在 `setDefaultStyle` 一处加**（漏掉切工具）—— **两侧都要，这正是「不变量是二元组」的含义**。
 
 **必须配的测试**（**五条都要**）：① 趋势线 `.segment` → 切水平线 → **第一次点击就落线成功**（不是被吞）；② resume 一个存着 `.segment` 默认的存档 → 进画线模式（默认水平线）→ **第一次点击就落线成功**；③ 趋势线 `.segment` → 切水平线 → **按 ↩ 撤销** → 第一次点击**仍然落线成功**；④ 同上但**按 ↪ 重做**；⑤ **反向对照**：趋势线 `.segment` 在**趋势线自己**下落线仍成功（防「归一化过头、把合法组合也改掉」） | **第 4 片**（与 Q17 同一动作） | 症状是**零反馈的点击失效** —— 用户无从理解、也不会去想「是样式的问题」 |
 | **Q17** | **持久化解码边界的 `sanitized(for: .horizontal)`**（`DrawingDefaultStyleColumn.swift:31 / :44`，codex R6-high）：本局默认样式**读回来就被按水平线规则改写**。第 4 片加入 `.trend` 后，一份合法的 `.segment` 默认**写得进磁盘、resume 时被静默改成 `.straight`**。⚠️ **该文件头注已逐字预告了这一点，并承认「那天不会有任何测试变红」** ⇒ 第 4 片必须：① 让持久化解码**对工具中立**，或把语义 sanitize **推迟到知道当前工具之后**；② 配 **`pending_training` 与 `pending_replay` 两条**往返 / resume 测试，证明一条 `.trend` + `.segment` 的默认**逐字段不变地活过一次存盘再读回**。⛔ **两条都要** —— 只测一条会漏掉另一个 repo（两个 repo 各调一次该编解码点，守卫 G7 钉死） | **第 4 片** | 症状是**静默**的（用户改的默认悄悄变回去），且现有测试对它零判别力 |
