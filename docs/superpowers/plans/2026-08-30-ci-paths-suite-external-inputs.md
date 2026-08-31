@@ -1,9 +1,9 @@
-# CI 触发路径补齐：paths 必须覆盖后端套件的全部外部输入
+# 后端 CI 触发路径：取消过滤器，每个 PR 都跑
 
 - 日期：2026-08-30
 - 分支：`fix/ci-paths-suite-external-inputs`（base = main `1437529`）
 - 类别：trust-boundary（改 `.github/workflows/**`）→ 强制 `codex:adversarial-review`
-- 前置：PR #175（`test_env_example_coverage.py` 落地）、#178（残留已明写但再次推迟本项）
+- 前置：PR #175 落地了 `test_env_example_coverage.py`；#178 明写「CI paths 漏 `scripts/**`」为残留，已连续两个 PR 推迟
 
 ---
 
@@ -24,109 +24,77 @@ PR 根本不触发本套件 ⇒ **守卫存在但有一条静默旁路**：守�
 之后由 `push: branches: [main]` 触发才暴露。本仓在 Catalyst 闸门上踩过同型的坑
 （后合 PR 引红 main，见 memory `project_catalyst_gate_scheme_fix`）。
 
-## B. 范围（user 2026-08-30 拍板）
+## B. 外部输入到底有哪些（实测，非推断）
 
-交接单只点名 `scripts/**`。实测（§D）发现**同型的洞有两个**，user 选择一并补掉：
+**没有靠读代码猜**。给 pytest 挂一个插件，把 `builtins.open` /
+`pathlib.Path.{read_text,read_bytes,open}` / `os.{scandir,listdir}` 各包一层记录路径，
+然后**真跑一遍全套**（2026-08-30 在 main `1437529` 上：`1106 passed`，命中 74 条记录）。
+去掉 pytest 自己的 `.pytest_cache` 后，外部输入是：
 
 | # | 外部输入 | 谁在读 | 补前状态 |
 |---|---|---|---|
-| 1 | `scripts/`（递归，当前 30 个 `.sh`） | `test_env_example_coverage.py`：找出真的 `source` 了 `.env` 的脚本，读它自己声明的必需变量列表，与分类表做**双向精确相等**比对 | ❌ 未覆盖 |
-| 2 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | `test_qmt_pilot_db.py::test_contract_version_matches_swift_source_of_truth`：跨语言 `CONTRACT_VERSION` 漂移钉 | ❌ 未覆盖 |
-| 3 | `tests/contract-fixtures/` | `test_openapi.py` | ✅ 早已覆盖 |
-| 4 | `.github/workflows/backend-tests.yml` | 本次新增的守卫自己 | ✅ 早已覆盖 |
+| 1 | `scripts/`（递归，当前 30 个 `.sh`） | `test_env_example_coverage.py` | ❌ 未覆盖 |
+| 2 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | `test_qmt_pilot_db.py` 的跨语言 `CONTRACT_VERSION` 漂移钉 | ❌ 未覆盖 |
+| 3 | `tests/contract-fixtures/` | `test_openapi.py` **和** `test_routes.py` 两处 | ✅ 已覆盖 |
 
-第 2 条**刻意只钉那一个文件、不写 `ios/**`**：写 `ios/**` 会让本仓绝大多数 PR
-（都在动 iOS）平白多跑一趟后端全套。
+> ⚠️ 第 3 条「两处」是 codex R2 挖出来的：追踪器记录的是**被读的路径**，
+> 不是**哪个模块读的**，我当时凭印象把它归给了 `test_openapi.py` 一家。
+> 教训=归因要单独核，结论对不代表归因对。
 
-**不在本次范围**：`hardening_6_gate.yml` 无 paths 过滤器（当年为避开必需检查死锁刻意
-删掉的），`openapi-smoke.yml` 只跑单个测试文件且 paths 与之对齐 —— 两者都不存在本问题。
+## C. 走过的弯路与最终决策
 
-## C. 落地内容
+### C-1 初版（R1 前）：补 paths + 造一道守卫
+
+思路是：每个测试模块把自己读到的外部输入声明成 `EXTERNAL_INPUTS`，守卫 AST 收集后
+逐条核 paths 覆盖。**两轮评审两次被打回**：
+
+| 轮 | 结果 | 缺陷 |
+|---|---|---|
+| —— | 额度用完（日志无 `Verdict:`，账本未写入） | 按规矩不计轮次，等额度重跑 |
+| R1 | needs-attention | 覆盖判据有两个假绿：①`scripts/*`+`scripts/*/*` 骗过两个固定探针却盖不住第三层；②GitHub 的 `?` 是「前一个字符 0 或 1 次」的数量词而非任意字符，`Model?.swift` 被误判成盖得住 `Models.swift`。**两条都本地复现后重写了判据** |
+| R2 | needs-attention | 更根本：声明制**靠人自觉**，不是构造上穷尽的。而且假阴性**当场就存在** —— `test_routes.py` 也读 `tests/contract-fixtures` 却没声明 |
+
+R2 说得对。要做到不靠自觉，得再写约 100 行静态分析去解析各种路径表达式
+（`__file__.parent` / `parents[1]` / `parents[2]` / `parents[3]` 四种锚点写法都要认），
+而且静态分析永远有它看不见的写法 —— 盲区只是变小、不会消失。
+
+### C-2 最终决策（user 2026-08-30 拍板）：**取消过滤器**
+
+实测本 job 在 CI 上**只跑 1.5–2 分钟**（`gh run list` 最近 8 次：1.5 / 1.6 / 1.6 / 1.7 /
+1.8 / 1.9 / 2 / 2 分钟）。为省这 2 分钟去维护一张「必须与套件实际读取面永远同步」的
+清单，不划算 —— 而那张清单已经漏过两次。
+
+取消过滤器后，「某个外部输入没进清单」这件事**从根上不可能发生**，于是那套发现机制
+和三处声明全部不需要，一并删掉。
+
+**代价**：以后每个 PR（包括只改 iOS 界面的）都多跑约 2 分钟。user 已知悉并接受。
+
+**为什么这么做是安全的**：
+- `backend pytest (full suite)` **不是**分支保护的必需检查（已核 `codeowners_required_globs`
+  与 required-checks 配置），所以「无过滤器」不会造成必需检查等不到状态的死锁；
+- 本仓已有先例：`hardening_6_gate.yml` 就没有 paths 过滤器（当年正是为避开必需检查
+  死锁而刻意删掉的）。
+
+## D. 落地内容
 
 1. **`.github/workflows/backend-tests.yml`**（trust-boundary，Claude 硬 deny，走 ceremony
-   由 user `cp` 落地）：paths 增两条 + 一段说明为什么不能随手删的注释。
-2. **`backend/tests/test_ci_paths_cover_external_inputs.py`**（新增，机械守卫）。
-3. **三处 `EXTERNAL_INPUTS` 声明**（`test_env_example_coverage.py` /
-   `test_qmt_pilot_db.py` / `test_openapi.py`）。
+   由 user `cp` 落地）：删掉 `pull_request.paths` 整段，加一段注释说明为什么不设过滤器。
+2. **`backend/tests/test_backend_tests_workflow_runs_on_every_pr.py`**（新增，40 行）：
+   钉住这个决定别被悄悄改回去。两条判据：
+   - `test_workflow_still_triggers_on_pull_request` —— **防空转**：`pull_request`
+     触发器本身必须在。没有这条，整个触发器被删掉时下面那条也会绿，而那种情况比
+     有过滤器更糟（后端测试一次都不跑）。
+   - `test_no_pull_request_paths_filter` —— 正题。
+   解析 `on:` 段时对 PyYAML 的坑做了处理并 fail-closed（见下）。
 
-### 守卫的判据形状
+> 📌 这道钉子**不是** C-1 里被否掉的那套东西。被否的是「靠声明发现外部输入」的
+> 259 行机制（有盲区）；这里只有一条无歧义的不变量，没有发现逻辑，也就没有盲区。
 
-```
-① 每个测试模块把自己读到的外部输入声明成模块级 EXTERNAL_INPUTS，
-   并且【用这个常量本身】去做那次读取；
-② 守卫用 AST 静态扫描全部测试模块，收集所有 EXTERNAL_INPUTS；
-③ 每一条声明都必须被 workflow 的 paths 覆盖（目录要覆盖到任意深度）。
-```
+### 一个必须记住的解析坑
 
-①里「用常量本身去读」是关键：声明因此不可能与该模块的实际行为脱节。有人给
-`test_env_example_coverage.py` 加第三个扫描根时，常量一改，③的覆盖要求自动跟着变 ——
-守卫不是手抄一张会过期的清单。
-
-**防空转四道**（每一道都对应一种「判据两侧同时缩水、于是恒真」的失效）：
-
-| 道 | 断言 | 兜住的失效 |
-|---|---|---|
-| a | 至少扫到一条 `EXTERNAL_INPUTS` | AST 扫描器坏掉 → 声明集为空 → ③恒真 |
-| b | `paths` 解析出非空列表 | YAML 口径失效 / paths 被整个删掉 → ③恒真 |
-| c | 每条声明在磁盘上真实存在 | 陈旧声明：路径不存在时探针怎么拼都能被满足，声明变空话 |
-| d | 声明不得落在 `backend/` 里 | 往表里塞内部路径会稀释这张表的含义（`backend/**` 早覆盖了） |
-
-**fail-closed 两处**（不写 `continue`，避免把「判据够不着」伪装成「这里没有目标」）：
-
-- `EXTERNAL_INPUTS` 存在但不是非空字符串字面量序列 → **抛异常**；
-- paths 条目含本匹配器建模不了的元字符（`!` 否定式、`[]{}()|+`）→ **抛异常**。
-
-### 覆盖判据：结构比对，**不**模拟 GitHub 的通配符
-
-初版是「自己实现一套 glob→正则，再拿两个固定探针去试」。codex R1 指出它有两个假绿，
-**两条都本地复现了**：
-
-| # | 反例 | 为什么是假绿 |
-|---|---|---|
-| ① | paths 写 `scripts/*` + `scripts/*/*` | 同时满足「一层」和「两层」两个探针，但盖不住 `scripts/a/b/c.sh`，而扫描器用 `rglob` 读**任意深度**。有限个探针证明不了无限深度 |
-| ② | paths 写 `…/Model?.swift` | GitHub 的 `?` 是「**前一个字符**出现 0 或 1 次」的数量词，不是「任意一个字符」（官方 filter pattern cheat sheet）。该模式实际匹配 `Mode.swift`/`Model.swift`，**不匹配** `Models.swift`；初版按「任意字符」翻译，于是发了一张 GitHub 不认的通行证 |
-
-改法是**不再模拟匹配**，只认两种结构上无歧义的条目：
-
-- **字面路径**（不含任何元字符）；
-- **规范递归前缀** `<字面前缀>/**`，以及全仓通配 `**`。
-
-判定：目录声明 `d` 必须有某条递归前缀 `p/**` 满足 `d == p` 或 `d` 在 `p/` 下；
-文件声明 `f` 则再多一条出路 —— 某条字面条目正好等于 `f`。
-
-认不出的条目（花括号、方括号、`?`、`+`…）**一律不据以授予覆盖，但不报错**。这个方向
-是安全的：paths 是**并集**，多一条只会让触发面更大，所以「不算它」只可能让判据更严、
-不可能造成假绿；真红时会把这些条目列出来解释为什么没算数。
-
-> ⚠️ 唯一例外是 `!`（否定式）：它从并集里**减掉**内容，忽略它就不再保守 → 直接抛异常。
-> 这条区分本身配了测试：`test_negation_entry_is_refused`。
-
-## D. 外部输入是怎么穷尽出来的（复核配方）
-
-**没有靠读代码猜**。做法是给 pytest 挂一个插件，把 `builtins.open` /
-`pathlib.Path.{read_text,read_bytes,open}` / `os.{scandir,listdir}` 全部包一层，
-记录每一次落在仓库内、且不在 `backend/` 下的访问，然后**真跑一遍全套**。
-
-2026-08-30 在 main `1437529` 上的实测结果：`1106 passed`，命中 74 条记录，
-去掉 pytest 自己的 `.pytest_cache` 后，外部输入恰好就是 §B 那四条（`scripts/` 下
-30 个 `.sh` 全部被读到 + 3 次目录扫描）。
-
-复核脚本留在 scratchpad（不进仓库，因为它 monkeypatch 全套 IO，常驻会给 1106 个
-测试引入风险）。要重跑：写一个 pytest 插件包住上述五个入口把路径记进集合，
-`python -m pytest tests/ -q -p <插件名>`，约 35 秒。
-
-### ⚠️ 明写的盲区
-
-一个测试模块如果读了 `backend/` 之外的东西却**没声明** `EXTERNAL_INPUTS`，守卫看不见。
-
-试过用「扫字符串字面量、看它是不是一个存在的仓库相对路径」来无声明地识别，**行不通**：
-5 个候选里 3 个是假阳性 —— `"fixtures"` 实际拼到 `backend/tests/fixtures`，
-`"scripts"`（`test_pilot_verify_harness.py`）实际拼到 `backend/scripts`，
-`"scripts/"`（`test_qmt_pilot_db.py`）根本不是路径拼接而是断言里的子串判断。
-锚点表达式在本套件里有四种写法（`__file__.parent` / `parents[1]` / `parents[2]` /
-`parents[3]`），靠名字启发式去认锚点属于本仓明令回避的「禁词黑名单」形状。
-
-穷尽的手段就是上面那个运行期追踪，作为**人工复核工具**保留，不做成常驻守卫。
+YAML 1.1 里裸键 `on:` 会被 PyYAML 解析成**布尔 `True`**，不是字符串 `"on"`
+（PyYAML 6.0.3 实测）。`doc["on"]` 会 KeyError。两种键都要试，都取不到就**报错**，
+不能返回空字典 —— 返回空会让两条判据一起恒真。
 
 ## E. 验收清单（非程序员可执行）
 
@@ -134,33 +102,26 @@ PR 根本不触发本套件 ⇒ **守卫存在但有一条静默旁路**：守�
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| E1 | 在终端进入仓库，运行 `git -C '.dev/worktree/ci-paths-external' diff --stat main` | 只列出 5 个文件：1 个 workflow、3 个已有测试文件、1 个新测试文件；没有其它文件 | |
-| E2 | 打开 `.github/workflows/backend-tests.yml`，看 `paths:` 那一段 | 能看到 `- 'scripts/**'` 和那一行很长的 `Models.swift` 路径，各一条 | |
-| E3 | 在 worktree 的 `backend` 目录里运行后端全套测试 | 最后一行显示全部通过，数量不少于 1130，且**没有** `failed` / `error` / `skipped` 字样 | |
-| E4 | 只运行新守卫那一个文件 | 显示 25 个测试全部通过 | |
-| E5 | 临时把 workflow 里 `- 'scripts/**'` 那一行删掉，重跑 E4 | 必须**变红**，且报错文字里点名 `scripts` 没被覆盖 | |
-| E6 | 把 E5 删掉的那一行加回去，重跑 E4 | 重新全绿 | |
-| E7 | 临时把 `- 'scripts/**'` 改成**两行** `- 'scripts/*'` 加 `- 'scripts/*/*'`，重跑 E4 | 必须**变红**（这是 codex R1 反例①：看着像盖住了两层，其实盖不住第三层） | |
-| E8 | 把 E7 改的那两行换回一行 `- 'scripts/**'`，重跑 E4 | 重新全绿 | |
-| E9 | 临时把那行 `Models.swift` 改成 `Model?.swift`（多一个问号），重跑 E4 | 必须**变红**（R1 反例②：GitHub 的问号不是「任意一个字」） | |
-| E10 | 把 E9 的问号去掉改回原样，重跑 E4 | 重新全绿 | |
-| E11 | PR 开出来后看 GitHub 的检查列表 | 有一项叫 `backend pytest (full suite)`，且是绿的 | |
+| E1 | 在终端运行 `git -C '.dev/worktree/ci-paths-external' diff --stat main` | 只列出 3 个文件：1 个 workflow、1 个新测试文件、1 个计划文档。**不含**任何已有测试文件 | |
+| E2 | 打开 `.github/workflows/backend-tests.yml` | `on:` 段下面**看不到** `paths:` 这一项；`pull_request:` 后面直接就是 `push:` | |
+| E3 | 在 worktree 的 `backend` 目录里运行后端全套测试 | 最后一行显示 **1108 passed**（main 是 1106，减掉被删的守卫、加上新钉子那 2 条），且**没有** `failed` / `error` / `skipped` 字样 | |
+| E4 | 只运行新钉子那一个文件 | 显示 2 个测试全部通过 | |
+| E5 | 临时在 workflow 的 `pull_request:` 下面加回两行 `paths:` 和 `- 'backend/**'`，重跑 E4 | 必须**变红**，报错文字里列出你刚加的那条 | |
+| E6 | 把 E5 加的两行删掉，重跑 E4 | 重新全绿 | |
+| E7 | 临时把整个 `pull_request:` 那一行删掉，重跑 E4 | 必须**变红**（防空转那条：触发器都没了，比有过滤器更糟） | |
+| E7b | 临时把 `pull_request:` 改成 `pull_request: 123`，重跑 E4 | 必须**变红**，且报错文字要说「既不是空、也不是映射（实得 int）」——不能是一句看不懂的 `AttributeError` | |
+| E8 | 把 E7 删掉的那行加回去，重跑 E4 | 重新全绿 | |
+| E9 | PR 开出来后看 GitHub 的检查列表 | 有一项叫 `backend pytest (full suite)`，且是绿的 | |
+| E10 | 合并之后，随便找一个**只改 iOS 界面**的新 PR 看它的检查列表 | 也应该有 `backend pytest (full suite)` 在跑 —— 这就是本次改动的正题 | |
 
-E5 / E7 / E9 是这份改动的**要害**：它们证明这道守卫真的会因为 paths 漂移而变红，
-而不是一个永远绿着的摆设。三条都必须亲手做一次，不能只看代码推断。
-E6 / E8 / E10 这三条「改回去要重新变绿」同样不能省 —— 只有「拒了」的档，
-没法区分「守卫在工作」和「守卫恒红」。
-
-## E-bis. 评审轮次
-
-| 轮 | 结果 | 处置 |
-|---|---|---|
-| —— | codex 额度用完（日志无 `Verdict:` 行，账本未写入） | 按本仓规矩**不计轮次**，等额度重跑 |
-| R1 | `needs-attention`，1 条 medium：覆盖判据有两个可复现的假绿 | **两条都本地复现后修好**（见 §C「覆盖判据」）。判据从「模拟 glob + 探针」重写为「结构比对」；变异 12 组重跑，含 M10/M11 两条正向对照 |
+E5 / E7 是要害：证明这颗钉子真的会变红，不是摆设。E6 / E8 这两条「改回去要重新变绿」
+同样不能省 —— 只有「拒了」的档，没法区分「守卫在工作」和「守卫恒红」。
 
 ## F. 已知残留
 
-- **F1**：`.github/workflows/backend-tests.yml` 的 paths 仍未含 `.claude/**` 等治理文件 ——
-  后端套件不读它们，不是本判据的范围。
-- **F2**：§D 的盲区（未声明的外部输入）——用运行期追踪人工复核，不常驻。
-- **F3**：本次不碰 `hardening_6_gate.yml` / `openapi-smoke.yml`（§B 已核实两者无此问题）。
+- **F1**：每个 PR 多跑约 2 分钟 CI（本次决策刻意换来的，见 §C-2）。
+- **F2**：本次不碰 `hardening_6_gate.yml`（本来就无过滤器）与 `openapi-smoke.yml`
+  （只跑单个测试文件、paths 与之对齐，不存在本问题）—— 两者均已核实。
+- **F3**：§B 那套运行期 IO 追踪脚本留在 scratchpad、不进仓库。它 monkeypatch 全套 IO，
+  常驻会给上千个测试引入风险，而且 `-k` 选跑时结果不完整、会给出「少报」的假安心。
+  取消过滤器后也不再需要它当守卫，只作为将来的人工排查工具。

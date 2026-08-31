@@ -28,14 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
 ENV_EXAMPLE = BACKEND_DIR / ".env.example"
 
-# 本模块读到 `backend/` **之外**的东西：shell 扫描面包含仓库根的 `scripts/`。
-# 这条声明由 `test_ci_paths_cover_external_inputs.py` 静态收集，用来保证
-# `.github/workflows/backend-tests.yml` 的 `pull_request.paths` 覆盖它 ——
-# 否则「只改 scripts/ 的 PR」压根不触发本套件，本守卫就有了一条静默旁路。
-# 下面 `_shell_consumer_files` **必须用这个常量本身**去拼扫描根：声明与实际扫描面
-# 共用一份来源，才不会一边改了另一边还停在旧值上。
-EXTERNAL_INPUTS = ("scripts",)
-
 # ── 分类表 ──────────────────────────────────────────────────────────────
 # 该进 `.env.example` 的：部署时由 backend/.env 提供。
 ENV_FILE_KEYS = {
@@ -196,8 +188,9 @@ def _shell_consumer_files() -> list[Path]:
     以前 scripts/ 用非递归 glob，只看到 5 个文件、漏掉 scripts/*/ 下的 25 个；
     覆盖面不一致本身就是漏扫来源，所以统一 rglob。仓库里只有这两处放 shell 脚本。
     """
-    roots = [BACKEND_DIR] + [REPO_ROOT / rel for rel in EXTERNAL_INPUTS]
-    return sorted(path for root in roots for path in root.rglob("*.sh"))
+    return sorted(
+        list(BACKEND_DIR.rglob("*.sh")) + list((REPO_ROOT / "scripts").rglob("*.sh"))
+    )
 
 
 def _scan_shell_keys() -> set[str]:

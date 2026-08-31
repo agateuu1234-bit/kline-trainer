@@ -1,21 +1,18 @@
 name: Backend Tests
 
 on:
+  # ⚠️ 刻意**不设** pull_request.paths 过滤器：每个 PR 都跑。别加回来。
+  # 本套件读 backend/ 之外的东西 —— scripts/** 下 30 个 .sh（test_env_example_coverage
+  # 递归扫）、iOS 那份 Swift 契约常量（test_qmt_pilot_db 的跨语言漂移钉）、
+  # tests/contract-fixtures/（test_openapi 与 test_routes 两处都读）。过滤器漏掉其中
+  # 任何一条，只改那些文件的 PR 就静默跳过整套后端测试：守卫还在但有旁路，红要等
+  # 合进 main 之后由 push 触发才暴露（本仓在 Catalyst 闸门上踩过同型的坑）。
+  # 试过用「每个测试模块自报外部输入」维护这张清单，两轮评审两次被打回——清单靠人
+  # 自觉，实际当场就漏了 test_routes.py。而本 job 实测只跑 1.5-2 分钟，为省这点时间
+  # 维护一张必须与套件实际读取面永远同步的清单，不划算。
+  # 由 backend/tests/test_backend_tests_workflow_runs_on_every_pr.py 钉住。
+  # 同款配置本仓有先例：hardening_6_gate.yml 也没有 paths 过滤器。
   pull_request:
-    # ⚠️ 这张 paths 表**必须覆盖后端测试套件读到的每一处 backend/ 之外的文件**。
-    # 漏一条 = 只改那些文件的 PR 根本不跑本套件：守卫还在，但多了一条静默旁路，
-    # 红要等合进 main 之后由 push 触发才暴露（本仓在 Catalyst 闸门上踩过同型的坑）。
-    # 由 backend/tests/test_ci_paths_cover_external_inputs.py 机械守卫，改动前先看它。
-    #   - scripts/**：test_env_example_coverage.py 递归扫 scripts/ 下的 .sh（当前 30 个）
-    #   - Models.swift：test_qmt_pilot_db.py 的跨语言 CONTRACT_VERSION 漂移钉；
-    #     刻意只钉这一个文件而不是 ios/**，免得每个 iOS 改动都去跑后端全套。
-    paths:
-      - 'backend/**'
-      - 'pytest.ini'
-      - 'scripts/**'
-      - 'tests/contract-fixtures/**'
-      - 'ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift'
-      - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
 
