@@ -867,43 +867,56 @@ def _write_manifest(stg_fd: int, payload: dict) -> None:
     atomic_write_bytes(stg_fd, MANIFEST_NAME, data, full_sync=True)
 
 
-def _require_lifecycle_only(lifecycle: dict, where: str) -> None:
-    """`lifecycle` 只许携带生命周期三字段。
+def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
+    """**启动闸**：读回磁盘上的 manifest，执行启动期互斥检查，返回生命周期启动快照。
 
-    不拦的话 `payload.update(lifecycle)` 是一条通往**任意顶层键**的走私通道：
-    `lifecycle={"files": []}` 就能在一个自称「够不到生命周期字段」的入口里
-    把实拷清单清空。这条守卫让「剥 + 塞」真的闭合在那三个键上。
+    返回的快照是收尾提交的**预期**（`commit_final(..., startup_lifecycle=…)`），
+    用来识别「本次运行期间账本被人动过」。
+
+    ⚠️ **`--skip-existing-verify` 与「manifest 带着必须做全量复校才能清的证据」
+    互斥，且必须在**任何文件系统改动之前**判定**（P2-F3 明写「撞上即**拒绝启动**」）。
+    此前这条只在 `resolve_final_lifecycle` 里求值，而那是**收尾提交**才走的路径
+    ——一次带 flag 的运行可以先拷完文件、推进游标、写满池子，到最后才被拒，
+    **已提交的状态与已消耗的配额都收不回来**（codex R6 [high]）。
+
+    ⚠️ **已接受的残留**：本模块无法强制调用方**先调本函数再动文件系统**
+    （它没有运行上下文对象）。**这是对 S4/S5 的硬性要求**：启动序列必须
+    第一步就调它，且在任何拷贝/建目录/提交之前。
     """
-    extra = sorted(set(lifecycle) - LIFECYCLE_KEYS)
-    if extra:
-        raise ValueError(
-            f"{where} 的 lifecycle 只许携带 {sorted(LIFECYCLE_KEYS)}，"
-            f"多出 {extra}——它会经 update 写进 manifest 的任意顶层键"
+    previous = read_manifest(stg_fd)
+    snapshot = lifecycle_snapshot(previous) if previous is not None else {}
+    if skip_existing_verify and _needs_staging_recheck(
+            snapshot.get("stopped_reason"), snapshot.get("fetch_fatal_error")):
+        raise SkipVerifyWithEscapeError(
+            "这棵 staging 的 manifest 里带着必须做全量复校才能解除的记录，"
+            "而本次传了 --skip-existing-verify。两者互斥：跳过复校就无法证明"
+            "那些已记录的文件还在、还是原来的字节。请去掉该 flag 重跑，"
+            "或换新 staging + 新 seed 重拉。"
         )
+    return snapshot
 
 
-def commit_stock(stg_fd: int, manifest: dict, *, lifecycle: dict) -> dict:
+def commit_stock(stg_fd: int, manifest: dict) -> dict:
     """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
 
-    ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段**：manifest 里的
+    ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段，且这是无条件的**：
     `stopped_reason` / `stopped_reason_secondary` / `fetch_fatal_error`
-    一律被**剥掉**，再把 `lifecycle`（启动时从磁盘捕获的快照）逐字塞回去。
-    调用方即使污染了内存里的 manifest，也写不进磁盘。
+    一律从**磁盘上那份 manifest** 读出来、原样写回去；调用方内存里是什么、
+    甚至调用方想传什么，都进不来——**这个参数根本不存在**。
 
-    这不是纪律而是结构：spec §9-3s 要求「per-stock 提交一律不动这两个字段，
-    **使规则可机械检验**」。靠「实施者记得别改」的实现无法被机械检验，
-    而这两个字段是 pilot 的 fail-closed 判据——被 per-stock 提交洗掉一次，
-    一棵**已被证明动过**的 staging 就会拿到干净标签。
+    spec §9-3s 要求「per-stock 提交一律不动这两个字段，**使规则可机械检验**」。
+    ⚠️ 初版做法是「调用方在启动时取一次快照、每次提交传进来」，本片曾把
+    「调用方可能传一份伪造的快照」登记为**已接受的残留** —— codex R6 那轮
+    实测证明它是**活的洞**：传一个空快照就能把磁盘上的警报抹掉，
+    而 fatal 是 pilot 的 fail-closed 判据。
+    **教训：登记为「已接受残留」的东西，下一轮要重新问一次它还能不能被利用。**
 
-    ⚠️ **这条结构保证的边界（如实登记，不许对外说过头）**：它挡住的是
-    「调用方污染了内存里那份 manifest」与「借 `lifecycle` 参数走私其它顶层键」。
-    它**挡不住**「调用方故意传一个伪造的快照」——那需要每次提交都回读磁盘，
-    代价与 per-stock 的调用频次不成比例。正确用法是启动时 `lifecycle_snapshot()`
-    取一次、整轮传同一个对象，由 S4 的拷贝循环承担。
+    代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    _require_lifecycle_only(lifecycle, "commit_stock")
+    previous = read_manifest(stg_fd)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
-    payload.update(lifecycle)
+    if previous is not None:
+        payload.update(lifecycle_snapshot(previous))
     _write_manifest(stg_fd, payload)
     return payload
 
@@ -1169,13 +1182,18 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
     return {}
 
 
-def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome) -> dict:
+def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
+                 startup_lifecycle: dict) -> dict:
     """**收尾提交** —— 全流程中**唯一**能写入或清除生命周期三字段的入口
     （R95-F2）。返回真正写出去的那份。
 
     与 `commit_stock` 的差别不在「记不记得改」，而在**能不能改**：
-    per-stock 提交把那三个键剥掉再回填启动快照，本函数把它们剥掉再回填
+    per-stock 提交把那三个键从磁盘读出来原样写回，本函数把它们剥掉再回填
     **决策表的输出**。两者都不从调用方内存里那份 manifest 直接取值。
+
+    `startup_lifecycle` 是 `begin_run()` 在**本次运行开始时**取到的快照，
+    作为「磁盘上应该是什么」的**预期**；与磁盘不匹配（含「预期非空而磁盘上
+    账本不见了」）一律 fail closed。
 
     ⚠️ **`resolve_final_lifecycle` 必须在任何写入之前求值**：它可能抛
     `SkipVerifyWithEscapeError`（P2-F3），而那一档的规定是「拒绝启动、
@@ -1191,9 +1209,30 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome) -> dict:
     # `read_manifest` 返回 `None` 是**合法**的引导态（首份 manifest 还没提交）；
     # 它抛异常则说明磁盘上那份账本已经坏了/被换了 —— 此时拒绝发布是 fail-closed。
     previous = read_manifest(stg_fd)
+    on_disk = lifecycle_snapshot(previous) if previous is not None else None
+
+    # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
+    # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口：`read_manifest` 返回
+    # None → 被当成全新引导态 → **内存里还带着未解除的警报，磁盘上的证据却被删了，
+    # 于是发布一份结构完全合法的干净账本**（本机复现过）。
+    # ⭐ 这正是 R5 那个「凭据改从磁盘取」的修复自己带出来的另一面 ——
+    #   **正解不是二选一，而是两边都要**。
+    if on_disk is None:
+        if startup_lifecycle:
+            raise ManifestInvalidError(
+                "启动时这棵 staging 的账本带着未解除的生命周期记录，而现在磁盘上"
+                "**账本不见了**——本次运行期间有人删掉或改名了它。拒绝发布收尾账本："
+                "发布它等于把那条记录一起抹掉。请人工核实 staging 现场。"
+            )
+        on_disk = {}
+    elif on_disk != startup_lifecycle:
+        raise ManifestInvalidError(
+            f"磁盘上的生命周期 {on_disk!r} 与启动快照 {startup_lifecycle!r} **不一致**"
+            "——本次运行期间有人动过账本。拒绝发布收尾账本。"
+        )
+
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
-    if previous is not None:
-        basis.update(lifecycle_snapshot(previous))
+    basis.update(on_disk)
 
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
