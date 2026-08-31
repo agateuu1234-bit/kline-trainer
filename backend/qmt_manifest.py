@@ -28,7 +28,8 @@ from typing import Iterable, Mapping
 
 from qmt_fsroot import (
     PathDisciplineError,
-    atomic_write_json,
+    atomic_write_bytes,
+    encode_json,
     open_regular_probe,
     split_relative_components,
 )
@@ -848,7 +849,22 @@ def _write_manifest(stg_fd: int, payload: dict) -> None:
     上一份好账本已经被 `os.replace` 换掉了，报不报错都救不回来。
     """
     validate_manifest(payload)          # ← 必须在任何写入之前
-    atomic_write_json(stg_fd, MANIFEST_NAME, payload, full_sync=True)
+    # ⚠️ **大小也要在读侧的接受范围内**（codex R5 [medium]）：读侧有 64 MiB 硬上限，
+    # 而未知顶层键按 O4-F10 是「原样保留且无上限」的通道 —— 一份结构完全合法、
+    # 序列化后 6700 万字节的账本此前**写入报告成功**，下一次启动却以「过大」
+    # 拒绝整棵 staging，已积累的数据全部不可用。这是 S2-F13 的另一半：
+    # 我补了「结构合法」，漏了「大小也在读侧接受范围内」。
+    #
+    # ⚠️ **量的必须就是写的那批字节**：先 `encode_json` 拿到字节、量它、
+    # 再把**同一批字节**交给 `atomic_write_bytes`。两处各自 dumps 一次会漂移
+    # （`ensure_ascii` 一改，中文周期目录名长度差好几倍）。
+    data = encode_json(payload)
+    if len(data) > _MANIFEST_MAX_BYTES:
+        raise ManifestInvalidError(
+            f"{MANIFEST_NAME} 过大（序列化后 {len(data)} 字节，读侧上限 "
+            f"{_MANIFEST_MAX_BYTES}）——写出去下一次就读不回来了，拒绝发布"
+        )
+    atomic_write_bytes(stg_fd, MANIFEST_NAME, data, full_sync=True)
 
 
 def _require_lifecycle_only(lifecycle: dict, where: str) -> None:
@@ -1112,19 +1128,22 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
                 "stopped_reason_secondary": "max_bytes"}
 
     # ④ 上次有 fatal，本次干净跑完 —— 清除与否取决于「有没有证明干净」
-    if not outcome.revisited_fatal_path:                    # 前提① 不满足
-        return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
-                "stopped_reason": prev_reason}
-
-    # ⚠️ **「复校失败」先于 kind 判断**：spec 只在 staging_path_escape 的语境里
-    # 定义了这一档，但「staging 全量复校失败」是一个与 fatal 种类无关的事实。
-    # 放在 kind 判断之后，则「上次是 source escape + 本次复校失败」会走到
-    # `return {}`，把 fatal 与复校失败这两个信号一起丢掉——一棵已被证明与账本
-    # 对不上的 staging 拿到干净标签。本判据只增加拒绝，不会误杀合法状态。
-    # ⭐ 这也是 `kind` 与 `stopped_reason` 解耦的唯一理由（O4-F3）。
+    #
+    # ⚠️ **「本次全量复校失败」必须最先判**（codex R5 [high]）：它是**本次运行的
+    # 事实**，与「有没有重走过上次出事的那条路」无关。前提①管的是「能不能清除」，
+    # 不该挡住「记录一个新的失败」。排在前提①早退之后时：
+    # `clean_finish(revisited_fatal_path=False, staging_recheck="failed")` 会原样
+    # 保留旧的 source reason、**把「复校失败」这个事实丢掉**，下一次运行重走过
+    # 源路径又不做复校，就只看见一个 source 逃逸 → 两个信号全清。
+    # ⭐ 这条分支的次序被改过三次（D5 → D16 → 本次），每次都只挪了一格 ——
+    #    正是「结构性改动后要重核原来成立的东西」那一类。
     if outcome.staging_recheck == "failed":
         return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
                 "stopped_reason": "staging_recheck_failed"}
+
+    if not outcome.revisited_fatal_path:                    # 前提① 不满足
+        return {"fetch_fatal_error": copy.deepcopy(prev_fatal),
+                "stopped_reason": prev_reason}
 
     # ⚠️ **必须用 `_needs_staging_recheck`，不能只看 `kind`**（codex R4 [high]）：
     # `staging_recheck_failed` 同样是「必须做过全量复校才能清」的状态，而它的
@@ -1162,8 +1181,22 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome) -> dict:
     `SkipVerifyWithEscapeError`（P2-F3），而那一档的规定是「拒绝启动、
     一个字节都不写」；也可能抛 `ManifestInvalidError`（输入自相矛盾）。
     """
-    new_lifecycle = resolve_final_lifecycle(manifest, outcome)   # ← 可能抛，必须在写之前
-    payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
+    # ⚠️⚠️ **「上一次的状态」必须来自磁盘，不能来自调用方内存里那份 manifest**
+    # （codex R5 [high]）：本函数是**唯一能清除证据的入口**。
+    # `commit_stock` 早就用启动快照挡住了同一件事（调用方污染内存），
+    # 而当时只修了一半——本机复现：磁盘上有未解除的 staging 警报、内存里那份
+    # 「不小心」把三个键弄没了 → 决策表看见「上次没有 fatal」→ 产出空生命周期
+    # → **发布了一份干净账本**，而落盘前的读侧校验抓不到（它结构上完全合法）。
+    #
+    # `read_manifest` 返回 `None` 是**合法**的引导态（首份 manifest 还没提交）；
+    # 它抛异常则说明磁盘上那份账本已经坏了/被换了 —— 此时拒绝发布是 fail-closed。
+    previous = read_manifest(stg_fd)
+    basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
+    if previous is not None:
+        basis.update(lifecycle_snapshot(previous))
+
+    new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
+    payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
     _write_manifest(stg_fd, payload)
     return payload

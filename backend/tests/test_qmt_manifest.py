@@ -2295,7 +2295,11 @@ def test_commit_final_clears_the_fatal_when_proven_clean(tmp_path):
                         stopped_reason="source_path_escape")
     _d, fd = _staging(tmp_path)
     try:
-        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True))
+        # ⚠️ 凭据取自**磁盘**（R5 high B），故必须先把这份账本真正落盘；
+        # 只放在内存里的话本档会因为「决策表看不到 fatal」而恒真。
+        _seed_disk(fd, m)
+        commit_final(fd, _valid_manifest(),
+                     outcome=clean_finish(revisited_fatal_path=True))
         on_disk = read_manifest(fd)
         assert "fetch_fatal_error" not in on_disk
         assert "stopped_reason" not in on_disk
@@ -2307,7 +2311,9 @@ def test_commit_final_keeps_the_fatal_when_not_proven(tmp_path):
     m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
     _d, fd = _staging(tmp_path)
     try:
-        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=False))
+        _seed_disk(fd, m)
+        commit_final(fd, _valid_manifest(),
+                     outcome=clean_finish(revisited_fatal_path=False))
         on_disk = read_manifest(fd)
         assert on_disk["fetch_fatal_error"] == _fatal()
         assert on_disk["stopped_reason"] == "staging_path_escape"
@@ -2328,11 +2334,13 @@ def test_commit_final_ignores_lifecycle_fields_already_in_the_passed_manifest(tm
     """
     m = _valid_manifest(fetch_fatal_error=_fatal(),
                         stopped_reason="staging_path_escape")
-    m["stopped_reason_secondary"] = "max_bytes"        # 内存里预置的陈旧附注
     _d, fd = _staging(tmp_path)
     try:
-        commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True,
-                                                 staging_recheck="passed"))
+        _seed_disk(fd, m)
+        polluted = _valid_manifest()
+        polluted["stopped_reason_secondary"] = "max_bytes"   # 内存里预置的陈旧附注
+        commit_final(fd, polluted, outcome=clean_finish(revisited_fatal_path=True,
+                                                        staging_recheck="passed"))
         on_disk = read_manifest(fd)
         assert "fetch_fatal_error" not in on_disk
         assert "stopped_reason" not in on_disk
@@ -2370,9 +2378,14 @@ def test_commit_final_refuses_skip_verify_with_escape_and_writes_nothing(tmp_pat
     m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
     d, fd = _staging(tmp_path)
     try:
+        _seed_disk(fd, m)
+        before = (d / MANIFEST_NAME).read_bytes()
         with pytest.raises(SkipVerifyWithEscapeError):
-            commit_final(fd, m, outcome=clean_finish(revisited_fatal_path=True))
-        assert not (d / MANIFEST_NAME).exists()
+            commit_final(fd, _valid_manifest(),
+                         outcome=clean_finish(revisited_fatal_path=True))
+        # 拒绝时一个字节都不写：磁盘上那份必须逐字节未变
+        assert (d / MANIFEST_NAME).read_bytes() == before
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
     finally:
         os.close(fd)
 
@@ -2935,3 +2948,154 @@ def test_only_one_place_decides_whether_a_staging_recheck_is_required():
         "「这个状态要不要 staging 全量复校」只许在 _needs_staging_recheck 里判定，"
         f"但下列函数也在直接比 kind：{sorted(set(found) - {'_needs_staging_recheck'})}"
         "——同一件事判在两处，改了一处忘了另一处正是 codex R4 那条 high 的根因")
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R5：三条，共同形态仍是「我修了一半」
+#   A 复校失败被前提①的早退挡住 —— D5/D16 两轮都动过这个分支的次序，
+#     却一直没把它提到**最前面**；
+#   B commit_final 的「上一次状态」取自调用方内存 —— R1 我给 commit_stock
+#     配了启动快照，却没管 commit_final，而**能清除证据的恰恰只有它**；
+#   C 写侧不查序列化后的字节数 —— S2-F13 我补了「结构合法」那一半，
+#     漏了「大小也在读侧接受范围内」那一半。
+# ═════════════════════════════════════════════════════════════
+
+
+def _seed_disk(fd, manifest):
+    """把一份 manifest 真正落到磁盘上（模拟上一次运行留下的账本）。"""
+    commit_stock(fd, manifest, lifecycle=lifecycle_snapshot(manifest))
+    return read_manifest(fd)
+
+
+def test_a_failed_recheck_is_recorded_even_without_revisiting_the_fatal_path():
+    """⭐⭐ [R5 high A] 「本次全量复校失败」是**本次运行的事实**，
+    与「有没有重走过上次出事的那条路」无关。
+
+    前提①（重走过）管的是**能不能清除**，不该挡住**记录一个新的失败**。
+    照旧次序：`clean_finish(revisited_fatal_path=False, staging_recheck="failed")`
+    会走前提①的早退、原样保留旧的 source reason，**把「复校失败」这个事实丢掉**；
+    下一次运行重走过源路径、不做复校，就只看见一个 source 逃逸 → 全清。
+
+    判别力：把「复校失败」那一支挪回前提①早退**之后**，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    got = resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=False,
+                                                  staging_recheck="failed"))
+    assert got["stopped_reason"] == "staging_recheck_failed"
+    assert got["fetch_fatal_error"]["kind"] == "source_path_escape"
+
+
+def test_the_unrevisited_failed_recheck_chain_cannot_launder():
+    """⭐ [R5 high A] 两次运行的完整链条必须走不通。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=False,
+                                      staging_recheck="failed"))
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_commit_final_takes_the_previous_lifecycle_from_disk_not_from_memory(tmp_path):
+    """⭐⭐ [R5 high B] `commit_final` 是**唯一能清除证据的入口**，
+    它凭据的「上一次状态」必须来自**磁盘**，不能来自调用方内存里那份 manifest。
+
+    本机复现：磁盘上有未解除的 staging 警报，而内存里那份「不小心」把三个键
+    弄没了 → 决策表看见「上次没有 fatal」→ 产出空生命周期 →
+    **发布了一份干净账本**。落盘前的读侧校验也抓不到，因为它结构上完全合法。
+
+    `commit_stock` 早就用启动快照挡住了同一件事（R1），而**能清除的恰恰只有
+    收尾提交**——我当时只修了一半。
+
+    判别力：把 `commit_final` 改回从入参 manifest 取上一次状态，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        polluted = _valid_manifest()          # 内存里三个键都没了
+        commit_final(fd, polluted, outcome=clean_finish(revisited_fatal_path=False))
+        on_disk = read_manifest(fd)
+        assert on_disk["fetch_fatal_error"] == _fatal()
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_still_clears_when_the_persisted_state_says_it_may(tmp_path):
+    """方向②：凭据换成磁盘之后，**该清的仍要清得掉**，否则 staging 永远解不开。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        commit_final(fd, _valid_manifest(),
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="passed"))
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_works_in_the_bootstrap_state_with_no_manifest_on_disk(tmp_path):
+    """方向②：引导态（磁盘上还没有 manifest）必须照常工作 ——
+    `read_manifest` 返回 None 是**合法**的，不能被当成错误。"""
+    d, fd = _staging(tmp_path)
+    try:
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish())
+        assert read_manifest(fd) == written
+        assert "stopped_reason" not in written
+    finally:
+        os.close(fd)
+
+
+def test_the_writer_refuses_a_payload_bigger_than_the_readers_limit(tmp_path, monkeypatch):
+    """⭐ [R5 medium C] 写侧此前只查「结构合法」，不查**序列化后的字节数**。
+
+    未知顶层键按 O4-F10 是**原样保留且无上限**的通道；一份结构完全合法、
+    序列化后 67,113,084 字节的账本（读侧上限 67,108,864）**写入报告成功**，
+    而下一次启动就以「过大」拒绝整棵 staging —— 已积累的数据全部不可用。
+
+    这是 S2-F13 的另一半：我补了「结构合法」，漏了「大小也在读侧接受范围内」。
+
+    判别力：删掉写侧的大小检查，本条必红。
+    """
+    import qmt_manifest as qm
+    monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 4096)
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), lifecycle={})       # 先写一份好的
+        before = (d / MANIFEST_NAME).read_bytes()
+        big = _valid_manifest()
+        big["batches"] = "x" * 8192                              # 未知顶层键，结构合法
+        with pytest.raises(ManifestInvalidError, match="过大"):
+            commit_stock(fd, big, lifecycle={})
+        assert (d / MANIFEST_NAME).read_bytes() == before        # 好账本逐字节未变
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
+    finally:
+        os.close(fd)
+
+
+def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_path, monkeypatch):
+    """⭐ 量的必须**就是**写的那批字节（codex R5 的「序列化漂移」）。
+
+    中文周期目录名在 `ensure_ascii=True` 下会膨胀成 `\\uXXXX`，长度差好几倍。
+    若「量长度」与「写文件」各自 dumps 一次，参数一旦不一致，量到的就不是
+    落盘的。本条把上限卡在**恰好等于真实落盘长度**上：多一个字节就必须被拒。
+
+    判别力：让写侧改用另一种编码去量（例如 ensure_ascii=True），本条必红。
+    """
+    import qmt_manifest as qm
+    m = _valid_manifest()
+    exact = len(_json_rw.dumps(m, ensure_ascii=False).encode("utf-8"))
+    d, fd = _staging(tmp_path)
+    try:
+        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact)
+        commit_stock(fd, m, lifecycle={})                        # 恰好等于上限 → 放行
+        assert (d / MANIFEST_NAME).read_bytes() == \
+            _json_rw.dumps(m, ensure_ascii=False).encode("utf-8")
+        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
+        with pytest.raises(ManifestInvalidError, match="过大"):
+            commit_stock(fd, m, lifecycle={})                    # 少一个字节 → 拒
+    finally:
+        os.close(fd)

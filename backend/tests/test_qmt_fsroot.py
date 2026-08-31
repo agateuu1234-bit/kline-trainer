@@ -1466,7 +1466,8 @@ def test_split_relative_components_rejects_escapes(bad):
 # 故随第一个真使用者一起落地。
 # ─────────────────────────────────────────────────────────────
 import stat as stat_module
-from qmt_fsroot import atomic_write_json, open_regular_probe
+from qmt_fsroot import (atomic_write_bytes, atomic_write_json, encode_json,
+                        open_regular_probe)
 
 
 def _fcntl_cmd_spy(monkeypatch) -> list:
@@ -1671,3 +1672,31 @@ def test_atomic_write_json_without_full_sync_has_no_barrier_after_rename(
         os.close(root)
     if hasattr(fcntl, "F_FULLFSYNC"):
         assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_atomic_write_bytes_publishes_exactly_the_given_bytes(tmp_path: Path):
+    """⭐ 把「序列化」与「落盘」拆开的理由（codex R5 [medium]）：
+
+    调用方需要**先按最终编码序列化、校验字节数、再把那批字节交出去**。
+    如果调用方自己 dumps 一次量长度、写入时再 dumps 一次，两次编码之间存在
+    **漂移**的可能（参数一改就不一致），量到的长度就不是真正落盘的长度。
+    """
+    root = open_root(str(tmp_path))
+    payload = '{"周期": "1分钟K线"}'.encode("utf-8")
+    try:
+        atomic_write_bytes(root, "m.json", payload, full_sync=True)
+    finally:
+        os.close(root)
+    assert (tmp_path / "m.json").read_bytes() == payload
+
+
+def test_atomic_write_json_and_write_bytes_agree_on_the_encoding(tmp_path: Path):
+    """两条路必须产出**逐字节相同**的文件——否则「量的」和「写的」不是一回事。"""
+    root = open_root(str(tmp_path))
+    obj = {"周期": "1分钟K线_前复权", "n": 1}
+    try:
+        atomic_write_json(root, "a.json", obj)
+        atomic_write_bytes(root, "b.json", encode_json(obj))
+    finally:
+        os.close(root)
+    assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()

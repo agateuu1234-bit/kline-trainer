@@ -29,7 +29,8 @@ __all__ = [
     # 逐段无跟随
     "open_root", "open_under", "parent_fd_under", "open_regular_probe",
     # 耐久提交
-    "fsync_dir", "full_fsync", "atomic_write_json",
+    "fsync_dir", "full_fsync", "atomic_write_json", "atomic_write_bytes",
+    "encode_json",
     # 锁
     "acquire_lock", "probe_unclaimed_dir", "assert_lock_still_held",
     # 归属
@@ -636,8 +637,19 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         os.close(lock_fd)
 
 
-def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
-                       full_sync: bool = False) -> None:
+def encode_json(payload: dict) -> bytes:
+    """本模块落盘 JSON 的**唯一**编码入口。
+
+    ⚠️ 存在的理由是**消除序列化漂移**（codex R5 [medium]）：调用方若要先按最终
+    编码量一次字节数、再交给写入函数，两处各自 `json.dumps` 一次就有漂移的可能
+    （`ensure_ascii` 一改，中文周期目录名的长度差好几倍），**量到的就不是落盘的**。
+    量与写都走本函数，或者干脆量完把**那批字节**交给 `atomic_write_bytes`。
+    """
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _atomic_write_bytes(dir_fd: int, name: str, data: bytes, *,
+                        full_sync: bool = False) -> None:
     """原子写一份 JSON：`lstat` 守卫 → 唯一名 `O_EXCL` 临时文件 → `fsync(文件)`
     → `os.replace` → `fsync(目录)`。**本模块唯一的文件写入路径。**
 
@@ -682,7 +694,7 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
     )
     try:
         try:
-            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            _write_all(fd, data)
             if full_sync:
                 full_fsync(fd)
             else:
@@ -716,6 +728,22 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
         full_fsync(dir_fd)
     else:
         fsync_dir(dir_fd)
+
+
+def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+                       full_sync: bool = False) -> None:
+    """原子写一份 JSON（语义见 `_atomic_write_bytes`）。"""
+    _atomic_write_bytes(dir_fd, name, encode_json(payload), full_sync=full_sync)
+
+
+def atomic_write_bytes(dir_fd: int, name: str, data: bytes, *,
+                       full_sync: bool = False) -> None:
+    """公开入口：原子写**调用方已经序列化好的那批字节**。
+
+    manifest 提交走它——先 `encode_json` 得到字节、校验长度、再把**同一批字节**
+    交出去，量的与写的必然是一回事。
+    """
+    _atomic_write_bytes(dir_fd, name, data, full_sync=full_sync)
 
 
 def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
