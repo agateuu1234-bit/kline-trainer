@@ -1871,13 +1871,12 @@ def _fcntl_cmd_spy(monkeypatch) -> list:
 
 
 def _expect(fd):
-    """测试便利：取当前磁盘上的生命周期当作「启动快照」。
+    """测试便利：就地取一份反映**当前**磁盘状态的运行凭据。
 
-    ⚠️ 只用于**不针对快照比对本身**的档；针对它的档要显式用 `begin_run(fd)`
-    在正确的时刻取快照，否则本帮手会让那些档恒真。
+    ⚠️ 只用于**不针对凭据比对本身**的档；针对它的档要显式在正确的时刻
+    `begin_run(fd)` 取凭据，否则本帮手会让那些档恒真。
     """
-    m = read_manifest(fd)
-    return lifecycle_snapshot(m) if m is not None else {}
+    return begin_run(fd)
 
 
 def test_commit_stock_writes_a_readable_manifest(tmp_path):
@@ -1885,7 +1884,7 @@ def test_commit_stock_writes_a_readable_manifest(tmp_path):
     m = _valid_manifest()
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, m, startup_lifecycle=_expect(fd))
+        commit_stock(fd, m, ledger=_expect(fd))
         assert read_manifest(fd) == m
     finally:
         os.close(fd)
@@ -1909,7 +1908,7 @@ def test_commit_stock_cannot_change_lifecycle_fields(tmp_path):
     _d, fd = _staging(tmp_path)
     try:
         _seed_disk(fd, _valid_manifest(**prev))       # 磁盘上是上一次留下的真相
-        commit_stock(fd, poisoned, startup_lifecycle=_expect(fd))
+        commit_stock(fd, poisoned, ledger=_expect(fd))
         on_disk = read_manifest(fd)
         assert on_disk["stopped_reason"] == "staging_path_escape"
         assert on_disk["fetch_fatal_error"] == _fatal()
@@ -1927,7 +1926,7 @@ def test_commit_stock_cannot_invent_lifecycle_fields(tmp_path):
     poisoned = _valid_manifest(stopped_reason="max_bytes")
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, poisoned, startup_lifecycle=_expect(fd))       # 启动时磁盘上是干净的
+        commit_stock(fd, poisoned, ledger=_expect(fd))       # 启动时磁盘上是干净的
         assert "stopped_reason" not in read_manifest(fd)
     finally:
         os.close(fd)
@@ -1939,7 +1938,7 @@ def test_commit_stock_preserves_unknown_top_level_keys(tmp_path):
                         committed_bytes=123)
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, m, startup_lifecycle=_expect(fd))
+        commit_stock(fd, m, ledger=_expect(fd))
         on_disk = read_manifest(fd)
         assert on_disk["failures"] == [{"stock_code": "600004.SH", "attempts": 1}]
         assert on_disk["committed_bytes"] == 123
@@ -1960,7 +1959,7 @@ def test_commit_stock_uses_full_fsync(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
     finally:
         os.close(fd)
     if hasattr(fcntl, "F_FULLFSYNC"):
@@ -1973,7 +1972,7 @@ def test_commit_stock_is_atomic_leaving_no_tmp_files(tmp_path):
     """走 tmp → replace，落地后目录里不得有残留临时文件。"""
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
     finally:
         os.close(fd)
     assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
@@ -2267,7 +2266,7 @@ def test_every_resolved_state_passes_the_read_side_validator():
 # ═════════════════════════════════════════════════════════════
 # S2b Task 18：commit_final —— 唯一能动生命周期字段的落盘入口
 # ═════════════════════════════════════════════════════════════
-from qmt_manifest import begin_run, commit_final
+from qmt_manifest import RunLedger, begin_run, commit_final
 
 
 def test_commit_final_writes_a_readable_manifest(tmp_path):
@@ -2275,7 +2274,7 @@ def test_commit_final_writes_a_readable_manifest(tmp_path):
     _d, fd = _staging(tmp_path)
     try:
         startup = begin_run(fd)
-        written = commit_final(fd, _valid_manifest(), startup_lifecycle=startup, outcome=clean_finish())
+        written = commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
         assert read_manifest(fd) == written
     finally:
         os.close(fd)
@@ -2292,7 +2291,7 @@ def test_commit_final_clears_the_fatal_when_proven_clean(tmp_path):
         _seed_disk(fd, m)
         startup = begin_run(fd)
         commit_final(fd, _valid_manifest(),
-                     startup_lifecycle=startup, outcome=clean_finish(revisited_fatal_path=True))
+                     ledger=startup, outcome=clean_finish(revisited_fatal_path=True))
         on_disk = read_manifest(fd)
         assert "fetch_fatal_error" not in on_disk
         assert "stopped_reason" not in on_disk
@@ -2307,7 +2306,7 @@ def test_commit_final_keeps_the_fatal_when_not_proven(tmp_path):
         _seed_disk(fd, m)
         startup = begin_run(fd)
         commit_final(fd, _valid_manifest(),
-                     startup_lifecycle=startup, outcome=clean_finish(revisited_fatal_path=False))
+                     ledger=startup, outcome=clean_finish(revisited_fatal_path=False))
         on_disk = read_manifest(fd)
         assert on_disk["fetch_fatal_error"] == _fatal()
         assert on_disk["stopped_reason"] == "staging_path_escape"
@@ -2334,7 +2333,7 @@ def test_commit_final_ignores_lifecycle_fields_already_in_the_passed_manifest(tm
         startup = begin_run(fd)
         polluted = _valid_manifest()
         polluted["stopped_reason_secondary"] = "max_bytes"   # 内存里预置的陈旧附注
-        commit_final(fd, polluted, startup_lifecycle=startup, outcome=clean_finish(revisited_fatal_path=True,
+        commit_final(fd, polluted, ledger=startup, outcome=clean_finish(revisited_fatal_path=True,
                                                         staging_recheck="passed"))
         on_disk = read_manifest(fd)
         assert "fetch_fatal_error" not in on_disk
@@ -2357,7 +2356,7 @@ def test_commit_final_uses_full_fsync(tmp_path, monkeypatch):
     _d, fd = _staging(tmp_path)
     try:
         startup = begin_run(fd)
-        commit_final(fd, _valid_manifest(), startup_lifecycle=startup, outcome=clean_finish())
+        commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
     finally:
         os.close(fd)
     if hasattr(fcntl, "F_FULLFSYNC"):
@@ -2379,7 +2378,7 @@ def test_commit_final_refuses_skip_verify_with_escape_and_writes_nothing(tmp_pat
         before = (d / MANIFEST_NAME).read_bytes()
         with pytest.raises(SkipVerifyWithEscapeError):
             commit_final(fd, _valid_manifest(),
-                         startup_lifecycle=startup, outcome=clean_finish(revisited_fatal_path=True))
+                         ledger=startup, outcome=clean_finish(revisited_fatal_path=True))
         # 拒绝时一个字节都不写：磁盘上那份必须逐字节未变
         assert (d / MANIFEST_NAME).read_bytes() == before
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
@@ -2396,11 +2395,11 @@ def test_full_round_trip_stock_commits_then_final(tmp_path):
     _d, fd = _staging(tmp_path)
     try:
         _seed_disk(fd, start)                    # 上一次运行留下的账本
-        startup = begin_run(fd)
+        startup = begin_run(fd)                  # ⚠️ 整轮共用同一份凭据
         for _ in range(3):                       # 三次 per-stock 提交
-            commit_stock(fd, start, startup_lifecycle=_expect(fd))
+            commit_stock(fd, start, ledger=startup)
             assert read_manifest(fd)["fetch_fatal_error"] == _fatal()
-        commit_final(fd, start, startup_lifecycle=startup,
+        commit_final(fd, start, ledger=startup,
                      outcome=clean_finish(revisited_fatal_path=True,
                                           staging_recheck="passed"))
         assert "fetch_fatal_error" not in read_manifest(fd)
@@ -2512,7 +2511,7 @@ def test_lifecycle_snapshot_does_not_alias_the_manifests_nested_fatal(tmp_path):
     try:
         _seed_disk(fd, _valid_manifest(stopped_reason="staging_path_escape",
                                        fetch_fatal_error=_fatal()))
-        commit_stock(fd, m, startup_lifecycle=_expect(fd))
+        commit_stock(fd, m, ledger=_expect(fd))
         assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
     finally:
         os.close(fd)
@@ -2704,7 +2703,7 @@ def test_commit_stock_refuses_to_publish_a_manifest_its_own_reader_would_reject(
     _d, fd = _staging(tmp_path)
     try:
         with pytest.raises(ManifestInvalidError, match="cursor"):
-            commit_stock(fd, broken, startup_lifecycle=_expect(fd))
+            commit_stock(fd, broken, ledger=_expect(fd))
     finally:
         os.close(fd)
 
@@ -2719,7 +2718,7 @@ def test_commit_final_refuses_to_publish_a_manifest_its_own_reader_would_reject(
     try:
         startup = begin_run(fd)
         with pytest.raises(ManifestInvalidError, match="seed"):
-            commit_final(fd, broken, startup_lifecycle=startup, outcome=clean_finish())
+            commit_final(fd, broken, ledger=startup, outcome=clean_finish())
     finally:
         os.close(fd)
 
@@ -2734,12 +2733,12 @@ def test_a_refused_commit_leaves_the_previous_manifest_byte_identical(tmp_path):
     """
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
         before = (d / MANIFEST_NAME).read_bytes()
         broken = _valid_manifest()
         del broken["cursor"]
         with pytest.raises(ManifestInvalidError):
-            commit_stock(fd, broken, startup_lifecycle=_expect(fd))
+            commit_stock(fd, broken, ledger=_expect(fd))
         assert (d / MANIFEST_NAME).read_bytes() == before
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]   # 无临时残留
     finally:
@@ -3024,7 +3023,7 @@ def test_commit_final_takes_the_previous_lifecycle_from_disk_not_from_memory(tmp
                                        stopped_reason="staging_path_escape"))
         startup = begin_run(fd)
         polluted = _valid_manifest()          # 内存里三个键都没了
-        commit_final(fd, polluted, startup_lifecycle=startup, outcome=clean_finish(revisited_fatal_path=False))
+        commit_final(fd, polluted, ledger=startup, outcome=clean_finish(revisited_fatal_path=False))
         on_disk = read_manifest(fd)
         assert on_disk["fetch_fatal_error"] == _fatal()
         assert on_disk["stopped_reason"] == "staging_path_escape"
@@ -3039,7 +3038,7 @@ def test_commit_final_still_clears_when_the_persisted_state_says_it_may(tmp_path
         _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
                                        stopped_reason="staging_path_escape"))
         startup = begin_run(fd)
-        commit_final(fd, _valid_manifest(), startup_lifecycle=startup,
+        commit_final(fd, _valid_manifest(), ledger=startup,
                      outcome=clean_finish(revisited_fatal_path=True,
                                           staging_recheck="passed"))
         assert "fetch_fatal_error" not in read_manifest(fd)
@@ -3053,7 +3052,7 @@ def test_commit_final_works_in_the_bootstrap_state_with_no_manifest_on_disk(tmp_
     d, fd = _staging(tmp_path)
     try:
         startup = begin_run(fd)
-        written = commit_final(fd, _valid_manifest(), startup_lifecycle=startup, outcome=clean_finish())
+        written = commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
         assert read_manifest(fd) == written
         assert "stopped_reason" not in written
     finally:
@@ -3075,12 +3074,12 @@ def test_the_writer_refuses_a_payload_bigger_than_the_readers_limit(tmp_path, mo
     monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 4096)
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))       # 先写一份好的
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))       # 先写一份好的
         before = (d / MANIFEST_NAME).read_bytes()
         big = _valid_manifest()
         big["batches"] = "x" * 8192                              # 未知顶层键，结构合法
         with pytest.raises(ManifestInvalidError, match="过大"):
-            commit_stock(fd, big, startup_lifecycle=_expect(fd))
+            commit_stock(fd, big, ledger=_expect(fd))
         assert (d / MANIFEST_NAME).read_bytes() == before        # 好账本逐字节未变
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
     finally:
@@ -3102,12 +3101,12 @@ def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_pa
     d, fd = _staging(tmp_path)
     try:
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact)
-        commit_stock(fd, m, startup_lifecycle=_expect(fd))                        # 恰好等于上限 → 放行
+        commit_stock(fd, m, ledger=_expect(fd))                        # 恰好等于上限 → 放行
         assert (d / MANIFEST_NAME).read_bytes() == \
             _json_rw.dumps(m, ensure_ascii=False).encode("utf-8")
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
         with pytest.raises(ManifestInvalidError, match="过大"):
-            commit_stock(fd, m, startup_lifecycle=_expect(fd))                    # 少一个字节 → 拒
+            commit_stock(fd, m, ledger=_expect(fd))                    # 少一个字节 → 拒
     finally:
         os.close(fd)
 
@@ -3136,8 +3135,8 @@ def test_begin_run_returns_the_startup_lifecycle_snapshot(tmp_path):
         m = _valid_manifest(fetch_fatal_error=_fatal(),
                             stopped_reason="staging_path_escape")
         _seed_disk(fd, m)
-        assert begin_run(fd) == {"fetch_fatal_error": _fatal(),
-                                 "stopped_reason": "staging_path_escape"}
+        assert begin_run(fd).lifecycle == {"fetch_fatal_error": _fatal(),
+                                           "stopped_reason": "staging_path_escape"}
     finally:
         os.close(fd)
 
@@ -3146,7 +3145,7 @@ def test_begin_run_on_a_bootstrap_staging_returns_an_empty_snapshot(tmp_path):
     """引导态（磁盘上还没有账本）合法，返回空快照。"""
     d, fd = _staging(tmp_path)
     try:
-        assert begin_run(fd) == {}
+        assert begin_run(fd).lifecycle == {}
     finally:
         os.close(fd)
 
@@ -3173,7 +3172,7 @@ def test_begin_run_allows_skip_existing_verify_on_a_clean_staging(tmp_path):
     d, fd = _staging(tmp_path)
     try:
         _seed_disk(fd, _valid_manifest())
-        assert begin_run(fd, skip_existing_verify=True) == {}
+        assert begin_run(fd, skip_existing_verify=True).lifecycle == {}
     finally:
         os.close(fd)
 
@@ -3216,7 +3215,7 @@ def test_commit_stock_preserves_the_on_disk_lifecycle_no_matter_what_memory_says
     try:
         _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
                                        stopped_reason="staging_path_escape"))
-        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))        # 内存里干干净净
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))        # 内存里干干净净
         on_disk = read_manifest(fd)
         assert on_disk["fetch_fatal_error"] == _fatal()
         assert on_disk["stopped_reason"] == "staging_path_escape"
@@ -3244,7 +3243,7 @@ def test_commit_final_refuses_when_an_expected_manifest_has_disappeared(tmp_path
         os.unlink(str(d / MANIFEST_NAME))              # 运行中有人把账本删了
         with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
             commit_final(fd, m, outcome=clean_finish(),
-                         startup_lifecycle=startup)
+                         ledger=startup)
     finally:
         os.close(fd)
 
@@ -3263,7 +3262,7 @@ def test_commit_final_refuses_when_disk_lifecycle_drifted_from_the_startup_snaps
                                        stopped_reason="staging_path_escape"))
         with pytest.raises(ManifestInvalidError, match="不一致|漂移"):
             commit_final(fd, _valid_manifest(), outcome=clean_finish(),
-                         startup_lifecycle=startup)
+                         ledger=startup)
     finally:
         os.close(fd)
 
@@ -3273,9 +3272,9 @@ def test_commit_final_still_works_on_a_genuine_bootstrap(tmp_path):
     d, fd = _staging(tmp_path)
     try:
         startup = begin_run(fd)
-        assert startup == {}
+        assert startup.lifecycle == {} and startup.existed is False
         written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
-                               startup_lifecycle=startup)
+                               ledger=startup)
         assert read_manifest(fd) == written
     finally:
         os.close(fd)
@@ -3306,7 +3305,7 @@ def test_commit_stock_refuses_when_an_expected_manifest_has_disappeared(tmp_path
         startup = begin_run(fd)
         os.unlink(str(d / MANIFEST_NAME))              # 运行中有人把账本删了
         with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
-            commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+            commit_stock(fd, _valid_manifest(), ledger=startup)
     finally:
         os.close(fd)
 
@@ -3327,7 +3326,7 @@ def test_commit_stock_refuses_when_the_disk_lifecycle_drifted(tmp_path):
         _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
                                        stopped_reason="staging_path_escape"))
         with pytest.raises(ManifestInvalidError, match="不一致|漂移"):
-            commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+            commit_stock(fd, _valid_manifest(), ledger=startup)
     finally:
         os.close(fd)
 
@@ -3341,8 +3340,8 @@ def test_commit_stock_writes_the_first_manifest_in_a_genuine_bootstrap(tmp_path)
     d, fd = _staging(tmp_path)
     try:
         startup = begin_run(fd)
-        assert startup == {}
-        written = commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+        assert startup.lifecycle == {} and startup.existed is False
+        written = commit_stock(fd, _valid_manifest(), ledger=startup)
         assert read_manifest(fd) == written
     finally:
         os.close(fd)
@@ -3362,6 +3361,145 @@ def test_begin_run_requires_a_real_bool_for_skip_existing_verify(tmp_path):
         for bad in ("false", "true", "", 0, 1, None, []):
             with pytest.raises(ValueError, match="skip_existing_verify"):
                 begin_run(fd, skip_existing_verify=bad)
-        assert begin_run(fd, skip_existing_verify=False) == {}
+        assert begin_run(fd, skip_existing_verify=False).lifecycle == {}
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R7 [high]：`{}` 这个哨兵把两种截然不同的状态混成了一个
+#
+# `begin_run()` 对「磁盘上没有账本」和「账本在、但没有生命周期字段」都返回 `{}`，
+# 而 `_lifecycle_from_disk` 拿它的**真假值**去判断「后来账本不见了算不算合法引导态」。
+# 于是一棵**已经积累了 files / pool_order / cursor 的干净 staging**，账本被删掉之后
+# 两个提交入口都会拿调用方内存里那份（可能是过期的）把它**凭空重建**，
+# 已积累的进度被静默丢弃；换成另一份合法账本同样无人察觉。
+#
+# ⚠️ 与 R1 那条「manifest 不存在 ≠ manifest 坏了」是同一族错误的**反向**：
+#    那次我把两种状态**正确地分开了**，这次我又把两种状态**合并**成一个哨兵。
+#    判据：**凡用「空值/假值」当哨兵，先问它是不是把两种语义压在了一起。**
+#
+# 处置：`begin_run` 改为返回**不透明凭据** `RunLedger`，分别记「当时有没有账本」
+# 与「那份账本的字节指纹」；每次提交成功后**更新**这份预期。
+# ═════════════════════════════════════════════════════════════
+
+
+def _established(**kw):
+    """一份**已经积累了进度**的干净账本（有额外顶层键、没有生命周期字段）。"""
+    return _valid_manifest(committed_bytes=1234567,
+                           failures=[{"stock_code": "600004.SH", "attempts": 1}], **kw)
+
+
+def test_begin_run_distinguishes_bootstrap_from_an_established_clean_ledger(tmp_path):
+    """⭐⭐ [R7 high] 两种状态必须可区分。
+
+    判别力：把凭据换回裸的生命周期 dict，两者都是 `{}`，本条必红。
+    """
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    d1, fd1 = _staging(tmp_path / "a")
+    d2, fd2 = _staging(tmp_path / "b")
+    try:
+        _seed_disk(fd2, _established())
+        boot = begin_run(fd1)          # 真引导态
+        est = begin_run(fd2)           # 已建成、但干净
+        assert boot.existed is False
+        assert est.existed is True
+        assert est.digest is not None
+    finally:
+        os.close(fd1); os.close(fd2)
+
+
+@pytest.mark.parametrize("commit", ["stock", "final"])
+def test_commit_refuses_when_an_established_clean_ledger_disappears(tmp_path, commit):
+    """⭐⭐ [R7 high] 已建成的**干净**账本被删 → 两个入口都必须拒。
+
+    此前只有「带 fatal 的账本被删」有档，干净那一档漏掉了——而账本正是
+    `files` / `pool_order` / `cursor` 的**唯一**真相，丢了就是丢进度。
+
+    判别力：把「有没有账本」这个位去掉、退回看生命周期真假值，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _established())
+        ledger = begin_run(fd)
+        os.unlink(str(d / MANIFEST_NAME))
+        stale = _valid_manifest()                      # 调用方手里那份是过期的
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            if commit == "stock":
+                commit_stock(fd, stale, ledger=ledger)
+            else:
+                commit_final(fd, stale, outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("commit", ["stock", "final"])
+def test_commit_refuses_when_the_ledger_was_replaced_by_another_valid_one(tmp_path, commit):
+    """⭐ [R7 high 同族] 账本被**换成另一份同样合法的干净账本** → 必须拒。
+
+    只比「生命周期字段」时两份都是空的、完全看不出来；比**字节指纹**才看得出。
+
+    判别力：删掉指纹比对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _established())
+        ledger = begin_run(fd)
+        _seed_disk(fd, _valid_manifest(seed="别人的-seed"))     # 被换掉
+        with pytest.raises(ManifestInvalidError, match="不一致|换|改"):
+            if commit == "stock":
+                commit_stock(fd, _valid_manifest(), ledger=ledger)
+            else:
+                commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_bootstrap_run_fails_closed_if_its_own_first_manifest_disappears(tmp_path):
+    """⭐⭐ [R7 high] 预期必须**每次提交后更新**：引导态第一次提交成功之后，
+    这棵 staging 就**不再是引导态**了；账本再消失就是有人动过。
+
+    判别力：不在提交后更新预期，本条必红（第二次提交会把它当成仍在引导态）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        commit_stock(fd, _established(), ledger=ledger)     # 首份账本
+        os.unlink(str(d / MANIFEST_NAME))
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            commit_stock(fd, _valid_manifest(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_commit_refuses_when_a_manifest_appears_during_a_bootstrap_run(tmp_path):
+    """⭐ 反方向：本次运行开始时这里**没有**账本，提交时却出现了一份 ——
+    有别的进程在同一棵 staging 上跑。覆盖它等于把对方的进度盖掉。
+
+    判别力：删掉这条反向检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)                              # 引导态
+        _seed_disk(fd, _established())                      # 别人写了一份
+        with pytest.raises(ManifestInvalidError, match="出现|不一致"):
+            commit_stock(fd, _valid_manifest(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_many_commits_in_one_run_are_all_accepted(tmp_path):
+    """方向②：**同一次运行里连续多次提交必须全部通过** ——
+    每次写完都要把预期更新到刚写出去的那份，否则第二次就会被自己拒掉。
+
+    没有这一条，一个「提交后不更新预期」的实现会让整条按股流水线在第二只股上死掉。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        for i in range(5):
+            commit_stock(fd, _valid_manifest(committed_bytes=i), ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == 4
+        commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
     finally:
         os.close(fd)

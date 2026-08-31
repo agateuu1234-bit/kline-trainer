@@ -781,6 +781,16 @@ def read_manifest(stg_fd: int) -> dict | None:
     而叠一道 `st_size` 早拒**无法被任何测试单独钉住**（读取本身每次上限 1 MiB、
     累计到上限即停，两条路的实际读取量同量级），一道钉不住的守卫是负债不是资产。
     """
+    seen = _read_manifest_with_digest(stg_fd)
+    return None if seen is None else seen[0]
+
+
+def _read_manifest_with_digest(stg_fd: int) -> tuple[dict, str] | None:
+    """`read_manifest` 的实现，另外返回**磁盘上那批原始字节的 sha256**。
+
+    指纹是「这份账本还是不是我上次看见/写下的那一份」的判据 —— 只比生命周期
+    字段看不出「被换成另一份同样合法的干净账本」（codex R7 [high]）。
+    """
     try:
         fd, st = open_regular_probe(stg_fd, MANIFEST_NAME, flags=os.O_RDONLY)
     except FileNotFoundError:
@@ -822,10 +832,10 @@ def read_manifest(stg_fd: int) -> dict | None:
             f"{MANIFEST_NAME} 不是合法 JSON：{e}。"
             "这通常意味着上一次写入被打断（文件被截断）。"
         ) from e
-    return validate_manifest(payload)
+    return validate_manifest(payload), hashlib.sha256(data).hexdigest()
 
 
-def _write_manifest(stg_fd: int, payload: dict) -> None:
+def _write_manifest(stg_fd: int, payload: dict) -> str:
     """manifest 的**唯一**落盘路径：tmp → `F_FULLFSYNC(文件)` → `os.replace` →
     `fsync(目录)`。
 
@@ -865,9 +875,38 @@ def _write_manifest(stg_fd: int, payload: dict) -> None:
             f"{_MANIFEST_MAX_BYTES}）——写出去下一次就读不回来了，拒绝发布"
         )
     atomic_write_bytes(stg_fd, MANIFEST_NAME, data, full_sync=True)
+    return hashlib.sha256(data).hexdigest()
 
 
-def _lifecycle_from_disk(stg_fd: int, startup_lifecycle: dict) -> dict:
+@dataclass
+class RunLedger:
+    """本次运行对磁盘上那份 manifest 的**预期**（由 `begin_run()` 产出）。
+
+    ⚠️ **必须分别记「当时有没有账本」与「那份账本的字节指纹」**（codex R7 [high]）：
+    此前用一个裸的生命周期 dict 当凭据，而它对「磁盘上没有账本」和「账本在、
+    但没有生命周期字段」**都是 `{}`** —— 两种截然不同的状态被压成同一个哨兵。
+    后果：一棵已经积累了 `files` / `pool_order` / `cursor` 的干净 staging，
+    账本被删之后会被当成引导态、拿调用方内存里那份（可能过期的）**凭空重建**，
+    已积累的进度静默丢失；换成另一份合法账本同样无人察觉。
+
+    ⭐ 与 R1 那条「manifest 不存在 ≠ manifest 坏了」是同一族的**反向**错误：
+      那次我把两种状态正确地分开了，这次又把两种状态合并成一个哨兵。
+      **判据：凡用「空值/假值」当哨兵，先问它是不是把两种语义压在了一起。**
+
+    ⚠️ 本对象是**可变**的：每次提交成功后必须更新到刚写出去的那一份，
+    否则引导态跑完第一次提交之后，账本再消失就检测不出来了。
+    """
+    existed: bool
+    digest: str | None
+    lifecycle: dict
+
+    def _advance(self, digest: str, lifecycle: dict) -> None:
+        self.existed = True
+        self.digest = digest
+        self.lifecycle = lifecycle
+
+
+def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> dict:
     """读回磁盘上的生命周期，并与**启动快照**（预期）对表；不一致一律 fail closed。
 
     ⚠️ **两个提交入口共用同一份判定**：codex R6 只报了收尾提交那一处，
@@ -882,25 +921,31 @@ def _lifecycle_from_disk(stg_fd: int, startup_lifecycle: dict) -> dict:
     ⚠️ `startup_lifecycle` 在这里**只当预期用来比对，从不被写进 payload**
     （写的永远是磁盘上那份），所以它不构成走私通道 —— 伪造的对不上磁盘。
     """
-    previous = read_manifest(stg_fd)
-    if previous is None:
-        if startup_lifecycle:
+    seen = _read_manifest_with_digest(stg_fd)
+    if ledger.existed:
+        if seen is None:
             raise ManifestInvalidError(
-                "启动时这棵 staging 的账本带着未解除的生命周期记录，而现在磁盘上"
-                "**账本不见了**——本次运行期间有人删掉或改名了它。拒绝写入："
-                "写下去等于把那条记录一起抹掉。请人工核实 staging 现场。"
+                "本次运行此前看见过这棵 staging 的账本，而现在它**不见了**"
+                "——运行期间有人删掉或改名了它。拒绝写入：账本是 files / "
+                "pool_order / cursor 的唯一真相，凭内存里那份重建等于把已积累的"
+                "进度静默丢弃。请人工核实 staging 现场。"
             )
-        return {}
-    on_disk = lifecycle_snapshot(previous)
-    if on_disk != startup_lifecycle:
+        if seen[1] != ledger.digest:
+            raise ManifestInvalidError(
+                "磁盘上的账本与本次运行此前看见的那一份**字节指纹不一致**"
+                "——运行期间它被改过或被换成了另一份。拒绝写入。"
+            )
+        return lifecycle_snapshot(seen[0])
+    if seen is not None:
         raise ManifestInvalidError(
-            f"磁盘上的生命周期 {on_disk!r} 与启动快照 {startup_lifecycle!r} **不一致**"
-            "——本次运行期间有人动过账本。拒绝写入。"
+            "本次运行开始时这棵 staging 上**没有**账本，而现在**出现了一份**"
+            "——很可能有另一个进程正在同一棵 staging 上跑。拒绝写入：覆盖它"
+            "等于把对方的进度盖掉。"
         )
-    return on_disk
+    return {}
 
 
-def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
+def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
     """**启动闸**：读回磁盘上的 manifest，执行启动期互斥检查，返回生命周期启动快照。
 
     返回的快照是收尾提交的**预期**（`commit_final(..., startup_lifecycle=…)`），
@@ -923,8 +968,8 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
             "skip_existing_verify 必须是 True/False（真正的布尔值），"
             f"收到 {skip_existing_verify!r}"
         )
-    previous = read_manifest(stg_fd)
-    snapshot = lifecycle_snapshot(previous) if previous is not None else {}
+    seen = _read_manifest_with_digest(stg_fd)
+    snapshot = lifecycle_snapshot(seen[0]) if seen is not None else {}
     if skip_existing_verify and _needs_staging_recheck(
             snapshot.get("stopped_reason"), snapshot.get("fetch_fatal_error")):
         raise SkipVerifyWithEscapeError(
@@ -933,10 +978,12 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
             "那些已记录的文件还在、还是原来的字节。请去掉该 flag 重跑，"
             "或换新 staging + 新 seed 重拉。"
         )
-    return snapshot
+    return RunLedger(existed=seen is not None,
+                     digest=seen[1] if seen is not None else None,
+                     lifecycle=snapshot)
 
 
-def commit_stock(stg_fd: int, manifest: dict, *, startup_lifecycle: dict) -> dict:
+def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger) -> dict:
     """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
 
     ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段，且这是无条件的**：
@@ -953,10 +1000,10 @@ def commit_stock(stg_fd: int, manifest: dict, *, startup_lifecycle: dict) -> dic
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    on_disk = _lifecycle_from_disk(stg_fd, startup_lifecycle)
+    on_disk = _expect_from_disk(stg_fd, ledger)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     payload.update(on_disk)
-    _write_manifest(stg_fd, payload)
+    ledger._advance(_write_manifest(stg_fd, payload), on_disk)
     return payload
 
 
@@ -1222,7 +1269,7 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
 
 
 def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
-                 startup_lifecycle: dict) -> dict:
+                 ledger: RunLedger) -> dict:
     """**收尾提交** —— 全流程中**唯一**能写入或清除生命周期三字段的入口
     （R95-F2）。返回真正写出去的那份。
 
@@ -1230,9 +1277,9 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     per-stock 提交把那三个键从磁盘读出来原样写回，本函数把它们剥掉再回填
     **决策表的输出**。两者都不从调用方内存里那份 manifest 直接取值。
 
-    `startup_lifecycle` 是 `begin_run()` 在**本次运行开始时**取到的快照，
-    作为「磁盘上应该是什么」的**预期**；与磁盘不匹配（含「预期非空而磁盘上
-    账本不见了」）一律 fail closed。
+    `ledger` 是 `begin_run()` 产出的运行凭据（记着「有没有账本」与字节指纹），
+    作为「磁盘上应该是什么」的**预期**；与磁盘不匹配（含消失、被替换、
+    引导态里凭空出现）一律 fail closed，且每次提交成功后**自动更新**。
 
     ⚠️ **`resolve_final_lifecycle` 必须在任何写入之前求值**：它可能抛
     `SkipVerifyWithEscapeError`（P2-F3），而那一档的规定是「拒绝启动、
@@ -1250,7 +1297,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
     # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
     # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
-    on_disk = _lifecycle_from_disk(stg_fd, startup_lifecycle)
+    on_disk = _expect_from_disk(stg_fd, ledger)
 
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     basis.update(on_disk)
@@ -1258,5 +1305,5 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
-    _write_manifest(stg_fd, payload)
+    ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle)
     return payload
