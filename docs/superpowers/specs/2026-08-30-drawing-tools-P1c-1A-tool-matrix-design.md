@@ -204,10 +204,20 @@
 
 ⇒ **作为硬约束交接给第 4 片**（§8-Q8）。**今天不构成缺陷**：表里只有水平线，面板拿横线规则算横线，结果正确。
 
-**另有两处写死 `.horizontal` 明确不在本片范围**（它们不是样式矩阵，是**每工具几何/标签布局**，属第 4 片起的工作）：
+**本片范围之外、但第 4 片起必须处理的「水平线专属耦合」完整清单**：
 
-- `Drawing/DrawingLabelLayout.swift:66` —— `guard drawing.toolType == .horizontal else { return nil }`（价格标签内容）
-- `Render/KLineView+Drawing.swift:33` —— `if drawing.toolType == .horizontal`（渲染层画价格标签的分支）
+> **⚠️ 本表经两种写法穷尽扫描**（codex R5-high 逼出来的订正 —— 本 spec 上一稿只列了前两行，因为我**只按 `== .horizontal` 这一种写法搜**，漏掉了「直接调用 `HorizontalLineTool.某函数`」那一整类）。
+> **⛔ 这是本 spec 第二次栽在同一个形状上**（第一次见 D115：搜 `unregistered` 漏掉 `MissingTool`）。**扫描必须按「该概念在本仓的全部书写形态」穷尽，不能按概念名搜一遍就收工。** 本表用的两个搜索式：`== \.horizontal` 与 `HorizontalLineTool`。
+
+| # | 位置 | 是什么 | 归属 |
+|---|---|---|---|
+| 1 | `Drawing/DrawingLabelLayout.swift:64 / :66` | `guard drawing.toolType == .horizontal else { return nil }`（价格标签内容） | 第 4 片（Q10） |
+| 2 | `Render/KLineView+Drawing.swift:33-34` | `if drawing.toolType == .horizontal` + `HorizontalLineTool.visibleGeometry`（渲染层画价格标签的分支） | 第 4 片（Q10） |
+| **3** | **`Drawing/DrawingEditRouter.swift:50`** | `selectionGeometryVisible` —— **「屏幕上真看得见吗」这条通用判据，用的却是水平线专属几何**。它是**改样式 / 删除 / 锁定**三个动作的共同前提 | **第 4 片（Q16，新增）** |
+| **4** | **`Drawing/DrawingEditRouter.swift:203`** | 改线型子类时，候选对象必须有可见几何，否则**拒绝改样式** | **第 4 片（Q16）** |
+| **5** | **`Drawing/DrawingEditRouter.swift:321`** | 落线提交路径上的「不可见画线不落库」门 —— 不通过就**清掉选中、不落库** | **第 4 片（Q16）** |
+| 6 | `Render/KLineView.swift:47` | 渲染注册表 `[.horizontal: HorizontalLineTool()]` | 第 4 片起逐个注册新工具（已在上游 D109 各片范围内） |
+| — | `Drawing/DrawingStyleIconSpec.swift:19 / :25` | 引用 `HorizontalLineTool.dashPattern` / `.lineWidth` 生成样式图标 | **判定：不需要泛化。** 虚线间隔与粗细档位→线宽是**工具无关**的视觉规格（所有工具用同一套），该文件头注也写明「刻意派生自渲染层、不另写一张表」。⛔ 若日后某工具真需要不同线宽，那一片自己论证后再动，**本片与第 4 片都不得顺手改它** |
 
 ---
 
@@ -572,6 +582,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ⛔ 不得把灰态塞回有效性列 | **第 4 片**（与 Q8 同一动作） | 第 5 片（箱体）一落地矛盾就爆发；第 4 片是最后一个能从容建立这一维的时机 |
 | **Q15** | **有效性列的默认取值纪律**：⛔ 默认应是**全 ✅**，只有该工具**真的画不出**某个值才写 ❌（今天唯一已知的真·画不出是水平线的 `.segment`）。⚠️ 连带风险：`sanitized(for:)` 在「不可渲染」时回落 `.straight`（`DrawingEnums.swift:58`），这**隐含假设 `.straight` 恒有效**；若日后有工具把 `.straight` 标成 ❌（母 spec §3.1 里黄金率/波浪尺的「直线」是灰的），`sanitized` 会产出一个**仍然无效**的值 → 落线照样被拒。届时必须同时改 `sanitized` 的回退目标，或坚持「有效性列全 ✅、灰态交给另一维」 | **第 4 片起每片自查**（P2 工具尤甚） | 表的形状定在本片，故纪律必须写在本片 |
+| **Q16** | **`DrawingEditRouter` 的三处水平线专属几何**（上表 3/4/5，codex R5-high）：`:50` / `:203` / `:321` 全部直接调 `HorizontalLineTool.visibleGeometry`，却守着**工具无关**的动作（改样式 / 删除 / 锁定 / 落库）。对一条合法的 `.trend` + `.segment`：水平线几何对 `.segment` **恒返 nil**（`KLineView+Drawing.swift:34` 注释逐字：「nil = segment / 超界射线 / 价格超出可见区间」）⇒ ① 落线时 `:321` 判它不可见 → **锚点被消耗掉、线却没落库**（静默丢线）；② `:203` 拒绝把趋势线改成线段；③ `:50` 认为它不可见 → **改不了样式、删不掉、解不开锁**。⇒ 第 4 片必须把这三处换成**tool-aware 的可见性契约**（经工具注册表拿该工具自己的几何），并配**端到端测试**：一条趋势线 `.segment` 能**落库 / 选中 / 改样式 / 锁定与解锁 / 删除**（五项都要 —— 只测其中几项会被不同的坏实现分别蒙混）。⛔ 不得只把 `HorizontalLineTool` 换成另一个写死的工具 | **第 4 片** | 不做的话第 4 片会 ship 一个「画得出但一碰就废」的趋势线：锚点消耗掉、线不见了，用户完全无从理解 |
 | **Q13** | **⚠️ 与 P1c 无关的既有缺陷（本片只登记、不修）**：`结算入账失败` 弹窗的正文写着「进度保留至最近存档」（`UI/TrainingView.swift:180`），而「放弃」按钮实际执行 `discardSession()` → `pendingRepo.clearPending()`（`TrainingSessionCoordinator.swift:1000-1018`）**永久删除整局 pending**。⇒ **用户看到的话与按钮做的事相反**，会让他放心点下破坏性动作。触发面**不限于**未支持数据 —— 上表原因 5（磁盘满 / DB 损坏 / IO 错误）是现实可达的。⛔ **不得并进 P1c 任何一片**（它属结算流程，与划线无关）；最小修法可能只是**把那句文案改对**（如「放弃将丢弃本局进度」），未必需要改行为 | **未排期 · 独立 bug** | 登记在此防止随本轮讨论一起被遗忘；user 2026-08-30 明确要求与 P1c 分开 |
 | **Q12** | **锚数的单一真相**（D119）：仓里现有**两份**同一个数字 —— `HorizontalLineTool.requiredAnchors`（`1...1`，`HorizontalLineTool.swift:13`）与 `DefaultDrawingInputController` 的 enum→锚数映射（`:42-48`，其注释自认是 MVP 权宜）。第 4 片按上游既定方案改成经工具注册表读 `DrawingTool.requiredAnchors`，一次性消灭重复。**⛔ 第 4 片不得反过来把锚数塞回样式表** —— 那正是本片 D119 拒绝的形状 | **第 4 片** | 第 4 片是第一个真正需要「每工具不同锚数」的片；再拖就会有第三份 |
 | Q1 / Q2 / Q3 / Q4 / Q5 / Q6 / Q7 | 上游 §10 的七个遗留问题**原样有效**，归属不变（Q2 原属第 1B 片 ⇒ **随 1B 一并取消**） | 见上游 §10 | — |
