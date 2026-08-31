@@ -3503,3 +3503,157 @@ def test_many_commits_in_one_run_are_all_accepted(tmp_path):
         commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者追查（R8 被配额掐断前，codex 留下的一条**未完成**的线索）
+#
+# 它的原话：「the ledger validates only the disk file, while both commit paths
+# rebuild all non-lifecycle state from caller memory. I'm testing whether a
+# stale-but-valid caller snapshot can roll back already committed progress」
+# —— 那是**进行时的计划**、不是结论（判决行是伪造的），但线索本身值得追。
+#
+# 本机复现坐实：调用方拿一份**过期副本**再提交一次，已提交的 files 从 6 条退回
+# 4 条、cursor 倒退、pool_order 缩水，而凭据检查**照过**——因为磁盘上那份确实是
+# 我们上次写的。凭据管的是「账本有没有被外人动过」，管不了「调用方自己交回来的
+# 内容是不是退步了」。
+#
+# ⚠️ **差点修过头**：第一反应是「条目只增不减」，而 spec §4.4:429 明写崩溃恢复
+#    发生在「读完并校验 manifest **之后**、任何拷贝**之前**」——也就是在 begin_run
+#    之后、运行之内；恢复第③档更是**合法地**删该股条目并回退 cursor。
+#    写死单调就会打死 spec 自己的恢复路径。
+# ⇒ 正解：让调用方**显式声明唯一正当理由**，其余一律拒。
+# ═════════════════════════════════════════════════════════════
+
+
+def _with_more_stocks(m):
+    """在一份 manifest 上「再拉一只股」：files +2、池 +1、cursor 前进。"""
+    m = copy.deepcopy(m)
+    m["files"] += [_file_rec("600004.SH", "浦发银行", "1m"),
+                   _file_rec("600004.SH", "浦发银行", "daily")]
+    m["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
+    m["cursor"]["SH"] = 2
+    return _recompute_evidence(m)
+
+
+def test_commit_stock_refuses_a_stale_snapshot_that_rolls_back_progress(tmp_path):
+    """⭐⭐ 调用方交回一份**过期副本** → 已提交的进度被回滚，而凭据检查照过。
+
+    本机复现：files 6→4、cursor SH 2→1、池 SH 2→1。账本是 files / pool_order /
+    cursor 的唯一真相，回滚它等于把已拷到盘上的股票从台账里抹掉——它们随后既
+    不在池里，又会被 pilot 当成 `untracked_target_file`。
+
+    判别力：删掉这条守卫，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        stale = _valid_manifest()
+        commit_stock(fd, stale, ledger=ledger)
+        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
+        assert len(read_manifest(fd)["files"]) == 6
+        with pytest.raises(ManifestInvalidError, match="回滚|倒退|退步"):
+            commit_stock(fd, stale, ledger=ledger)          # 又拿过期那份
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_also_refuses_a_progress_rollback(tmp_path):
+    """同族的另一个入口（第⑪问：评审报了 A 处，同族的 B 处呢）。
+
+    收尾提交同样从调用方内存重建全部非生命周期内容 —— 而收尾**永远**没有
+    正当理由回滚进度（崩溃恢复不走收尾提交）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        stale = _valid_manifest()
+        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
+        with pytest.raises(ManifestInvalidError, match="回滚|倒退|退步"):
+            commit_final(fd, stale, outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_crash_recovery_may_deliberately_roll_back(tmp_path):
+    """⭐⭐ 方向②：**spec 自己的崩溃恢复必须还能跑**。
+
+    §4.4 恢复第③档（「已提交但 final 不符」）要求 `cursor ← min(cursor,
+    universe_idx)` 且**只删该股的** files / pool_order 条目 —— 那是一次**合法的
+    回退**，且它发生在 `begin_run` 之后（§4.4:429：读完并校验 manifest 之后、
+    任何拷贝之前）。
+
+    没有这一条，「条目只增不减」的实现会**打死 spec 自己的恢复路径**，
+    让一棵崩过一次的 staging 永远修不好。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        stale = _valid_manifest()
+        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
+        rolled = commit_stock(fd, stale, ledger=ledger, recovering_from_crash=True)
+        assert len(rolled["files"]) == 4
+        assert read_manifest(fd)["cursor"]["SH"] == 1
+    finally:
+        os.close(fd)
+
+
+def test_normal_growth_and_no_change_are_both_accepted(tmp_path):
+    """方向②：只增不减、以及**完全不变**（配额触顶那一支不推进 cursor）都必须放行。
+
+    没有这一条，一个「payload 必须与磁盘严格相等」或「必须严格变大」的过严实现
+    也能让上面几条绿。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        m = _valid_manifest()
+        commit_stock(fd, m, ledger=ledger)
+        commit_stock(fd, m, ledger=ledger)                       # 完全不变
+        commit_stock(fd, _with_more_stocks(m), ledger=ledger)    # 只增
+        assert len(read_manifest(fd)["files"]) == 6
+    finally:
+        os.close(fd)
+
+
+def test_recovering_from_crash_must_be_a_real_bool(tmp_path):
+    """与其它开关同规格：非空字符串是真值，会把一次普通提交伪装成恢复提交。"""
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        for bad in ("false", "", 0, 1, None):
+            with pytest.raises(ValueError, match="recovering_from_crash"):
+                commit_stock(fd, _valid_manifest(), ledger=ledger,
+                             recovering_from_crash=bad)
+    finally:
+        os.close(fd)
+
+
+def test_a_cursor_only_regression_is_refused(tmp_path):
+    """⭐ 隔离 `cursor` 倒退这一条判据。
+
+    ⚠️ 为什么必须单独造这一档：机械变异实测，「files 回滚」「pool 回滚」
+    「cursor 倒退」三条判据在**同一份过期副本**上会一起触发，最先命中的那条
+    把后两条挡住了 —— 于是删掉 `cursor` 那条**零红**。
+    只回退游标、不动 files/pool 的账本**仍然合法**，故这一档只有它够得着。
+
+    ⚠️ **`files` 与 `pool_order` 两条则造不出专属档（如实登记等价重叠）**：
+    账本自身的一致性规则（R21-F3：每个池条目恰配 1m + daily 两条文件记录）
+    把它们**结构上绑死**了——只缩其中一边会先被读侧校验拒掉，
+    根本走不到回滚守卫。**这是「结构上做不到」，不是「懒得写」。**
+
+    判别力：删掉 cursor 那条判据，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        m = _valid_manifest()
+        commit_stock(fd, m, ledger=ledger)
+        ahead = copy.deepcopy(m)
+        ahead["cursor"]["SH"] = 2                    # 游标前进（files/pool 不变，合法）
+        commit_stock(fd, ahead, ledger=ledger)
+        assert read_manifest(fd)["cursor"]["SH"] == 2
+        with pytest.raises(ManifestInvalidError, match="倒退"):
+            commit_stock(fd, m, ledger=ledger)       # 只有游标退回去
+    finally:
+        os.close(fd)

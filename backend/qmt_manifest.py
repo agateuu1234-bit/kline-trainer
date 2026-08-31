@@ -906,7 +906,7 @@ class RunLedger:
         self.lifecycle = lifecycle
 
 
-def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> dict:
+def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> tuple[dict, dict | None]:
     """读回磁盘上的生命周期，并与**启动快照**（预期）对表；不一致一律 fail closed。
 
     ⚠️ **两个提交入口共用同一份判定**：codex R6 只报了收尾提交那一处，
@@ -935,14 +935,69 @@ def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> dict:
                 "磁盘上的账本与本次运行此前看见的那一份**字节指纹不一致**"
                 "——运行期间它被改过或被换成了另一份。拒绝写入。"
             )
-        return lifecycle_snapshot(seen[0])
+        return lifecycle_snapshot(seen[0]), seen[0]
     if seen is not None:
         raise ManifestInvalidError(
             "本次运行开始时这棵 staging 上**没有**账本，而现在**出现了一份**"
             "——很可能有另一个进程正在同一棵 staging 上跑。拒绝写入：覆盖它"
             "等于把对方的进度盖掉。"
         )
-    return {}
+    return {}, None
+
+
+def _require_no_progress_rollback(previous: dict | None, payload: dict,
+                                  where: str) -> None:
+    """磁盘上已提交的进度**不得被一份过期的调用方副本悄悄回滚**。
+
+    ⚠️ 运行凭据管的是「账本有没有被**外人**动过」（消失 / 被替换 / 指纹变了），
+    它**管不了**「调用方自己交回来的内容退步了」——两个提交入口的非生命周期内容
+    **全部**来自调用方内存。本机复现：调用方拿一份过期副本再提交一次，
+    `files` 由 6 条退回 4 条、`cursor` 倒退、`pool_order` 缩水，而凭据检查照过。
+    后果：已拷到盘上的股票被从台账里抹掉——它们随后既不在池里，
+    又会被 pilot 当成 `untracked_target_file`。
+
+    ⚠️⚠️ **不能写成「条目只增不减」**：spec §4.4:429 明写崩溃恢复发生在
+    「读完并校验 manifest **之后**、任何拷贝**之前**」（也就是在 `begin_run`
+    之后、运行之内），而恢复第③档要求 `cursor ← min(cursor, universe_idx)`
+    且**只删该股的** `files` / `pool_order` 条目 —— 那是**合法**的回退。
+    写死单调会打死 spec 自己的恢复路径，让崩过一次的 staging 永远修不好。
+    ⇒ 故本守卫只拦**未声明的**回退；唯一正当理由由调用方显式声明
+    （`commit_stock(..., recovering_from_crash=True)`）。
+    """
+    if previous is None:
+        return
+
+    def _file_ids(m):
+        return {(f.get("stock_code"), f.get("period"), f.get("relative_path"))
+                for f in m.get("files", []) if isinstance(f, dict)}
+
+    lost = _file_ids(previous) - _file_ids(payload)
+    if lost:
+        raise ManifestInvalidError(
+            f"{where} 会把已提交的 {len(lost)} 条 files 记录**回滚**掉"
+            f"（例如 {sorted(lost)[0]}）——调用方交回来的很可能是一份过期副本。"
+            "账本是 files / pool_order / cursor 的唯一真相，抹掉它们等于让已拷到盘上"
+            "的股票既不在池里、又被 pilot 当成来路不明的文件。"
+        )
+
+    for mk in MARKETS:
+        def _pool_ids(m):
+            lst = m.get("pool_order", {}).get(mk, [])
+            return {(e.get("code"), e.get("universe_idx"))
+                    for e in lst if isinstance(e, dict)}
+        gone = _pool_ids(previous) - _pool_ids(payload)
+        if gone:
+            raise ManifestInvalidError(
+                f"{where} 会把 {mk} 层已提交的池条目 {sorted(gone)} **回滚**掉"
+                "——调用方交回来的很可能是一份过期副本。"
+            )
+        old_c = previous.get("cursor", {}).get(mk)
+        new_c = payload.get("cursor", {}).get(mk)
+        if isinstance(old_c, int) and isinstance(new_c, int) and new_c < old_c:
+            raise ManifestInvalidError(
+                f"{where} 会让 {mk} 层的 cursor 从 {old_c} **倒退**到 {new_c}"
+                "——调用方交回来的很可能是一份过期副本。"
+            )
 
 
 def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
@@ -983,7 +1038,8 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
                      lifecycle=snapshot)
 
 
-def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger) -> dict:
+def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
+                 recovering_from_crash: bool = False) -> dict:
     """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
 
     ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段，且这是无条件的**：
@@ -1000,9 +1056,18 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger) -> dict:
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    on_disk = _expect_from_disk(stg_fd, ledger)
+    if not isinstance(recovering_from_crash, bool):
+        raise ValueError(
+            "recovering_from_crash 必须是 True/False（真正的布尔值），"
+            f"收到 {recovering_from_crash!r}——它是「这次回退是有意的」的唯一声明，"
+            "非空字符串等真值会把一次普通提交伪装成恢复提交"
+        )
+    on_disk, previous = _expect_from_disk(stg_fd, ledger)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     payload.update(on_disk)
+    if not recovering_from_crash:
+        # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须显式声明。
+        _require_no_progress_rollback(previous, payload, "per-stock 提交")
     ledger._advance(_write_manifest(stg_fd, payload), on_disk)
     return payload
 
@@ -1297,7 +1362,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
     # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
     # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
-    on_disk = _expect_from_disk(stg_fd, ledger)
+    on_disk, previous = _expect_from_disk(stg_fd, ledger)
 
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     basis.update(on_disk)
@@ -1305,5 +1370,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
+    # 收尾提交**永远**没有正当理由回滚进度（崩溃恢复不走这个入口），故无声明可传。
+    _require_no_progress_rollback(previous, payload, "收尾提交")
     ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle)
     return payload
