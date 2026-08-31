@@ -1869,12 +1869,23 @@ def _fcntl_cmd_spy(monkeypatch) -> list:
     return calls
 
 
+
+def _expect(fd):
+    """测试便利：取当前磁盘上的生命周期当作「启动快照」。
+
+    ⚠️ 只用于**不针对快照比对本身**的档；针对它的档要显式用 `begin_run(fd)`
+    在正确的时刻取快照，否则本帮手会让那些档恒真。
+    """
+    m = read_manifest(fd)
+    return lifecycle_snapshot(m) if m is not None else {}
+
+
 def test_commit_stock_writes_a_readable_manifest(tmp_path):
     """正向放行档：写出去的必须读得回来。"""
     m = _valid_manifest()
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, m)
+        commit_stock(fd, m, startup_lifecycle=_expect(fd))
         assert read_manifest(fd) == m
     finally:
         os.close(fd)
@@ -1898,7 +1909,7 @@ def test_commit_stock_cannot_change_lifecycle_fields(tmp_path):
     _d, fd = _staging(tmp_path)
     try:
         _seed_disk(fd, _valid_manifest(**prev))       # 磁盘上是上一次留下的真相
-        commit_stock(fd, poisoned)
+        commit_stock(fd, poisoned, startup_lifecycle=_expect(fd))
         on_disk = read_manifest(fd)
         assert on_disk["stopped_reason"] == "staging_path_escape"
         assert on_disk["fetch_fatal_error"] == _fatal()
@@ -1916,7 +1927,7 @@ def test_commit_stock_cannot_invent_lifecycle_fields(tmp_path):
     poisoned = _valid_manifest(stopped_reason="max_bytes")
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, poisoned)       # 启动时磁盘上是干净的
+        commit_stock(fd, poisoned, startup_lifecycle=_expect(fd))       # 启动时磁盘上是干净的
         assert "stopped_reason" not in read_manifest(fd)
     finally:
         os.close(fd)
@@ -1928,7 +1939,7 @@ def test_commit_stock_preserves_unknown_top_level_keys(tmp_path):
                         committed_bytes=123)
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, m)
+        commit_stock(fd, m, startup_lifecycle=_expect(fd))
         on_disk = read_manifest(fd)
         assert on_disk["failures"] == [{"stock_code": "600004.SH", "attempts": 1}]
         assert on_disk["committed_bytes"] == 123
@@ -1949,7 +1960,7 @@ def test_commit_stock_uses_full_fsync(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest())
+        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
     finally:
         os.close(fd)
     if hasattr(fcntl, "F_FULLFSYNC"):
@@ -1962,7 +1973,7 @@ def test_commit_stock_is_atomic_leaving_no_tmp_files(tmp_path):
     """走 tmp → replace，落地后目录里不得有残留临时文件。"""
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest())
+        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
     finally:
         os.close(fd)
     assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
@@ -2387,7 +2398,7 @@ def test_full_round_trip_stock_commits_then_final(tmp_path):
         _seed_disk(fd, start)                    # 上一次运行留下的账本
         startup = begin_run(fd)
         for _ in range(3):                       # 三次 per-stock 提交
-            commit_stock(fd, start)
+            commit_stock(fd, start, startup_lifecycle=_expect(fd))
             assert read_manifest(fd)["fetch_fatal_error"] == _fatal()
         commit_final(fd, start, startup_lifecycle=startup,
                      outcome=clean_finish(revisited_fatal_path=True,
@@ -2501,7 +2512,7 @@ def test_lifecycle_snapshot_does_not_alias_the_manifests_nested_fatal(tmp_path):
     try:
         _seed_disk(fd, _valid_manifest(stopped_reason="staging_path_escape",
                                        fetch_fatal_error=_fatal()))
-        commit_stock(fd, m)
+        commit_stock(fd, m, startup_lifecycle=_expect(fd))
         assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
     finally:
         os.close(fd)
@@ -2693,7 +2704,7 @@ def test_commit_stock_refuses_to_publish_a_manifest_its_own_reader_would_reject(
     _d, fd = _staging(tmp_path)
     try:
         with pytest.raises(ManifestInvalidError, match="cursor"):
-            commit_stock(fd, broken)
+            commit_stock(fd, broken, startup_lifecycle=_expect(fd))
     finally:
         os.close(fd)
 
@@ -2723,12 +2734,12 @@ def test_a_refused_commit_leaves_the_previous_manifest_byte_identical(tmp_path):
     """
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest())
+        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))
         before = (d / MANIFEST_NAME).read_bytes()
         broken = _valid_manifest()
         del broken["cursor"]
         with pytest.raises(ManifestInvalidError):
-            commit_stock(fd, broken)
+            commit_stock(fd, broken, startup_lifecycle=_expect(fd))
         assert (d / MANIFEST_NAME).read_bytes() == before
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]   # 无临时残留
     finally:
@@ -3064,12 +3075,12 @@ def test_the_writer_refuses_a_payload_bigger_than_the_readers_limit(tmp_path, mo
     monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 4096)
     d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, _valid_manifest())       # 先写一份好的
+        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))       # 先写一份好的
         before = (d / MANIFEST_NAME).read_bytes()
         big = _valid_manifest()
         big["batches"] = "x" * 8192                              # 未知顶层键，结构合法
         with pytest.raises(ManifestInvalidError, match="过大"):
-            commit_stock(fd, big)
+            commit_stock(fd, big, startup_lifecycle=_expect(fd))
         assert (d / MANIFEST_NAME).read_bytes() == before        # 好账本逐字节未变
         assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
     finally:
@@ -3091,12 +3102,12 @@ def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_pa
     d, fd = _staging(tmp_path)
     try:
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact)
-        commit_stock(fd, m)                        # 恰好等于上限 → 放行
+        commit_stock(fd, m, startup_lifecycle=_expect(fd))                        # 恰好等于上限 → 放行
         assert (d / MANIFEST_NAME).read_bytes() == \
             _json_rw.dumps(m, ensure_ascii=False).encode("utf-8")
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
         with pytest.raises(ManifestInvalidError, match="过大"):
-            commit_stock(fd, m)                    # 少一个字节 → 拒
+            commit_stock(fd, m, startup_lifecycle=_expect(fd))                    # 少一个字节 → 拒
     finally:
         os.close(fd)
 
@@ -3205,7 +3216,7 @@ def test_commit_stock_preserves_the_on_disk_lifecycle_no_matter_what_memory_says
     try:
         _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
                                        stopped_reason="staging_path_escape"))
-        commit_stock(fd, _valid_manifest())        # 内存里干干净净
+        commit_stock(fd, _valid_manifest(), startup_lifecycle=_expect(fd))        # 内存里干干净净
         on_disk = read_manifest(fd)
         assert on_disk["fetch_fatal_error"] == _fatal()
         assert on_disk["stopped_reason"] == "staging_path_escape"
@@ -3266,5 +3277,91 @@ def test_commit_final_still_works_on_a_genuine_bootstrap(tmp_path):
         written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
                                startup_lifecycle=startup)
         assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者自查（R7 等配额期间，拿十条自问对**刚改过的新代码**跑一遍）
+#   ⑨「凭据从 A 换成 B ⇒ 问 B 缺席/被篡改时会怎样」——R6 只把它应用在
+#      commit_final 上，而 commit_stock 这一轮也刚改成从磁盘取，同样的洞照样在。
+#   ①「每个字段都校验了吗」——R1 那条 bool 教训没有应用到**新加的**参数上。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_commit_stock_refuses_when_an_expected_manifest_has_disappeared(tmp_path):
+    """⭐⭐ 与 `commit_final` 同一个洞，只是在另一个入口（控制者自查挖出）。
+
+    per-stock 提交这一轮刚改成「三个字段从磁盘读」——那么账本被删时 `previous`
+    是 `None`，它就会写出一份**没有警报**的账本。收尾提交的快照比对能在**最后**
+    兜住，但**运行若崩在收尾之前，下一次就从一份干净账本开始了**，
+    而崩溃恰恰是这套设计明写要扛的场景。
+
+    判别力：删掉这条检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        startup = begin_run(fd)
+        os.unlink(str(d / MANIFEST_NAME))              # 运行中有人把账本删了
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_refuses_when_the_disk_lifecycle_drifted(tmp_path):
+    """⭐ 同族：磁盘上的生命周期与启动快照不一致 → 有人在运行期间动过账本。
+
+    这条同时把「伪造启动快照」堵死：伪造的对不上磁盘。
+    ⚠️ 注意 `startup_lifecycle` 在这里只当**预期**用来比对，**从不被写进 payload**
+    （写的永远是磁盘上那份），所以它不构成新的走私通道。
+
+    判别力：删掉这条比对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        startup = begin_run(fd)                        # {}
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        with pytest.raises(ManifestInvalidError, match="不一致|漂移"):
+            commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_writes_the_first_manifest_in_a_genuine_bootstrap(tmp_path):
+    """方向②：真引导态（启动时就没有账本、快照为空）必须能写出首份 manifest。
+
+    没有这一条，一个「磁盘上没有账本就一律拒绝」的实现也能让上面两条绿，
+    而那会让**首份 manifest 永远写不出来**（R60-F3 明写引导态要能继续初始化）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        assert startup == {}
+        written = commit_stock(fd, _valid_manifest(), startup_lifecycle=startup)
+        assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_requires_a_real_bool_for_skip_existing_verify(tmp_path):
+    """⭐ R1 那条教训（非空字符串是真值）没有应用到这个**新加的**参数上。
+
+    `skip_existing_verify="false"` 会被当成真 → 在一棵干净 staging 上凭空拒绝启动；
+    反过来说，任何非布尔值都意味着调用方对这个开关的理解与实现不一致，
+    而它守的是「拒绝启动」这条闸。构造期拒掉，别猜调用方的意思。
+
+    判别力：删掉这条 bool 校验，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        for bad in ("false", "true", "", 0, 1, None, []):
+            with pytest.raises(ValueError, match="skip_existing_verify"):
+                begin_run(fd, skip_existing_verify=bad)
+        assert begin_run(fd, skip_existing_verify=False) == {}
     finally:
         os.close(fd)

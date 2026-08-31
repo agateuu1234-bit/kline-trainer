@@ -867,6 +867,39 @@ def _write_manifest(stg_fd: int, payload: dict) -> None:
     atomic_write_bytes(stg_fd, MANIFEST_NAME, data, full_sync=True)
 
 
+def _lifecycle_from_disk(stg_fd: int, startup_lifecycle: dict) -> dict:
+    """读回磁盘上的生命周期，并与**启动快照**（预期）对表；不一致一律 fail closed。
+
+    ⚠️ **两个提交入口共用同一份判定**：codex R6 只报了收尾提交那一处，
+    而 per-stock 提交同一轮也刚改成「从磁盘取」，同样的洞照样在
+    （控制者拿第⑨问自查挖出）——**同一件事绝不判在两处**（S2-F15 的教训）。
+
+    - 磁盘上没有账本、启动快照也是空的 → **真引导态**，返回 `{}`（R60-F3：
+      首份 manifest 还没提交时必须能继续初始化）；
+    - 磁盘上没有账本、而启动快照非空 → 本次运行期间有人删掉/改名了它 → 拒绝；
+    - 磁盘上有账本、但生命周期与启动快照不一致 → 有人动过账本 → 拒绝。
+
+    ⚠️ `startup_lifecycle` 在这里**只当预期用来比对，从不被写进 payload**
+    （写的永远是磁盘上那份），所以它不构成走私通道 —— 伪造的对不上磁盘。
+    """
+    previous = read_manifest(stg_fd)
+    if previous is None:
+        if startup_lifecycle:
+            raise ManifestInvalidError(
+                "启动时这棵 staging 的账本带着未解除的生命周期记录，而现在磁盘上"
+                "**账本不见了**——本次运行期间有人删掉或改名了它。拒绝写入："
+                "写下去等于把那条记录一起抹掉。请人工核实 staging 现场。"
+            )
+        return {}
+    on_disk = lifecycle_snapshot(previous)
+    if on_disk != startup_lifecycle:
+        raise ManifestInvalidError(
+            f"磁盘上的生命周期 {on_disk!r} 与启动快照 {startup_lifecycle!r} **不一致**"
+            "——本次运行期间有人动过账本。拒绝写入。"
+        )
+    return on_disk
+
+
 def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
     """**启动闸**：读回磁盘上的 manifest，执行启动期互斥检查，返回生命周期启动快照。
 
@@ -883,6 +916,13 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
     （它没有运行上下文对象）。**这是对 S4/S5 的硬性要求**：启动序列必须
     第一步就调它，且在任何拷贝/建目录/提交之前。
     """
+    # ⚠️ 必须是**真正的 bool**：非空字符串是真值（R1 在 `revisited_fatal_path`
+    # 上栽过同一条），而本参数守的是「拒绝启动」这条闸——别猜调用方的意思。
+    if not isinstance(skip_existing_verify, bool):
+        raise ValueError(
+            "skip_existing_verify 必须是 True/False（真正的布尔值），"
+            f"收到 {skip_existing_verify!r}"
+        )
     previous = read_manifest(stg_fd)
     snapshot = lifecycle_snapshot(previous) if previous is not None else {}
     if skip_existing_verify and _needs_staging_recheck(
@@ -896,7 +936,7 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> dict:
     return snapshot
 
 
-def commit_stock(stg_fd: int, manifest: dict) -> dict:
+def commit_stock(stg_fd: int, manifest: dict, *, startup_lifecycle: dict) -> dict:
     """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
 
     ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段，且这是无条件的**：
@@ -913,10 +953,9 @@ def commit_stock(stg_fd: int, manifest: dict) -> dict:
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    previous = read_manifest(stg_fd)
+    on_disk = _lifecycle_from_disk(stg_fd, startup_lifecycle)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
-    if previous is not None:
-        payload.update(lifecycle_snapshot(previous))
+    payload.update(on_disk)
     _write_manifest(stg_fd, payload)
     return payload
 
@@ -1208,28 +1247,10 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     #
     # `read_manifest` 返回 `None` 是**合法**的引导态（首份 manifest 还没提交）；
     # 它抛异常则说明磁盘上那份账本已经坏了/被换了 —— 此时拒绝发布是 fail-closed。
-    previous = read_manifest(stg_fd)
-    on_disk = lifecycle_snapshot(previous) if previous is not None else None
-
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
-    # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口：`read_manifest` 返回
-    # None → 被当成全新引导态 → **内存里还带着未解除的警报，磁盘上的证据却被删了，
-    # 于是发布一份结构完全合法的干净账本**（本机复现过）。
-    # ⭐ 这正是 R5 那个「凭据改从磁盘取」的修复自己带出来的另一面 ——
-    #   **正解不是二选一，而是两边都要**。
-    if on_disk is None:
-        if startup_lifecycle:
-            raise ManifestInvalidError(
-                "启动时这棵 staging 的账本带着未解除的生命周期记录，而现在磁盘上"
-                "**账本不见了**——本次运行期间有人删掉或改名了它。拒绝发布收尾账本："
-                "发布它等于把那条记录一起抹掉。请人工核实 staging 现场。"
-            )
-        on_disk = {}
-    elif on_disk != startup_lifecycle:
-        raise ManifestInvalidError(
-            f"磁盘上的生命周期 {on_disk!r} 与启动快照 {startup_lifecycle!r} **不一致**"
-            "——本次运行期间有人动过账本。拒绝发布收尾账本。"
-        )
+    # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
+    # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
+    on_disk = _lifecycle_from_disk(stg_fd, startup_lifecycle)
 
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     basis.update(on_disk)
