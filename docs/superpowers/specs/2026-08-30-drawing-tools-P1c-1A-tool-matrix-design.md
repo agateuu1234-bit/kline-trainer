@@ -79,6 +79,7 @@
 | c | **备份 / 迁移落到一台只装得到更旧版本的设备**：App Store 对系统版本过老的设备只提供「最后一个兼容的旧版」 | 窄，但真实存在 | 「让用户升级就好了」 |
 | d | 第三方降级工具 | 罕见 | 「不考虑」 |
 | **e** | **开发者主动把 App Store 上可下载的版本回退到更早的二进制**（撤下新版、重新发布旧构建）后，用户恢复备份时拿到那个更旧的二进制 | 极窄，且**完全在开发者自己控制之下** | **本 spec 新增**（上一稿漏列）。应对 = 真要回退版本时，先确认没有跨版本数据 |
+| **f** | **⚠️ 同版本、无任何版本错位**：存储层损坏把某条画线的 `toolType` 改成一个「仍是合法 JSON、仍是非空字符串、但不在枚举里」的值 ⇒ 落进 `.unknownRaw`，撞同一道门（依据见 §2-F4b，codex R6-high） | 罕见，但**与本表 a–e 全部无关**；量级同「数据库 / 存储损坏」这一族 | **本 spec 新增**。⚠️ 对这一类，「保留给更新版本去救」的理由**不成立** —— 损坏字节没有任何版本读得懂。它需要的不是「等新版」，而是「别让用户在不知情的情况下按下破坏性按钮」（= §8-Q13 那条独立缺陷） |
 
 **⛔ 上游 D105 不变量 4「不得存在用户无法解除的归档死锁」在本 spec 中被降为「知情接受的残留」**，理由三条：
 
@@ -96,7 +97,7 @@
 
      | # | 原因 | 现实可达性 |
      |---|---|---|
-     | 1 | **未支持数据那道门**（`:741-743`） | **今天不可达**（需比本构建更新的版本写出的数据）；将来仅限 D113 上表五条路径 |
+     | 1 | **未支持数据那道门**（`:741-743`） | **版本错位那一支今天不可达**（需比本构建更新的版本写出的数据），将来仅限上表 a–e；⚠️ **但同版本的存储损坏（路径 f）不受此限**，量级同下面第 2、4 行 |
      | 2 | `reconciled` 抛（重复 / 空 id，`:737-740`） | 极罕见，属数据损坏 |
      | 3 | 缺活跃会话上下文（`:754`） | 属内部 bug |
      | 4 | `reader.loadMeta()` 抛（`:756`） | 训练组文件损坏 / 丢失 |
@@ -206,18 +207,38 @@
 
 **本片范围之外、但第 4 片起必须处理的「水平线专属耦合」完整清单**：
 
-> **⚠️ 本表经两种写法穷尽扫描**（codex R5-high 逼出来的订正 —— 本 spec 上一稿只列了前两行，因为我**只按 `== .horizontal` 这一种写法搜**，漏掉了「直接调用 `HorizontalLineTool.某函数`」那一整类）。
-> **⛔ 这是本 spec 第二次栽在同一个形状上**（第一次见 D115：搜 `unregistered` 漏掉 `MissingTool`）。**扫描必须按「该概念在本仓的全部书写形态」穷尽，不能按概念名搜一遍就收工。** 本表用的两个搜索式：`== \.horizontal` 与 `HorizontalLineTool`。
+> **⚠️⚠️ 扫描方法论（本 spec 在同一个形状上栽了三次，第三次才改对方法）**：
+> - 第一次（D115，codex R1）：搜 `unregistered` / `未注册` ⇒ 漏掉叫 `MissingTool` 的测试；
+> - 第二次（codex R5）：搜 `== \.horizontal` ⇒ 漏掉 `HorizontalLineTool.某函数` 那一类；
+> - 第三次（codex R6）：搜 `== \.horizontal` + `HorizontalLineTool` ⇒ 漏掉 **`.horizontal` 作为实参**那一类（`sanitized(for: .horizontal)`）—— 而那个文件**自己的注释就写着「P1c 必须回来重判这个 `.horizontal` 实参」**。
+>
+> **⛔ 正确方法不是「按概念多搜几个词」，而是：把该字面量在生产代码里的每一处出现**全部列出来、逐个定性**（含判定「不构成缺陷」的，并写明理由）。本表即按该方法产出：`grep -rn "\.horizontal" ios/Contracts/Sources --include='*.swift'` 全量命中，剔除 SwiftUI 的 `.padding(.horizontal,…)`、手势生命周期枚举 `.horizontal(delta:)`/`.horizontalActive`、十字线 `lines.horizontal` 之后，逐条分类如下。
+
+**A. 必须泛化（第 4 片起）**
 
 | # | 位置 | 是什么 | 归属 |
 |---|---|---|---|
-| 1 | `Drawing/DrawingLabelLayout.swift:64 / :66` | `guard drawing.toolType == .horizontal else { return nil }`（价格标签内容） | 第 4 片（Q10） |
-| 2 | `Render/KLineView+Drawing.swift:33-34` | `if drawing.toolType == .horizontal` + `HorizontalLineTool.visibleGeometry`（渲染层画价格标签的分支） | 第 4 片（Q10） |
-| **3** | **`Drawing/DrawingEditRouter.swift:50`** | `selectionGeometryVisible` —— **「屏幕上真看得见吗」这条通用判据，用的却是水平线专属几何**。它是**改样式 / 删除 / 锁定**三个动作的共同前提 | **第 4 片（Q16，新增）** |
-| **4** | **`Drawing/DrawingEditRouter.swift:203`** | 改线型子类时，候选对象必须有可见几何，否则**拒绝改样式** | **第 4 片（Q16）** |
-| **5** | **`Drawing/DrawingEditRouter.swift:321`** | 落线提交路径上的「不可见画线不落库」门 —— 不通过就**清掉选中、不落库** | **第 4 片（Q16）** |
-| 6 | `Render/KLineView.swift:47` | 渲染注册表 `[.horizontal: HorizontalLineTool()]` | 第 4 片起逐个注册新工具（已在上游 D109 各片范围内） |
-| — | `Drawing/DrawingStyleIconSpec.swift:19 / :25` | 引用 `HorizontalLineTool.dashPattern` / `.lineWidth` 生成样式图标 | **判定：不需要泛化。** 虚线间隔与粗细档位→线宽是**工具无关**的视觉规格（所有工具用同一套），该文件头注也写明「刻意派生自渲染层、不另写一张表」。⛔ 若日后某工具真需要不同线宽，那一片自己论证后再动，**本片与第 4 片都不得顺手改它** |
+| 1 | `Drawing/DrawingLabelLayout.swift:66` | `guard drawing.toolType == .horizontal else { return nil }`（价格标签内容） | 第 4 片（Q10） |
+| 2 | `Render/KLineView+Drawing.swift:33-34` | 渲染层画价格标签的分支 + `HorizontalLineTool.visibleGeometry` | 第 4 片（Q10） |
+| 3 | `Drawing/DrawingEditRouter.swift:50` | `selectionGeometryVisible` —— **改样式 / 删除 / 锁定**三个动作的共同几何前提，却用水平线专属几何 | 第 4 片（Q16） |
+| 4 | `Drawing/DrawingEditRouter.swift:203` | 改线型子类时候选对象的可见性门 | 第 4 片（Q16） |
+| 5 | `Drawing/DrawingEditRouter.swift:321` | 落线提交路径的「不可见画线不落库」门 | 第 4 片（Q16） |
+| **6** | **`KlineTrainerPersistence/Internal/DrawingDefaultStyleColumn.swift:31 / :44`** | **持久化解码边界两处 `sanitized(for: .horizontal)`** —— 本局默认样式**读回来就被按水平线规则改写**。⚠️ **该文件自己的头注已明写「P1c 必须回来重判这个 `.horizontal` 实参」**：一旦有了 `.trend`，一份合法的 `.segment` 默认**写得进磁盘、读回来被静默改成 `.straight`**，且注释逐字承认「**那天不会有任何测试变红**」 | **第 4 片（Q17，新增）** |
+| 7 | `Drawing/DefaultDrawingInputController.swift:45-46` | 锚数映射 | 第 4 片（Q12 / D119） |
+| 8 | `UI/DrawingStyleParams.swift:39 / :46 / :142` | 面板的线型灰态 / 标注归一化 / 标注灰态 | 第 4 片（Q8 + Q14） |
+| 9 | `Render/KLineView.swift:47` | 渲染注册表 `[.horizontal: HorizontalLineTool()]` | 第 4 片起逐个注册（上游 D109 各片范围内） |
+| 10 | `Models/Models.swift:50` | `implemented` 集合 | 第 4 片起逐个加（连同样式表加行，既有漂移告警钉死两者相等） |
+
+**B. 逐条定性为「不构成缺陷 / 不需泛化」（⛔ 写明理由，防后来者「顺手统一」改坏）**
+
+| 位置 | 判定与理由 |
+|---|---|
+| `TrainingEngine.swift:1412` `beginDrawingSession(tool: .horizontal)` | **不构成缺陷** —— 这是「进入画线模式时**默认**拿哪个工具」，不是语义耦合；工具切换由类型行负责。第 4 片只需确认「默认仍是水平线」仍然合适（或改成记住上次），**不是必须改的耦合** |
+| `KlineTrainerPersistence/…/RecordRepositoryImpl.swift:254` `DrawingStyle(from: DrawingObject(toolType: .horizontal, …))` | **不构成缺陷** —— 这里只是构造一个临时对象来**取各字段的出厂默认值**，而 `DrawingObject` 的字段默认值与 `toolType` **无关**（逐参数默认），故该实参是纯占位。⛔ 别顺手改 |
+| `KlineTrainerPersistence/…/RecordRepositoryImpl.swift:201` | **这是正确行为**：注释逐字「未知→跳过，**不 coerce** `.horizontal`」—— 恰恰是不耦合的证据 |
+| `Drawing/DrawingStyleIconSpec.swift:19 / :25` | **不需要泛化** —— 虚线间隔与粗细档位→线宽是**工具无关**的视觉规格（所有工具共用），该文件头注也写明「刻意派生自渲染层、不另写一张表」。⛔ 若日后某工具真需要不同线宽，那一片自己论证后再动，**本片与第 4 片都不得顺手改它** |
+| `Drawing/HorizontalLineTool.swift:12` `static var type { .horizontal }` | 工具自报类型，**本来就该写死** |
+| `Drawing/DrawingObjectStyleEdit.swift:35`、`Render/ChartContainerView.swift:99`、`Drawing/DrawingSession.swift:147` | **仅出现在注释里**，无代码耦合 |
 
 ---
 
@@ -239,7 +260,8 @@
 | F1 | **不渲染** | `Render/KLineView+Drawing.swift:25` | `DrawDrawingsDispatchTests.swift:49`（空注册表 → 渲染器零调用）+ `:30` 正向对照 + `:17` 空列表对照；另有 `KLineViewCompileTests.swift:39` 钉死「生产注册表里确实没有 `.trend`」。**四条均在 `catalyst-uikit-baseline.txt` 被逐条点名，CI 每个 PR 真跑并要求 passed** |
 | F2 | **不可命中**，与渲染 dispatch **逐字同判据** | `Drawing/DrawingHitTester.swift:26`（`:23` 注释逐字写明同判据） | `DrawingHitTesterTests.swift:51-58`（含反向对照）+ `:61-80`（源码守卫：命中入口唯一 + 必来自 `visibleDrawings`） |
 | F3 | **不被普通保存覆盖**：`.known` 未编辑 → 原样 `raw`；`.unknownRaw` → 原位保留 | `Persistence/LossyDrawingArray.swift:348` / `:355` | `DrawingModelP1aTests.swift:236 / :274 / :456` + `PendingLossyTests` / `CoordinatorLossyPreserveTests` / `ReviewArchiveRepositoryTests` |
-| F4 | **`.unknownRaw` 恒等于「正面识别的未来工具记录」**：须同时满足①合法 JSON 对象 ②非空 `toolType` 字符串 ③该名不在本构建枚举里；任一不满足 → 抛 `.dbCorrupted` | `Persistence/LossyDrawingArray.swift:143-147` | `DrawingModelP1aTests.swift:139 / :147 / :155 / :163 / :174 / :182 / :217`（正反两档齐） |
+| F4 | **`.unknownRaw` 的判据是**：①合法 JSON 对象 ②非空 `toolType` 字符串 ③该名不在本构建枚举里；任一不满足 → 抛 `.dbCorrupted` | `Persistence/LossyDrawingArray.swift:143-147` |
+| **F4b** | ⚠️ **⛔ 订正上游 D105 一处过强的表述**（codex R6-high，**已核实为真**）：上游写「`.unknownRaw` **恒等于**『正面识别的未来工具记录』」，**这一步推不出来**。F4 的三条只证明「**本构建不认识这个工具名**」，**证明不了这条记录来自更新的版本** —— 该判据**对来源是盲的**。⇒ 同版本下的**存储层损坏**，只要损坏后仍是合法 JSON 对象、`toolType` 仍是非空字符串、且该字符串不在 13 个枚举值里（一次落在 `toolType` 值里的字节翻转即可满足），**同样会进 `.unknownRaw`**，**不需要任何版本错位**。⛔ 后续任何人不得再写「`.unknownRaw` 恒来自更新版本」 | 由 F4 的三条判据直接推出（`LossyDrawingArray.swift:143-147`） | `DrawingModelP1aTests.swift:139 / :147 / :155 / :163 / :174 / :182 / :217`（正反两档齐） |
 
 **归档阻塞的真实判据**（`TrainingSessionCoordinator.swift:741-743`，本片**一行不改也不新增**）：
 
@@ -582,6 +604,7 @@ if !effectiveLossy.unknownRaw.isEmpty
 
 ⛔ 不得把灰态塞回有效性列 | **第 4 片**（与 Q8 同一动作） | 第 5 片（箱体）一落地矛盾就爆发；第 4 片是最后一个能从容建立这一维的时机 |
 | **Q15** | **有效性列的默认取值纪律**：⛔ 默认应是**全 ✅**，只有该工具**真的画不出**某个值才写 ❌（今天唯一已知的真·画不出是水平线的 `.segment`）。⚠️ 连带风险：`sanitized(for:)` 在「不可渲染」时回落 `.straight`（`DrawingEnums.swift:58`），这**隐含假设 `.straight` 恒有效**；若日后有工具把 `.straight` 标成 ❌（母 spec §3.1 里黄金率/波浪尺的「直线」是灰的），`sanitized` 会产出一个**仍然无效**的值 → 落线照样被拒。届时必须同时改 `sanitized` 的回退目标，或坚持「有效性列全 ✅、灰态交给另一维」 | **第 4 片起每片自查**（P2 工具尤甚） | 表的形状定在本片，故纪律必须写在本片 |
+| **Q17** | **持久化解码边界的 `sanitized(for: .horizontal)`**（`DrawingDefaultStyleColumn.swift:31 / :44`，codex R6-high）：本局默认样式**读回来就被按水平线规则改写**。第 4 片加入 `.trend` 后，一份合法的 `.segment` 默认**写得进磁盘、resume 时被静默改成 `.straight`**。⚠️ **该文件头注已逐字预告了这一点，并承认「那天不会有任何测试变红」** ⇒ 第 4 片必须：① 让持久化解码**对工具中立**，或把语义 sanitize **推迟到知道当前工具之后**；② 配 **`pending_training` 与 `pending_replay` 两条**往返 / resume 测试，证明一条 `.trend` + `.segment` 的默认**逐字段不变地活过一次存盘再读回**。⛔ **两条都要** —— 只测一条会漏掉另一个 repo（两个 repo 各调一次该编解码点，守卫 G7 钉死） | **第 4 片** | 症状是**静默**的（用户改的默认悄悄变回去），且现有测试对它零判别力 |
 | **Q16** | **`DrawingEditRouter` 的三处水平线专属几何**（上表 3/4/5，codex R5-high）：`:50` / `:203` / `:321` 全部直接调 `HorizontalLineTool.visibleGeometry`，却守着**工具无关**的动作（改样式 / 删除 / 锁定 / 落库）。对一条合法的 `.trend` + `.segment`：水平线几何对 `.segment` **恒返 nil**（`KLineView+Drawing.swift:34` 注释逐字：「nil = segment / 超界射线 / 价格超出可见区间」）⇒ ① 落线时 `:321` 判它不可见 → **锚点被消耗掉、线却没落库**（静默丢线）；② `:203` 拒绝把趋势线改成线段；③ `:50` 认为它不可见 → **改不了样式、删不掉、解不开锁**。⇒ 第 4 片必须把这三处换成**tool-aware 的可见性契约**（经工具注册表拿该工具自己的几何），并配**端到端测试**：一条趋势线 `.segment` 能**落库 / 选中 / 改样式 / 锁定与解锁 / 删除**（五项都要 —— 只测其中几项会被不同的坏实现分别蒙混）。⛔ 不得只把 `HorizontalLineTool` 换成另一个写死的工具 | **第 4 片** | 不做的话第 4 片会 ship 一个「画得出但一碰就废」的趋势线：锚点消耗掉、线不见了，用户完全无从理解 |
 | **Q13** | **⚠️ 与 P1c 无关的既有缺陷（本片只登记、不修）**：`结算入账失败` 弹窗的正文写着「进度保留至最近存档」（`UI/TrainingView.swift:180`），而「放弃」按钮实际执行 `discardSession()` → `pendingRepo.clearPending()`（`TrainingSessionCoordinator.swift:1000-1018`）**永久删除整局 pending**。⇒ **用户看到的话与按钮做的事相反**，会让他放心点下破坏性动作。触发面**不限于**未支持数据 —— 上表原因 5（磁盘满 / DB 损坏 / IO 错误）是现实可达的。⛔ **不得并进 P1c 任何一片**（它属结算流程，与划线无关）；最小修法可能只是**把那句文案改对**（如「放弃将丢弃本局进度」），未必需要改行为 | **未排期 · 独立 bug** | 登记在此防止随本轮讨论一起被遗忘；user 2026-08-30 明确要求与 P1c 分开 |
 | **Q12** | **锚数的单一真相**（D119）：仓里现有**两份**同一个数字 —— `HorizontalLineTool.requiredAnchors`（`1...1`，`HorizontalLineTool.swift:13`）与 `DefaultDrawingInputController` 的 enum→锚数映射（`:42-48`，其注释自认是 MVP 权宜）。第 4 片按上游既定方案改成经工具注册表读 `DrawingTool.requiredAnchors`，一次性消灭重复。**⛔ 第 4 片不得反过来把锚数塞回样式表** —— 那正是本片 D119 拒绝的形状 | **第 4 片** | 第 4 片是第一个真正需要「每工具不同锚数」的片；再拖就会有第三份 |
