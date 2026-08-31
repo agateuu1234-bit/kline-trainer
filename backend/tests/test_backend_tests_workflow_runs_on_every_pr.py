@@ -60,31 +60,43 @@ def test_workflow_still_triggers_on_pull_request():
     )
 
 
-def test_no_pull_request_paths_filter():
-    """本文件的正题：不许有 paths 过滤器。
+def test_pull_request_trigger_is_completely_unfiltered():
+    """本文件的正题：`pull_request:` 下面**一个键都不许有**。
 
-    两道 fail-closed 写在前面，都是为了别靠**偶然异常**兜底（变异实测过：不写这两道时，
-    触发器被删会抛 `KeyError`、`pull_request` 被写成数字会抛 `AttributeError`——
-    虽然一样是红的，但那是撞出来的，不是判据判出来的，且报错文字对读者毫无帮助）。
+    ⚠️ 这里刻意用**白名单**（什么都不许有）而不是黑名单（只拒 `paths`）。初版写成
+    「`paths` 必须为空」，codex R3 当场给出四种等效绕过，本地全部复现为**绿**：
+      - `paths-ignore: ['scripts/**']` —— 重建一模一样的外部输入盲区；
+      - `branches: [main]` / `branches-ignore: ['feat/**']` —— 按分支排掉一批 PR；
+      - `types: [closed]` —— 只在 PR 关闭时触发，等于合并前完全不验。
+    判据本身有多种正交的绕过方式时，逐个去禁是禁不完的（本仓 memory
+    `feedback_same_predicate_multiple_bypasses`）。GitHub 在 `on.pull_request` 下
+    支持的键就是 `types` / `branches` / `branches-ignore` / `paths` / `paths-ignore`，
+    每一个都会让「哪些 PR 会跑」变窄，所以正解是**一个都不接受**。
+    将来真需要其中某个（例如用 `types` 去**放宽**），就改本判据并写清理由。
+
+    另外两道 fail-closed 写在前面，是为了别靠**偶然异常**兜底（变异实测过：不写它们时，
+    触发器被删会抛 `KeyError`、`pull_request` 被写成数字会抛 `AttributeError` ——
+    一样是红的，但那是撞出来的、不是判据判出来的，报错文字对读者也毫无帮助）。
     """
     section = _on_section()
     assert "pull_request" in section, (
         "on: 段里没有 pull_request —— 见 test_workflow_still_triggers_on_pull_request"
     )
     pull_request = section["pull_request"]
-    # `pull_request:` 后面什么都不写 → PyYAML 给 None，那正是我们要的「无过滤器」。
+    # `pull_request:` 后面什么都不写 → PyYAML 给 None，那正是我们要的「无任何过滤」。
     # 除此之外只接受映射；是别的类型说明写法超出本判据的理解范围。
     assert pull_request is None or isinstance(pull_request, dict), (
         f"on.pull_request 既不是空、也不是映射（实得 {type(pull_request).__name__}）—— "
-        "本文件的解析口径够不着这种写法，请先扩本判据再判覆盖"
+        "本文件的解析口径够不着这种写法，请先扩本判据再判"
     )
-    paths = (pull_request or {}).get("paths")
-    assert paths is None, (
-        "backend-tests.yml 又出现了 pull_request.paths 过滤器：\n"
-        f"  {paths}\n"
-        "这张清单必须与「本套件实际读到的 backend/ 之外的文件」保持同步，"
-        "漏一条就等于给守卫开一条静默旁路（历史上漏过两次）。"
-        "本 job 只跑 1.5–2 分钟，不值得为省这点时间维护它 —— "
+    keys = sorted(pull_request or {})
+    assert keys == [], (
+        f"backend-tests.yml 的 on.pull_request 下面出现了过滤键：{keys}\n"
+        "这些键每一个都会让「哪些 PR 会跑后端测试」变窄，而本套件读 backend/ 之外的\n"
+        "文件（scripts/** 下的 .sh、iOS 那份 Swift 契约常量、tests/contract-fixtures/），\n"
+        "一旦某类 PR 不跑，就等于给守卫开一条静默旁路 —— 红要等合进 main 才暴露。\n"
+        "本 job 只跑 1.5–2 分钟，不值得为省这点时间承担这个风险；历史上那张\n"
+        "「哪些文件才触发」的清单已经漏过两次。\n"
         "详见 docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md。\n"
-        "确实要加回去，就连同本文件一起改，并说明清单靠什么机制保持同步。"
+        "确实要加其中某个键，就连同本文件一起改，并写清为什么这样不会漏掉某类 PR。"
     )

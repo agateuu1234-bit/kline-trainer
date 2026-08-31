@@ -75,6 +75,27 @@ R2 说得对。要做到不靠自觉，得再写约 100 行静态分析去解析
 - 本仓已有先例：`hardening_6_gate.yml` 就没有 paths 过滤器（当年正是为避开必需检查
   死锁而刻意删掉的）。
 
+### C-3 R3：钉子写成了黑名单，四种等效过滤器全能绕过
+
+第一版钉子只断言「`paths` 必须为空」。codex R3 指出这是黑名单，并给出四种等效
+绕过，**本地全部复现为绿**：
+
+| 绕过写法 | 效果 |
+|---|---|
+| `paths-ignore: ['scripts/**']` | 重建一模一样的外部输入盲区 |
+| `branches: [main]` | 只在目标是 main 的 PR 上跑，其余 PR 静默跳过 |
+| `branches-ignore: ['feat/**']` | 按分支排掉一批 PR |
+| `types: [closed]` | 只在 PR **关闭**时触发 = 合并前完全不验 |
+
+根因是本仓 memory `feedback_same_predicate_multiple_bypasses`（同一条判据有多种
+**正交**的绕过方式）叠加 `feedback_source_guard_text_source_discipline`（禁用
+「禁词黑名单」，要用结构判据）。GitHub 在 `on.pull_request` 下支持的键就是
+`types` / `branches` / `branches-ignore` / `paths` / `paths-ignore` 五个，每一个都会
+让「哪些 PR 会跑」变窄，所以改成**白名单：一个键都不接受**。
+
+将来真需要其中某个（例如用 `types` 去**放宽**触发时机），就改这条判据并写清理由 ——
+判据刻意连「放宽」也拒（变异 M11 验证过），让这种改动必须是显式的。
+
 ## D. 落地内容
 
 1. **`.github/workflows/backend-tests.yml`**（trust-boundary，Claude 硬 deny，走 ceremony
@@ -84,7 +105,8 @@ R2 说得对。要做到不靠自觉，得再写约 100 行静态分析去解析
    - `test_workflow_still_triggers_on_pull_request` —— **防空转**：`pull_request`
      触发器本身必须在。没有这条，整个触发器被删掉时下面那条也会绿，而那种情况比
      有过滤器更糟（后端测试一次都不跑）。
-   - `test_no_pull_request_paths_filter` —— 正题。
+   - `test_pull_request_trigger_is_completely_unfiltered` —— 正题：`pull_request:`
+     下面**一个键都不许有**（白名单），不是「只拒 `paths`」（黑名单）。理由见 §C-3。
    解析 `on:` 段时对 PyYAML 的坑做了处理并 fail-closed（见下）。
 
 > 📌 这道钉子**不是** C-1 里被否掉的那套东西。被否的是「靠声明发现外部输入」的
@@ -108,13 +130,15 @@ YAML 1.1 里裸键 `on:` 会被 PyYAML 解析成**布尔 `True`**，不是字符
 | E4 | 只运行新钉子那一个文件 | 显示 2 个测试全部通过 | |
 | E5 | 临时在 workflow 的 `pull_request:` 下面加回两行 `paths:` 和 `- 'backend/**'`，重跑 E4 | 必须**变红**，报错文字里列出你刚加的那条 | |
 | E6 | 把 E5 加的两行删掉，重跑 E4 | 重新全绿 | |
+| E5b | 临时在 `pull_request:` 下面加 `    paths-ignore:` 和 `      - 'scripts/**'` 两行，重跑 E4 | 必须**变红**，报错文字里点名 `paths-ignore`（这条最关键：它能重建一模一样的盲区） | |
+| E5c | 把 E5b 换成 `    types: [closed]` 一行，重跑 E4 | 必须**变红**，点名 `types` | |
 | E7 | 临时把整个 `pull_request:` 那一行删掉，重跑 E4 | 必须**变红**（防空转那条：触发器都没了，比有过滤器更糟） | |
 | E7b | 临时把 `pull_request:` 改成 `pull_request: 123`，重跑 E4 | 必须**变红**，且报错文字要说「既不是空、也不是映射（实得 int）」——不能是一句看不懂的 `AttributeError` | |
 | E8 | 把 E7 删掉的那行加回去，重跑 E4 | 重新全绿 | |
 | E9 | PR 开出来后看 GitHub 的检查列表 | 有一项叫 `backend pytest (full suite)`，且是绿的 | |
 | E10 | 合并之后，随便找一个**只改 iOS 界面**的新 PR 看它的检查列表 | 也应该有 `backend pytest (full suite)` 在跑 —— 这就是本次改动的正题 | |
 
-E5 / E7 是要害：证明这颗钉子真的会变红，不是摆设。E6 / E8 这两条「改回去要重新变绿」
+E5 / E5b / E5c / E7 是要害：证明这颗钉子真的会变红，不是摆设。E6 / E8 这两条「改回去要重新变绿」
 同样不能省 —— 只有「拒了」的档，没法区分「守卫在工作」和「守卫恒红」。
 
 ## F. 已知残留
