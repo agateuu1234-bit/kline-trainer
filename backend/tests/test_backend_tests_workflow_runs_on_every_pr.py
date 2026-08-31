@@ -1,5 +1,5 @@
 # backend/tests/test_backend_tests_workflow_runs_on_every_pr.py
-"""钉住一条不变量：`backend-tests.yml` **不得**有 `pull_request.paths` 过滤器。
+"""钉住一组不变量：`backend-tests.yml` 的触发器**不得被任何形式收窄**。
 
 为什么这条不变量值得钉（2026-08-30 决策，详见
 `docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md`）：
@@ -16,7 +16,8 @@
 必须与套件实际读取面永远同步的清单，不划算。
 
 所以决定：**取消过滤器，每个 PR 都跑**。这样「漏了某个外部输入」这件事从根上不可能
-发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去。
+发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去 —— 三条
+判据分别管：触发器还在、`pull_request` 下一个键都没有、`push` 那条兜底退路没被过滤。
 
 （同款配置在本仓有先例：`hardening_6_gate.yml` 也没有 paths 过滤器。另注：
 `backend pytest (full suite)` 不是分支保护的必需检查，所以无过滤器不会造成
@@ -38,7 +39,7 @@ def _on_section() -> dict:
 
     ⚠️ YAML 1.1 坑（PyYAML 6.0.3 实测）：裸键 `on:` 被解析成**布尔 True**，不是
     字符串 `"on"`，`doc["on"]` 会 KeyError。两种键都试，都取不到就报错 —— 不返回
-    空字典，否则下面两条判据会一起恒真。
+    空字典，否则下面几条判据会一起恒真。
     """
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     section = doc.get("on", doc.get(True))
@@ -99,4 +100,35 @@ def test_pull_request_trigger_is_completely_unfiltered():
         "「哪些文件才触发」的清单已经漏过两次。\n"
         "详见 docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md。\n"
         "确实要加其中某个键，就连同本文件一起改，并写清为什么这样不会漏掉某类 PR。"
+    )
+
+
+def test_push_trigger_is_not_narrowed_by_paths():
+    """`push` 触发器只许有 `branches: [main]`，不许再加路径过滤。
+
+    为什么这条也要钉（codex R4 引出）：本文件的判据**跑在它自己看守的那道工作流里**。
+    如果有人提一个只改 workflow 的 PR、加上一条把该文件本身排除在外的
+    `pull_request.paths`，那个 PR 上这道 job 压根不会启动，判据也就不会红 ——
+    而 `backend pytest (full suite)` 又不是必需检查，于是能合进去。
+
+    这时候**唯一还能兜住的就是 `push: branches: [main]`**：合并后 main 上会跑一次，
+    钉子在那里变红。所以 `push` 一旦也被路径过滤，就真的全静默了。
+    这条判据把那条退路焊死。
+
+    ⚠️ 它只保证「**合并后**一定被发现」，不保证合并前。合并前的强制拦截需要独立的
+    必需检查，属本次范围之外的已知残留（见计划文档 §F-4）。
+    """
+    push = _on_section().get("push")
+    assert isinstance(push, dict), (
+        f"on.push 不是映射（实得 {type(push).__name__}）—— 合并后在 main 上重跑这条"
+        "退路没了，而它是 pull_request 触发被绕过时唯一还能发现问题的地方"
+    )
+    assert sorted(push) == ["branches"], (
+        f"on.push 下面出现了 branches 之外的键：{sorted(push)}\n"
+        "尤其不许有 paths / paths-ignore —— 那会让「合并后在 main 上重跑」这条退路\n"
+        "也被过滤掉。届时一个只改 workflow、自我排除的 PR 将完全无人发现。"
+    )
+    assert push["branches"] == ["main"], (
+        f"on.push.branches 不再是 ['main']（实得 {push['branches']}）—— "
+        "合并后的兜底重跑必须发生在默认分支上"
     )

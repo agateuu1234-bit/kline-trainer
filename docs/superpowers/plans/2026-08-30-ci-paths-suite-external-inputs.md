@@ -96,15 +96,35 @@ R2 说得对。要做到不靠自觉，得再写约 100 行静态分析去解析
 将来真需要其中某个（例如用 `types` 去**放宽**触发时机），就改这条判据并写清理由 ——
 判据刻意连「放宽」也拒（变异 M11 验证过），让这种改动必须是显式的。
 
+### C-4 R4：钉子住在它自己看守的那道门里（**已接受的残留**）
+
+codex R4 指出：这三条判据跑在 `backend-tests.yml` 自己的 job 里。若有人提一个
+**只改该 workflow、且过滤器把该文件自身排除在外**的 PR，那个 PR 上这道 job 根本
+不会启动，判据也就不会红；而 `backend pytest (full suite)` 不是必需检查，于是能合。
+
+**核实后对严重程度的修正**：R4 说这会「静默回归」，但 `push: branches: [main]`
+没有路径过滤 —— 合并到 main 之后工作流照样跑，钉子在那里变红。所以真实后果是
+**「合并后才发现」而不是「永远发现不了」**。
+
+不过这暴露了一个真漏洞：初版钉子只看 `pull_request`，**完全没看 `push`**。同一个
+坏改动只要把 `push` 也过滤掉，就真的全静默了。已补第三条判据
+`test_push_trigger_is_not_narrowed_by_paths`（`push` 只许有 `branches: [main]`），
+把这条退路焊死。变异 5 组验证：push 加 `paths` / 加 `paths-ignore` / 换分支 /
+删掉整个 push / push 写成裸的 —— 全红且全走显式断言。
+
+**「合并前就拦住」没有做**，理由与决定见 §F-4。
+
 ## D. 落地内容
 
 1. **`.github/workflows/backend-tests.yml`**（trust-boundary，Claude 硬 deny，走 ceremony
    由 user `cp` 落地）：删掉 `pull_request.paths` 整段，加一段注释说明为什么不设过滤器。
-2. **`backend/tests/test_backend_tests_workflow_runs_on_every_pr.py`**（新增，40 行）：
-   钉住这个决定别被悄悄改回去。两条判据：
+2. **`backend/tests/test_backend_tests_workflow_runs_on_every_pr.py`**（新增）：
+   钉住这个决定别被悄悄改回去。三条判据：
    - `test_workflow_still_triggers_on_pull_request` —— **防空转**：`pull_request`
      触发器本身必须在。没有这条，整个触发器被删掉时下面那条也会绿，而那种情况比
      有过滤器更糟（后端测试一次都不跑）。
+   - `test_push_trigger_is_not_narrowed_by_paths` —— `push` 只许有 `branches: [main]`：
+     它是 `pull_request` 触发被绕过时**唯一还能发现问题**的退路（见 §C-4）。
    - `test_pull_request_trigger_is_completely_unfiltered` —— 正题：`pull_request:`
      下面**一个键都不许有**（白名单），不是「只拒 `paths`」（黑名单）。理由见 §C-3。
    解析 `on:` 段时对 PyYAML 的坑做了处理并 fail-closed（见下）。
@@ -126,12 +146,13 @@ YAML 1.1 里裸键 `on:` 会被 PyYAML 解析成**布尔 `True`**，不是字符
 |---|---|---|---|
 | E1 | 在终端运行 `git -C '.dev/worktree/ci-paths-external' diff --stat main` | 只列出 3 个文件：1 个 workflow、1 个新测试文件、1 个计划文档。**不含**任何已有测试文件 | |
 | E2 | 打开 `.github/workflows/backend-tests.yml` | `on:` 段下面**看不到** `paths:` 这一项；`pull_request:` 后面直接就是 `push:` | |
-| E3 | 在 worktree 的 `backend` 目录里运行后端全套测试 | 最后一行显示 **1108 passed**（main 是 1106，减掉被删的守卫、加上新钉子那 2 条），且**没有** `failed` / `error` / `skipped` 字样 | |
-| E4 | 只运行新钉子那一个文件 | 显示 2 个测试全部通过 | |
+| E3 | 在 worktree 的 `backend` 目录里运行后端全套测试 | 最后一行显示 **1109 passed**（main 是 1106，减掉被删的守卫、加上新钉子那 3 条），且**没有** `failed` / `error` / `skipped` 字样 | |
+| E4 | 只运行新钉子那一个文件 | 显示 3 个测试全部通过 | |
 | E5 | 临时在 workflow 的 `pull_request:` 下面加回两行 `paths:` 和 `- 'backend/**'`，重跑 E4 | 必须**变红**，报错文字里列出你刚加的那条 | |
 | E6 | 把 E5 加的两行删掉，重跑 E4 | 重新全绿 | |
 | E5b | 临时在 `pull_request:` 下面加 `    paths-ignore:` 和 `      - 'scripts/**'` 两行，重跑 E4 | 必须**变红**，报错文字里点名 `paths-ignore`（这条最关键：它能重建一模一样的盲区） | |
 | E5c | 把 E5b 换成 `    types: [closed]` 一行，重跑 E4 | 必须**变红**，点名 `types` | |
+| E5d | 临时在 `push:` 的 `branches: [main]` 下面加 `    paths:` 和 `      - 'backend/**'` 两行，重跑 E4 | 必须**变红**，报错文字说 push 下面出现了 branches 之外的键（这条守的是「合并后兜底」那条退路） | |
 | E7 | 临时把整个 `pull_request:` 那一行删掉，重跑 E4 | 必须**变红**（防空转那条：触发器都没了，比有过滤器更糟） | |
 | E7b | 临时把 `pull_request:` 改成 `pull_request: 123`，重跑 E4 | 必须**变红**，且报错文字要说「既不是空、也不是映射（实得 int）」——不能是一句看不懂的 `AttributeError` | |
 | E8 | 把 E7 删掉的那行加回去，重跑 E4 | 重新全绿 | |
@@ -146,6 +167,16 @@ E5 / E5b / E5c / E7 是要害：证明这颗钉子真的会变红，不是摆设
 - **F1**：每个 PR 多跑约 2 分钟 CI（本次决策刻意换来的，见 §C-2）。
 - **F2**：本次不碰 `hardening_6_gate.yml`（本来就无过滤器）与 `openapi-smoke.yml`
   （只跑单个测试文件、paths 与之对齐，不存在本问题）—— 两者均已核实。
+- **F4（codex R4，user 2026-08-31 明确接受）**：**合并前**没有强制拦截。
+  一个「只改 `backend-tests.yml`、且过滤器自我排除」的 PR 上，这三条判据不会执行。
+  兜底是 `push: branches: [main]`：**合并后 main 会红**（该退路已由第三条判据焊死）。
+  - 为什么接受：原 bug 是**被动**的 —— 任何无辜 PR 都会掉进去；F4 需要有人**刻意**
+    写一个自我排除的过滤器，而 workflow 文件里已有一整段注释写着别加回来。
+  - 要闭合它有两条路，都超出本次范围、且各自应作独立 PR：
+    ① 把 `backend pytest (full suite)` 设为分支保护的必需检查（现在无过滤器了，
+       这么做是自洽的；**顺带能补上另一个更大的洞** —— 今天后端测试全红也不阻止合并）；
+    ② 把这条不变量搬进一道既「必需」又「每个 PR 无条件跑」的门
+       （本仓有两道：`codeowners-config-check`、`branch-protection-config-self-check`）。
 - **F3**：§B 那套运行期 IO 追踪脚本留在 scratchpad、不进仓库。它 monkeypatch 全套 IO，
   常驻会给上千个测试引入风险，而且 `-k` 选跑时结果不完整、会给出「少报」的假安心。
   取消过滤器后也不再需要它当守卫，只作为将来的人工排查工具。
