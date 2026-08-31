@@ -294,14 +294,21 @@ generate_one_training_set
 
 两条测试夹住这道缝：
 
-**(a) 后端侧（Python，host pytest）**：用**生产函数本身**（`assign_global_indices` → `build_training_set_sqlite` → `zip_and_hash`）从一组合成 bar 数据造出一个**小训练组**，其形态必须包含本缺陷的特征 —— 至少一个非 m3 周期有 **≥2 根** K 线落在 `end_global_index = 0`（即合成数据里高周期历史要早于 3m 轴起点）。断言：
+**(a) 后端侧（Python，host pytest）**：**必须经由生产的顶层装配函数 `assemble_from_windows(...)`** 从一组合成 bar 数据造出一个**小训练组**，取其返回的 `GeneratedTrainingSet.path`（即真 zip）来做后续比对。其形态必须包含本缺陷的特征
+
+⚠️ **不得**改成直接串调 `assign_global_indices` → `build_training_set_sqlite` → `zip_and_hash`（codex R3 finding 1，**原文就是这么写的，错**）：真正决定 zip 内成员名的是 `assemble_from_windows` 的 **`:403` `db_path = Path(_tmp) / f"{fname}.db"`**，而 `zip_and_hash:371` 只是把 `db_path.name` 抄成 `arcname`。测试若自己造 `db_path`，就对 `:403` 的改动**完全不敏感** —— 把 `:403` 改成 `.txt`，测试的产物名不变、App 侧静态 fixture 也不变，**两条测试全绿而每一次真机下载都会失败**。`assemble_from_windows` 是纯装配层（不碰 PostgreSQL），host pytest 可直接调。 —— 至少一个非 m3 周期有 **≥2 根** K 线落在 `end_global_index = 0`（即合成数据里高周期历史要早于 3m 轴起点）。断言：
 1. 产物与仓库里那份 fixture 的**数据库内容**逐表一致（**不比 zip 字节** —— `zipfile.write` 会嵌入文件 mtime，跨机跨时不可复现；比字节必然假红）；
 2. 产物满足 §3.1 的全部不变量（这条同时是 §5.5 assert 的正向对照）；
 3. **产物的压缩包清单（archive manifest）与 fixture 的清单一致，且满足 §3.2 的形态契约**：`namelist()` 恰好 1 项、无目录项、后缀 ∈ {`.sqlite`, `.db`}。
 
 ⚠️ **第 3 条是 codex R1 finding 3 打回后补的，缺了它这套测试就复刻了缺陷 A 的那道缝**：只比数据库内容的话，生成器哪天把 `arcname` 改成 `x.txt`、或多塞一个 sidecar 文件，**数据库内容一字不变**，而 App 侧吃的是已提交的静态 fixture、也一字不变 —— **两条测试同时保持绿**，正好放过缺陷 A 那一类。清单名不含 mtime，比对是确定性的。
 
-**必配的生产者侧变异**（证明第 3 条有判别力）：把 `arcname` 改成不被接受的后缀（如 `.txt`）→ 须红；往压缩包里多写一个 regular 文件 → 须红。
+**必配的生产者侧变异**（证明第 3 条有判别力）：
+- **把 `assemble_from_windows:403` 的 `f"{fname}.db"` 改成 `f"{fname}.txt"` → 须红**（这是**生产真正的决策点**，也是 codex R3 指出原方案够不着的那一个）；
+- 把 `zip_and_hash:371` 的 `arcname` 改成不被接受的后缀 → 须红；
+- 往压缩包里多写一个 regular 文件 → 须红。
+
+⚠️ 前两条是**两个不同的绕过点**（调用方选名 vs 打包时改名），必须**各配一档**；只留其中一条会让另一条的绕过方式静默通过（本仓「同一条判据有多种正交绕过方式」那条教训）。
 
 ⇒ 生成器日后若改动索引方案**或压缩包形态**，这条会红，fixture 不会悄悄过期。
 
@@ -313,6 +320,35 @@ generate_one_training_set
 ⚠️ 该 fixture 同时是 §5.1(a)/(b) 的**正向档**：它必须含「同一周期内多根并列于 0 且 datetime 各不相同」这一形态，否则次序键与 datetime 单调两条判据在这条链路上取不到值。
 
 **为什么合成 bar 数据不违反「fixture 必须照生产真实格式造」**：被测的是**产物的生成路径**，而该路径用的是**生产函数本人**；禁忌是「照想象手写产物格式」，不是「喂合成输入」。fixture 文件本身由生产代码写出，不是手搓的。
+
+---
+
+### 5.7 顶层 `CONTRACT_VERSION` bump `"1.13"` → `"1.14"`（codex R3 打回后新增）
+
+⚠️ **原 §7 只考虑了训练组的 `PRAGMA user_version`，漏掉了顶层标识。**
+
+冻结治理契约 `docs/governance/m01-schema-versioning-contract.md` §Bump 策略 **A 类**明列的触发条件里，本次命中**两条**：
+
+- 「**改既有语义**」—— 持久化字段 `end_global_index = 0` 从「未定义/隐式」变为「该 K 线整个覆盖窗口至多触及 `.m3` 首根」的**明确语义**；
+- 「**任何跨系统契约字段调整**」—— zip 成员名的生产者/读取端契约（`.sqlite` → `.sqlite` 或 `.db`）。
+
+**先例**（同文件 bump 记录，2026-05-25 E2）：`position_data` 从「任何字节」收紧为「合法否则拒收」，**无任何 DDL 变更、纯读取端语义**，照样 bump 顶层 `"1.4"` → `"1.5"`，三套存储 sub-version 全部不动。本次形态与之完全一致。
+
+**做法**：`PRAGMA user_version` 保持 `1`（物理 schema 确实没变）；顶层 `CONTRACT_VERSION` `"1.13"` → `"1.14"`，并**同步全部 5 个点**：
+
+| # | 位置 | 内容 |
+|---|---|---|
+| 1 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7` | `public let CONTRACT_VERSION = "1.13"` → `"1.14"` |
+| 2 | `backend/qmt_pilot_db.py:827` | `CONTRACT_VERSION = "1.13"` → `"1.14"`（旁注已写明须与 Swift 侧一致） |
+| 3 | `ios/Contracts/Tests/.../ModelsTests.swift:8`、`RenderStateBuilderTests.swift:1260` | 两处 `#expect(CONTRACT_VERSION == "1.13")` 同步 |
+| 4 | `docs/governance/m01-schema-versioning-contract.md` | 矩阵顶层 cell `"1.13"` → `"1.14"` **且**追加一条 bump 记录（触发条件、先例、为何三套 sub-version 不动） |
+| 5 | 跨语言一致性测试 | `backend/tests/test_qmt_pilot_db.py:835` 断言 Swift 源码里含 `CONTRACT_VERSION = "<同值>"`，两侧不同步会红 —— 这条是天然守卫，**不需要改**，但实施时要知道它会挡住只改一边 |
+
+另有 `M01MatrixSyncGuardTests.swift` 守着矩阵文档与代码的同步，**改漏第 4 项会被它挡下**。
+
+⚠️ **必须提前知道的连带后果**：`backend/qmt_pilot_db.py:2273`（闸 1）会拿 `meta["contract_version"]` 与常量逐字比对，不等即拒绝复用该库。bump 后，**任何带 `"1.13"` 的既有 QMT pilot 库/清单都会被拒**，需 `--reset` 重建。当前风险很低（4b `qmt_fetch.py` 仍零实现、pilot 出货链未投产），但**必须在实施计划里明写这条**，不能让它在别人手里变成意外。
+
+⚠️ 本 bump **对 App 运行期行为零影响**（`CONTRACT_VERSION` 在 iOS 侧只是常量与断言，不参与任何判定）；它的作用是**让改动前后的构建在兼容性与回滚审计上可区分**。
 
 ---
 
@@ -334,7 +370,9 @@ generate_one_training_set
 | M8 | 把 §5.6(b) 的 fixture 换成没有老历史的 | 该测试的防空转断言变红 |
 | M9 | 把 §5.1(d) 的覆盖窗口约束删掉 | 需有一条「跨界 K 线被标成 0」用例变红 |
 | M9b | 把 §5.1(d) 的约束从「窗口内 `.m3` 根数 ≤1」改成「开盘 ≤ `.m3` 首根开盘」（= 退回被打回的弱版本） | 同上那条用例仍须红（弱版本放行它，这正是 codex R1 finding 2） |
-| M10 | 把 §5.6(a) 第 3 条（清单比对）删掉 | 生产者侧变异（`arcname` 改 `.txt` / 多一个 regular 项）须变红；删掉后这两个变异会**全绿**，正是缺陷 A 的缝 |
+| M10 | 把 §5.6(a) 第 3 条（清单比对）删掉 | 三个生产者侧变异（`:403` 改名 / `arcname` 改名 / 多一个 regular 项）须变红；删掉后它们会**全绿**，正是缺陷 A 的缝 |
+| M10b | 把 `assemble_from_windows:403` 的 `.db` 改成 `.txt` | §5.6(a) 的清单比对须变红。⚠️ 若 (a) 仍按原方案自己串调底层函数，本变异**恒绿** —— 这条同时是「fixture 必须经顶层装配函数产出」的判别力证明 |
+| M10c | 把 §5.6(a) 改回「自己造 `db_path` 串调底层函数」 | M10b 必须由红转绿 ⇒ 该改法被判定为**削弱**，不许采纳 |
 | M11 | 只改生产读取器、**不改** `PreviewTrainingSetReader`（即 codex R2 打回的原状） | 预览侧须有一条「含重复 0 的真实格式数据 → 应放行」的**正向**用例变红（证明镜像真的接上了，不是只改了一半） |
 | M11b | 把预览读取器的「倒退」判据（`< prev`）删掉 | 「调用方传入倒退序列 → `.dbCorrupted`」那条**行为**测试变红（⚠️ 该分支在预览侧**可达**，不许照抄生产侧的「不变量锁」写法，见 §5.1b） |
 
@@ -351,7 +389,8 @@ generate_one_training_set
 | 维度 | 结论 | 理由 |
 |---|---|---|
 | 训练组 SQLite schema | **不变** | 无新列、无类型变化；`training_set_schema_v1.sql` 一字不动 |
-| `TRAINING_SET_SCHEMA_VERSION` | **不 bump（保持 1）** | 数据格式未变；变的是**读取端的接受集合**，且是**放宽** |
+| `TRAINING_SET_SCHEMA_VERSION` / `PRAGMA user_version` | **不 bump（保持 1）** | 物理 schema 未变（无新列 / 无类型变化 / 无约束变化） |
+| 顶层 `CONTRACT_VERSION` | **必须 bump `"1.13"` → `"1.14"`（§5.7）** | ⚠️ **codex R3 打回后补的**：原文只看了训练组 sub-version。冻结治理契约 A 类触发命中两条（改既有语义 / 跨系统契约字段调整），且有「无 DDL 的纯读取端语义收紧照样 bump 顶层」的先例（2026-05-25 E2，`1.4`→`1.5`） |
 | 已生成的训练组（含 NAS 上这 3 个） | **全部继续可用** | 产物零改动；`content_hash` 不变 |
 | 用户手机上已缓存的训练组 | **不受影响** | 缓存里存的是解压后的 sqlite，文件名由 `meta.filename`（`.zip`）规范化而来，与 zip 内条目名无关（`DefaultFileSystemCacheManager.swift:145-159`） |
 | 旧版本 App 读新训练组 | **与今日相同（仍失败）** | 本次不改产物，故不产生「新数据老 App 读不了」的新错位 |
@@ -380,10 +419,11 @@ generate_one_training_set
 ## 9. 验收判据
 
 1. 三个真实训练组（NAS 上 id=3/4/5）经**真实生产实现**跑完 §5.6(b) 那条链路，六关全过；
-2. **§6 的全部变异逐条跑过 —— M1、M2、M3、M3b、M4、M5、M6、M7、M7b、M8、M9、M9b、M10、M11、M11b，外加 M2+M3 组合变异**，共 16 组；每组**报告里写明红的是哪一条测试**（不接受「有测试红了」）。
+2. **§6 的全部变异逐条跑过 —— M1、M2、M3、M3b、M4、M5、M6、M7、M7b、M8、M9、M9b、M10、M10b、M10c、M11、M11b，外加 M2+M3 组合变异**，共 18 组；每组**报告里写明红的是哪一条测试**（不接受「有测试红了」）。
    ⚠️ 本条在 codex R2 被打回过：原文只要求 M1–M7，而 M8–M11b 恰好是 R1/R2 之后新增的修复所对应的变异 —— 那样实施者可以**满足验收门却没证明新修复有判别力**。**新增判据必须同步进验收门**，否则等于没加；
 3. 正向对照全部放行（三个真实训练组 + §5.6 的 fixture，在**生产读取器与预览读取器两侧**都放行）；
 4. 后端与 App 两侧闸门按既有流程全绿（后端 Linux CI 零 skip；Catalyst 按既有配方）；
+4b. **§5.7 的 5 个同步点全部改到**，且 `test_qmt_pilot_db.py:835`（跨语言一致性）与 `M01MatrixSyncGuardTests`（矩阵同步）两条既有守卫全绿 —— 它们能挡住「只改一边」和「漏改矩阵」；
 5. **真机**：runbook P14 的 G2（状态行 3 个成功）+ G3（库里 3 行变 `sent`）+ G4（图表画出蜡烛图）全部成立。
 
 ⚠️ 判据 5 需重跑 runbook P12–P14；判据 1–4 在 CI 内即可闭合。
@@ -428,6 +468,19 @@ generate_one_training_set
 **R2-F2（medium）验收门停在 M1–M7** —— 属实。M8–M11b 恰是 R1/R2 之后新增修复对应的变异，不进验收门 = 新修复的判别力没人验。已改 §9 判据 2：**16 组变异全覆盖**，并写明「新增判据必须同步进验收门」这条纪律。
 
 ⚠️ **R2 同样无一条被判误报。**
+
+| 轮 | 结果 | 处置 |
+|---|---|---|
+| （配额失败 ×2） | 无 verdict（日志 990–1030 字节，连代码都没读） | **不计轮次**，同 SHA 重跑 |
+| **R3** @ `25b06f8` | `needs-attention`，1 high + 1 medium | **两条均核实属实、全部采纳** |
+
+**R3-F1（high）生产者测试够不着真正选文件名的那一行** —— 属实。核实：`assemble_from_windows:403` 才是决定 zip 成员名的地方（`f"{fname}.db"`），`zip_and_hash:371` 只是把 `db_path.name` 抄成 `arcname`。原方案让测试自己造 `db_path` 再串调底层三函数 ⇒ 对 `:403` **零敏感**：把它改成 `.txt`，测试产物名不变、App 侧静态 fixture 也不变，**两条测试全绿而每一次真机下载都会失败**。已改 §5.6(a)：fixture **必须经 `assemble_from_windows` 产出**；新增变异 M10b（改 `:403`）与 M10c（把方案改回去须让 M10b 由红转绿 ⇒ 判定为削弱）。
+
+⭐ 顺带识别出**两个正交的绕过点**（调用方选名 `:403` vs 打包时改名 `:371`），各配一档 —— 本仓「同一条判据有多种正交绕过方式」那条教训。
+
+**R3-F2（medium）漏了顶层 `CONTRACT_VERSION` bump** —— 属实。原 §7 只看训练组 sub-version。冻结契约 `m01-schema-versioning-contract.md` §Bump 策略 A 类命中两条（改既有语义 / 跨系统契约字段调整），且**有「无 DDL 的纯读取端语义收紧照样 bump 顶层」的先例**（2026-05-25 E2，`1.4`→`1.5`）。已新增 §5.7：`"1.13"` → `"1.14"`，列出 5 个同步点、两条既有守卫，并**明写连带后果**（`qmt_pilot_db.py:2273` 闸 1 会拒绝带旧版本号的既有 pilot 库，需 `--reset` 重建；当前 4b 未投产故风险低）。
+
+⚠️ **R3 同样无一条被判误报。三轮 7 条，全部属实。**
 
 ---
 
