@@ -102,17 +102,54 @@ codex R4 指出：这三条判据跑在 `backend-tests.yml` 自己的 job 里。
 **只改该 workflow、且过滤器把该文件自身排除在外**的 PR，那个 PR 上这道 job 根本
 不会启动，判据也就不会红；而 `backend pytest (full suite)` 不是必需检查，于是能合。
 
-**核实后对严重程度的修正**：R4 说这会「静默回归」，但 `push: branches: [main]`
-没有路径过滤 —— 合并到 main 之后工作流照样跑，钉子在那里变红。所以真实后果是
-**「合并后才发现」而不是「永远发现不了」**。
+初版钉子只看 `pull_request`，完全没看 `push`。已补第三条判据
+`test_push_trigger_is_not_narrowed_by_paths`（`push` 只许有 `branches: [main]`）。
+变异 5 组验证：push 加 `paths` / 加 `paths-ignore` / 换分支 / 删掉整个 push /
+push 写成裸的 —— 全红且全走显式断言。
 
-不过这暴露了一个真漏洞：初版钉子只看 `pull_request`，**完全没看 `push`**。同一个
-坏改动只要把 `push` 也过滤掉，就真的全静默了。已补第三条判据
-`test_push_trigger_is_not_narrowed_by_paths`（`push` 只许有 `branches: [main]`），
-把这条退路焊死。变异 5 组验证：push 加 `paths` / 加 `paths-ignore` / 换分支 /
-删掉整个 push / push 写成裸的 —— 全红且全走显式断言。
+### ⚠️ C-4 修正（codex R5）：上一版这里写错了
 
-**「合并前就拦住」没有做**，理由与决定见 §F-4。
+上一版在这里写「`push` 是退路，合并后 main 会红，所以只是**发现得晚**」。
+**那句话不成立**，R5 指出得对：三条判据都跑在这道工作流自己的 job 里，
+工作流不启动，判据就一条也执行不到。分两种情形：
+
+| 情形 | 结果 |
+|---|---|
+| 坏改动**只**过滤 `pull_request` | 合并后 push 到 main 会跑 → 钉子红。**发现得晚，但会发现** |
+| 坏改动**同时**过滤 `pull_request` 和 `push` | 该 PR 不跑、合并后也不跑 → **一条判据都不执行**。要等到以后某个 PR 恰好命中新过滤器时才会红，在那之前盲区是敞开的 |
+
+第三条判据能挡住的是「先有一个正常 PR 去动 `push`」——那时 `pull_request` 还没被
+过滤，PR 上会跑、会红。它挡不住「一个 PR 同时把两个都过滤掉」。
+
+另外核实：CODEOWNERS 虽然把 `.github/**` 指给了 canonical owner，但分支保护里
+`require_code_owner_review = false`、`required_approving_review_count = 0` ——
+**没有人工审查这道闸**，所以那不构成缓解。
+
+### C-5 R5 收口：把这条不变量搬进一道**必需且无过滤**的门
+
+R5 复述了 R4 并指出我 §C-4 上一版那句话是错的（见上表）。user 2026-09-01 拍板闭合。
+
+做法：往 `.github/workflows/codeowners-config-check.yml` 加两步。选它的理由是它同时
+满足两个条件 —— **是分支保护的必需检查**，且 **`on: pull_request:` 无任何过滤**。
+于是「只改 backend-tests.yml、把两个触发器一起过滤」的 PR，在这道门上照样会红，
+**合并前就被拦住**。
+
+三个刻意的选择：
+1. **直接跑那个测试文件本身**，不在 workflow 里另抄一份判据 —— 两份判据必然各自漂移；
+2. 新步骤插在 checkout 之后、原有 scope 门控之前，**不带 `if:`**，所以每个 PR 真跑
+   （已用结构断言核过全部 6 个步骤的门控状态）；
+3. job id 不动（`codeowners-config-check`），分支保护认的必需检查名照样对得上。
+
+判据里补了一条**存在性断言**：`backend-tests.yml` 被整个删掉时也报错，而不是靠
+`FileNotFoundError` 撞红。
+
+验证（变异，全走显式断言）：
+- D0 基线绿；
+- D1 `backend-tests.yml` 被删 → 红，报「工作流被删掉了」；
+- D2 **两个触发器一起过滤**（R5 的核心场景）→ 红。
+
+并实测了 CI 里那一行的**确切调用方式**（从仓库根 `python -m pytest backend/tests/<该文件>`）
+—— 这一步不能靠推断：`backend/tests/` 是个 Python 包，导入路径容易出岔子。
 
 ## D. 落地内容
 
@@ -129,6 +166,10 @@ codex R4 指出：这三条判据跑在 `backend-tests.yml` 自己的 job 里。
      下面**一个键都不许有**（白名单），不是「只拒 `paths`」（黑名单）。理由见 §C-3。
    解析 `on:` 段时对 PyYAML 的坑做了处理并 fail-closed（见下）。
 
+3. **`.github/workflows/codeowners-config-check.yml`**（trust-boundary，同样走 ceremony
+   由 user `cp` 落地）：加两步（装 Python + 跑上面那个测试文件），让这条不变量由一道
+   **必需且无过滤**的门独立执行。理由见 §C-5。
+
 > 📌 这道钉子**不是** C-1 里被否掉的那套东西。被否的是「靠声明发现外部输入」的
 > 259 行机制（有盲区）；这里只有一条无歧义的不变量，没有发现逻辑，也就没有盲区。
 
@@ -144,7 +185,7 @@ YAML 1.1 里裸键 `on:` 会被 PyYAML 解析成**布尔 `True`**，不是字符
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| E1 | 在终端运行 `git -C '.dev/worktree/ci-paths-external' diff --stat main` | 只列出 3 个文件：1 个 workflow、1 个新测试文件、1 个计划文档。**不含**任何已有测试文件 | |
+| E1 | 在终端运行 `git -C '.dev/worktree/ci-paths-external' diff --stat main` | 只列出 4 个文件：2 个 workflow、1 个新测试文件、1 个计划文档。**不含**任何已有测试文件 | |
 | E2 | 打开 `.github/workflows/backend-tests.yml` | `on:` 段下面**看不到** `paths:` 这一项；`pull_request:` 后面直接就是 `push:` | |
 | E3 | 在 worktree 的 `backend` 目录里运行后端全套测试 | 最后一行显示 **1109 passed**（main 是 1106，减掉被删的守卫、加上新钉子那 3 条），且**没有** `failed` / `error` / `skipped` 字样 | |
 | E4 | 只运行新钉子那一个文件 | 显示 3 个测试全部通过 | |
@@ -156,7 +197,8 @@ YAML 1.1 里裸键 `on:` 会被 PyYAML 解析成**布尔 `True`**，不是字符
 | E7 | 临时把整个 `pull_request:` 那一行删掉，重跑 E4 | 必须**变红**（防空转那条：触发器都没了，比有过滤器更糟） | |
 | E7b | 临时把 `pull_request:` 改成 `pull_request: 123`，重跑 E4 | 必须**变红**，且报错文字要说「既不是空、也不是映射（实得 int）」——不能是一句看不懂的 `AttributeError` | |
 | E8 | 把 E7 删掉的那行加回去，重跑 E4 | 重新全绿 | |
-| E9 | PR 开出来后看 GitHub 的检查列表 | 有一项叫 `backend pytest (full suite)`，且是绿的 | |
+| E8b | 临时把 `.dev/worktree/ci-paths-external/.github/workflows/backend-tests.yml` 改名（模拟被删），从仓库根跑 `python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | 必须**变红**，报「工作流被删掉了」；改回原名后重新全绿 | |
+| E9 | PR 开出来后看 GitHub 的检查列表 | `backend pytest (full suite)` 和 `codeowners-config-check` 两项都在、都是绿的 | |
 | E10 | 合并之后，随便找一个**只改 iOS 界面**的新 PR 看它的检查列表 | 也应该有 `backend pytest (full suite)` 在跑 —— 这就是本次改动的正题 | |
 
 E5 / E5b / E5c / E7 是要害：证明这颗钉子真的会变红，不是摆设。E6 / E8 这两条「改回去要重新变绿」
@@ -167,16 +209,13 @@ E5 / E5b / E5c / E7 是要害：证明这颗钉子真的会变红，不是摆设
 - **F1**：每个 PR 多跑约 2 分钟 CI（本次决策刻意换来的，见 §C-2）。
 - **F2**：本次不碰 `hardening_6_gate.yml`（本来就无过滤器）与 `openapi-smoke.yml`
   （只跑单个测试文件、paths 与之对齐，不存在本问题）—— 两者均已核实。
-- **F4（codex R4，user 2026-08-31 明确接受）**：**合并前**没有强制拦截。
-  一个「只改 `backend-tests.yml`、且过滤器自我排除」的 PR 上，这三条判据不会执行。
-  兜底是 `push: branches: [main]`：**合并后 main 会红**（该退路已由第三条判据焊死）。
-  - 为什么接受：原 bug 是**被动**的 —— 任何无辜 PR 都会掉进去；F4 需要有人**刻意**
-    写一个自我排除的过滤器，而 workflow 文件里已有一整段注释写着别加回来。
-  - 要闭合它有两条路，都超出本次范围、且各自应作独立 PR：
-    ① 把 `backend pytest (full suite)` 设为分支保护的必需检查（现在无过滤器了，
-       这么做是自洽的；**顺带能补上另一个更大的洞** —— 今天后端测试全红也不阻止合并）；
-    ② 把这条不变量搬进一道既「必需」又「每个 PR 无条件跑」的门
-       （本仓有两道：`codeowners-config-check`、`branch-protection-config-self-check`）。
+- **F4（codex R4/R5）✅ 已闭合**（见 §C-5）：合并前拦截由 `codeowners-config-check`
+  这道必需门独立执行。**新引入的代价（明写）**：这道治理门从此依赖一点后端测试基建
+  （`pip install pyyaml pytest`）。装依赖失败会让一道必需检查因不相干的原因变红。
+  这是本方案自带的代价，user 2026-09-01 知悉并接受。
+- **F5**：把 `backend pytest (full suite)` 本身设为必需检查这件事**没做**，仍是独立议题。
+  它能补上一个比 F4 更大的洞：**今天后端测试全红也不阻止合并**（它只是咨询性检查）。
+  建议单独开 PR。
 - **F3**：§B 那套运行期 IO 追踪脚本留在 scratchpad、不进仓库。它 monkeypatch 全套 IO，
   常驻会给上千个测试引入风险，而且 `-k` 选跑时结果不完整、会给出「少报」的假安心。
   取消过滤器后也不再需要它当守卫，只作为将来的人工排查工具。

@@ -14,6 +14,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      # ── backend-tests.yml 触发器不变量（**不受下面 scope 门控，每个 PR 都跑**）──
+      # 为什么这条检查放在本 workflow 而不是留在 backend-tests.yml 自己那道 job 里：
+      # 那道 job 的判据跑在它自己看守的工作流内。一个「只改 backend-tests.yml、
+      # 同时给 pull_request 和 push 都加上把该文件排除在外的 paths」的 PR，会让那道
+      # 工作流一次都不启动 —— 判据永远执行不到，而它又不是必需检查，于是能合进去，
+      # 把「只改 scripts/** 或 iOS 契约文件的 PR 不跑后端测试」这个盲区原样放回来
+      # （codex R5；详见 docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md）。
+      # 本 workflow 既是分支保护的**必需检查**、又**无 paths 过滤**，所以那种 PR 在这里
+      # 照样被拦在合并之前；backend-tests.yml 被整个删掉也一样拦得住（判据里有存在性断言）。
+      # 刻意**直接跑那个测试文件本身**，而不是在这里另抄一份判据 —— 免得两份各自漂移。
+      - name: Setup Python 3.11
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: '3.11'
+      - name: backend-tests.yml trigger invariant (independent of backend-tests itself)
+        run: |
+          python -m pip install --quiet pyyaml pytest
+          python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q
       - name: Decide scope (fast no-op pass when unrelated)
         id: scope
         run: |

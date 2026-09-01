@@ -41,6 +41,10 @@ def _on_section() -> dict:
     字符串 `"on"`，`doc["on"]` 会 KeyError。两种键都试，都取不到就报错 —— 不返回
     空字典，否则下面几条判据会一起恒真。
     """
+    assert WORKFLOW.is_file(), (
+        f"{WORKFLOW.name} 不存在 —— 后端测试工作流被删掉了，PR 上一次都不会跑。"
+        "（本判据由 codeowners-config-check 那道必需门独立执行，所以删文件也拦得住）"
+    )
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     section = doc.get("on", doc.get(True))
     assert isinstance(section, dict), (
