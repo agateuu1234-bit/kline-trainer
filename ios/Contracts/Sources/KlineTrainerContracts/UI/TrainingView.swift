@@ -80,6 +80,10 @@ public struct TrainingView: View {
     @State private var confirmingDeleteDrawing = false      // 1b-i PR-4：🗑 的删除确认框
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
+    // Q13（codex R2-high）：安全退出**什么都没保住**时的诚实提示（既没落盘、磁盘上也没有旧存档）。
+    @State private var cannotPreserveOnExit = false
+    // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
+    @State private var discardFailed = false
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
     // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
@@ -188,8 +192,14 @@ public struct TrainingView: View {
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    await lifecycle.exitPreservingProgress()
-                    onExit()
+                    // ⛔ 三态必须分开处置（codex R2-high）：`.cannotPreserve` 表示**会话没有被结束**，
+                    //    此刻 onExit() 会把用户带走，而整局只剩内存里那一份 —— 等于亲手丢掉它。
+                    switch await lifecycle.exitPreservingProgress() {
+                    case .savedCurrentState, .keptEarlierCheckpoint:
+                        onExit()
+                    case .cannotPreserve:
+                        cannotPreserveOnExit = true
+                    }
                 }
             }
             // 放弃本局 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）。
@@ -201,7 +211,13 @@ public struct TrainingView: View {
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()
+                    // ⛔ 不得吞错就走（codex R2-medium）：`discardSession()` 是**故意**在清槽失败时
+                    //    先抛错、**不** endSession（其文档逐字：「清槽失败 → 保留 active session
+                    //    （不 teardown）供 retry，透传 AppError」）。吞掉它再 onExit() 会造成
+                    //    「界面回了首页、协调器里会话还活着、那条 pending 也还在」，而用户被告知"已丢弃"
+                    //    —— 在触发本弹窗的同一个降级存储场景下极可能发生。
+                    do { try await lifecycle.discard(); onExit() }
+                    catch { discardFailed = true }
                 }
             }
         } message: {
@@ -215,6 +231,20 @@ public struct TrainingView: View {
         // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
         // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
         // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
+        // Q13（codex R2-high）：安全退出什么都没保住时的诚实提示。
+        // ⚠️ 关掉它要把结算失败弹窗**重新弹回来** —— 否则用户回到训练页、屏幕上什么都没有，
+        //    会以为刚才那一下"没反应"，比不给出口更糟。
+        .alert("暂时退不出本局", isPresented: $cannotPreserveOnExit) {
+            Button("知道了", role: .cancel) { finalizeFailed = true }
+        } message: {
+            Text("存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。")
+        }
+        // Q13（codex R2-medium）：弃局没做成时的诚实提示（会话仍在，未离开本局）。
+        .alert("放弃未完成", isPresented: $discardFailed) {
+            Button("知道了", role: .cancel) { finalizeFailed = true }
+        } message: {
+            Text("清除本局存档时出错，本局没有被放弃，你仍在这一局里。可稍后再试。")
+        }
         .alert("结算失败", isPresented: $replaySettlementFailed) {
             Button("重试") { runReplaySettlement() }
             Button("退出本局", role: .cancel) {

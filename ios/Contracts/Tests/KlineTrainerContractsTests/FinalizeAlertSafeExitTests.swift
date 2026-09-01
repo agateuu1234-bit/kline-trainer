@@ -19,9 +19,9 @@ struct FinalizeAlertSafeExitTests {
         let engine = try await coord.startNewNormalSession()
         let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
 
-        let saved = await lifecycle.exitPreservingProgress()
+        let outcome = await lifecycle.exitPreservingProgress()
 
-        #expect(saved, "落盘成功时必须如实返回 true")
+        #expect(outcome == .savedCurrentState, "落盘成功时必须如实报告『存的是当前进度』")
         #expect(try pending.loadPending() != nil, "进度必须留在 pending 里")
         #expect(coord.activeEngine == nil, "会话必须已结束")
     }
@@ -38,15 +38,52 @@ struct FinalizeAlertSafeExitTests {
         let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         pending.failNextSavePending = .persistence(.diskFull)      // 模拟磁盘满
 
-        let saved = await lifecycle.exitPreservingProgress()
+        let outcome = await lifecycle.exitPreservingProgress()
 
-        #expect(!saved, "必须如实报告『这次没存成』，⛔ 不得谎称成功")
+        #expect(outcome == .keptEarlierCheckpoint, "必须如实报告『退回到旧存档』，⛔ 不得谎称存成了当前进度")
         let after = try #require(try pending.loadPending(),
                                  "⛔ pending 被清掉了 —— 安全出口变成了破坏性动作")
         #expect(after.globalTickIndex == checkpoint.globalTickIndex,
                 "必须原样保留最近一次自动存档")
         #expect(coord.activeEngine == nil,
                 "会话仍必须结束 —— 否则用户卡在原地出不去，等于没有出口")
+    }
+
+    @Test("⭐⭐无存档 + 落盘失败：⛔ 绝不能结束会话（否则整局只在内存里，一退就没）")
+    func keepsSessionWhenNothingIsDurable() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        // ⚠️ **刻意不预先存档** —— 实测：开新局时磁盘上什么都没有（loadPending() == nil）。
+        //    上一版本测试恰恰先成功存了一次，把这条**真正会出事的路**排除在外了（codex R2-high）。
+        #expect(try pending.loadPending() == nil, "前置：此刻磁盘上确实没有任何存档")
+
+        let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        pending.failNextSavePending = .persistence(.diskFull)      // 整局都存不进去
+
+        let outcome = await lifecycle.exitPreservingProgress()
+
+        #expect(outcome == .cannotPreserve,
+                "既没存成、磁盘上也没有旧存档 ⇒ 必须如实报告『保不住』")
+        #expect(coord.activeEngine === engine,
+                "⛔ 会话必须保留 —— 此刻结束会话 = 把整局唯一的副本扔掉")
+    }
+
+    @Test("有旧存档 + 落盘失败：可以退出，如实报告『退回到旧存档』")
+    func fallsBackToCheckpoint() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)
+        let checkpoint = try #require(try pending.loadPending())
+
+        let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        pending.failNextSavePending = .persistence(.diskFull)
+
+        let outcome = await lifecycle.exitPreservingProgress()
+
+        #expect(outcome == .keptEarlierCheckpoint, "必须区分『存成了』与『退回旧存档』")
+        #expect(try pending.loadPending()?.globalTickIndex == checkpoint.globalTickIndex,
+                "旧存档必须原样留着")
+        #expect(coord.activeEngine == nil, "有东西保住了 ⇒ 可以安全退出")
     }
 
     @Test("反向对照：安全退出**不是**弃局 —— 它一次都不该碰清空那条路")

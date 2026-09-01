@@ -54,13 +54,37 @@ public struct TrainingSessionLifecycle {
     ///    依赖那条**正在坏掉的路**，等于没有出口：用户会被弹回「保存进度失败」（只有再写一次
     ///    或破坏性弃局），最终仍被推向数据丢失。
     /// ⛔ 本方法**绝不调用 `discardSession`** —— 它不是弃局，是「带着已有存档离开」。
-    /// - Returns: 当前进度是否成功落盘。`false` = 已安全退出，但保留的是**最近一次自动存档**。
+    /// - Returns: 三种结局之一，见 `SafeExitOutcome`。
     @discardableResult
-    public func exitPreservingProgress() async -> Bool {
-        var saved = true
-        do { try await coordinator.saveProgress(engine: engine) } catch { saved = false }
+    public func exitPreservingProgress() async -> SafeExitOutcome {
+        do {
+            try await coordinator.saveProgress(engine: engine)
+        } catch {
+            // 落盘失败 → 先确认磁盘上到底还有没有东西可退回。
+            // ⛔ 这一步不能省（codex R2-high）：上一版本无条件 `endSession()`，
+            //    而开新局时磁盘上本来就没有存档——若整局的自动存档又全部失败，
+            //    那一退就把**整局唯一的副本**扔掉了，而文案还承诺着「保留进度」。
+            guard coordinator.hasDurablePendingCheckpoint(for: engine) else {
+                return .cannotPreserve      // ⛔ 刻意不 endSession：会话必须留着
+            }
+            await coordinator.endSession()
+            return .keptEarlierCheckpoint
+        }
         await coordinator.endSession()
-        return saved
+        return .savedCurrentState
+    }
+
+    /// 安全退出的三种结局（Q13 / codex R2-high）。
+    /// ⚠️ 三态而非 Bool：`false` 分不清「退回旧存档」（安全）与「什么都没保住」（**绝不能退**），
+    ///    而这两种的正确处置完全相反。
+    public enum SafeExitOutcome: Equatable, Sendable {
+        /// 当前进度已落盘 —— 最好的情况。
+        case savedCurrentState
+        /// 当前进度没落成，但磁盘上**已有**一份更早的存档 ⇒ 退出是安全的，只是会回到那一档。
+        case keptEarlierCheckpoint
+        /// 既没落成、磁盘上**也没有任何存档** ⇒ **未退出，会话原样保留**。
+        /// 调用方必须如实告诉用户「现在退不出去」，⛔ 不得假装已经退了。
+        case cannotPreserve
     }
 
     /// 自动结束（plan v1.5 §6.2.5）：正式结束入账，返 recordId（Normal）/ nil（review/replay 非保存分支）。

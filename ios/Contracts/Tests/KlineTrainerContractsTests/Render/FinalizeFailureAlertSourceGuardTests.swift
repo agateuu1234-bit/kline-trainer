@@ -74,6 +74,31 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "⛔ back() 依赖写盘成功，不能当作失败场景下的安全出口")
     }
 
+    @Test("退出本局必须**分三态处置**，且『保不住』那一态⛔不得离开本局（codex R2-high）")
+    func exitHandlesAllThreeOutcomes() throws {
+        let block = try finalizeAlertBlock(try source(tv))
+        // 必须真的分支处理，而不是拿到结果就丢掉
+        #expect(block.contains("case .savedCurrentState, .keptEarlierCheckpoint:"),
+                "保住了东西的两态才允许 onExit()")
+        #expect(block.contains("case .cannotPreserve:"),
+                "必须显式处理『什么都没保住』这一态")
+        // ⛔ 核心：`.cannotPreserve` 表示会话**没有被结束**；此刻 onExit() 会把用户带走，
+        //    而整局只剩内存里那一份 —— 等于亲手丢掉它。
+        let tail = try #require(block.range(of: "case .cannotPreserve:"))
+        let afterCannotPreserve = String(block[tail.upperBound...].prefix(120))
+        #expect(!afterCannotPreserve.contains("onExit()"),
+                "⛔ 保不住任何东西时绝不能 onExit() —— 那正是本条要防的丢失")
+    }
+
+    @Test("放弃本局必须**成功才离开**，⛔ 不得吞掉错误就回首页（codex R2-medium）")
+    func discardExitsOnlyOnSuccess() throws {
+        let block = try finalizeAlertBlock(try source(tv))
+        #expect(block.contains("do { try await lifecycle.discard(); onExit() }"),
+                "必须 do/catch：discardSession() 是故意在清槽失败时先抛错、不结束会话")
+        #expect(!block.contains("try? await lifecycle.discard()"),
+                "⛔ try? 会造成『界面回了首页、会话还活着、pending 也还在』而用户被告知已丢弃")
+    }
+
     @Test("破坏性按钮必须标 role: .destructive，且仍真的弃局")
     func destructiveButtonIsMarked() throws {
         let block = try finalizeAlertBlock(try source(tv))

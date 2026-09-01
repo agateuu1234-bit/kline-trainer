@@ -994,6 +994,21 @@ public final class TrainingSessionCoordinator {
         replayHasPersisted = false
     }
 
+    /// Q13（codex R2-high）：磁盘上**是否已有一份可回退的存档**。
+    /// 供「安全退出」在落盘失败时判断：还有东西可退回 ⇒ 结束会话是安全的；
+    /// **什么都没有 ⇒ 结束会话等于把整局唯一的副本扔掉**（实测：`startNewNormalSession` 不落盘，
+    /// 开局那一刻 `loadPending()` 就是 nil；若整局的自动存档又全部失败，磁盘上始终空无一物）。
+    ///
+    /// ⚠️ **读失败一律当作「没有」**（fail-closed）：磁盘正在坏的时候读本身也可能失败，
+    ///    此时保守地留住会话，比乐观地放走它安全。
+    /// ⚠️ **只查正常局的槽**；非 normal 一律返回 false（同样 fail-closed ⇒ 调用方会保留会话）。
+    ///    今天唯一的调用方是「结算入账失败」弹窗，而它只在正常局出现（replay 被 `routeEndOfSession`
+    ///    分流、review 不可达）。⛔ 日后若给 replay 复用，必须先补 `pending_replay` 那一支。
+    public func hasDurablePendingCheckpoint(for engine: TrainingEngine) -> Bool {
+        guard engine.flow.mode == .normal else { return false }
+        do { return try pendingRepo.loadPending() != nil } catch { return false }
+    }
+
     /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。
     /// 清槽失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
     /// 新需求10(A6)：replay 清 pending_replay（条件清，fail-closed）；normal 清 pending_training（原逻辑）。
