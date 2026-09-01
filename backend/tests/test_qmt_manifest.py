@@ -4344,3 +4344,71 @@ def test_distinct_failure_records_are_still_accepted(tmp_path):
         assert len(read_manifest(fd)["failures"]) == 2
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R13：两条 high —— **两条都是 R12 那次修复留下的边界**
+#   A 恢复豁免只看「条数 + 在不在池里」，于是**换掉两条记录的路径/字节数/指纹**
+#     仍是 (2, True)，既不触发「完全移除」也不需要退游标 —— 已提交股票被
+#     **重新绑定到不同的文件**，原文件变孤儿，下游从此信任被换过的基线。
+#   B `isinstance` 证明不了凭据**来自 begin_run** —— dataclass 的构造函数是公开的，
+#     照着字段值另造一个一模一样的实例即可。冻结挡住了「改」，没挡住「重造」。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_recovery_may_not_rebind_a_committed_stock_to_different_files(tmp_path):
+    """⭐⭐ [R13 high A] 恢复豁免必须**只在该股被完全移除时**生效。
+
+    本机复现：把 600004.SH 那两条记录的 `relative_path` / `bytes` / `sha256`
+    全换掉、条数仍是 2、池条目原样保留 → 豁免照样放行、也不用退游标。
+    后果：一只**已提交**的股票被重新绑定到**不同的（甚至不存在的）文件**，
+    原文件变成无主孤儿，而 pilot 的 `staging_intact` 从此校验的是**被换过的基线**。
+
+    判别力：把豁免的 `scoped_removed` 前置条件去掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        swap = copy.deepcopy(full)
+        for f in swap["files"]:
+            if f["stock_code"] == "600004.SH":
+                f["relative_path"] = f["relative_path"].replace("600004", "699999")
+                f["bytes"] = 1
+                f["sha256"] = "e" * 64
+        _recompute_evidence(swap)
+        with pytest.raises(ManifestInvalidError, match="回滚|范围"):
+            commit_stock(fd, swap, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_a_forged_ledger_of_the_real_class_is_refused(tmp_path):
+    """⭐⭐ [R13 high B] 冻结挡住了「改」，没挡住「**重造**」。
+
+    本机复现两档：
+    · `RunLedger(real.existed, real.digest, real.lifecycle, False)` ——
+      把「跳过校验」那一位关掉 → 收尾又发布了 `full`；
+    · `RunLedger(False, None, {}, False)` —— 伪造成引导态 →
+      **被删掉的账本被凭空重建**。
+
+    ⇒ 凭据必须是**只有本模块造得出**的能力对象（构造期核对模块私有令牌）。
+
+    判别力：去掉构造期的令牌核对，本条必红。
+    """
+    with pytest.raises(ValueError, match="begin_run"):
+        RunLedger(True, "0" * 64, {}, False)
+    with pytest.raises(ValueError, match="begin_run"):
+        RunLedger(False, None, {})
+
+
+def test_begin_run_still_produces_a_usable_ledger(tmp_path):
+    """方向②：`begin_run` 造出来的那个必须照常能用，否则整条流水线动不了。"""
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        assert isinstance(ledger, RunLedger)
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)

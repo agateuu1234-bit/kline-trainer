@@ -885,6 +885,13 @@ def _write_manifest(stg_fd: int, payload: dict) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# 模块私有令牌：`RunLedger` 的构造期核它，于是**只有本模块造得出**运行凭据。
+# ⚠️ `frozen=True` 只挡住「改」，挡不住「**重造**」—— dataclass 的构造函数是公开的，
+# 照着字段值另造一个一模一样的实例即可（codex R13 [high]，本机复现两档：
+# 关掉 skip 位让收尾又发 full；伪造成引导态让被删的账本被重建）。
+_LEDGER_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class RunLedger:
     """本次运行对磁盘上那份 manifest 的**预期**（由 `begin_run()` 产出）。
@@ -910,6 +917,16 @@ class RunLedger:
     # 「**一旦使用，manifest 与 pilot 报告都打上 `source_verification: "partial"`**」
     # —— 收尾提交据此把级别压成 partial，**凭据是这件事唯一的持久记忆**。
     skip_existing_verify: bool = False
+    # 只有 `begin_run()` 会传对令牌；这是「这份凭据确实来自启动闸」的唯一证明。
+    token: object = None
+
+    def __post_init__(self) -> None:
+        if self.token is not _LEDGER_TOKEN:
+            raise ValueError(
+                "RunLedger 只能由 begin_run() 产出 —— 它记的是安全事实"
+                "（跳没跳过校验 / 见没见过账本 / 账本指纹），"
+                "照字段值另造一个一模一样的实例就能把这些事实伪造掉。"
+            )
 
     def _advance(self, digest: str, lifecycle: dict) -> None:
         """把预期推进到刚写出去的那一份（**只许本模块调用**）。
@@ -1092,7 +1109,13 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     prev_files, new_files = _by_id(previous), _by_id(payload)
     for key, rec in prev_files.items():
         if key not in new_files:
-            if recovery is not None and key[0] == recovery.stock_code:
+            # ⚠️ **豁免只在该股被「完全移除」时生效**（codex R13 [high]）：
+            # 只看「条数 + 在不在池里」时，把两条记录的 relative_path / bytes /
+            # sha256 全换掉仍是 (2, True) —— 既不算完全移除、也不用退游标，
+            # 于是一只**已提交**的股票被**重新绑定到不同的文件**，原文件变孤儿，
+            # 而 pilot 的 staging_intact 从此校验的是被换过的基线。
+            if (recovery is not None and scoped_removed
+                    and key[0] == recovery.stock_code):
                 continue                      # 恢复范围内：允许删这一只股的记录
             raise ManifestInvalidError(
                 f"{where} 会把已提交的 files 记录 {key} **回滚**掉"
@@ -1117,7 +1140,10 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                     for e in lst if isinstance(e, dict)}
         # ③ 池条目不得消失。
         gone = _pool_ids(previous) - _pool_ids(payload)
-        if recovery is not None and mk == recovery.market:
+        # ⚠️ 本条的 `scoped_removed` 前置**造不出专属档**（如实登记，第五次撞同一耦合）：
+        # files 判据排在前面，池条目消失时它的文件记录必然也先消失并触发那一条。
+        # 保留是**防御性冗余**，与上面那处同源。
+        if recovery is not None and scoped_removed and mk == recovery.market:
             gone -= {(recovery.stock_code, recovery.universe_idx)}
         if gone:
             raise ManifestInvalidError(
@@ -1305,7 +1331,8 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
     return RunLedger(existed=seen is not None,
                      digest=seen[1] if seen is not None else None,
                      lifecycle=snapshot,
-                     skip_existing_verify=skip_existing_verify)
+                     skip_existing_verify=skip_existing_verify,
+                     token=_LEDGER_TOKEN)
 
 
 def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
