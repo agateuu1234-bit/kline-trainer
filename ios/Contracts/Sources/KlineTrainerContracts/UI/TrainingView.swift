@@ -166,10 +166,34 @@ public struct TrainingView: View {
     // 两段各自独立类型检查，纯行为中性重构（无逻辑改动，仅表达式分割）。
     public var body: some View {
         trainingContent
+        // Q13：本弹窗曾在**三件事**上与同文件紧邻的另外两个弹窗不一致，现已全部对齐：
+        //   ① **缺非破坏性出口** —— 未支持数据 / 磁盘满等持续性失败下，「重试」撞同一道门必然再失败，
+        //      用户手上只剩一个**会删数据**的按钮，等于被界面推向不可逆丢失；
+        //   ② **破坏性按钮标成了 `.cancel`** —— iOS 因此不会把它渲染成红色，看起来像"安全的那个"；
+        //   ③ **文案与行为相反** —— 原文说「进度保留至最近存档」，而「放弃」走 `discardSession()` →
+        //      `pendingRepo.clearPending()`，**永久删除整局 pending**（含本可靠新版本救回的数据）。
+        //   ⇒ 对齐对象：replay 的「结算失败」弹窗（非破坏性出口走 `back()`）与「保存进度失败」弹窗
+        //     （破坏性按钮标 `.destructive`）。本次**不改任何行为逻辑**，只是把出口补齐、把话说实。
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
-            // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
-            Button("放弃", role: .cancel) {
+            // 退出本局 = **非破坏性**出口：`saveProgress` 落当前终态 + `endSession`，**不清 pending**。
+            // 与 replay「结算失败」弹窗同做法（那里 codex R3-F1 已定：必须显式 `lifecycle.back()` 而非
+            // `onSessionEnded(nil)` —— fence 已置 terminating、autosave 协程已死，不显式落盘的话槽里
+            // 只剩旧检查点，"暂存进度保留"这句承诺就落空了）。
+            // 保存失败 → 复用既有的「保存进度失败」弹窗（可重试 / 可放弃），**不新增错误路径**。
+            Button("退出本局", role: .cancel) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    do { try await lifecycle.back(); onExit() } catch { backFailed = true }
+                }
+            }
+            // 放弃本局 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）。
+            // ⚠️ 标 `.destructive` 而非 `.cancel`：它**真的会永久删除整局 pending**，iOS 据此渲染成红色。
+            // ⛔ 别为了"安全"把它改成不弃局 —— 用户确实想扔掉这一局时必须扔得干净，
+            //    否则每次开 App 都会被同一个结算不了的坏局纠缠。
+            Button("放弃本局", role: .destructive) {
                 guard !exitInFlight else { return }
                 exitInFlight = true
                 Task {
@@ -178,7 +202,7 @@ public struct TrainingView: View {
                 }
             }
         } message: {
-            Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
+            Text("本局结果尚未写入历史记录。可重试入账；或退出本局（暂存进度保留，可在历史记录返回训练）；或放弃本局（本局进度将被丢弃）。")
         }
         // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
         // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
