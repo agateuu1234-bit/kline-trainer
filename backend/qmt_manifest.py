@@ -1014,6 +1014,50 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     if previous is None:
         return
 
+    # ⓪ 崩溃恢复是**一次耦合的转移**，不是两个各自独立的许可（codex R11 [high]）。
+    #    spec §4.4 恢复第③档：删该股条目 **且** `cursor[market] ← min(cursor, idx)`。
+    #    分开判时「删了条目、游标原样停在后面」照样通过 —— 那只股**永远不会被
+    #    重新拉取**，池子静默缩水，正是恢复流程本来要消灭的那个状态。
+    scoped_removed = False
+    if recovery is not None:
+        uni = previous.get("source_snapshot", {})
+        uni = uni.get("universe", {}) if isinstance(uni, dict) else {}
+        lst = uni.get(recovery.market) if isinstance(uni, dict) else None
+        anchored = (isinstance(lst, list) and 0 <= recovery.universe_idx < len(lst)
+                    and lst[recovery.universe_idx] == recovery.stock_code)
+        if not anchored:
+            raise ManifestInvalidError(
+                f"崩溃恢复声明的范围与**冻结名单**对不上："
+                f"universe[{recovery.market!r}][{recovery.universe_idx}] 不是 "
+                f"{recovery.stock_code!r}。锚点核对是在途标记形状校验的同一条纪律"
+                "——一个错的下标能让 cursor 退到任意位置。"
+            )
+
+        def _has(m, code):
+            lst_f = m.get("files")
+            n = sum(1 for f in (lst_f if isinstance(lst_f, list) else [])
+                    if isinstance(f, dict) and f.get("stock_code") == code)
+            pool = m.get("pool_order")
+            pool = pool.get(recovery.market) if isinstance(pool, dict) else None
+            in_pool = any(isinstance(e, dict) and e.get("code") == code
+                          for e in (pool if isinstance(pool, list) else []))
+            return n, in_pool
+
+        pn, pp = _has(previous, recovery.stock_code)
+        nn, np_ = _has(payload, recovery.stock_code)
+        if (pn or pp) and not (nn or np_):
+            scoped_removed = True
+        elif (pn, pp) != (nn, np_):
+            # ⚠️ **本条造不出专属档（如实登记，本片第四次撞同一耦合）**：
+            # 「部分移除」产出的账本本身就非法（R21-F3：每个池条目恰配两条
+            # files 记录），落盘前的读侧校验会先把它拒掉，走不到这里。
+            # 保留它是**防御性冗余** —— 万一将来那条一致性规则被放宽。
+            raise ManifestInvalidError(
+                f"崩溃恢复只**部分**移除了 {recovery.stock_code}"
+                f"（files {pn}→{nn} 条、池条目 {pp}→{np_}）——"
+                "spec 要求那只股的两条 files 与池条目**一起**消失。"
+            )
+
     # ① 冻结字段：一经写入就不许再变。
     for k in _FROZEN_KEYS:
         if k in previous and previous[k] != payload.get(k):
@@ -1074,15 +1118,25 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
             if isinstance(previous.get("cursor"), dict) else None
         new_c = payload.get("cursor", {}).get(mk) \
             if isinstance(payload.get("cursor"), dict) else None
-        if isinstance(old_c, int) and isinstance(new_c, int) and new_c < old_c:
-            allowed = (recovery is not None and mk == recovery.market
-                       and new_c == min(old_c, recovery.universe_idx))
-            if not allowed:
+        if isinstance(old_c, int) and isinstance(new_c, int):
+            in_scope = recovery is not None and mk == recovery.market
+            want = min(old_c, recovery.universe_idx) if in_scope else None
+            if in_scope and scoped_removed:
+                # 删了那只股 ⇒ 游标**必须**退到确切位置（耦合转移的另一半）。
+                if new_c != want:
+                    raise ManifestInvalidError(
+                        f"崩溃恢复删除了 {recovery.stock_code}，"
+                        f"但 {mk} 层的**游标**是 {new_c}、应为 min(cursor, "
+                        f"{recovery.universe_idx}) = {want}。"
+                        "删条目与退游标是**一次耦合的转移**：只删不退的话，"
+                        "那只股永远不会被重新拉取，池子会静默缩水。"
+                    )
+            elif new_c < old_c:
                 raise ManifestInvalidError(
                     f"{where} 会让 {mk} 层的 cursor 从 {old_c} **倒退**到 {new_c}"
-                    + ("——超出本次崩溃恢复声明的范围（只允许退到 "
-                       f"min(cursor, {recovery.universe_idx})）。"
-                       if recovery is not None else
+                    + ("——本次崩溃恢复并未移除声明的那只股，"
+                       "**只退游标**同样超出范围。"
+                       if in_scope else
                        "——调用方交回来的很可能是一份过期副本。")
                 )
 
@@ -1247,6 +1301,14 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
     on_disk, previous = _expect_from_disk(stg_fd, ledger)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     payload.update(on_disk)
+    # ⚠️ **per-stock 提交时这两个字段的取值写死**（spec §4.5:785，O4-F2）。
+    # 不写死的后果：一棵干净 staging 用 --skip-existing-verify 起跑，一次
+    # 「只失败、没新增文件」的提交会把上一次的 `full` 存根**原样写回**
+    # （它结构上仍然合法）；若进程随后崩在收尾之前，磁盘上那份账本就一直
+    # **声称自己是 full 级**，而本次运行明确跳过了校验（codex R11 [medium]）。
+    # 定级是**收尾提交**的事，且必须在收尾复校跑完之后。
+    payload["source_verification"] = "partial"
+    payload["source_verification_evidence"] = {"level": "partial", "passes": []}
     # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须**声明范围**；
     # 范围之外的一切不变量照旧强制。
     _require_no_progress_rollback(previous, payload, "per-stock 提交", recovery)

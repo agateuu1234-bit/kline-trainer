@@ -1884,8 +1884,11 @@ def test_commit_stock_writes_a_readable_manifest(tmp_path):
     m = _valid_manifest()
     _d, fd = _staging(tmp_path)
     try:
-        commit_stock(fd, m, ledger=_expect(fd))
-        assert read_manifest(fd) == m
+        written = commit_stock(fd, m, ledger=_expect(fd))
+        # ⚠️ 比对**返回的那份**而不是入参：per-stock 提交会把 source_verification
+        # 写死成 partial（spec §4.5:785，O4-F2），故与入参本就不同。
+        assert read_manifest(fd) == written
+        assert written["source_verification"] == "partial"
     finally:
         os.close(fd)
 
@@ -3097,13 +3100,21 @@ def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_pa
     """
     import qmt_manifest as qm
     m = _valid_manifest()
-    exact = len(_json_rw.dumps(m, ensure_ascii=False).encode("utf-8"))
+    # ⚠️ 量的必须是**真正会落盘的那份**：per-stock 提交把 source_verification
+    # 写死成 partial，长度与入参不同。先跑一次拿到它，再据此设上限。
+    (tmp_path / "probe").mkdir()
+    _probe_d, _probe_fd = _staging(tmp_path / "probe")
+    try:
+        published = commit_stock(_probe_fd, m, ledger=_expect(_probe_fd))
+    finally:
+        os.close(_probe_fd)
+    exact = len(_json_rw.dumps(published, ensure_ascii=False).encode("utf-8"))
     d, fd = _staging(tmp_path)
     try:
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact)
         commit_stock(fd, m, ledger=_expect(fd))                        # 恰好等于上限 → 放行
         assert (d / MANIFEST_NAME).read_bytes() == \
-            _json_rw.dumps(m, ensure_ascii=False).encode("utf-8")
+            _json_rw.dumps(published, ensure_ascii=False).encode("utf-8")
         monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
         with pytest.raises(ManifestInvalidError, match="过大"):
             commit_stock(fd, m, ledger=_expect(fd))                    # 少一个字节 → 拒
@@ -3870,7 +3881,7 @@ def test_recovery_cursor_may_only_go_to_the_declared_index(tmp_path):
                                       if e["code"] != "600004.SH"]
         rolled["cursor"]["SH"] = 0          # 声明的是 idx=1，却退到了 0
         _recompute_evidence(rolled)
-        with pytest.raises(ManifestInvalidError, match="倒退"):
+        with pytest.raises(ManifestInvalidError, match="游标"):
             commit_stock(fd, rolled, ledger=ledger,
                          recovery=RecoveryScope(stock_code="600004.SH",
                                                 market="SH", universe_idx=1))
@@ -4019,5 +4030,155 @@ def test_batches_may_grow_by_appending(tmp_path):
         _recompute_evidence(grown)
         commit_stock(fd, grown, ledger=ledger)
         assert read_manifest(fd)["batches"] == [{"n": 1}, {"n": 2}]
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R11：1 high + 1 medium
+#   A 恢复的两半（删条目 / 退游标）我是**各自独立**判的，而 spec §4.4 恢复第③档
+#     是**一次耦合的转移**。删了却不退 → 那只股永远不会被重拉、池子静默缩水。
+#   B §4.5:785（O4-F2）明写「per-stock 提交时这两个字段的取值**必须写死**：
+#     `source_verification: "partial"` + evidence `{"level":"partial","passes":[]}`」
+#     —— 我实现时**漏了这条**，调用方的 `full` 标签被原样写盘。
+# ═════════════════════════════════════════════════════════════
+
+
+def _scope(idx=1):
+    return RecoveryScope(stock_code="600004.SH", market="SH", universe_idx=idx)
+
+
+def _drop_stock(m, code="600004.SH"):
+    t = copy.deepcopy(m)
+    t["files"] = [f for f in t["files"] if f["stock_code"] != code]
+    for mk in ("SH", "SZ", "BJ"):
+        t["pool_order"][mk] = [e for e in t["pool_order"][mk] if e["code"] != code]
+    return t
+
+
+def test_recovery_removing_a_stock_must_also_rewind_the_cursor(tmp_path):
+    """⭐⭐ [R11 high A] 恢复是**一次耦合的转移**：删该股条目 **且**
+    `cursor[market] ← min(cursor, universe_idx)`（spec §4.4 恢复第③档）。
+
+    我把两半各自独立判了 → 「删了条目、游标原样停在后面」照样通过。
+    后果：那只股**永远不会被重新拉取**（游标已经走过它），池子静默缩水，
+    最终可能报出假的池穷尽 —— 正是恢复流程本来要消灭的那个状态。
+
+    判别力：把耦合检查删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)          # cursor 原样不动
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="游标|cursor"):
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_rewind_the_cursor_without_removing_the_stock(tmp_path):
+    """⭐ 反方向：只退游标、不删该股条目，也超出了恢复的确切范围。
+
+    判别力：把「未删除时不许退游标」那半删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        only_rewind = copy.deepcopy(full)
+        only_rewind["cursor"]["SH"] = 1        # 退了，但条目都还在
+        _recompute_evidence(only_rewind)
+        with pytest.raises(ManifestInvalidError, match="游标|cursor"):
+            commit_stock(fd, only_rewind, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_recovery_scope_must_be_anchored_in_the_frozen_universe(tmp_path):
+    """⭐ [R11 high A 同族] 声明的 `universe_idx` 必须在**冻结名单**里确实是这只股。
+
+    spec 对在途标记的形状校验就要求 `source_snapshot.universe[market][idx] == code`
+    ——恢复范围是同一件事，否则一个错的下标能让 cursor 退到任意位置。
+    ⚠️ 构造期查不了这个（`RecoveryScope` 手里没有 manifest），只能在提交时查。
+
+    判别力：删掉锚点核对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)
+        bad["cursor"]["SH"] = 0
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="锚点|冻结|universe"):
+            # 冻结名单里 SH[0] 是 600000.SH，不是 600004.SH
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope(idx=0))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_of_a_never_committed_stock_needs_no_removal(tmp_path):
+    """方向②：恢复第①档（manifest 里该股无记录，崩在提交之前）——
+    什么都不用删、`cursor` 也不推进，必须照常提交（它要记 inflight_rollbacks）。
+
+    没有这一条，一个「声明了恢复就**必须**删点什么」的过严实现也能让上面几条绿，
+    而那会让第①档根本提交不了。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(inflight_rollbacks={"1": 1})
+        ledger = _committed(fd, m)
+        again = copy.deepcopy(m)
+        again["inflight_rollbacks"]["1"] = 2      # 只是遥测 +1
+        _recompute_evidence(again)
+        commit_stock(fd, again, ledger=ledger, recovery=_scope())
+        assert read_manifest(fd)["inflight_rollbacks"]["1"] == 2
+    finally:
+        os.close(fd)
+
+
+# ── B：per-stock 提交的校验级别写死 partial ──────────────────
+
+def test_commit_stock_always_publishes_partial_verification(tmp_path):
+    """⭐⭐ [R11 medium B] spec §4.5:785（O4-F2）明写 per-stock 提交时
+    `source_verification` / `source_verification_evidence` **取值写死**：
+    `partial` + 空 passes。
+
+    不写死的后果（codex 的场景）：一棵干净 staging 用 `--skip-existing-verify`
+    起跑，一次「只失败、没新增文件」的提交把上一次的 `full` 存根**原样写回**
+    （它结构上仍然合法）；若进程随后崩在收尾之前，**磁盘上那份账本就一直
+    声称自己是 full 级**，而本次运行明确跳过了校验。
+
+    判别力：把这两行投影删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest()                       # 调用方那份写着 full + 两趟
+        assert m["source_verification"] == "full"
+        ledger = begin_run(fd)
+        commit_stock(fd, m, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["source_verification"] == "partial"
+        assert on["source_verification_evidence"] == {"level": "partial", "passes": []}
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_still_publishes_the_real_verification_level(tmp_path):
+    """方向②：**收尾提交**才是定级的地方，不得被一并写死成 partial。
+
+    没有这一条，「两个入口都写死 partial」的实现也能让上一条绿 ——
+    而那会让 full / snapshot 级永远发布不出来，出货资格永远拿不到。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "full"
+        assert len(read_manifest(fd)["source_verification_evidence"]["passes"]) == 2
     finally:
         os.close(fd)
