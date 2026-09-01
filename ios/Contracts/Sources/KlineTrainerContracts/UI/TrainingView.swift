@@ -176,17 +176,20 @@ public struct TrainingView: View {
         //     （破坏性按钮标 `.destructive`）。本次**不改任何行为逻辑**，只是把出口补齐、把话说实。
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
-            // 退出本局 = **非破坏性**出口：`saveProgress` 落当前终态 + `endSession`，**不清 pending**。
-            // 与 replay「结算失败」弹窗同做法（那里 codex R3-F1 已定：必须显式 `lifecycle.back()` 而非
-            // `onSessionEnded(nil)` —— fence 已置 terminating、autosave 协程已死，不显式落盘的话槽里
-            // 只剩旧检查点，"暂存进度保留"这句承诺就落空了）。
-            // 保存失败 → 复用既有的「保存进度失败」弹窗（可重试 / 可放弃），**不新增错误路径**。
+            // 退出本局 = **非破坏性**出口，且**不依赖正在坏掉的那条存储路**（codex R1-high）。
+            // ⛔ 不用 `lifecycle.back()`：它必须 `saveProgress` **成功**才 `endSession`，而本弹窗
+            //    最现实的触发原因**正是写盘失败**（磁盘满 / DB 损坏 / IO）—— 那条出口会在最需要它的
+            //    时候恰好也坏掉，把用户弹进「保存进度失败」（只剩再写一次 或 破坏性弃局），
+            //    等于仍然没有安全出口。
+            // ⇒ 改用 `exitPreservingProgress()`：尽力落盘，**失败也照样安全退出**
+            //   （`endSession` 是纯内存收尾、不写盘），磁盘上最近一次自动存档原样留存；**永不弃局**。
             Button("退出本局", role: .cancel) {
                 guard !exitInFlight else { return }
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    do { try await lifecycle.back(); onExit() } catch { backFailed = true }
+                    await lifecycle.exitPreservingProgress()
+                    onExit()
                 }
             }
             // 放弃本局 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）。
@@ -202,7 +205,11 @@ public struct TrainingView: View {
                 }
             }
         } message: {
-            Text("本局结果尚未写入历史记录。可重试入账；或退出本局（暂存进度保留，可在历史记录返回训练）；或放弃本局（本局进度将被丢弃）。")
+            // ⚠️ 指路必须对（codex R1-medium）：正常局的 pending **不在历史记录里**（历史记录放的是
+            //    已入账的 `TrainingRecord`，而本局恰恰是没入账才走到这个弹窗），它从**首页那个主按钮**
+            //    回去 —— `HomeContent.swift:59` 逐字 `hasPending ? "继续训练" : "开始训练"`。
+            //    ⛔ 别照抄 replay 弹窗的「历史记录」：那个绑在一条已入账记录上，语境不同。
+            Text("本局结果尚未写入历史记录。可重试入账；或退出本局（保留进度，可在首页「继续训练」返回；若此刻无法写入，则保留到最近一次自动存档）；或放弃本局（本局进度将被丢弃）。")
         }
         // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
         // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，

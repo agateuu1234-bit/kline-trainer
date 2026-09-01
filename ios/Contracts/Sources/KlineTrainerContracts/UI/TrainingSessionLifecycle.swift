@@ -45,6 +45,24 @@ public struct TrainingSessionLifecycle {
         await coordinator.endSession()
     }
 
+    /// Q13（codex R1-high）：**永不失败、永不弃局**的安全退出。
+    /// 先尽力把当前进度落盘；**落盘失败也照样结束会话**（`endSession` 是纯内存收尾、不写盘），
+    /// 磁盘上最近一次自动存档因此**原样留存**。
+    ///
+    /// ⚠️ **它存在的理由**：`back()` 必须先 `saveProgress` **成功**才 `endSession`；而「结算入账失败」
+    ///    弹窗最现实的触发原因**正是写盘失败**（磁盘满 / DB 损坏 / IO 错误）—— 让唯一的安全出口
+    ///    依赖那条**正在坏掉的路**，等于没有出口：用户会被弹回「保存进度失败」（只有再写一次
+    ///    或破坏性弃局），最终仍被推向数据丢失。
+    /// ⛔ 本方法**绝不调用 `discardSession`** —— 它不是弃局，是「带着已有存档离开」。
+    /// - Returns: 当前进度是否成功落盘。`false` = 已安全退出，但保留的是**最近一次自动存档**。
+    @discardableResult
+    public func exitPreservingProgress() async -> Bool {
+        var saved = true
+        do { try await coordinator.saveProgress(engine: engine) } catch { saved = false }
+        await coordinator.endSession()
+        return saved
+    }
+
     /// 自动结束（plan v1.5 §6.2.5）：正式结束入账，返 recordId（Normal）/ nil（review/replay 非保存分支）。
     /// 不 endSession —— 结算确认后才结束（D2）。
     public func finalizeForSettlement() async throws -> Int64? {

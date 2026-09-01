@@ -28,7 +28,7 @@ struct FinalizeFailureAlertSourceGuardTests {
         }.joined(separator: "\n")
     }
 
-    /// **原始**源码（用户可见文案断言用）—— 文案本身就住在字符串字面量里，剥不得。
+    /// **原始**源码（`source` 的输入）。
     private func rawSource(_ rel: String) throws -> String {
         try String(contentsOf: srcDir.appendingPathComponent(rel), encoding: .utf8)
     }
@@ -36,7 +36,12 @@ struct FinalizeFailureAlertSourceGuardTests {
     private let tv = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
 
     /// 只取「结算入账失败」这一个弹窗的源码块：从它的 `.alert(` 起，到**下一个** `.alert(` 之前。
-    /// 不限定范围的话，断言会被同文件里另外两个弹窗的内容蒙混过去。
+    /// 不限定范围的话，断言会被同文件里另外三个弹窗的内容蒙混过去。
+    ///
+    /// ⚠️ **本块会连带圈进下一个弹窗的「前置注释」**（注释写在 `.alert(` 之上，边界切不掉它）。
+    ///    实测踩过：replay 弹窗上方的注释里引用了它自己的文案「…可在历史记录返回训练」，
+    ///    害本文件的文案断言误报。⇒ **所有断言一律喂剥掉注释的文本**（`source`）；
+    ///    字符串字面量**不剥**，故用户可见文案照样测得到。
     private func finalizeAlertBlock(_ text: String) throws -> String {
         let start = try #require(text.range(of: ".alert(\"结算入账失败\""),
                                  "锚点失效：找不到「结算入账失败」弹窗（文件被改名或标题被改？）")
@@ -57,12 +62,16 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "该弹窗应恰好三个按钮：重试 / 退出本局 / 放弃本局")
     }
 
-    @Test("必须有非破坏性出口：退出本局 → lifecycle.back()（保存进度后退出，不清 pending）")
+    @Test("必须有非破坏性出口，且该出口**不依赖正在坏掉的存储层**（codex R1-high）")
     func nonDestructiveExitExists() throws {
         let block = try finalizeAlertBlock(try source(tv))
         #expect(block.contains("Button(\"退出本局\""), "缺少非破坏性出口 —— 用户只剩会删数据的按钮")
-        #expect(block.contains("lifecycle.back()"),
-                "退出本局必须走 back()（saveProgress + endSession），⛔ 不得走 discard()")
+        // ⛔ 不得是 `lifecycle.back()`：它必须 saveProgress **成功**才 endSession，而本弹窗最现实的
+        //    触发原因正是写盘失败 ⇒ 那条出口在最需要它的时候恰好也坏了（codex R1-high）。
+        #expect(block.contains("lifecycle.exitPreservingProgress()"),
+                "退出本局必须走 exitPreservingProgress()（落盘失败也照样安全退出）")
+        #expect(!block.contains("lifecycle.back()"),
+                "⛔ back() 依赖写盘成功，不能当作失败场景下的安全出口")
     }
 
     @Test("破坏性按钮必须标 role: .destructive，且仍真的弃局")
@@ -74,12 +83,23 @@ struct FinalizeFailureAlertSourceGuardTests {
         #expect(block.contains("lifecycle.discard()"), "放弃本局仍必须真的弃局")
     }
 
-    @Test("文案必须属实：不得再声称「进度保留至最近存档」，且三条出口后果各自说清")
+    @Test("文案必须属实：不含旧假话、指对回去的地方、并说清「最坏保留到哪」")
     func alertCopyIsTruthful() throws {
-        let block = try finalizeAlertBlock(try rawSource(tv))
+        // ⚠️ 用 source（剥注释、**保留字符串字面量**）：文案住在 `Text("…")` 里，剥注释不影响它；
+        //    而不剥注释会把下一个弹窗的前置注释圈进来造成误报（见 finalizeAlertBlock 头注）。
+        let block = try finalizeAlertBlock(try source(tv))
         #expect(!block.contains("进度保留至最近存档"),
                 "这句与「放弃」实际清空整局 pending 的行为相反 —— 会诱导用户放心点下破坏性动作")
-        #expect(block.contains("暂存进度保留"), "必须告诉用户哪条出口会保留进度")
+        // 指路必须对（codex R1-medium）：正常局的 pending **不是**历史记录行（历史记录里放的是
+        // 已入账的 TrainingRecord），它从首页那个主按钮回去 —— `HomeContent.swift:59`
+        // 逐字：`hasPending ? "继续训练" : "开始训练"`。照抄 replay 弹窗的「历史记录」是错的：
+        // replay 绑在一条已入账记录上，正常局的 pending 还没入账。
+        #expect(!block.contains("历史记录返回训练"),
+                "⛔ 指错地方：正常局的 pending 不在历史记录里，用户会以为进度丢了")
+        #expect(block.contains("首页"), "必须指明回去的地方是首页")
+        #expect(block.contains("继续训练"), "必须点名首页那个按钮的实际文字")
+        // 诚实的下限：落盘失败时保留的是最近一次自动存档，不能笼统说「进度保留」
+        #expect(block.contains("最近一次自动存档"), "必须说清最坏情况保留到哪一档")
         #expect(block.contains("丢弃"), "必须明示「放弃本局」会丢弃本局进度")
     }
 }
