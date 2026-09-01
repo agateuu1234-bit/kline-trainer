@@ -2266,7 +2266,7 @@ def test_every_resolved_state_passes_the_read_side_validator():
 # ═════════════════════════════════════════════════════════════
 # S2b Task 18：commit_final —— 唯一能动生命周期字段的落盘入口
 # ═════════════════════════════════════════════════════════════
-from qmt_manifest import RunLedger, begin_run, commit_final
+from qmt_manifest import RecoveryScope, RunLedger, begin_run, commit_final
 
 
 def test_commit_final_writes_a_readable_manifest(tmp_path):
@@ -3575,29 +3575,6 @@ def test_commit_final_also_refuses_a_progress_rollback(tmp_path):
         os.close(fd)
 
 
-def test_crash_recovery_may_deliberately_roll_back(tmp_path):
-    """⭐⭐ 方向②：**spec 自己的崩溃恢复必须还能跑**。
-
-    §4.4 恢复第③档（「已提交但 final 不符」）要求 `cursor ← min(cursor,
-    universe_idx)` 且**只删该股的** files / pool_order 条目 —— 那是一次**合法的
-    回退**，且它发生在 `begin_run` 之后（§4.4:429：读完并校验 manifest 之后、
-    任何拷贝之前）。
-
-    没有这一条，「条目只增不减」的实现会**打死 spec 自己的恢复路径**，
-    让一棵崩过一次的 staging 永远修不好。
-    """
-    d, fd = _staging(tmp_path)
-    try:
-        ledger = begin_run(fd)
-        stale = _valid_manifest()
-        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
-        rolled = commit_stock(fd, stale, ledger=ledger, recovering_from_crash=True)
-        assert len(rolled["files"]) == 4
-        assert read_manifest(fd)["cursor"]["SH"] == 1
-    finally:
-        os.close(fd)
-
-
 def test_normal_growth_and_no_change_are_both_accepted(tmp_path):
     """方向②：只增不减、以及**完全不变**（配额触顶那一支不推进 cursor）都必须放行。
 
@@ -3612,19 +3589,6 @@ def test_normal_growth_and_no_change_are_both_accepted(tmp_path):
         commit_stock(fd, m, ledger=ledger)                       # 完全不变
         commit_stock(fd, _with_more_stocks(m), ledger=ledger)    # 只增
         assert len(read_manifest(fd)["files"]) == 6
-    finally:
-        os.close(fd)
-
-
-def test_recovering_from_crash_must_be_a_real_bool(tmp_path):
-    """与其它开关同规格：非空字符串是真值，会把一次普通提交伪装成恢复提交。"""
-    d, fd = _staging(tmp_path)
-    try:
-        ledger = begin_run(fd)
-        for bad in ("false", "", 0, 1, None):
-            with pytest.raises(ValueError, match="recovering_from_crash"):
-                commit_stock(fd, _valid_manifest(), ledger=ledger,
-                             recovering_from_crash=bad)
     finally:
         os.close(fd)
 
@@ -3655,5 +3619,278 @@ def test_a_cursor_only_regression_is_refused(tmp_path):
         assert read_manifest(fd)["cursor"]["SH"] == 2
         with pytest.raises(ManifestInvalidError, match="倒退"):
             commit_stock(fd, m, ledger=ledger)       # 只有游标退回去
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R9：三条（2 high + 1 medium），最彻底的一轮（73 条查看命令）
+#
+# A 回滚守卫**只看我想到的那三样**（files 身份 / pool 身份 / cursor 方向），
+#   其余非生命周期字段全都能被一份过期副本改写 —— 第①问（按字段穷尽）
+#   应用到**守卫本身**，我又只列了想得到的那几个。
+# B `recovering_from_crash=True` 是**无限制**的旁路：spec 只允许删「那一只在途
+#   的股」并把该层 cursor 退到它的下标，而这个 API 收不到目标、也不校验增量。
+# C 语法合法的 JSON 仍可能抛**裸 ValueError**（超长整数撞 Python 的位数上限）。
+# ═════════════════════════════════════════════════════════════
+
+
+def _rich(**kw):
+    """一份带齐「计数 / 历史 / 遥测」的账本。"""
+    return _valid_manifest(committed_bytes=9_000_000,
+                           failures=[{"stock_code": "600006.SH", "attempts": 2}],
+                           batches=[{"n": 1}], inflight_rollbacks={"1": 2}, **kw)
+
+
+def _committed(fd, m):
+    """先提交一份，返回运行凭据。"""
+    ledger = begin_run(fd)
+    commit_stock(fd, m, ledger=ledger)
+    return ledger
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("committed_bytes 被调小", lambda t: t.__setitem__("committed_bytes", 1)),
+    ("failures[].attempts 被清零", lambda t: t["failures"][0].__setitem__("attempts", 0)),
+    ("batches 历史被丢弃", lambda t: t.__setitem__("batches", [])),
+    ("inflight_rollbacks 遥测被丢弃", lambda t: t.__setitem__("inflight_rollbacks", {})),
+    ("已提交文件的 sha256 被改", lambda t: t["files"][0].__setitem__("sha256", "0" * 64)),
+    ("已提交文件的 bytes 被改", lambda t: t["files"][0].__setitem__("bytes", 1)),
+    ("冻结的 seed 被换", lambda t: t.__setitem__("seed", "别人的-seed")),
+    ("冻结的 universe 被换",
+     lambda t: t["source_snapshot"]["universe"].__setitem__("BJ", [])),
+    ("冻结的 source_mount 被换",
+     lambda t: t["source_mount"].__setitem__("device", "//别人/share")),
+])
+def test_a_stale_snapshot_cannot_rewrite_committed_state(tmp_path, label, mutate):
+    """⭐⭐ [R9 high A] 这 9 个字段此前**逐个实测全部能被改写**。
+
+    危害各不相同、但都实在：累计字节调小 → **绕开 `--max-bytes` 硬上限**；
+    重试次数清零 → **复活已耗尽的候选**；历史与遥测被丢弃 → 报告里的
+    `inflight_rollbacks` 归零，把本机故障史抹成「市场就这样」；
+    已提交文件的 bytes/sha256 被改 → **完整性基线被污染**，
+    pilot 的 `staging_intact` 从此校验的是一条假基线；
+    冻结的 seed / universe / source_mount 被换 → staging 与归属标记**永久对不上**。
+
+    判别力：删掉对应那条判据，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _rich()
+        ledger = _committed(fd, m)
+        tampered = copy.deepcopy(m)
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_legitimate_growth_of_counters_and_history_is_accepted(tmp_path):
+    """⭐ 方向②：这些字段**正常往前走**必须照常放行，否则整条流水线动不了。
+
+    没有这一条，一个「所有非生命周期字段都必须逐字不变」的过严实现也能让
+    上面 9 档全绿 —— 而那会让第二只股根本提交不了。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _rich()
+        ledger = _committed(fd, m)
+        grown = copy.deepcopy(m)
+        grown["committed_bytes"] = 9_500_000                       # 累计增加
+        grown["failures"][0]["attempts"] = 3                        # 重试次数增加
+        grown["failures"].append({"stock_code": "600008.SH", "attempts": 1})
+        grown["batches"].append({"n": 2})                           # 历史追加
+        grown["inflight_rollbacks"]["1"] = 3                        # 遥测增加
+        grown["inflight_rollbacks"]["2"] = 1
+        grown = _with_more_stocks(grown)                            # 再拉一只股
+        commit_stock(fd, grown, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["committed_bytes"] == 9_500_000
+        assert len(on["files"]) == 6 and len(on["batches"]) == 2
+    finally:
+        os.close(fd)
+
+
+# ── B：崩溃恢复必须是**窄口**，不是旁路 ──────────────────────
+
+def _multi_stock():
+    m = _valid_manifest()
+    for code, name, idx in [("600004.SH", "浦发银行", 1), ("600006.SH", "工商银行", 2)]:
+        m["files"] += [_file_rec(code, name, "1m"), _file_rec(code, name, "daily")]
+        m["pool_order"]["SH"].append({"code": code, "universe_idx": idx})
+    m["cursor"] = {"SH": 3, "SZ": 1, "BJ": 0}
+    return _recompute_evidence(m)
+
+
+def test_recovery_cannot_wipe_stocks_outside_its_scope(tmp_path):
+    """⭐⭐ [R9 high B] 声明「崩溃恢复」此前是**无限制**旁路。
+
+    本机复现：一次「恢复」把所有市场的所有股票全清了、cursor 全归零，
+    而 spec §4.4 恢复第③档只允许**删那一只在途的股**并把**该层** cursor
+    退到它的 `universe_idx`。后果：已提交的 CSV 全部变成无主文件，
+    整轮进度丢光，而账本结构上还是合法的。
+
+    判别力：把范围描述符换回布尔旁路，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _multi_stock())
+        wipe = _valid_manifest()
+        wipe["pool_order"] = {"SH": [], "SZ": [], "BJ": []}
+        wipe["files"] = []
+        wipe["cursor"] = {"SH": 0, "SZ": 0, "BJ": 0}
+        _recompute_evidence(wipe)
+        with pytest.raises(ManifestInvalidError, match="范围|超出|只允许"):
+            commit_stock(fd, wipe, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_removes_exactly_the_inflight_stock(tmp_path):
+    """⭐⭐ 方向②：spec 明写允许的那一次回退必须**跑得通**。
+
+    §4.4 恢复第③档：只删该股的 files / pool_order 条目，
+    并 `cursor[market] ← min(cursor, universe_idx)`。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        _recompute_evidence(rolled)
+        commit_stock(fd, rolled, ledger=ledger,
+                     recovery=RecoveryScope(stock_code="600004.SH",
+                                            market="SH", universe_idx=1))
+        on = read_manifest(fd)
+        assert {f["stock_code"] for f in on["files"]} == {"600000.SH", "000001.SZ",
+                                                          "600006.SH"}
+        assert on["cursor"]["SH"] == 1 and on["cursor"]["SZ"] == 1
+    finally:
+        os.close(fd)
+
+
+def test_recovery_still_enforces_every_unrelated_invariant(tmp_path):
+    """⭐ 恢复只放开「删那一只股」，**其余不变量照旧**（codex R9 原话）。
+
+    这里在一次合法范围的恢复里顺手把 seed 换掉 —— 必须仍被拒。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        rolled["seed"] = "别人的-seed"                      # 顺手夹带
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="seed"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_scope_rejects_malformed_descriptors():
+    """范围描述符本身在构造期就要挡住非法值（与本模块其它构造期校验同规格）。"""
+    ok = dict(stock_code="600004.SH", market="SH", universe_idx=1)
+    for k, bad in [("stock_code", "600004"), ("stock_code", 123),
+                   ("market", "XX"), ("market", None),
+                   ("universe_idx", -1), ("universe_idx", "1"),
+                   ("universe_idx", True)]:
+        with pytest.raises(ValueError):
+            RecoveryScope(**dict(ok, **{k: bad}))
+    with pytest.raises(ValueError, match="后缀|一致"):
+        RecoveryScope(stock_code="600004.SH", market="SZ", universe_idx=1)
+
+
+# ── C：解析器级异常 ──────────────────────────────────────────
+
+def test_an_oversized_integer_is_rejected_as_a_manifest_error(tmp_path):
+    """⭐ [R9 medium C] Python 3.11（CI 钉的版本）对超过 4300 位的整数
+    在 `int()` 转换时抛**裸 `ValueError`**，而不是 `JSONDecodeError`。
+
+    一份约 5 KB 的 manifest（远低于 64 MiB 上限）就能让读回口带着原始
+    traceback 崩掉，`ManifestInvalidError` 那句恢复指引一个字都印不出来
+    —— 与 S2-F9、S2-F10 是同一族：**守卫自己被它该抓的那种损坏弄坏了**。
+
+    判别力：把 `except` 改回只接 `JSONDecodeError`，本条必红。
+    """
+    _d, fd = _staging(tmp_path, raw='{"manifest_version": ' + "9" * 5000 + "}")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_a_deeply_nested_json_is_rejected_as_a_manifest_error(tmp_path):
+    """同族：深嵌套 JSON 会撞递归上限抛 `RecursionError`（不是 ValueError）。"""
+    _d, fd = _staging(tmp_path, raw="[" * 20000 + "]" * 20000)
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_cursor_may_only_go_to_the_declared_index(tmp_path):
+    """⭐ 隔离「恢复的 cursor 只许退到 `min(cursor, universe_idx)`」这一条判据。
+
+    这里删的股、删的池条目**都在声明范围内**（files / pool 两条判据都放行），
+    只有 cursor 退过了头 —— 于是只剩 cursor 那条够得着。
+
+    ⚠️ **`files` 那一侧的范围判据造不出专属档（如实登记）**：
+    要让它单独触发，就得让 pool 判据放行，而账本自身的一致性规则（R21-F3）
+    要求每个池条目恰配 1m + daily 两条文件记录 —— 少一边就先被读侧校验拒掉。
+    这与前面 `_require_no_progress_rollback` 那条登记是**同一个结构性绑定**。
+
+    判别力：把 cursor 的范围判据放宽成「声明了恢复就随便退」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 0          # 声明的是 idx=1，却退到了 0
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="倒退"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_touch_another_markets_cursor(tmp_path):
+    """⭐ 同族：恢复声明的是 SH 层，就不许顺手把 SZ 层的 cursor 也退回去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        rolled["cursor"]["SZ"] = 0          # 顺手夹带别的层
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="SZ"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
     finally:
         os.close(fd)

@@ -827,7 +827,14 @@ def _read_manifest_with_digest(stg_fd: int) -> tuple[dict, str] | None:
         raise ManifestInvalidError(f"{MANIFEST_NAME} 是空文件")
     try:
         payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    # ⚠️ **不能只接 `JSONDecodeError`**（codex R9 [medium]）：语法完全合法的 JSON
+    # 仍可能在**解析器层**抛别的异常 —— Python 3.11（CI 钉的版本）对超过 4300 位的
+    # 整数在 `int()` 转换时抛**裸 `ValueError`**，深嵌套则抛 `RecursionError`。
+    # 一份约 5 KB 的 manifest（远低于 64 MiB 上限）就能让读回口带着原始 traceback
+    # 崩掉，恢复指引一个字都印不出来 —— 与 S2-F9 / S2-F10 同族：
+    # **守卫自己被它该抓的那种损坏弄坏了**。
+    # （`JSONDecodeError` 是 `ValueError` 的子类，故写 `ValueError` 即可覆盖两者。）
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise ManifestInvalidError(
             f"{MANIFEST_NAME} 不是合法 JSON：{e}。"
             "这通常意味着上一次写入被打断（文件被截断）。"
@@ -945,8 +952,48 @@ def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> tuple[dict, dict | None
     return {}, None
 
 
+# 一经写入就**不许再变**的字段（spec：`seed` 是复用准入条件；`source_snapshot`
+# 是「冻结的完整分层 universe + export_log_sha256」；`source_mount` 记的是 fetch
+# 那一次的挂载身份；`staged_export_log` 是那一份 export_log 的字节记录）。
+# ⚠️ `source_verification` / `source_verification_evidence` **不在**此列 ——
+# 它们由收尾复校重算，本来就该变。
+_FROZEN_KEYS = ("manifest_version", "seed", "source_snapshot", "source_mount",
+                "staged_export_log")
+
+
+@dataclass(frozen=True)
+class RecoveryScope:
+    """崩溃恢复允许改动的**确切范围**（spec §4.4 恢复第③档）。
+
+    ⚠️ **取代原先那个布尔旁路**（codex R9 [high]）：`recovering_from_crash=True`
+    此前**整条**跳过回滚守卫。本机复现：一次「恢复」把所有市场的所有股票全清了、
+    cursor 全归零，而账本结构上还合法 —— 已提交的 CSV 全部变成无主文件。
+    spec 只允许**删那一只在途的股**并把**该层** cursor 退到它的 `universe_idx`。
+
+    **一切与该范围无关的不变量照旧强制**。
+    """
+    stock_code: str
+    market: str
+    universe_idx: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stock_code, str) or \
+                _STOCK_CODE_RE.match(self.stock_code) is None:
+            raise ValueError(f"stock_code 形如 600000.SH，收到 {self.stock_code!r}")
+        if not isinstance(self.market, str) or self.market not in MARKETS:
+            raise ValueError(f"market 必须是 {list(MARKETS)} 之一，收到 {self.market!r}")
+        if not isinstance(self.universe_idx, int) or \
+                isinstance(self.universe_idx, bool) or self.universe_idx < 0:
+            raise ValueError(
+                f"universe_idx 必须是非负整数，收到 {self.universe_idx!r}")
+        if not self.stock_code.endswith("." + self.market):
+            raise ValueError(
+                f"stock_code {self.stock_code!r} 的后缀与 market {self.market!r} 不一致")
+
+
 def _require_no_progress_rollback(previous: dict | None, payload: dict,
-                                  where: str) -> None:
+                                  where: str,
+                                  recovery: "RecoveryScope | None" = None) -> None:
     """磁盘上已提交的进度**不得被一份过期的调用方副本悄悄回滚**。
 
     ⚠️ 运行凭据管的是「账本有没有被**外人**动过」（消失 / 被替换 / 指纹变了），
@@ -967,36 +1014,119 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     if previous is None:
         return
 
-    def _file_ids(m):
-        return {(f.get("stock_code"), f.get("period"), f.get("relative_path"))
-                for f in m.get("files", []) if isinstance(f, dict)}
+    # ① 冻结字段：一经写入就不许再变。
+    for k in _FROZEN_KEYS:
+        if k in previous and previous[k] != payload.get(k):
+            raise ManifestInvalidError(
+                f"{where} 改动了**冻结字段** {k!r} —— 它一经写入就不该再变"
+                "（seed / 冻结的 universe / 挂载身份 / staged export_log）。"
+                "调用方交回来的很可能是一份过期或来自另一棵 staging 的副本；"
+                "改掉它会让这棵 staging 与自己的归属标记永久对不上。"
+            )
 
-    lost = _file_ids(previous) - _file_ids(payload)
-    if lost:
-        raise ManifestInvalidError(
-            f"{where} 会把已提交的 {len(lost)} 条 files 记录**回滚**掉"
-            f"（例如 {sorted(lost)[0]}）——调用方交回来的很可能是一份过期副本。"
-            "账本是 files / pool_order / cursor 的唯一真相，抹掉它们等于让已拷到盘上"
-            "的股票既不在池里、又被 pilot 当成来路不明的文件。"
-        )
+    def _by_id(m):
+        out = {}
+        for f in m.get("files", []) if isinstance(m.get("files"), list) else []:
+            if isinstance(f, dict):
+                out[(f.get("stock_code"), f.get("period"),
+                     f.get("relative_path"))] = f
+        return out
+
+    # ② 已提交的 files 记录：不得消失，也不得被改写。
+    prev_files, new_files = _by_id(previous), _by_id(payload)
+    for key, rec in prev_files.items():
+        if key not in new_files:
+            if recovery is not None and key[0] == recovery.stock_code:
+                continue                      # 恢复范围内：允许删这一只股的记录
+            raise ManifestInvalidError(
+                f"{where} 会把已提交的 files 记录 {key} **回滚**掉"
+                + ("——超出本次崩溃恢复声明的范围（只允许删 "
+                   f"{recovery.stock_code}）。" if recovery is not None else
+                   "——调用方交回来的很可能是一份过期副本。")
+                + "账本是 files / pool_order / cursor 的唯一真相，抹掉它们等于让"
+                  "已拷到盘上的股票既不在池里、又被 pilot 当成来路不明的文件。"
+            )
+        if new_files[key] != rec:
+            raise ManifestInvalidError(
+                f"{where} **改写**了已提交文件 {key} 的记录（bytes / sha256 等）"
+                "——完整性基线一旦被污染，pilot 的 staging_intact 从此校验的是"
+                "一条假基线。已提交的文件记录只许新增，不许修改。"
+            )
 
     for mk in MARKETS:
         def _pool_ids(m):
-            lst = m.get("pool_order", {}).get(mk, [])
+            lst = m.get("pool_order", {})
+            lst = lst.get(mk, []) if isinstance(lst, dict) else []
             return {(e.get("code"), e.get("universe_idx"))
                     for e in lst if isinstance(e, dict)}
+        # ③ 池条目不得消失。
         gone = _pool_ids(previous) - _pool_ids(payload)
+        if recovery is not None and mk == recovery.market:
+            gone -= {(recovery.stock_code, recovery.universe_idx)}
         if gone:
             raise ManifestInvalidError(
                 f"{where} 会把 {mk} 层已提交的池条目 {sorted(gone)} **回滚**掉"
-                "——调用方交回来的很可能是一份过期副本。"
+                + ("——超出本次崩溃恢复声明的范围。" if recovery is not None else
+                   "——调用方交回来的很可能是一份过期副本。")
             )
-        old_c = previous.get("cursor", {}).get(mk)
-        new_c = payload.get("cursor", {}).get(mk)
+        # ④ cursor 不得倒退（恢复范围内允许退到那一只股的下标）。
+        old_c = previous.get("cursor", {}).get(mk) \
+            if isinstance(previous.get("cursor"), dict) else None
+        new_c = payload.get("cursor", {}).get(mk) \
+            if isinstance(payload.get("cursor"), dict) else None
         if isinstance(old_c, int) and isinstance(new_c, int) and new_c < old_c:
+            allowed = (recovery is not None and mk == recovery.market
+                       and new_c == min(old_c, recovery.universe_idx))
+            if not allowed:
+                raise ManifestInvalidError(
+                    f"{where} 会让 {mk} 层的 cursor 从 {old_c} **倒退**到 {new_c}"
+                    + ("——超出本次崩溃恢复声明的范围（只允许退到 "
+                       f"min(cursor, {recovery.universe_idx})）。"
+                       if recovery is not None else
+                       "——调用方交回来的很可能是一份过期副本。")
+                )
+
+    # ⑤ 单调计数：累计字节 / 历史 / 遥测 / 每股重试次数，只增不减。
+    ob, nb = previous.get("committed_bytes"), payload.get("committed_bytes")
+    if isinstance(ob, int) and not isinstance(ob, bool) and isinstance(nb, int) \
+            and not isinstance(nb, bool) and nb < ob:
+        raise ManifestInvalidError(
+            f"{where} 会让 committed_bytes 从 {ob} **减少**到 {nb}"
+            "——它是累计量，调小它等于绕开 --max-bytes 这条硬上限。"
+        )
+    obt, nbt = previous.get("batches"), payload.get("batches")
+    if isinstance(obt, list) and isinstance(nbt, list) and len(nbt) < len(obt):
+        raise ManifestInvalidError(
+            f"{where} 会把 batches 历史从 {len(obt)} 条**丢弃**到 {len(nbt)} 条"
+            "——它是只增的历史。"
+        )
+    orb, nrb = previous.get("inflight_rollbacks"), payload.get("inflight_rollbacks")
+    if isinstance(orb, dict) and isinstance(nrb, dict):
+        for k, v in orb.items():
+            nv = nrb.get(k)
+            if isinstance(v, int) and not isinstance(v, bool) and \
+                    (not isinstance(nv, int) or isinstance(nv, bool) or nv < v):
+                raise ManifestInvalidError(
+                    f"{where} 会让 inflight_rollbacks[{k!r}] 从 {v} **减少**到 {nv!r}"
+                    "——它是基础设施故障的遥测，丢掉它会把本机故障史抹成"
+                    "「市场就这样」（R66-F3）。"
+                )
+
+    def _attempts(m):
+        out = {}
+        lst = m.get("failures")
+        for f in lst if isinstance(lst, list) else []:
+            if isinstance(f, dict) and isinstance(f.get("attempts"), int) \
+                    and not isinstance(f.get("attempts"), bool):
+                out[f.get("stock_code")] = f["attempts"]
+        return out
+    oa, na = _attempts(previous), _attempts(payload)
+    for code, v in oa.items():
+        nv = na.get(code)
+        if nv is None or nv < v:
             raise ManifestInvalidError(
-                f"{where} 会让 {mk} 层的 cursor 从 {old_c} **倒退**到 {new_c}"
-                "——调用方交回来的很可能是一份过期副本。"
+                f"{where} 会让 {code} 的 failures.attempts 从 {v} **减少**到 {nv!r}"
+                "——重试次数只增不减，调小它等于复活一个已经耗尽重试的候选。"
             )
 
 
@@ -1039,7 +1169,7 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
 
 
 def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
-                 recovering_from_crash: bool = False) -> dict:
+                 recovery: "RecoveryScope | None" = None) -> dict:
     """**per-stock 提交**（每只股一次，R37-F1）。返回真正写出去的那份。
 
     ⚠️⚠️ **本函数在写入路径上够不到生命周期三字段，且这是无条件的**：
@@ -1056,18 +1186,16 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    if not isinstance(recovering_from_crash, bool):
+    if recovery is not None and not isinstance(recovery, RecoveryScope):
         raise ValueError(
-            "recovering_from_crash 必须是 True/False（真正的布尔值），"
-            f"收到 {recovering_from_crash!r}——它是「这次回退是有意的」的唯一声明，"
-            "非空字符串等真值会把一次普通提交伪装成恢复提交"
-        )
+            f"recovery 必须是 RecoveryScope 或 None，收到 {recovery!r}"
+            "——它是「这次回退是有意的、范围到此为止」的唯一声明")
     on_disk, previous = _expect_from_disk(stg_fd, ledger)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     payload.update(on_disk)
-    if not recovering_from_crash:
-        # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须显式声明。
-        _require_no_progress_rollback(previous, payload, "per-stock 提交")
+    # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须**声明范围**；
+    # 范围之外的一切不变量照旧强制。
+    _require_no_progress_rollback(previous, payload, "per-stock 提交", recovery)
     ledger._advance(_write_manifest(stg_fd, payload), on_disk)
     return payload
 
