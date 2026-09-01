@@ -4238,3 +4238,109 @@ def test_a_normal_run_still_publishes_the_earned_label(tmp_path):
         assert len(written["source_verification_evidence"]["passes"]) == 2
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R12：两条 high
+#   A **运行凭据本身是可变的** —— 它记的是安全事实（跳没跳过校验、见没见过账本、
+#     那份账本的指纹），而调用方一行赋值就能抹掉；两个提交入口还**不核对**
+#     传进来的到底是不是真凭据（鸭子类型照收）。
+#     ⚠️ 与 R1 那条「escape 证据塞进 frozen dataclass 仍可变」同族——
+#        **凡承载安全事实的对象，先问「调用方改得动吗」**。
+#   B **`failures` 里放两条同名记录**就能绕开有界重试：转移守卫按 stock_code
+#     收进 dict（后者覆盖前者），而读侧根本不校验 `failures`。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_the_run_ledger_cannot_be_mutated_by_the_caller(tmp_path):
+    """⭐⭐ [R12 high A] 凭据的每个字段都是安全事实，必须改不动。
+
+    本机复现三档：
+    · 把 `skip_existing_verify` 改回 False → **跳过校验的运行又发布了 full**；
+    · 把 `existed` 改成 False → 被删掉的账本被当成引导态**凭空重建**；
+    · `digest` 同理（改成任意值即可让「被替换」检测失效）。
+
+    判别力：去掉 `frozen=True`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd, skip_existing_verify=True)
+        for field, value in [("skip_existing_verify", False), ("existed", True),
+                             ("digest", "0" * 64), ("lifecycle", {})]:
+            with pytest.raises(AttributeError):
+                setattr(ledger, field, value)
+    finally:
+        os.close(fd)
+
+
+def test_commit_entry_points_reject_a_counterfeit_ledger(tmp_path):
+    """⭐ [R12 high A 同族] 「凭据不可变」挡不住**另造一个**。
+
+    两个提交入口此前不核对类型，任何带着同名属性的对象都收 ——
+    一个 `existed=False` 的假凭据就能让「账本被删」重新变成「引导态」。
+
+    判别力：去掉 isinstance 核对，本条必红。
+    """
+    class Counterfeit:
+        existed = False
+        digest = None
+        lifecycle = {}
+        skip_existing_verify = False
+
+        def _advance(self, *a):
+            pass
+
+    d, fd = _staging(tmp_path)
+    try:
+        for call in (lambda: commit_stock(fd, _valid_manifest(), ledger=Counterfeit()),
+                     lambda: commit_final(fd, _valid_manifest(),
+                                          outcome=clean_finish(),
+                                          ledger=Counterfeit())):
+            with pytest.raises(ValueError, match="RunLedger"):
+                call()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("order", ["低在前", "高在前"])
+def test_duplicate_failure_records_are_refused(tmp_path, order):
+    """⭐⭐ [R12 high B] `failures` 里放两条同名记录就能绕开有界重试。
+
+    转移守卫按 `stock_code` 收进 dict（**后者覆盖前者**），而读侧根本不校验
+    `failures`（它是扩展字段）。于是 `[attempts 0, attempts 2]` 两条同名记录
+    既过守卫、又过读侧校验 —— 而补拉时「先重试 `attempts < 2` 的条目」会命中
+    **第一条**，**一个已经耗尽重试的候选被复活**，反复运行还可能原地打转。
+
+    两种次序都要拦：低在前时守卫看到的是高值（放行），高在前时看到的是低值
+    （虽然会被单调判据拦下，但拦下的理由是错的）。
+
+    判别力：删掉重复检测，「低在前」那一档必红。
+    """
+    lo = {"stock_code": "600006.SH", "universe_idx": 2, "attempts": 0}
+    hi = {"stock_code": "600006.SH", "universe_idx": 2, "attempts": 2}
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[dict(hi)])
+        ledger = _committed(fd, m)
+        dup = copy.deepcopy(m)
+        dup["failures"] = [lo, hi] if order == "低在前" else [hi, lo]
+        _recompute_evidence(dup)
+        with pytest.raises(ManifestInvalidError, match="重复|同名"):
+            commit_stock(fd, dup, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_distinct_failure_records_are_still_accepted(tmp_path):
+    """方向②：不同股票各一条必须照常放行，否则失败台账根本记不下去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600006.SH", "attempts": 1}])
+        ledger = _committed(fd, m)
+        more = copy.deepcopy(m)
+        more["failures"].append({"stock_code": "000002.SZ", "attempts": 1})
+        _recompute_evidence(more)
+        commit_stock(fd, more, ledger=ledger)
+        assert len(read_manifest(fd)["failures"]) == 2
+    finally:
+        os.close(fd)

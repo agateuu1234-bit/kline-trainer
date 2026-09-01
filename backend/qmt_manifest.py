@@ -885,7 +885,7 @@ def _write_manifest(stg_fd: int, payload: dict) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunLedger:
     """本次运行对磁盘上那份 manifest 的**预期**（由 `begin_run()` 产出）。
 
@@ -912,9 +912,17 @@ class RunLedger:
     skip_existing_verify: bool = False
 
     def _advance(self, digest: str, lifecycle: dict) -> None:
-        self.existed = True
-        self.digest = digest
-        self.lifecycle = lifecycle
+        """把预期推进到刚写出去的那一份（**只许本模块调用**）。
+
+        ⚠️ 本类是 `frozen=True`：它的每个字段都是**安全事实**（跳没跳过校验、
+        见没见过账本、那份账本的指纹），调用方一行赋值就能抹掉的话，
+        这些事实就不成其为凭据（codex R12 [high]，本机复现三档：
+        改 `skip_existing_verify` → 跳过校验的运行又发出 `full`；
+        改 `existed` → 被删的账本被当成引导态凭空重建；`digest` 同理）。
+        """
+        object.__setattr__(self, "existed", True)
+        object.__setattr__(self, "digest", digest)
+        object.__setattr__(self, "lifecycle", lifecycle)
 
 
 def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> tuple[dict, dict | None]:
@@ -1193,6 +1201,25 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                     f"{nrb.get(k)!r}——它是基础设施故障的遥测，只增不减。"
                 )
 
+    # ⚠️ **先拦同名记录，再做转移比较**（codex R12 [high]）：下面按 `stock_code`
+    # 收进 dict，**后者覆盖前者**；而读侧根本不校验 `failures`（扩展字段）。
+    # 于是 `[attempts 0, attempts 2]` 两条同名记录既过守卫又过读侧校验，
+    # 而补拉时「先重试 `attempts < 2` 的条目」会命中**第一条** ——
+    # **一个已经耗尽重试的候选被复活**，反复运行还可能原地打转。
+    lst = payload.get("failures")
+    seen_codes = set()
+    for f in (lst if isinstance(lst, list) else []):
+        if not isinstance(f, dict):
+            continue
+        code = f.get("stock_code")
+        if code in seen_codes:
+            raise ManifestInvalidError(
+                f"{where} 的 failures 里有**重复**的 {code!r} 记录。"
+                "按 stock_code 归并时后者会覆盖前者，而补拉是「先重试 attempts<2 的"
+                "条目」——两条同名记录能让一个已耗尽重试的候选被复活。"
+            )
+        seen_codes.add(code)
+
     def _attempts(m):
         out = {}
         lst = m.get("failures")
@@ -1299,6 +1326,11 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
+    if not isinstance(ledger, RunLedger):
+        # 「凭据不可变」挡不住**另造一个**：任何带着同名属性的对象都能冒充，
+        # 一个 `existed=False` 的假凭据就让「账本被删」重新变成「引导态」。
+        raise ValueError(
+            f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
     if recovery is not None and not isinstance(recovery, RecoveryScope):
         raise ValueError(
             f"recovery 必须是 RecoveryScope 或 None，收到 {recovery!r}"
@@ -1608,6 +1640,9 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     #
     # `read_manifest` 返回 `None` 是**合法**的引导态（首份 manifest 还没提交）；
     # 它抛异常则说明磁盘上那份账本已经坏了/被换了 —— 此时拒绝发布是 fail-closed。
+    if not isinstance(ledger, RunLedger):
+        raise ValueError(
+            f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
     # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
     # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
