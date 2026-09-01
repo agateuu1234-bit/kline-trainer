@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import weakref
 import json
 import os
 import re
@@ -885,61 +886,84 @@ def _write_manifest(stg_fd: int, payload: dict) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-# 模块私有令牌：`RunLedger` 的构造期核它，于是**只有本模块造得出**运行凭据。
-# ⚠️ `frozen=True` 只挡住「改」，挡不住「**重造**」—— dataclass 的构造函数是公开的，
-# 照着字段值另造一个一模一样的实例即可（codex R13 [high]，本机复现两档：
-# 关掉 skip 位让收尾又发 full；伪造成引导态让被删的账本被重建）。
-_LEDGER_TOKEN = object()
+# 一经写入就**不许再变**的字段（spec：`seed` 是复用准入条件；`source_snapshot`
+# 是「冻结的完整分层 universe + export_log_sha256」；`source_mount` 记的是 fetch
+# 那一次的挂载身份；`staged_export_log` 是那一份 export_log 的字节记录）。
+# ⚠️ `source_verification` / `source_verification_evidence` **不在**此列 ——
+# 它们由收尾复校重算，本来就该变。
+_FROZEN_KEYS = ("manifest_version", "seed", "source_snapshot", "source_mount",
+                "staged_export_log")
 
 
-@dataclass(frozen=True)
-class RunLedger:
-    """本次运行对磁盘上那份 manifest 的**预期**（由 `begin_run()` 产出）。
+# ── 运行凭据：**不透明句柄 + 模块内注册表** ────────────────
+#
+# ⚠️ 安全事实（跳没跳过校验 / 见没见过账本 / 账本指纹）**不能存在调用方手里
+# 那个对象上**。前两轮的教训：
+# · R12：普通可变 dataclass → 一行赋值就改掉；
+# · R13：`frozen=True` 挡住「改」，挡不住「**重造**」（构造函数是公开的）；
+# · R14：加了构造期令牌，`dataclasses.replace` 仍把令牌**一起复制**过去，
+#        `object.__setattr__` 也照样改得动冻结实例。
+# ⇒ 终局做法：句柄只是**查表用的钥匙**，事实全部存在模块内部的注册表里。
+#   句柄没有任何可写字段（`__slots__` 为空），也没有公开的构造路径。
 
-    ⚠️ **必须分别记「当时有没有账本」与「那份账本的字节指纹」**（codex R7 [high]）：
-    此前用一个裸的生命周期 dict 当凭据，而它对「磁盘上没有账本」和「账本在、
-    但没有生命周期字段」**都是 `{}`** —— 两种截然不同的状态被压成同一个哨兵。
-    后果：一棵已经积累了 `files` / `pool_order` / `cursor` 的干净 staging，
-    账本被删之后会被当成引导态、拿调用方内存里那份（可能过期的）**凭空重建**，
-    已积累的进度静默丢失；换成另一份合法账本同样无人察觉。
 
-    ⭐ 与 R1 那条「manifest 不存在 ≠ manifest 坏了」是同一族的**反向**错误：
-      那次我把两种状态正确地分开了，这次又把两种状态合并成一个哨兵。
-      **判据：凡用「空值/假值」当哨兵，先问它是不是把两种语义压在了一起。**
-
-    ⚠️ 本对象是**可变**的：每次提交成功后必须更新到刚写出去的那一份，
-    否则引导态跑完第一次提交之后，账本再消失就检测不出来了。
-    """
+@dataclass
+class _RunState:
+    """注册表里那份真正的运行状态（**模块内部可见，调用方够不着**）。"""
     existed: bool
     digest: str | None
     lifecycle: dict
-    # 本次运行是否传了 `--skip-existing-verify`。spec §4.5:342 明写
-    # 「**一旦使用，manifest 与 pilot 报告都打上 `source_verification: "partial"`**」
-    # —— 收尾提交据此把级别压成 partial，**凭据是这件事唯一的持久记忆**。
-    skip_existing_verify: bool = False
-    # 只有 `begin_run()` 会传对令牌；这是「这份凭据确实来自启动闸」的唯一证明。
-    token: object = None
+    skip_existing_verify: bool
 
-    def __post_init__(self) -> None:
-        if self.token is not _LEDGER_TOKEN:
+
+class RunLedger:
+    """`begin_run()` 产出的**不透明凭据句柄**。
+
+    它本身不携带任何可改的安全事实 —— 读取走只读属性，写入只有本模块的
+    `_advance()` 做得到。绕过 `begin_run()` 造出来的句柄（哪怕类型完全正确）
+    因为不在注册表里，任何一次读取都会当场拒绝。
+    """
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise ValueError(
+            "RunLedger 只能由 begin_run() 产出 —— 它记的是安全事实，"
+            "自己造一个等于把这些事实伪造掉。")
+
+    def _state(self) -> _RunState:
+        st = _LEDGER_STATE.get(self)
+        if st is None:
             raise ValueError(
-                "RunLedger 只能由 begin_run() 产出 —— 它记的是安全事实"
-                "（跳没跳过校验 / 见没见过账本 / 账本指纹），"
-                "照字段值另造一个一模一样的实例就能把这些事实伪造掉。"
-            )
+                "这个 RunLedger 不是 begin_run() 产出的（不在运行注册表里）")
+        return st
+
+    @property
+    def existed(self) -> bool:
+        return self._state().existed
+
+    @property
+    def digest(self) -> "str | None":
+        return self._state().digest
+
+    @property
+    def lifecycle(self) -> dict:
+        return self._state().lifecycle
+
+    @property
+    def skip_existing_verify(self) -> bool:
+        return self._state().skip_existing_verify
 
     def _advance(self, digest: str, lifecycle: dict) -> None:
-        """把预期推进到刚写出去的那一份（**只许本模块调用**）。
+        """把预期推进到刚写出去的那一份（**只许本模块调用**）。"""
+        st = self._state()
+        st.existed = True
+        st.digest = digest
+        st.lifecycle = lifecycle
 
-        ⚠️ 本类是 `frozen=True`：它的每个字段都是**安全事实**（跳没跳过校验、
-        见没见过账本、那份账本的指纹），调用方一行赋值就能抹掉的话，
-        这些事实就不成其为凭据（codex R12 [high]，本机复现三档：
-        改 `skip_existing_verify` → 跳过校验的运行又发出 `full`；
-        改 `existed` → 被删的账本被当成引导态凭空重建；`digest` 同理）。
-        """
-        object.__setattr__(self, "existed", True)
-        object.__setattr__(self, "digest", digest)
-        object.__setattr__(self, "lifecycle", lifecycle)
+
+_LEDGER_STATE: "weakref.WeakKeyDictionary[RunLedger, _RunState]" = \
+    weakref.WeakKeyDictionary()
+
 
 
 def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> tuple[dict, dict | None]:
@@ -981,15 +1005,6 @@ def _expect_from_disk(stg_fd: int, ledger: RunLedger) -> tuple[dict, dict | None
     return {}, None
 
 
-# 一经写入就**不许再变**的字段（spec：`seed` 是复用准入条件；`source_snapshot`
-# 是「冻结的完整分层 universe + export_log_sha256」；`source_mount` 记的是 fetch
-# 那一次的挂载身份；`staged_export_log` 是那一份 export_log 的字节记录）。
-# ⚠️ `source_verification` / `source_verification_evidence` **不在**此列 ——
-# 它们由收尾复校重算，本来就该变。
-_FROZEN_KEYS = ("manifest_version", "seed", "source_snapshot", "source_mount",
-                "staged_export_log")
-
-
 @dataclass(frozen=True)
 class RecoveryScope:
     """崩溃恢复允许改动的**确切范围**（spec §4.4 恢复第③档）。
@@ -1020,6 +1035,31 @@ class RecoveryScope:
                 f"stock_code {self.stock_code!r} 的后缀与 market {self.market!r} 不一致")
 
 
+def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
+    """**只看这一份 payload 自身**的检查（与「有没有上一份」无关）。
+
+    ⚠️ 与转移检查分开的理由（codex R14 [high]）：绑在同一个
+    `if previous is None: return` 里，**首次提交会整个跳过它们**。
+
+    目前只有一条：`failures` 不得有同名记录。按 `stock_code` 归并时后者覆盖
+    前者，而补拉是「先重试 `attempts < 2` 的条目」（§4.4:350）——两条同名记录
+    能让一个**已耗尽重试的候选被复活**（codex R12 [high]）。
+    """
+    lst = payload.get("failures")
+    seen_codes = set()
+    for f in (lst if isinstance(lst, list) else []):
+        if not isinstance(f, dict):
+            continue
+        code = f.get("stock_code")
+        if code in seen_codes:
+            raise ManifestInvalidError(
+                f"{where} 的 failures 里有**重复**的 {code!r} 记录。"
+                "按 stock_code 归并时后者会覆盖前者，而补拉是「先重试 attempts<2 的"
+                "条目」——两条同名记录能让一个已耗尽重试的候选被复活。"
+            )
+        seen_codes.add(code)
+
+
 def _require_no_progress_rollback(previous: dict | None, payload: dict,
                                   where: str,
                                   recovery: "RecoveryScope | None" = None) -> None:
@@ -1040,6 +1080,13 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     ⇒ 故本守卫只拦**未声明的**回退；唯一正当理由由调用方显式声明
     （`commit_stock(..., recovering_from_crash=True)`）。
     """
+    # ⚠️ **只看 payload 的固有检查必须先于早退**（codex R14 [high]）：
+    # 它们与「有没有上一份」无关。绑在同一个 `if previous is None: return` 里的
+    # 后果是**首次提交整个跳过它们** —— 本机复现：引导态第一次提交就把
+    # `[attempts 0, attempts 2]` 两条同名记录写了进去，既复活一个已耗尽重试的
+    # 候选，又让**下一次**提交因「重复」被拒，这棵 staging 当场卡死。
+    _require_intrinsic_payload_ok(payload, where)
+
     if previous is None:
         return
 
@@ -1196,6 +1243,26 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                 f"{payload.get('committed_bytes')!r}——它是累计量，"
                 "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
             )
+        # ⚠️ **只拦「减少」不够**（codex R14 [high]）：**加了文件却原地不动**
+        # 照样通过 —— 下一次运行从一个被低估的累计值起步，突破 --max-bytes
+        # 这条硬上限，最坏把仅约 30 GiB 的可用空间写满（本机复现：新增 246 万
+        # 字节而累计值纹丝不动）。
+        # ⚠️ 判据取「**至少涨够新增文件的字节数**」而非严格相等：
+        # spec 未定 committed_bytes 计不计失败 `.part` 的字节（5o 只说
+        # `--max-bytes` 是逐块扣减的流式上限），严格相等会把那种合法记账判死。
+        added = 0
+        for key, rec in new_files.items():
+            if key not in prev_files:
+                b = _int_or_none(rec.get("bytes"))
+                if b is not None:
+                    added += b
+        if added and nb < ob + added:
+            raise ManifestInvalidError(
+                f"{where} 新增了合计 {added} 字节的 files 记录，而 "
+                f"committed_bytes 只从 {ob} 涨到 {nb}——累计量必须至少涨够"
+                "新增文件的字节数，否则下一次运行会从一个被低估的总数起步，"
+                "突破 --max-bytes 硬上限。"
+            )
 
     obt = previous.get("batches")
     if isinstance(obt, list):
@@ -1226,25 +1293,6 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                     f"{where} 会让 inflight_rollbacks[{k!r}] 从 {ov} 变成 "
                     f"{nrb.get(k)!r}——它是基础设施故障的遥测，只增不减。"
                 )
-
-    # ⚠️ **先拦同名记录，再做转移比较**（codex R12 [high]）：下面按 `stock_code`
-    # 收进 dict，**后者覆盖前者**；而读侧根本不校验 `failures`（扩展字段）。
-    # 于是 `[attempts 0, attempts 2]` 两条同名记录既过守卫又过读侧校验，
-    # 而补拉时「先重试 `attempts < 2` 的条目」会命中**第一条** ——
-    # **一个已经耗尽重试的候选被复活**，反复运行还可能原地打转。
-    lst = payload.get("failures")
-    seen_codes = set()
-    for f in (lst if isinstance(lst, list) else []):
-        if not isinstance(f, dict):
-            continue
-        code = f.get("stock_code")
-        if code in seen_codes:
-            raise ManifestInvalidError(
-                f"{where} 的 failures 里有**重复**的 {code!r} 记录。"
-                "按 stock_code 归并时后者会覆盖前者，而补拉是「先重试 attempts<2 的"
-                "条目」——两条同名记录能让一个已耗尽重试的候选被复活。"
-            )
-        seen_codes.add(code)
 
     def _attempts(m):
         out = {}
@@ -1328,11 +1376,14 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
             "那些已记录的文件还在、还是原来的字节。请去掉该 flag 重跑，"
             "或换新 staging + 新 seed 重拉。"
         )
-    return RunLedger(existed=seen is not None,
-                     digest=seen[1] if seen is not None else None,
-                     lifecycle=snapshot,
-                     skip_existing_verify=skip_existing_verify,
-                     token=_LEDGER_TOKEN)
+    handle = object.__new__(RunLedger)          # 绕过公开构造路径，只此一处
+    _LEDGER_STATE[handle] = _RunState(
+        existed=seen is not None,
+        digest=seen[1] if seen is not None else None,
+        lifecycle=snapshot,
+        skip_existing_verify=skip_existing_verify,
+    )
+    return handle
 
 
 def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
@@ -1353,9 +1404,12 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
 
     代价是每股多一次 manifest 读回——与同一次提交里的 `F_FULLFSYNC` 相比可以忽略。
     """
-    if not isinstance(ledger, RunLedger):
-        # 「凭据不可变」挡不住**另造一个**：任何带着同名属性的对象都能冒充，
-        # 一个 `existed=False` 的假凭据就让「账本被删」重新变成「引导态」。
+    if not isinstance(ledger, RunLedger) or ledger not in _LEDGER_STATE:
+        # 类型对不够：还必须在**模块内的运行注册表**里登记过
+        # ——否则 `object.__new__(RunLedger)` 造一个就能冒充。
+        # ⚠️ 本条**造不出专属档**（如实登记）：真正的防线在句柄的**属性访问**上
+        # （每次读取都查注册表，绕不过去），入口这道只是早失败的冗余。
+        # 这是本片少数几个「冗余是设计使然、不是遗漏」的地方。
         raise ValueError(
             f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
     if recovery is not None and not isinstance(recovery, RecoveryScope):
@@ -1667,7 +1721,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     #
     # `read_manifest` 返回 `None` 是**合法**的引导态（首份 manifest 还没提交）；
     # 它抛异常则说明磁盘上那份账本已经坏了/被换了 —— 此时拒绝发布是 fail-closed。
-    if not isinstance(ledger, RunLedger):
+    if not isinstance(ledger, RunLedger) or ledger not in _LEDGER_STATE:
         raise ValueError(
             f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。

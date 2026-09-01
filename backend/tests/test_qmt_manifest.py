@@ -3712,7 +3712,9 @@ def test_legitimate_growth_of_counters_and_history_is_accepted(tmp_path):
         m = _rich()
         ledger = _committed(fd, m)
         grown = copy.deepcopy(m)
-        grown["committed_bytes"] = 9_500_000                       # 累计增加
+        # ⚠️ 新增两条文件记录时，累计量必须**至少涨够它们的字节数**（R14 high B）。
+        _added = 2 * 1234567
+        grown["committed_bytes"] = 9_000_000 + _added              # 累计增加
         grown["failures"][0]["attempts"] = 3                        # 重试次数增加
         grown["failures"].append({"stock_code": "600008.SH", "attempts": 1})
         grown["batches"].append({"n": 2})                           # 历史追加
@@ -3721,7 +3723,7 @@ def test_legitimate_growth_of_counters_and_history_is_accepted(tmp_path):
         grown = _with_more_stocks(grown)                            # 再拉一只股
         commit_stock(fd, grown, ledger=ledger)
         on = read_manifest(fd)
-        assert on["committed_bytes"] == 9_500_000
+        assert on["committed_bytes"] == 9_000_000 + _added
         assert len(on["files"]) == 6 and len(on["batches"]) == 2
     finally:
         os.close(fd)
@@ -4396,10 +4398,13 @@ def test_a_forged_ledger_of_the_real_class_is_refused(tmp_path):
 
     判别力：去掉构造期的令牌核对，本条必红。
     """
+    # ⚠️ 2026-09-01 订正：R14 之后凭据已不是 dataclass，而是**不透明句柄**
+    # （安全事实存在模块内部的注册表里）。「另造一个」的形态也随之变了：
+    # 公开构造路径直接拒绝，`object.__new__` 造出来的不在注册表里。
     with pytest.raises(ValueError, match="begin_run"):
-        RunLedger(True, "0" * 64, {}, False)
-    with pytest.raises(ValueError, match="begin_run"):
-        RunLedger(False, None, {})
+        RunLedger()
+    with pytest.raises(TypeError):
+        RunLedger(True, "0" * 64, {}, False)          # 连签名都对不上了
 
 
 def test_begin_run_still_produces_a_usable_ledger(tmp_path):
@@ -4410,5 +4415,123 @@ def test_begin_run_still_produces_a_usable_ledger(tmp_path):
         assert isinstance(ledger, RunLedger)
         commit_stock(fd, _valid_manifest(), ledger=ledger)
         commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R14：三条 high
+#   A 令牌是 dataclass 的**初始化字段** → `dataclasses.replace` 连它一起复制；
+#     `object.__setattr__` 也照样改得动冻结实例。
+#     ⇒ 安全事实不能存在**调用方手里那个对象**上，只能存在模块内部。
+#   B 累计字节守卫只拦「减少」→ **加了文件却原地不动**照样通过，
+#     下一次运行从一个被低估的总数起步 → 突破 `--max-bytes` 硬上限。
+#   C **引导态（首次提交）整个跳过了只看 payload 的检查** ——
+#     `previous is None` 直接 return，连「同名 failures」都没查。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_ledger_cannot_be_forged_by_reconstruction_or_setattr(tmp_path):
+    """⭐⭐ [R14 high A] 凭据必须是**不透明句柄**，安全事实存在模块内部。
+
+    本机复现两条绕法：
+    · `dataclasses.replace(real, skip_existing_verify=False)` —— 令牌被一起复制，
+      构造期核对照过 → 跳过校验的运行又发布了 `full`；
+    · `object.__setattr__(real, "existed", False)` —— 冻结实例照样改得动。
+
+    判别力：把安全事实搬回句柄自身的字段，本条必红。
+    """
+    import dataclasses as _dc
+    d, fd = _staging(tmp_path)
+    try:
+        real = begin_run(fd, skip_existing_verify=True)
+        with pytest.raises(TypeError):
+            _dc.replace(real, skip_existing_verify=False)     # 已不是 dataclass
+        with pytest.raises(AttributeError):
+            object.__setattr__(real, "existed", False)        # 没有可写的字段
+        with pytest.raises(ValueError, match="begin_run"):
+            RunLedger()                                       # 也造不出空的
+        assert real.skip_existing_verify is True              # 事实原样可读
+    finally:
+        os.close(fd)
+
+
+def test_a_handle_not_issued_by_begin_run_is_refused(tmp_path):
+    """⭐ 绕过注册表另造一个句柄（`object.__new__`）也必须被拒 ——
+    句柄只是钥匙，钥匙不在锁里登记过就不算数。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        stray = object.__new__(RunLedger)
+        with pytest.raises(ValueError, match="begin_run"):
+            commit_stock(fd, _valid_manifest(), ledger=stray)
+    finally:
+        os.close(fd)
+
+
+def test_committed_bytes_must_grow_with_newly_added_files(tmp_path):
+    """⭐⭐ [R14 high B] 守卫只拦「减少」，于是**加了文件却原地不动**照样通过。
+
+    本机复现：新增两条共 246 万字节的文件记录，而 `committed_bytes` 仍是 1000。
+    后果：下一次运行从一个**被低估的累计值**起步，
+    **突破 `--max-bytes` 这条硬上限**，最坏把仅约 30 GiB 的可用空间写满。
+
+    判据取「**至少涨够新增文件的字节数**」而非严格相等：
+    ⚠️ spec 未定「committed_bytes 计不计失败 `.part` 的字节」（5o 说 `--max-bytes`
+    是逐块扣减的流式上限），严格相等会把那种合法记账方式判死。已在 spec 登记。
+
+    判别力：把判据退回「只拦减少」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=1000)
+        ledger = _committed(fd, m)
+        flat = _with_more_stocks(m)          # 加了两条文件记录
+        flat["committed_bytes"] = 1000       # 累计值原地不动
+        _recompute_evidence(flat)
+        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+            commit_stock(fd, flat, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_committed_bytes_may_grow_by_more_than_the_new_files(tmp_path):
+    """方向②：涨得**比新增文件更多**必须放行 —— 失败的 `.part` 也消耗了预算，
+    而 spec 未规定它计不计。过严会把一种合法记账判死。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=1000)
+        ledger = _committed(fd, m)
+        grown = _with_more_stocks(m)
+        added = sum(f["bytes"] for f in grown["files"]
+                    if f["stock_code"] == "600004.SH")
+        grown["committed_bytes"] = 1000 + added + 999_999     # 多算了失败的 .part
+        _recompute_evidence(grown)
+        commit_stock(fd, grown, ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == 1000 + added + 999_999
+    finally:
+        os.close(fd)
+
+
+def test_the_first_commit_still_refuses_duplicate_failures(tmp_path):
+    """⭐⭐ [R14 high C] 引导态（磁盘上还没有账本）**整个跳过了只看 payload 的检查**。
+
+    本机复现：**首次**提交就把 `[attempts 0, attempts 2]` 两条同名记录写了进去
+    —— 既复活一个已耗尽重试的候选，又让**下一次**提交因为「重复」被拒，
+    这棵 staging 当场卡死。
+
+    根因是把「只看 payload 的固有检查」与「新旧对比的转移检查」绑在了同一个
+    `if previous is None: return` 里。
+
+    判别力：把重复检测挪回早退之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        first = _valid_manifest(failures=[{"stock_code": "600006.SH", "attempts": 0},
+                                          {"stock_code": "600006.SH", "attempts": 2}])
+        with pytest.raises(ManifestInvalidError, match="重复|同名"):
+            commit_stock(fd, first, ledger=ledger)
     finally:
         os.close(fd)
