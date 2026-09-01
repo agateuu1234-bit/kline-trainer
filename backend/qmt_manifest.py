@@ -1086,46 +1086,100 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                        "——调用方交回来的很可能是一份过期副本。")
                 )
 
-    # ⑤ 单调计数：累计字节 / 历史 / 遥测 / 每股重试次数，只增不减。
-    ob, nb = previous.get("committed_bytes"), payload.get("committed_bytes")
-    if isinstance(ob, int) and not isinstance(ob, bool) and isinstance(nb, int) \
-            and not isinstance(nb, bool) and nb < ob:
-        raise ManifestInvalidError(
-            f"{where} 会让 committed_bytes 从 {ob} **减少**到 {nb}"
-            "——它是累计量，调小它等于绕开 --max-bytes 这条硬上限。"
-        )
-    obt, nbt = previous.get("batches"), payload.get("batches")
-    if isinstance(obt, list) and isinstance(nbt, list) and len(nbt) < len(obt):
-        raise ManifestInvalidError(
-            f"{where} 会把 batches 历史从 {len(obt)} 条**丢弃**到 {len(nbt)} 条"
-            "——它是只增的历史。"
-        )
-    orb, nrb = previous.get("inflight_rollbacks"), payload.get("inflight_rollbacks")
-    if isinstance(orb, dict) and isinstance(nrb, dict):
+    # ⑤ 单调计数：累计字节 / 历史 / 遥测 / 每股重试次数。
+    #
+    # ⚠️⚠️ **「上一份里有的，新的必须仍在、类型仍对」**（codex R10 [high]）：
+    # 守卫此前写成「两边类型都对才比」，于是**字段缺席或类型不对时守卫被跳过**、
+    # 改写照样落盘。而这些都是**扩展字段**，读侧校验根本不要求它们存在、兜不住。
+    # 「对坏输入要健壮」（S2-F9）指的是**别崩**，**不是别拦**。
+    def _int_or_none(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    ob = _int_or_none(previous.get("committed_bytes"))
+    if ob is not None:
+        nb = _int_or_none(payload.get("committed_bytes"))
+        if nb is None or nb < ob:
+            raise ManifestInvalidError(
+                f"{where} 会让 committed_bytes 从 {ob} 变成 "
+                f"{payload.get('committed_bytes')!r}——它是累计量，"
+                "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
+            )
+
+    obt = previous.get("batches")
+    if isinstance(obt, list):
+        nbt = payload.get("batches")
+        # ⚠️ **只比长度不够**：一次**等长改写**就能把历史悄悄换掉（本机复现过）。
+        # 旧列表必须是新列表的**前缀** —— batches 是只追加的历史。
+        if not isinstance(nbt, list) or nbt[:len(obt)] != obt:
+            raise ManifestInvalidError(
+                f"{where} 会**改写或丢弃** batches 历史（旧 {len(obt)} 条必须原样"
+                f"作为新列表的前缀保留，读到 {nbt!r}）——它是只追加的历史。"
+            )
+
+    orb = previous.get("inflight_rollbacks")
+    if isinstance(orb, dict):
+        nrb = payload.get("inflight_rollbacks")
+        if not isinstance(nrb, dict):
+            raise ManifestInvalidError(
+                f"{where} 会**丢弃** inflight_rollbacks 遥测（读到 {nrb!r}）"
+                "——丢掉它会把本机故障史抹成「市场就这样」（R66-F3）。"
+            )
         for k, v in orb.items():
-            nv = nrb.get(k)
-            if isinstance(v, int) and not isinstance(v, bool) and \
-                    (not isinstance(nv, int) or isinstance(nv, bool) or nv < v):
+            ov = _int_or_none(v)
+            if ov is None:
+                continue
+            nv = _int_or_none(nrb.get(k))
+            if nv is None or nv < ov:
                 raise ManifestInvalidError(
-                    f"{where} 会让 inflight_rollbacks[{k!r}] 从 {v} **减少**到 {nv!r}"
-                    "——它是基础设施故障的遥测，丢掉它会把本机故障史抹成"
-                    "「市场就这样」（R66-F3）。"
+                    f"{where} 会让 inflight_rollbacks[{k!r}] 从 {ov} 变成 "
+                    f"{nrb.get(k)!r}——它是基础设施故障的遥测，只增不减。"
                 )
 
     def _attempts(m):
         out = {}
         lst = m.get("failures")
         for f in lst if isinstance(lst, list) else []:
-            if isinstance(f, dict) and isinstance(f.get("attempts"), int) \
-                    and not isinstance(f.get("attempts"), bool):
-                out[f.get("stock_code")] = f["attempts"]
+            if isinstance(f, dict):
+                out[f.get("stock_code")] = _int_or_none(f.get("attempts"))
         return out
+
+    def _proved_success(m, code):
+        """该股在这份 manifest 里**自证成功**了吗？
+
+        判据 = 它在 `pool_order` 里有锚点条目，且 `files` 里恰好两条记录
+        （1m + daily，R21-F3）。
+        """
+        pool = m.get("pool_order")
+        pool = pool if isinstance(pool, dict) else {}
+        anchored = any(
+            isinstance(e, dict) and e.get("code") == code
+            for mk in MARKETS
+            for e in (pool.get(mk) if isinstance(pool.get(mk), list) else []))
+        lst = m.get("files")
+        n = sum(1 for f in (lst if isinstance(lst, list) else [])
+                if isinstance(f, dict) and f.get("stock_code") == code)
+        return anchored and n == 2
+
     oa, na = _attempts(previous), _attempts(payload)
     for code, v in oa.items():
-        nv = na.get(code)
+        if v is None:
+            continue
+        if code not in na:
+            # ⚠️ **spec §4.4:350 + O2-F14 明写「重试成功即把该条目移出 failures
+            # 并计入 batches 历史」** —— 一律拒会把这条路堵死，让一个只是瞬时
+            # 失败过的候选**永远回不到池子里**，最终报出假的池穷尽 / 达不到地板
+            # （codex R10 [high]）。故：**移出必须自证成功**。
+            if _proved_success(payload, code):
+                continue
+            raise ManifestInvalidError(
+                f"{where} 把 {code} 的 failures 条目移出了，却没有它成功的证据"
+                "（`pool_order` 里的锚点条目 + `files` 里恰好两条记录）"
+                "——凭空移出等于复活一个已经耗尽重试的候选。"
+            )
+        nv = na[code]
         if nv is None or nv < v:
             raise ManifestInvalidError(
-                f"{where} 会让 {code} 的 failures.attempts 从 {v} **减少**到 {nv!r}"
+                f"{where} 会让 {code} 的 failures.attempts 从 {v} 变成 {nv!r}"
                 "——重试次数只增不减，调小它等于复活一个已经耗尽重试的候选。"
             )
 

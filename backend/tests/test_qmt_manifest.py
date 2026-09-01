@@ -3500,7 +3500,10 @@ def test_many_commits_in_one_run_are_all_accepted(tmp_path):
         for i in range(5):
             commit_stock(fd, _valid_manifest(committed_bytes=i), ledger=ledger)
         assert read_manifest(fd)["committed_bytes"] == 4
-        commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+        # ⚠️ 收尾也必须带上已累计的量：调用方丢掉 committed_bytes 会被单调守卫
+        # 正确地判红（R10 high B）——现实里 S4 手里那份本来就该是累计的。
+        commit_final(fd, _valid_manifest(committed_bytes=4),
+                     outcome=clean_finish(), ledger=ledger)
     finally:
         os.close(fd)
 
@@ -3892,5 +3895,129 @@ def test_recovery_may_not_touch_another_markets_cursor(tmp_path):
             commit_stock(fd, rolled, ledger=ledger,
                          recovery=RecoveryScope(stock_code="600004.SH",
                                                 market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R10：两条 high，**两条都是我 R9 那次修复自己引入的**
+#
+# A 我那条「attempts 只增不减」把 spec 自己的**重试成功**路径堵死了
+#   （§4.4:350 + O2-F14 原文：「重试成功即把该条目移出 failures 并计入 batches」）
+#   —— 又一次修过头，而且是方向②没测到的那一半：我为「增长」配了放行档，
+#   **没为「合法的移除」配**。
+# B 我那些守卫写成 `if isinstance(旧) and isinstance(新) …`，于是**类型不符或
+#   字段缺席时守卫被跳过**而不是拒绝 —— 「对坏输入要健壮」被我写成了
+#   「对坏输入就放行」。⚠️ 这是 S2-F9 那条纪律的**反向陷阱**。
+# ═════════════════════════════════════════════════════════════
+
+
+def _retry_succeeded(m):
+    """把 600004.SH 从 failures 里移出，并给它补上「成功」的证据。"""
+    t = copy.deepcopy(m)
+    t["files"] += [_file_rec("600004.SH", "浦发银行", "1m"),
+                   _file_rec("600004.SH", "浦发银行", "daily")]
+    t["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
+    t["cursor"]["SH"] = 2
+    t["failures"] = [f for f in t["failures"] if f["stock_code"] != "600004.SH"]
+    return _recompute_evidence(t)
+
+
+def test_a_successfully_retried_stock_may_leave_the_failure_ledger(tmp_path):
+    """⭐⭐ [R10 high A] 方向②：spec 明写「**重试成功即把该条目移出 `failures`**」
+    （§4.4:350 与 O2-F14）。我那条「attempts 只增不减」把这条路堵死了 ——
+    于是一个只是**瞬时**失败过的候选**永远回不到池子里**，池子凭空缩水，
+    最终可能报出假的「池穷尽 / 达不到地板」，而那是要记到市场账上的结论。
+
+    判别力：把「移出必须自证成功」那一支删掉（退回一律拒），本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600004.SH",
+                                       "universe_idx": 1, "attempts": 1}])
+        ledger = _committed(fd, m)
+        commit_stock(fd, _retry_succeeded(m), ledger=ledger)
+        on = read_manifest(fd)
+        assert on["failures"] == []
+        assert any(e["code"] == "600004.SH" for e in on["pool_order"]["SH"])
+    finally:
+        os.close(fd)
+
+
+def test_a_failure_entry_may_not_vanish_without_proof_of_success(tmp_path):
+    """⭐ 与上一条配对：**只有自证成功**才准移出。
+
+    没有这一条，「移出一律放行」的实现也能让上一条绿 —— 而那正是
+    「重试次数被清零、候选被复活」那个洞换了个形状。
+    自证 = 该股在 `pool_order` 里有锚点条目、且 `files` 里恰好两条记录。
+
+    ⚠️ **「恰好两条记录」那半边造不出专属档（如实登记，本片第三次撞同一个耦合）**：
+    要单独触发它，就得构造「池里有该股、files 却不足两条」——而那本身就是一份
+    **非法账本**（R21-F3），落盘前的读侧校验会先把它拒掉，走不到这条判据。
+    与 `_require_no_progress_rollback` 里 files/pool 那两处登记同源。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600004.SH",
+                                       "universe_idx": 1, "attempts": 1}])
+        ledger = _committed(fd, m)
+        sneaky = copy.deepcopy(m)
+        sneaky["failures"] = []            # 凭空移出，没有任何成功证据
+        _recompute_evidence(sneaky)
+        with pytest.raises(ManifestInvalidError, match="failures"):
+            commit_stock(fd, sneaky, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("committed_bytes 整个删掉", lambda t: t.pop("committed_bytes")),
+    ("committed_bytes 换成字符串", lambda t: t.__setitem__("committed_bytes", "0")),
+    ("committed_bytes 换成 None", lambda t: t.__setitem__("committed_bytes", None)),
+    ("batches 整个删掉", lambda t: t.pop("batches")),
+    ("batches 换成等长但内容不同", lambda t: t.__setitem__("batches", [{"n": 999}])),
+    ("batches 换成非列表", lambda t: t.__setitem__("batches", "x")),
+    ("inflight_rollbacks 整个删掉", lambda t: t.pop("inflight_rollbacks")),
+    ("inflight_rollbacks 换成非字典", lambda t: t.__setitem__("inflight_rollbacks", [])),
+])
+def test_a_monotonic_field_may_not_be_erased_by_omission_or_wrong_type(
+        tmp_path, label, mutate):
+    """⭐⭐ [R10 high B] 守卫此前写成「两边类型都对才比」——于是**字段缺席或
+    类型不对时守卫被跳过**，改写照样落盘。而这些都是**扩展字段**，
+    读侧校验（`validate_manifest`）根本不要求它们存在，兜不住。
+
+    「对坏输入要健壮」（S2-F9）指的是**别崩**，**不是别拦**。
+    正确姿势：**上一份里有的单调字段，新的必须仍在、类型仍对、且满足转移规则**。
+
+    ⚠️ `batches` 还要求**旧列表是新列表的前缀**——只比长度的话，
+    一次等长改写就能把历史悄悄换掉（本机复现过）。
+
+    判别力：把对应那条改回「类型不符就跳过」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=9_000_000, batches=[{"n": 1}],
+                            inflight_rollbacks={"1": 2})
+        ledger = _committed(fd, m)
+        tampered = copy.deepcopy(m)
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_batches_may_grow_by_appending(tmp_path):
+    """方向②：`batches` 追加必须放行（前缀不变即可），否则历史永远记不下去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(batches=[{"n": 1}])
+        ledger = _committed(fd, m)
+        grown = copy.deepcopy(m)
+        grown["batches"].append({"n": 2})
+        _recompute_evidence(grown)
+        commit_stock(fd, grown, ledger=ledger)
+        assert read_manifest(fd)["batches"] == [{"n": 1}, {"n": 2}]
     finally:
         os.close(fd)
