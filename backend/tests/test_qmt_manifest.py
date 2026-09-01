@@ -4182,3 +4182,59 @@ def test_commit_final_still_publishes_the_real_verification_level(tmp_path):
         assert len(read_manifest(fd)["source_verification_evidence"]["passes"]) == 2
     finally:
         os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者自查（R12 等配额期间，用第⑪问追 R11-B 的另一半）
+#
+# R11 报的是「**per-stock 提交**把调用方的 full 标签原样写盘」。同族的另一处：
+# **收尾提交**同样照发调用方给的级别，而 spec §4.5:342 明写
+# 「**一旦使用 `--skip-existing-verify`，manifest 与 pilot 报告都打上
+#   `source_verification: "partial"`**」——运行凭据里根本没记住这个开关。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_skip_verify_run_can_never_publish_a_full_label(tmp_path):
+    """⭐⭐ 用了 `--skip-existing-verify` 的运行，**收尾也不许发布 full/snapshot**。
+
+    spec §4.5:342 的原话：「宁可让报告自己承认它证不了什么，也不要让读者以为
+    它证过。」而此前收尾提交照发调用方给的 `full` —— 一次明确跳过了校验的运行
+    产出一份**自称完整校验过**的账本，下游据此判出货资格。
+
+    ⚠️ 与 R11-B 同族：那条管 per-stock 提交，这条管**收尾**提交
+    （第⑪问：评审报了 A 处，先问「同样的改动我还做在哪些地方」）。
+
+    判别力：把凭据里的 `skip_existing_verify` 位或收尾的投影删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd, skip_existing_verify=True)
+        assert ledger.skip_existing_verify is True
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "partial"
+        assert written["source_verification_evidence"] == {"level": "partial",
+                                                           "passes": []}
+        assert read_manifest(fd)["source_verification"] == "partial"
+    finally:
+        os.close(fd)
+
+
+def test_a_normal_run_still_publishes_the_earned_label(tmp_path):
+    """方向②：**没**用那个开关时，收尾必须能发布真实级别。
+
+    没有这一条，「收尾一律写死 partial」的实现也能让上一条绿 ——
+    而那会让 full / snapshot 永远发布不出来、出货资格永远拿不到。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        assert ledger.skip_existing_verify is False
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "full"
+        assert len(written["source_verification_evidence"]["passes"]) == 2
+    finally:
+        os.close(fd)

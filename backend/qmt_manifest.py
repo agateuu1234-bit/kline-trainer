@@ -906,6 +906,10 @@ class RunLedger:
     existed: bool
     digest: str | None
     lifecycle: dict
+    # 本次运行是否传了 `--skip-existing-verify`。spec §4.5:342 明写
+    # 「**一旦使用，manifest 与 pilot 报告都打上 `source_verification: "partial"`**」
+    # —— 收尾提交据此把级别压成 partial，**凭据是这件事唯一的持久记忆**。
+    skip_existing_verify: bool = False
 
     def _advance(self, digest: str, lifecycle: dict) -> None:
         self.existed = True
@@ -1273,7 +1277,8 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
         )
     return RunLedger(existed=seen is not None,
                      digest=seen[1] if seen is not None else None,
-                     lifecycle=snapshot)
+                     lifecycle=snapshot,
+                     skip_existing_verify=skip_existing_verify)
 
 
 def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
@@ -1614,6 +1619,16 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
+    # ⚠️ **用了 `--skip-existing-verify` 的运行，收尾也不许发布 full/snapshot**
+    # （spec §4.5:342：「一旦使用，manifest 与 pilot 报告都打上 partial」）。
+    # 这是 R11 那条「per-stock 提交必须写死 partial」的**同族另一处**：
+    # 那条管每股提交，本条管收尾 —— 一次明确跳过了校验的运行若产出自称
+    # 「完整校验过」的账本，下游会据此判出货资格。
+    # 采取**投影**而非拒绝：spec 的措辞是「打上 partial」，且与 per-stock 提交
+    # 的处置一致；跑了几小时的一轮不该在最后一步整个失败。
+    if ledger.skip_existing_verify:
+        payload["source_verification"] = "partial"
+        payload["source_verification_evidence"] = {"level": "partial", "passes": []}
     # 收尾提交**永远**没有正当理由回滚进度（崩溃恢复不走这个入口），故无声明可传。
     _require_no_progress_rollback(previous, payload, "收尾提交")
     ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle)
