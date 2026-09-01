@@ -321,6 +321,11 @@ def _valid_manifest(**overrides) -> dict:
         "staged_export_log": {"relative_path": "export_log.csv",
                               "bytes": 2399554, "sha256": elog_sha},
         "source_verification": "full",
+        # ⚠️ 2026-09-01 补：spec 的写侧枚举里有「累计字节」，而本夹具一直没有它
+        # —— 于是「有 files 就必须带合法 committed_bytes」这条判据（R15 high C）
+        # 在夹具上根本触发不了。**测试样本要照生产真实格式造。**
+        # 值 = 4 条 files × 1234567 + staged_export_log 2399554。
+        "committed_bytes": 4 * 1234567 + 2399554,
         "operator_attestation": {"no_export_window": True,
                                  "recorded_at": "2026-08-24T12:00:00+08:00"},
     }
@@ -341,6 +346,22 @@ def _valid_manifest(**overrides) -> dict:
             ],
             "passes_agree": True,
         }
+    return m
+
+
+
+def _min_bytes(m):
+    """这份账本**至少**该有的累计字节：已记录文件之和 + staged export_log。
+
+    ⚠️ 写侧要求 `committed_bytes ≥ sum(files[].bytes)`（R15 high C）——
+    夹具此前随手写个小数字，**本来就不真实**（本仓栽过「照想象造样本」）。
+    """
+    return sum(f["bytes"] for f in m["files"]) + m["staged_export_log"]["bytes"]
+
+
+def _fix_bytes(m, extra=0):
+    """把 `committed_bytes` 补到合法下限（可再加 extra）。"""
+    m["committed_bytes"] = _min_bytes(m) + extra
     return m
 
 
@@ -1937,14 +1958,14 @@ def test_commit_stock_cannot_invent_lifecycle_fields(tmp_path):
 
 def test_commit_stock_preserves_unknown_top_level_keys(tmp_path):
     """S3/S4 的 failures / batches 等经 per-stock 提交流转，不得被剥掉（O4-F10）。"""
-    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}],
-                        committed_bytes=123)
+    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}])
+    m["committed_bytes"] = _min_bytes(m) + 123
     _d, fd = _staging(tmp_path)
     try:
         commit_stock(fd, m, ledger=_expect(fd))
         on_disk = read_manifest(fd)
         assert on_disk["failures"] == [{"stock_code": "600004.SH", "attempts": 1}]
-        assert on_disk["committed_bytes"] == 123
+        assert on_disk["committed_bytes"] == _min_bytes(m) + 123
     finally:
         os.close(fd)
 
@@ -3397,8 +3418,8 @@ def test_begin_run_requires_a_real_bool_for_skip_existing_verify(tmp_path):
 
 def _established(**kw):
     """一份**已经积累了进度**的干净账本（有额外顶层键、没有生命周期字段）。"""
-    return _valid_manifest(committed_bytes=1234567,
-                           failures=[{"stock_code": "600004.SH", "attempts": 1}], **kw)
+    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}], **kw)
+    return _fix_bytes(m, extra=1234567)
 
 
 def test_begin_run_distinguishes_bootstrap_from_an_established_clean_ledger(tmp_path):
@@ -3508,12 +3529,13 @@ def test_many_commits_in_one_run_are_all_accepted(tmp_path):
     d, fd = _staging(tmp_path)
     try:
         ledger = begin_run(fd)
+        _base = _min_bytes(_valid_manifest())
         for i in range(5):
-            commit_stock(fd, _valid_manifest(committed_bytes=i), ledger=ledger)
-        assert read_manifest(fd)["committed_bytes"] == 4
+            commit_stock(fd, _valid_manifest(committed_bytes=_base + i), ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == _base + 4
         # ⚠️ 收尾也必须带上已累计的量：调用方丢掉 committed_bytes 会被单调守卫
         # 正确地判红（R10 high B）——现实里 S4 手里那份本来就该是累计的。
-        commit_final(fd, _valid_manifest(committed_bytes=4),
+        commit_final(fd, _valid_manifest(committed_bytes=_base + 4),
                      outcome=clean_finish(), ledger=ledger)
     finally:
         os.close(fd)
@@ -3547,7 +3569,14 @@ def _with_more_stocks(m):
                    _file_rec("600004.SH", "浦发银行", "daily")]
     m["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
     m["cursor"]["SH"] = 2
+    if isinstance(m.get("committed_bytes"), int):
+        m["committed_bytes"] += 2 * 1234567        # 新增两条文件，累计量同步涨够
     return _recompute_evidence(m)
+
+
+def _multi_bytes(m):
+    """给多股夹具把累计字节补到合法下限。"""
+    return _fix_bytes(m)
 
 
 def test_commit_stock_refuses_a_stale_snapshot_that_rolls_back_progress(tmp_path):
@@ -3714,13 +3743,12 @@ def test_legitimate_growth_of_counters_and_history_is_accepted(tmp_path):
         grown = copy.deepcopy(m)
         # ⚠️ 新增两条文件记录时，累计量必须**至少涨够它们的字节数**（R14 high B）。
         _added = 2 * 1234567
-        grown["committed_bytes"] = 9_000_000 + _added              # 累计增加
         grown["failures"][0]["attempts"] = 3                        # 重试次数增加
         grown["failures"].append({"stock_code": "600008.SH", "attempts": 1})
         grown["batches"].append({"n": 2})                           # 历史追加
         grown["inflight_rollbacks"]["1"] = 3                        # 遥测增加
         grown["inflight_rollbacks"]["2"] = 1
-        grown = _with_more_stocks(grown)                            # 再拉一只股
+        grown = _with_more_stocks(grown)      # 再拉一只股（内部已把累计量涨够）
         commit_stock(fd, grown, ledger=ledger)
         on = read_manifest(fd)
         assert on["committed_bytes"] == 9_000_000 + _added
@@ -3737,6 +3765,7 @@ def _multi_stock():
         m["files"] += [_file_rec(code, name, "1m"), _file_rec(code, name, "daily")]
         m["pool_order"]["SH"].append({"code": code, "universe_idx": idx})
     m["cursor"] = {"SH": 3, "SZ": 1, "BJ": 0}
+    _fix_bytes(m)
     return _recompute_evidence(m)
 
 
@@ -3933,6 +3962,7 @@ def _retry_succeeded(m):
     t["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
     t["cursor"]["SH"] = 2
     t["failures"] = [f for f in t["failures"] if f["stock_code"] != "600004.SH"]
+    _fix_bytes(t)
     return _recompute_evidence(t)
 
 
@@ -3984,13 +4014,10 @@ def test_a_failure_entry_may_not_vanish_without_proof_of_success(tmp_path):
 
 
 @pytest.mark.parametrize("label,mutate", [
-    ("committed_bytes 整个删掉", lambda t: t.pop("committed_bytes")),
     ("committed_bytes 换成字符串", lambda t: t.__setitem__("committed_bytes", "0")),
     ("committed_bytes 换成 None", lambda t: t.__setitem__("committed_bytes", None)),
-    ("batches 整个删掉", lambda t: t.pop("batches")),
     ("batches 换成等长但内容不同", lambda t: t.__setitem__("batches", [{"n": 999}])),
     ("batches 换成非列表", lambda t: t.__setitem__("batches", "x")),
-    ("inflight_rollbacks 整个删掉", lambda t: t.pop("inflight_rollbacks")),
     ("inflight_rollbacks 换成非字典", lambda t: t.__setitem__("inflight_rollbacks", [])),
 ])
 def test_a_monotonic_field_may_not_be_erased_by_omission_or_wrong_type(
@@ -4484,10 +4511,11 @@ def test_committed_bytes_must_grow_with_newly_added_files(tmp_path):
     """
     d, fd = _staging(tmp_path)
     try:
-        m = _valid_manifest(committed_bytes=1000)
+        m = _fix_bytes(_valid_manifest())
+        _base = m["committed_bytes"]
         ledger = _committed(fd, m)
         flat = _with_more_stocks(m)          # 加了两条文件记录
-        flat["committed_bytes"] = 1000       # 累计值原地不动
+        flat["committed_bytes"] = _base      # 累计值原地不动
         _recompute_evidence(flat)
         with pytest.raises(ManifestInvalidError, match="committed_bytes"):
             commit_stock(fd, flat, ledger=ledger)
@@ -4501,15 +4529,16 @@ def test_committed_bytes_may_grow_by_more_than_the_new_files(tmp_path):
     """
     d, fd = _staging(tmp_path)
     try:
-        m = _valid_manifest(committed_bytes=1000)
+        m = _fix_bytes(_valid_manifest())
+        _base = m["committed_bytes"]
         ledger = _committed(fd, m)
         grown = _with_more_stocks(m)
         added = sum(f["bytes"] for f in grown["files"]
                     if f["stock_code"] == "600004.SH")
-        grown["committed_bytes"] = 1000 + added + 999_999     # 多算了失败的 .part
+        grown["committed_bytes"] = _base + added + 999_999    # 多算了失败的 .part
         _recompute_evidence(grown)
         commit_stock(fd, grown, ledger=ledger)
-        assert read_manifest(fd)["committed_bytes"] == 1000 + added + 999_999
+        assert read_manifest(fd)["committed_bytes"] == _base + added + 999_999
     finally:
         os.close(fd)
 
@@ -4533,5 +4562,155 @@ def test_the_first_commit_still_refuses_duplicate_failures(tmp_path):
                                           {"stock_code": "600006.SH", "attempts": 2}])
         with pytest.raises(ManifestInvalidError, match="重复|同名"):
             commit_stock(fd, first, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R15：三条 high —— **层次终于变了**
+#   A 打的是**核心提交语义**（不是我加的守卫）：提交 = 用调用方那份整体覆盖，
+#     于是**省略**任何一个已持久化的顶层键就等于静默删掉它 —— O4-F10
+#     「未知顶层键原样保留」那条前向兼容通道被打破。
+#   B 是**一条 spec 要求我从来没实现**：P2-F3 明写「复校失败那一轮**不得推进
+#     cursor、不得新增 files/pool_order**」。
+#   C 才是守卫边界（S2-F29 那一族的又一次：字段缺席 → 判据永久不生效）。
+# ═════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("entry", ["stock", "final"])
+def test_a_commit_may_not_delete_a_persisted_top_level_key_by_omission(tmp_path, entry):
+    """⭐⭐ [R15 high A] **省略即删除**，而 O4-F10 要求未知顶层键原样保留。
+
+    那条通道正是 S3/S4 的 `failures` / `batches` / `inflight_rollbacks` / `quota`
+    赖以流转、且**不需要 bump manifest_version** 的理由；它一旦漏水，
+    「旧工具消费新版 manifest 后把不认识的字段丢掉 → 再用新工具打开时缺必需字段
+    → 一棵 400 只股的 staging 被一次『用错版本跑补拉』永久毁掉」就重新成立。
+
+    判别力：删掉「磁盘上有而 payload 没有的键原样带过来」那一步，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=7_337_822, batches=[{"n": 1}],
+                            未来某个安全字段={"x": 1}, 预筛统计={"剔除": 469})
+        ledger = _committed(fd, m)
+        lean = copy.deepcopy(m)
+        del lean["预筛统计"]
+        del lean["未来某个安全字段"]
+        _recompute_evidence(lean)
+        if entry == "stock":
+            commit_stock(fd, lean, ledger=ledger)
+        else:
+            commit_final(fd, lean, outcome=clean_finish(), ledger=ledger)
+        on = read_manifest(fd)
+        assert on["预筛统计"] == {"剔除": 469}
+        assert on["未来某个安全字段"] == {"x": 1}
+    finally:
+        os.close(fd)
+
+
+def test_a_failed_recheck_run_may_not_have_advanced_progress(tmp_path):
+    """⭐⭐ [R15 high B] spec P2-F3 明写：复校失败那一轮
+    「**本次不得推进 `cursor`、不得新增 `files`/`pool_order` 条目**」——
+    否则每次重跑都继续消耗冻结宇宙与 `--max-bytes` 预算，却永远清不掉 fatal。
+
+    我此前只写了「保留 fatal + 换 stopped_reason」，**没有实现那半句**。
+    本机复现：复校失败的那一轮先提交了一只股，收尾照样接受。
+
+    判别力：删掉「与运行起点比对」那一步，本条必红。
+    """
+    warn = _valid_manifest(fetch_fatal_error=_fatal(),
+                           stopped_reason="staging_path_escape",
+                           committed_bytes=7_337_822)
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, warn)
+        ledger = begin_run(fd)
+        grown = _with_more_stocks(warn)
+        commit_stock(fd, grown, ledger=ledger)          # 本轮先拉了一只股
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="failed"))
+    finally:
+        os.close(fd)
+
+
+def test_a_failed_recheck_run_that_stayed_put_is_accepted(tmp_path):
+    """方向②：没推进进度的那一轮必须能把「复校失败」记下去，
+    否则这棵 staging 连「我复校没过」都写不进账本。"""
+    warn = _valid_manifest(fetch_fatal_error=_fatal(),
+                           stopped_reason="staging_path_escape",
+                           committed_bytes=7_337_822)
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, warn)
+        ledger = begin_run(fd)
+        written = commit_final(fd, warn, ledger=ledger,
+                               outcome=clean_finish(revisited_fatal_path=True,
+                                                    staging_recheck="failed"))
+        assert written["stopped_reason"] == "staging_recheck_failed"
+        assert len(read_manifest(fd)["files"]) == 4
+    finally:
+        os.close(fd)
+
+
+def test_growth_without_any_committed_bytes_is_refused(tmp_path):
+    """⭐ [R15 high C] 账本里**一直不带** `committed_bytes` → 配额判据永久不生效。
+
+    本机复现：files 从 4 条涨到 6 条，而该字段始终缺席，守卫一次都没触发。
+    ⇒ 只要有 `files`，就必须带一个**非负整数**且**不小于已记录文件字节之和**。
+
+    ⚠️ **只在写侧强制**：把它加进读侧必需键会构成「新增必需字段」，
+    按 O2-F8 必须 bump `manifest_version` —— 那超出本片范围，已在 spec 登记。
+
+    判别力：删掉这条，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        naked = copy.deepcopy(_valid_manifest())
+        naked.pop("committed_bytes", None)
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+            commit_stock(fd, naked, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_manifest_with_no_files_needs_no_committed_bytes(tmp_path):
+    """方向②：还没拷到任何文件的引导态账本不该被这条判据卡住。"""
+    d, fd = _staging(tmp_path)
+    try:
+        empty = copy.deepcopy(_valid_manifest())
+        empty.pop("committed_bytes", None)
+        empty["files"] = []
+        empty["pool_order"] = {"SH": [], "SZ": [], "BJ": []}
+        empty["cursor"] = {"SH": 0, "SZ": 0, "BJ": 0}
+        _recompute_evidence(empty)
+        ledger = begin_run(fd)
+        commit_stock(fd, empty, ledger=ledger)
+        assert read_manifest(fd)["files"] == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("field", ["committed_bytes", "batches", "inflight_rollbacks"])
+def test_omitting_a_persisted_extension_field_carries_it_forward(tmp_path, field):
+    """⭐ [R15 high A 的正向面] 「省略」不再是**擦除**，而是**原样带过来**。
+
+    ⚠️ 这三档原本挂在「单调字段不得被抹掉」那组参数里（R10 那轮）——
+    carry-forward 落地后它们**不再是攻击**：省略只会让磁盘上那份被原样保留。
+    真正还需要拦的是**换成错误类型**，那几档留在原处。
+    **每次改动之后要回头问「哪些既有档的语义变了」**，这就是一例。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(batches=[{"n": 1}], inflight_rollbacks={"1": 2})
+        _fix_bytes(m, extra=5_000_000)
+        ledger = _committed(fd, m)
+        lean = copy.deepcopy(m)
+        lean.pop(field)
+        _recompute_evidence(lean)
+        commit_stock(fd, lean, ledger=ledger)
+        assert read_manifest(fd)[field] == m[field]
     finally:
         os.close(fd)

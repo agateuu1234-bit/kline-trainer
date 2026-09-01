@@ -907,6 +907,28 @@ _FROZEN_KEYS = ("manifest_version", "seed", "source_snapshot", "source_mount",
 #   句柄没有任何可写字段（`__slots__` 为空），也没有公开的构造路径。
 
 
+def _progress_of(manifest: "dict | None") -> tuple:
+    """一份 manifest 的**进度指纹**：实拷清单 / 各层池 / 游标 / 累计字节。
+
+    spec P2-F3 要求「复校失败那一轮**不得推进 cursor、不得新增 files/pool_order**」
+    —— 要检验它，就得留住**运行起点**的进度并在收尾时逐项比对。
+    """
+    m = manifest or {}
+    files = frozenset(
+        (f.get("stock_code"), f.get("period"), f.get("relative_path"))
+        for f in (m.get("files") if isinstance(m.get("files"), list) else [])
+        if isinstance(f, dict))
+    pool = m.get("pool_order") if isinstance(m.get("pool_order"), dict) else {}
+    pools = tuple(
+        frozenset((e.get("code"), e.get("universe_idx"))
+                  for e in (pool.get(mk) if isinstance(pool.get(mk), list) else [])
+                  if isinstance(e, dict))
+        for mk in MARKETS)
+    cur = m.get("cursor") if isinstance(m.get("cursor"), dict) else {}
+    cursor = tuple(cur.get(mk) for mk in MARKETS)
+    return (files, pools, cursor, m.get("committed_bytes"))
+
+
 @dataclass
 class _RunState:
     """注册表里那份真正的运行状态（**模块内部可见，调用方够不着**）。"""
@@ -914,6 +936,8 @@ class _RunState:
     digest: str | None
     lifecycle: dict
     skip_existing_verify: bool
+    # 运行**起点**的进度指纹（不随提交推进），供 P2-F3 的「不得推进」判据比对。
+    start_progress: tuple = ()
 
 
 class RunLedger:
@@ -1035,6 +1059,30 @@ class RecoveryScope:
                 f"stock_code {self.stock_code!r} 的后缀与 market {self.market!r} 不一致")
 
 
+
+def _carry_forward_persisted_keys(previous: "dict | None", payload: dict) -> None:
+    """把**磁盘上有、而这次 payload 没有**的顶层键原样带过来（就地修改 payload）。
+
+    ⚠️ **省略即删除**是错的（codex R15 [high]）：提交此前是「用调用方那份整体
+    覆盖」，于是省略任何一个已持久化的顶层键就等于静默删掉它 —— 而 O4-F10 的
+    「未知顶层键原样保留」正是 S3/S4 的 `failures` / `batches` /
+    `inflight_rollbacks` / `quota` 赖以流转、且**不需要 bump manifest_version**
+    的理由。那条通道一旦漏水，「旧工具消费新版 manifest 后把不认识的字段丢掉
+    → 再用新工具打开时缺必需字段 → 一棵 400 只股的 staging 被一次『用错版本
+    跑补拉』永久毁掉」就重新成立。
+
+    生命周期三键不在此列：它们由两个提交入口各自的规则单独决定。
+    """
+    if previous is None:
+        return
+    for k, v in previous.items():
+        # ⚠️ 只带**非必需键**：O4-F10 说的是「未知顶层键原样保留」。
+        # 必需键由调用方负责给全 —— 缺了就该被读侧校验当场拒掉，
+        # 而不是由本函数悄悄补上（那会把调用方的 bug 修得看不见）。
+        if k not in payload and k not in LIFECYCLE_KEYS and k not in REQUIRED_KEYS:
+            payload[k] = copy.deepcopy(v)
+
+
 def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
     """**只看这一份 payload 自身**的检查（与「有没有上一份」无关）。
 
@@ -1045,6 +1093,29 @@ def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
     前者，而补拉是「先重试 `attempts < 2` 的条目」（§4.4:350）——两条同名记录
     能让一个**已耗尽重试的候选被复活**（codex R12 [high]）。
     """
+    # ⚠️ **有 files 就必须带合法的 `committed_bytes`**（codex R15 [high]）。
+    # 本机复现：files 从 4 条涨到 6 条而该字段始终缺席 —— 转移守卫里的配额判据
+    # 一次都没触发，`--max-bytes` 这条硬上限被**无限期**绕开。
+    # ⚠️ 它是**只看这一份 payload** 的性质，所以必须放在这里 ——
+    # 放进转移守卫会被引导态的早退跳过，而引导态正是它最该管的那一档。
+    # ⚠️ **只在写侧强制**：加进读侧必需键构成「新增必需字段」，按 O2-F8 必须
+    # bump `manifest_version` —— 超出本片范围，已在 spec 登记为交给 S4/S5。
+    files = payload.get("files")
+    files = files if isinstance(files, list) else []
+    if files:
+        nb = payload.get("committed_bytes")
+        need = 0
+        for f in files:
+            if isinstance(f, dict) and isinstance(f.get("bytes"), int) \
+                    and not isinstance(f.get("bytes"), bool):
+                need += f["bytes"]
+        if not isinstance(nb, int) or isinstance(nb, bool) or nb < 0 or nb < need:
+            raise ManifestInvalidError(
+                f"{where} 的账本里有 {len(files)} 条 files 记录，而 "
+                f"committed_bytes 是 {nb!r}（须为非负整数且不小于已记录文件"
+                f"字节之和 {need}）——缺了它，--max-bytes 这条硬上限就被无限期绕开。"
+            )
+
     lst = payload.get("failures")
     seen_codes = set()
     for f in (lst if isinstance(lst, list) else []):
@@ -1256,6 +1327,7 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                 b = _int_or_none(rec.get("bytes"))
                 if b is not None:
                     added += b
+        _ = added                    # 下面用
         if added and nb < ob + added:
             raise ManifestInvalidError(
                 f"{where} 新增了合计 {added} 字节的 files 记录，而 "
@@ -1382,6 +1454,7 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
         digest=seen[1] if seen is not None else None,
         lifecycle=snapshot,
         skip_existing_verify=skip_existing_verify,
+        start_progress=_progress_of(seen[0] if seen is not None else None),
     )
     return handle
 
@@ -1427,6 +1500,7 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
     # 定级是**收尾提交**的事，且必须在收尾复校跑完之后。
     payload["source_verification"] = "partial"
     payload["source_verification_evidence"] = {"level": "partial", "passes": []}
+    _carry_forward_persisted_keys(previous, payload)
     # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须**声明范围**；
     # 范围之外的一切不变量照旧强制。
     _require_no_progress_rollback(previous, payload, "per-stock 提交", recovery)
@@ -1730,11 +1804,29 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     on_disk, previous = _expect_from_disk(stg_fd, ledger)
 
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
+    _carry_forward_persisted_keys(previous, basis)
     basis.update(on_disk)
 
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
+    # ⚠️ **复校失败的那一轮，进度必须原地未动**（spec P2-F3，codex R15 [high]）：
+    # 「本次不得推进 `cursor`、不得新增 `files`/`pool_order` 条目」——
+    # 否则每次重跑都继续消耗冻结宇宙与 `--max-bytes` 预算，却永远清不掉 fatal。
+    # 我此前只实现了「保留 fatal + 换 stopped_reason」，漏了这半句。
+    # ⚠️ 这里比的是**运行起点**（`begin_run` 时）的进度，不是上一次提交 ——
+    # 否则本轮先提交几只股再收尾，比对就恒等成立了。
+    if outcome.staging_recheck == "failed":
+        st = ledger._state()
+        if _progress_of(payload) != st.start_progress:
+            raise ManifestInvalidError(
+                "本次 staging 全量复校失败，而这一轮**推进了进度**"
+                "（files / pool_order / cursor / committed_bytes 与运行起点不一致）。"
+                "spec P2-F3 规定复校失败的那一轮不得推进 cursor、不得新增 "
+                "files/pool_order —— 否则每次重跑都继续消耗冻结宇宙与 --max-bytes "
+                "预算，却永远清不掉 fatal。请换新 staging + 新 seed 重拉。"
+            )
+
     # ⚠️ **用了 `--skip-existing-verify` 的运行，收尾也不许发布 full/snapshot**
     # （spec §4.5:342：「一旦使用，manifest 与 pilot 报告都打上 partial」）。
     # 这是 R11 那条「per-stock 提交必须写死 partial」的**同族另一处**：
