@@ -1007,14 +1007,22 @@ public final class TrainingSessionCoordinator {
     /// ⚠️ **「那行能读出来」不等于「它是本局的」**（codex R3-high）：`pending_training` 是单例行，
     ///    必须比对 `sessionKey` 才能证明它属于当前这一局；否则会把**别的会话**留下的记录
     ///    当成自己的退路，据此放走一个其实无处可退的会话。
-    /// ⚠️ **它也不保证「一定续得回来」**：续局还要求那份训练组文件仍在缓存里，而缓存的 LRU 淘汰
+    /// ⚠️ **必须同时确认那份训练组文件还在缓存里**（codex R4-high）：缓存的 LRU 淘汰
     ///    **不保护正在用的文件**（`DefaultFileSystemCacheManager.evictIfNeededLocked`，上限 20 个，
-    ///    每次下载入库都会触发）。⇒ 本判据只回答「磁盘上有没有一份属于本局的存档」，
-    ///    **回答不了「它将来打不打得开」** —— 而且在退出那一刻验证也关不上那个洞（退出之后照样会被淘汰）。
-    ///    真正的修法是**把在用文件钉住不许淘汰**，属缓存子系统，已另立待办（见 §Q13 交接）。
+    ///    每次下载入库都会触发）。**最要命的状态**是：文件已被淘汰，但本局的 reader 还开着
+    ///    （POSIX 下已打开的句柄在文件被删后仍可用）⇒ **这一局其实还能继续玩**，
+    ///    而「安全退出」会关掉那个 reader。此时若判据仍说「退得安全」，
+    ///    就是**亲手**把一个还能用的会话变成打不开的存档。
+    /// ⚠️ **但它仍不保证「将来一定续得回来」**：用户退出**之后**那份文件照样可能被淘汰。
+    ///    在这一层关不上那个洞 —— 真正的修法是**把在用 / 被 pending 引用的文件钉住不许淘汰**，
+    ///    属缓存子系统，已另立待办（见本片验收清单 §五）。⛔ 别把本判据当成「保证可续」。
     public func hasDurablePendingCheckpoint(for engine: TrainingEngine) -> Bool {
         guard engine.flow.mode == .normal, let key = activeSessionKey else { return false }
-        do { return try pendingRepo.loadPending()?.sessionKey == key } catch { return false }
+        do {
+            guard let pending = try pendingRepo.loadPending(), pending.sessionKey == key else { return false }
+            _ = try cachedFile(filename: pending.trainingSetFilename)   // 文件没了 → throw → 下面 catch 返 false
+            return true
+        } catch { return false }
     }
 
     /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。

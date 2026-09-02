@@ -112,6 +112,25 @@ struct FinalizeAlertSafeExitTests {
                 "⛔ 只证明『那行能读出来』不够 —— 必须证明它属于本局")
     }
 
+    @Test("⭐训练组文件已被缓存淘汰：存档行还在也**不算退得安全**（codex R4-high）")
+    func evictedTrainingSetIsNotDurable() async throws {
+        let (coord, _, cache, pending) = PIFixtures.makeProvenanceCoordinator(files: ["a.sqlite"], corrupt: [])
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)
+        #expect(coord.hasDurablePendingCheckpoint(for: engine), "前置：文件还在时当然算数")
+
+        // 模拟后台下载把它挤掉（缓存 LRU 淘汰**不保护在用文件**）。
+        // ⚠️ 关键状态：此刻 reader **仍开着**，所以这一局其实还能继续玩 ——
+        //    而「安全退出」会关掉它。若判据此时仍返回 true，我们就是**亲手**把一个
+        //    还能用的会话变成了打不开的存档。
+        let saved = try #require(try pending.loadPending())
+        let f = try #require(try cache.listAvailable().first { $0.filename == saved.trainingSetFilename })
+        try cache.delete(f)
+
+        #expect(!coord.hasDurablePendingCheckpoint(for: engine),
+                "⛔ 文件没了 ⇒ 那条存档续不回来 ⇒ 绝不能据此关掉还开着的 reader")
+    }
+
     @Test("反向对照：安全退出**不是**弃局 —— 它一次都不该碰清空那条路")
     func neverClearsPending() async throws {
         let (coord, _, pending, _) = PIFixtures.makeCoordinator()
