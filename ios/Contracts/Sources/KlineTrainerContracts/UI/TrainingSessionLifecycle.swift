@@ -180,3 +180,24 @@ public struct TrainingSessionLifecycle {
         await coordinator.flushReviewForBackground(engine: engine)
     }
 }
+
+// MARK: - 「放弃本局」失败后回弹到哪个弹窗（codex R6-high）
+
+/// 谁发起了这次「放弃本局」。
+///
+/// ⛔ **不得退回成 Bool**：两个弹窗（「结算入账失败」与「保存进度失败」）都有「放弃」按钮，
+///    都可能失败。丢掉来源就只能猜一个回，而猜错的代价不对称 ——
+///    把「训练中途返回」的用户送进结算弹窗，他一点「重试」就会走 `finalizeForSettlement()`，
+///    那条路**不过** `didFinalize` / `forceCloseManually()` 任何一道终局门，
+///    于是一局没打完（甚至还持仓）的训练被当作完成局写进历史记录、pending 一并清掉。
+public enum DiscardFailureOrigin: Equatable, Sendable {
+    /// 本局已走到终局，结算入账失败后在那个弹窗里选了「放弃本局」。
+    case settlementFailure
+    /// 训练**中途**点返回、保存进度失败后在那个弹窗里选了「放弃」。本局尚未结束。
+    case saveProgressFailure
+
+    /// 关掉「放弃未完成」提示后必须回到的弹窗 —— 恒等回发起方。
+    /// 之所以不能「什么都不弹」：用户会回到训练页、屏幕上什么都没有，
+    /// 以为刚才那一下没反应，比不给出口更糟。
+    public var alertToRestore: DiscardFailureOrigin { self }
+}

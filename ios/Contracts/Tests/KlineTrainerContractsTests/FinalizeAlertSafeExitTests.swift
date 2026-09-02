@@ -194,3 +194,35 @@ struct FinalizeAlertSafeExitTests {
         #expect(pending.failNextClearPending != nil, "注入的 clear 故障仍未被消费 ⇒ 证明 clear 一次都没被调用")
     }
 }
+
+// MARK: - codex R6-high：「放弃未完成」关掉后回哪个弹窗
+
+/// 背景（我在 R2 自己引入的回归）：`discardFailed` 原本是个 Bool，两个弹窗的「放弃」失败都置它，
+/// 而它的「知道了」**无条件**把用户送回「结算入账失败」弹窗。可那个弹窗的「重试」直接调
+/// `finalizeForSettlement()` —— 不过 `didFinalize` / `forceCloseManually()` 任何一道终局门。
+/// ⇒ 从**训练中途返回**那条路进来的用户，一局没打完（可能还持仓）就被入账进历史记录。
+///
+/// 根因不是路由写错，是那个 Bool **表达不出来源**。故把来源做成类型，让「丢掉来源」不可表达。
+@Suite("放弃失败后的回弹目标（codex R6-high）")
+struct DiscardFailureOriginTests {
+
+    @Test("从结算失败弹窗发起的放弃失败 → 回结算失败弹窗")
+    func settlementOriginRestoresSettlementAlert() {
+        #expect(DiscardFailureOrigin.settlementFailure.alertToRestore == .settlementFailure)
+    }
+
+    @Test("⭐⭐从**返回保存失败**弹窗发起的放弃失败 → 回它自己，⛔ 绝不能落到结算弹窗")
+    func saveProgressOriginMustNotRestoreSettlementAlert() {
+        let restored = DiscardFailureOrigin.saveProgressFailure.alertToRestore
+        #expect(restored == .saveProgressFailure)
+        // 显式钉死这条路：落到结算弹窗 = 把「重试入账」按钮递给一局还没打完的用户。
+        #expect(restored != .settlementFailure,
+                "⛔ 这一局还没结束，结算弹窗的「重试」会直接 finalizeForSettlement() 把它入账")
+    }
+
+    @Test("两个来源不得映射到同一个弹窗（否则来源信息等于没用）")
+    func distinctOriginsRestoreDistinctAlerts() {
+        #expect(DiscardFailureOrigin.settlementFailure.alertToRestore
+                != DiscardFailureOrigin.saveProgressFailure.alertToRestore)
+    }
+}

@@ -94,6 +94,39 @@ struct FinalizeFailureAlertSourceGuardTests {
         return String(rest[..<next.lowerBound])
     }
 
+    /// 按标题取任一弹窗块（同 `finalizeAlertBlock` 的切法）。
+    private func alertBlock(_ text: String, titled title: String) throws -> String {
+        let start = try #require(text.range(of: ".alert(\"\(title)\""),
+                                 "锚点失效：找不到「\(title)」弹窗")
+        let rest = text[start.upperBound...]
+        guard let next = rest.range(of: ".alert(") else { return String(rest) }
+        return String(rest[..<next.lowerBound])
+    }
+
+    // MARK: - codex R6-high：放弃失败后不得跨语境回弹
+
+    @Test("⭐⭐两处「放弃」失败必须各自记下**自己的**来源，⛔ 不得共用一个丢掉来源的 Bool")
+    func discardFailureRecordsItsOrigin() throws {
+        let code = try code(tv)
+        #expect(code.contains(sq("discardFailedFrom = .settlementFailure")),
+                "「结算入账失败」弹窗的放弃失败必须记来源")
+        #expect(code.contains(sq("discardFailedFrom = .saveProgressFailure")),
+                "「保存进度失败」弹窗的放弃失败必须记**它自己**的来源")
+        #expect(!code.contains(sq("@State private var discardFailed = false")),
+                "⛔ 退回成无来源的 Bool = 重新打开 R6-high 那个洞（未完局被入账）")
+    }
+
+    @Test("⭐⭐「放弃未完成」关掉后按来源回弹，⛔ 不得一律送回结算弹窗")
+    func discardFailedAlertRestoresByOrigin() throws {
+        let block = try alertBlock(try code(tv), titled: "放弃未完成")
+        #expect(block.contains(sq("alertToRestore")),
+                "必须走 alertToRestore 决定回哪个弹窗")
+        #expect(block.contains(sq("backFailed")),
+                "⛔ 缺这一支就是 R6-high：训练中途返回的用户被送进结算弹窗，「重试」直接 finalizeForSettlement() 把没打完的局入账")
+        #expect(block.contains(sq("finalizeFailed")),
+                "结算那一支也必须在（否则终局用户失去重试入口）")
+    }
+
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
     func anchorAndButtonCount() throws {
         let code = try code(tv)
@@ -163,15 +196,17 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "⛔ 吞掉弃局的错误再 onExit() ⇒ 界面回首页、协调器里会话还活着、pending 也还在，而用户被告知已丢弃")
     }
 
-    @Test("两个新弹窗必须真的接在 body 上，且「知道了」会把结算弹窗弹回来")
+    @Test("两个新弹窗必须真的接在 body 上，且回弹都放到下一个 MainActor 轮次")
     func recoveryAlertsAreWired() throws {
         // ⚠️ 上一稿六条守卫的扫描范围止于「下一个 .alert(」，两个新弹窗恰好落在边界之外
         //    ⇒ 把它们整段删掉，13 条测试照样全绿（变异实证）。本条改扫整个文件。
         let code = try code(tv)
-        for (title, state) in [("暂时退不出本局", "cannotPreserveOnExit"), ("放弃未完成", "discardFailed")] {
-            #expect(code.contains(sq(".alert(\"\(title)\", isPresented: $\(state))")),
-                    "\(title) 弹窗没接在 body 上 —— 那条路会变成「点了没反应」")
-        }
+        #expect(code.contains(sq(".alert(\"暂时退不出本局\", isPresented: $cannotPreserveOnExit)")),
+                "「暂时退不出本局」没接在 body 上 —— 那条路会变成「点了没反应」")
+        // 「放弃未完成」改用**承载来源**的可选态（codex R6-high）⇒ 走 Binding(get:set:)，
+        // 与同文件既有的 reviewFailedAction 先例一致。
+        #expect(code.contains(sq(".alert(\"放弃未完成\", isPresented: Binding(")),
+                "「放弃未完成」没接在 body 上 —— 那条路会变成「点了没反应」")
         // 「知道了」必须把结算弹窗弹回来：否则用户回到训练页、屏幕上什么都没有，
         // 而 didFinalize 已置位 ⇒ maybeAutoEnd 不再触发 ⇒ 结算弹窗**永远回不来**。
         // ⚠️ 回弹必须放到**下一个 MainActor 轮次**（Opus 对抗评审，low）：
@@ -179,8 +214,14 @@ struct FinalizeFailureAlertSourceGuardTests {
         //    而「在一个 alert 正被关闭的同一次刷新里，把另一个挂在同一视图上的 alert 置 true」
         //    有被 SwiftUI 吞掉的风险。一旦被吞：会话还活着（.cannotPreserve 刻意没结束它），
         //    但 didFinalize 已置位 ⇒ maybeAutoEnd 不再触发 ⇒ **结算弹窗永远回不来**。
-        #expect(code.components(separatedBy: sq("Button(\"知道了\", role: .cancel) { Task { @MainActor in finalizeFailed = true } }")).count - 1 == 2,
-                "两个恢复弹窗的「知道了」都必须在下一轮 MainActor 里把结算弹窗弹回来（应恰好 2 处）")
+        // ⚠️ 判据钉的是**下一轮 MainActor**这条性质本身，不是某一句字面写法 ——
+        //    上一稿把「两处都置 finalizeFailed」写死进守卫，于是 R6-high 修复一到，
+        //    这条守卫反过来要求我把那个洞留着（陈旧的门会把缺陷固化成预期行为）。
+        for title in ["暂时退不出本局", "放弃未完成"] {
+            let block = try alertBlock(code, titled: title)
+            #expect(block.contains(sq("Task { @MainActor in")),
+                    "「\(title)」的「知道了」必须在下一轮 MainActor 里回弹，否则可能被 SwiftUI 吞掉")
+        }
     }
 
     @Test("『保不住』的三种原因必须分别给出诚实文案，⛔ 不得把原因写死成其中一种")

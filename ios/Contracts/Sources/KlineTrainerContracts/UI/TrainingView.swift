@@ -86,7 +86,9 @@ public struct TrainingView: View {
     // 压成一种就必然对另两种说假话（文件被清理 / 存档读不出来时，「清理存储空间」都是无效建议）。
     @State private var cannotPreserveReason: TrainingSessionCoordinator.CheckpointStatus = .none
     // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
-    @State private var discardFailed = false
+    // ⛔ 承载**来源**而非 Bool（codex R6-high）：两个弹窗的「放弃」都会失败，丢掉来源就只能猜一个回。
+    //    猜错的代价不对称 —— 把中途返回的用户送进结算弹窗，一点「重试」就把没打完的局入账。
+    @State private var discardFailedFrom: DiscardFailureOrigin? = nil
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
     // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
@@ -228,7 +230,7 @@ public struct TrainingView: View {
                     //    「界面回了首页、协调器里会话还活着、那条 pending 也还在」，而用户被告知"已丢弃"
                     //    —— 在触发本弹窗的同一个降级存储场景下极可能发生。
                     do { try await lifecycle.discard(); onExit() }
-                    catch { discardFailed = true }
+                    catch { discardFailedFrom = .settlementFailure }
                 }
             }
         } message: {
@@ -257,8 +259,24 @@ public struct TrainingView: View {
             Text(cannotPreserveCopy)
         }
         // Q13（codex R2-medium）：弃局没做成时的诚实提示（会话仍在，未离开本局）。
-        .alert("放弃未完成", isPresented: $discardFailed) {
-            Button("知道了", role: .cancel) { Task { @MainActor in finalizeFailed = true } }
+        .alert("放弃未完成", isPresented: Binding(
+            get: { discardFailedFrom != nil },
+            set: { if !$0 { discardFailedFrom = nil } }
+        )) {
+            Button("知道了", role: .cancel) {
+                // ⚠️ 关掉它必须把**发起它的那个**弹窗弹回来（codex R6-high）。
+                //    什么都不弹 → 用户回到训练页、屏幕上什么都没有，以为刚才那下没反应；
+                //    一律回结算弹窗 → 中途返回的用户拿到「重试入账」按钮，而 runFinalize()
+                //    不过 didFinalize / forceCloseManually() 任何一道终局门。
+                let origin = discardFailedFrom
+                Task { @MainActor in
+                    switch origin?.alertToRestore {
+                    case .settlementFailure: finalizeFailed = true
+                    case .saveProgressFailure: backFailed = true
+                    case nil: break
+                    }
+                }
+            }
         } message: {
             Text("清除本局存档时出错，本局没有被放弃，你仍在这一局里。可稍后再试。")
         }
@@ -298,7 +316,7 @@ public struct TrainingView: View {
                     //    pending 也还在」，而用户被告知已丢弃。更糟的是首页会显示「继续训练」，
                     //    一点就直接 resumePending()（AppRouter 未先 endSession）→ 违反 D10 前置条件。
                     do { try await lifecycle.discard(); onExit() }
-                    catch { discardFailed = true }
+                    catch { discardFailedFrom = .saveProgressFailure }
                 }
             }
         } message: {
