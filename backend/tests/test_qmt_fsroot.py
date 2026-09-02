@@ -1498,6 +1498,15 @@ def test_atomic_write_json_with_full_sync_uses_F_FULLFSYNC(tmp_path: Path, monke
         os.close(root)
     if hasattr(fcntl, "F_FULLFSYNC"):
         assert fcntl.F_FULLFSYNC in calls
+        # ⚠️ **只断言「出现过 F_FULLFSYNC」分不开两道屏障**（Opus 评审 [low]）：
+        # 改名之后那道目录屏障自己就能满足它 —— 实测把**文件内容**这半退回
+        # 普通 `os.fsync`，全量 1301 条一条都不红，而本档的标题与 docstring
+        # 恰恰声称自己钉的就是文件内容这半。
+        # `full_sync=True` 时两处都走 `full_fsync` ⇒ macOS 上 `os.fsync`
+        # 应当**一次都不被调用**；退回普通 fsync 就会出现一次。
+        assert fsynced == [], (
+            f"full_sync=True 时不该有任何普通 os.fsync，实际 {len(fsynced)} 次"
+            "——文件内容那半很可能退回了 os.fsync")
     else:
         assert fsynced          # Linux：fsync 就是该平台最强的那个原语
 
@@ -1652,6 +1661,12 @@ def test_atomic_write_json_full_sync_barriers_after_the_rename(tmp_path: Path, m
         os.close(root)
 
     assert "replace" in events, events
+    # ⚠️ **两侧都要断言**（Opus 评审 [low]）：只查一侧时，另一侧那道屏障
+    # 自己就能让断言成立，于是被查的那半其实没人守。
+    before = events[:events.index("replace")]
+    assert "barrier" in before, (
+        f"os.replace 之前没有任何设备级屏障，事件时序={events}——"
+        "文件内容在断电后可能丢失")
     after = events[events.index("replace") + 1:]
     assert "barrier" in after, (
         f"os.replace 之后没有任何设备级屏障，事件时序={events}——"

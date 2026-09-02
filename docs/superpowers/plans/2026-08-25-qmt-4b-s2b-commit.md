@@ -125,6 +125,10 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D50 | Task 17 启动闸 | `--skip-existing-verify` 互斥**窄于 spec 原文**，`source_path_escape` 被放行且同轮清掉 fatal（Opus [medium]，spec **S2-F48**）| 判据改为「`fetch_fatal_error` 在不在」|
 | D51 | Task 16 测试判别力 | S2-F45 的新下限把两条累计字节老攻击档抬到门槛以下 ⇒ 两条守卫**零红**（Opus [medium]，spec **S2-F49**）| 两档抬到下限之上 + 断言改判据专属措辞。⚠️ 收紧判据后要重跑邻居档的变异 |
 | D52 | Task 16 AST 守卫 | 守卫只扫 `comparators` 且只认一个字面量，三种绕法查不出（Opus [low]，spec **S2-F50**）| 扫 `left`+`comparators`、展开 Tuple/List/Set、补第二个字面量；两个诱饵档坐实 |
+| D53 | Task 17/18 复校闸 | 闸只立在 per-stock 入口，收尾入口照收推进过的 payload（Opus-2 [medium]，spec **S2-F51**）| 闸从「入口」改成「进度」，涵盖并合并旧判据；凭据加 `owes_staging_recheck` |
+| D54 | Task 17 进度指纹 | 四个分量只有 `files` 被钉住（Opus-2 [low]，spec **S2-F52**）| 补两条单分量推进档 |
+| D55 | Task 15 耐久性 | `F_FULLFSYNC` 文件内容那半被目录那半掩盖（Opus-2 [low]，spec **S2-F53**）| 断言 `os.fsync` 零次 + `replace` 两侧各有屏障 |
+| D56 | Task 15/16 正则 | `_STOCK_CODE_RE` 的 `\Z` 没人守；**补档第一版还是假的**（Opus-2 [low]，spec **S2-F54**）| 走 `RecoveryScope` + 断言判据专属措辞 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1570,6 +1574,7 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
 | **R16** | needs-attention（3 high）| ⭐⭐**三条全部落在核心语义 / spec 漏实现，没有一条是守卫边界**（R15 是 3 条里 1 条，趋势继续走对）。①**收口点位置错了** —— P2-F3 判在收尾，而 per-stock 提交早已逐只落盘，抛异常收不回来，且那一轮 spec 指定的 `staging_recheck_failed` 一次没记上；②**`pool_order` 只比集合** —— §4.5:545 的「按序追加」+「pilot 唯一消费顺序来源」被**重排 / 插队**安静绕过，成员一个没少；③**配额下限漏掉 staged export_log**（§4.5:532 明定的唯一非股级计账对象），引导态那一档更是被 `if files:` 整个跳过。⚠️ ③**推翻了我 R15 那轮自己写的正向档** —— 「方向②」的正向档同样要按字段穷尽。**15 组定向变异全部命中、零红为 0**，隔离度可核：闸「只看结论不看起跑状态」红 68 条、「只看起跑状态不看结论」红 1 条，两半各自承重；`attest` 入口那道凭据检查**首轮零红**（与 `_state()` 的文案互相掩盖），补一档「传错类型」后判别力恢复 |
 | **Opus** | needs-attention（1 high + 3 medium + 1 low）| ⚠️ **换了评审通道**（user 指定：codex 配额掐断后改用另一个 Opus 5 做对抗性评审；它**写不了账本**，故不兑现治理闸门，只当找缺陷用）。**五条全部本机复现坐实、零误报**。⭐⭐ **两条是 R16 那次修复自己引入的**：①一致性检查写成无条件相等，把 `max_bytes_stop()`/`escape_stop()` 两个合法结局全堵死 —— **唯一合法的恢复路径被自己封了**，还劝操作者报废一棵健康 staging；②新加的配额下限把两条累计字节老攻击档抬到门槛以下，**两条守卫从此零红**。另三条：登记「复校失败」在无 fatal 账本上被静默丢弃、`--skip-existing-verify` 互斥窄于 spec 原文、AST 守卫自己漏了一半判据。**10 组变异全部命中、零红为 0**（含两个注入诱饵函数坐实 AST 守卫的加强）。⚠️ 评审自报未覆盖：S2a 期的读侧校验器（~240-455 行）与本轮新增测试的大部分 |
 | **自查③** | 1 档（控制者，非评审）| 放开「非 clean 结局不查一致性」之后，`elif` 那一支只剩「clean 且取值不等」一种情形，而两条新正向档都不经过它 —— 补 `test_a_passing_recheck_must_still_be_reported_at_the_final_commit` 钉住「登记通过却不上报」。变异实测（把判据窄化成 `is not None and …`）**只有它一条红**，判别力隔离 |
+| **Opus-2** | needs-attention（1 medium + 3 low）| ⭐⭐ **本片第一次没有 high**。评审对**安全核心做了穷尽验证并判定找不到洞**，方法可核：`resolve_final_lifecycle` 的 **10 种合法前态 × 9 种结局**全枚举；走**真入口**的**两轮链路 2916 条**全枚举（凡产出「无 fatal」账本的链路**无一例外**都经过「登记通过 + 上报通过 + 重走过路径」）；**84 个决策表输出**逐个回喂读侧全部往返成功。①medium = 复校闸只立在 per-stock 入口（同一份 payload：per-stock 拒、收尾收）；②③④ 全是**测试判别力**（生产代码正确但判据没人守）。四条**全部本机复核属实、零误报**。8 组变异 7 组一次命中；**P7 首轮零红 —— 追下去发现我补的那条档本身是假的**（邻居 `endswith` 抢先抛且文案同样含 `stock_code`），改成断言判据专属措辞后判别力才成立 ⇒ **同一族错误在修它的过程中原地又踩一次**（见 S2-F49/F54）|
 
 > ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；

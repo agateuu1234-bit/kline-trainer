@@ -5291,3 +5291,136 @@ def test_a_passing_recheck_must_still_be_reported_at_the_final_commit(tmp_path):
                          outcome=clean_finish(revisited_fatal_path=True))
     finally:
         os.close(fd)
+
+
+# ── Opus 对抗性评审 第 2 轮 ──────────────────────────────────────
+# 1 medium（收尾入口没有复校闸）+ 3 low（全是**测试判别力**：生产代码本身正确，
+# 但判据没有任何测试隔离地守着，将来被改坏不会红）。
+
+
+def test_a_run_that_owes_a_recheck_may_not_advance_progress_at_the_final_commit(tmp_path):
+    """⭐⭐ [Opus-2 medium] 复校闸只立在 **per-stock** 那个入口。
+
+    本机端到端复现（**同一份 payload、同一次运行**）：
+      `commit_stock` → 被拒 ✅ ；`commit_final` → **被接受** ❌
+      cursor 1→3、files 4→8、committed_bytes +490 万。
+    于是一棵**已被证明动过**的 staging，只要把进度全走收尾那个入口，就能一轮
+    一轮地把冻结宇宙与 `--max-bytes` 预算烧光 —— 正是 P2-F3 存在的理由。
+
+    ⚠️ 修法不是「也在收尾入口拒绝提交」，而是把闸从「入口」改成「**进度**」：
+    这一轮没证明 staging 干净 ⇒ 收尾 payload 的进度指纹必须与**运行起点**逐项
+    相同。这样既堵死烧预算，又不妨碍它把「我撞了新逃逸」这类证据记下来。
+    ⭐ 原来那条 `outcome.staging_recheck == "failed"` 的判据被它**完全涵盖**
+    （上报 failed ⇒ 登记 failed ⇒ 欠一次复校且未通过），故合并成一条。
+
+    判别力：把判据退回 `outcome.staging_recheck == "failed"`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        before = read_manifest(fd)
+        ledger = begin_run(fd)                   # **不登记任何复校结论**
+        grown = _with_more_stocks(_warned())
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=False))
+        assert read_manifest(fd) == before        # 一个字节都没写
+    finally:
+        os.close(fd)
+
+
+def test_a_run_that_owes_a_recheck_may_still_commit_without_advancing(tmp_path):
+    """⭐ **正向档**：没推进进度的那一轮必须能照常收尾（否则一棵欠复校的
+    staging 连「我看见 fatal 了、我停了」都记不下去，而 fatal 必须被保留）。
+
+    判别力：把闸写成「欠复校就一律拒绝收尾」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        written = commit_final(fd, _warned(), ledger=ledger,
+                               outcome=clean_finish(revisited_fatal_path=False))
+        assert written["fetch_fatal_error"] == _fatal()       # 保留
+        assert written["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("label,advance", [
+    ("只推进 cursor", lambda m: m["cursor"].__setitem__("SH", 2)),
+    ("只涨 committed_bytes", lambda m: m.__setitem__(
+        "committed_bytes", m["committed_bytes"] + 1000)),
+])
+def test_the_progress_fingerprint_covers_every_component_it_names(tmp_path, label, advance):
+    """⭐ [Opus-2 low] 进度指纹的四个分量里，此前**只有 `files` 被钉住**。
+
+    原来那条 P2-F3 的档用 `_with_more_stocks` 一次性推进了 files + pool +
+    cursor + committed_bytes，**任何一个分量单独满足不等式就够了** ——
+    实测把 `cursor` 或 `committed_bytes` 从 `_progress_of` 的元组里删掉，
+    全量 1301 条**一条都不红**。而 `cursor` 恰恰是 spec P2-F3 点名的第一个，
+    `committed_bytes` 则写在本模块自己的报错文案里。
+    这正是本仓栽过的「两条判据互相掩盖 → 变异假阴性」那一族。
+
+    判别力：从 `_progress_of` 的元组里删掉对应分量，对应那一档必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        moved = copy.deepcopy(_warned())
+        advance(moved)
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, moved, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="failed"))
+    finally:
+        os.close(fd)
+
+
+def test_the_ledger_tells_the_caller_whether_it_owes_a_staging_recheck(tmp_path):
+    """⭐ 调用方**问得到**「这一轮欠不欠一次全量复校」。
+
+    不暴露时 S4 只能自己重新推导 `_needs_staging_recheck` —— 正是
+    `test_only_one_place_decides_whether_a_staging_recheck_is_required`
+    立起来要禁止的「同一件事判在两处」。
+
+    判别力：把这个属性删掉或写死成 False，本条必红。
+    """
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    d1, fd1 = _staging(tmp_path / "a")
+    d2, fd2 = _staging(tmp_path / "b")
+    try:
+        _seed_disk(fd1, _valid_manifest())                     # 干净
+        _seed_disk(fd2, _warned())                             # 欠一次复校
+        assert begin_run(fd1).owes_staging_recheck is False
+        assert begin_run(fd2).owes_staging_recheck is True
+    finally:
+        os.close(fd1); os.close(fd2)
+
+
+def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
+    """(*) [Opus-2 low] `_STOCK_CODE_RE` 的 \\Z 此前**没有任何测试守着**。
+
+    模块里那条注释说「三个正则都改成 \\Z，按判据本身穷尽」并给了实测依据
+    （不加 re.MULTILINE 时 `$` 仍容忍**恰好一个尾随换行**），而三个里只有
+    `_SHA256_RE` 与 `_GMT_TOKEN_RE` 被钉住 —— 实测把它退回 `$`，全量一条都不红。
+
+    (!!) **本档第一版是假的，控制者变异实测抓出来的**：`RecoveryScope` 还有
+    第四条检查 `stock_code.endswith("." + market)`，尾随换行同样过不了它 ——
+    正则退回 `$` 时**邻居抢先抛**，而邻居的文案里也含 `stock_code`，
+    于是 `match="stock_code"` 照样匹配、本档照样绿。
+    **这正是同一轮评审刚教的那一族**（判据之间互相掩盖），我在修它时又踩了一次。
+    => 断言必须用**判据专属措辞**：正则那条报「形如 600000.SH」，
+    后缀那条报「后缀与 market 不一致」，两者可分辨。
+    (!) manifest 里那三个调用点**没有一个隔离得开**（后缀比对 / 冻结名单锚点 /
+    文件名解析对表都会抢先接住换行），故只有这条路钉得住它。
+
+    判别力：把 \\Z 退回 `$`，本条必红（已实测）。
+    """
+    RecoveryScope(stock_code="600004.SH", market="SH", universe_idx=1)   # 正向
+    # 恰好一个尾随换行 = `$` 与 \Z 的**唯一**分界
+    for bad in ("600004.SH\n", "600004.SH\n\n", "\n600004.SH"):
+        with pytest.raises(ValueError, match="形如"):
+            RecoveryScope(stock_code=bad, market="SH", universe_idx=1)

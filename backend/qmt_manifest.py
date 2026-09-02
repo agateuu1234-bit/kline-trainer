@@ -983,6 +983,16 @@ class RunLedger:
     def skip_existing_verify(self) -> bool:
         return self._state().skip_existing_verify
 
+    @property
+    def owes_staging_recheck(self) -> bool:
+        """起跑时账本上那份记录，是否**必须**先做一次 staging 全量复校才能解除。
+
+        ⚠️ 不暴露时调用方只能自己重新推导 `_needs_staging_recheck` ——
+        正是 `test_only_one_place_decides_whether_a_staging_recheck_is_required`
+        立起来要禁止的「同一件事判在两处」（Opus 评审指出）。
+        """
+        return self._state().start_needs_recheck
+
     def _advance(self, digest: str, lifecycle: dict) -> None:
         """把预期推进到刚写出去的那一份（**只许本模块调用**）。"""
         st = self._state()
@@ -1984,15 +1994,27 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     # 我此前只实现了「保留 fatal + 换 stopped_reason」，漏了这半句。
     # ⚠️ 这里比的是**运行起点**（`begin_run` 时）的进度，不是上一次提交 ——
     # 否则本轮先提交几只股再收尾，比对就恒等成立了。
-    if outcome.staging_recheck == "failed":
-        st = ledger._state()
+    # ⚠️⚠️ **闸的对象是「进度」，不是「入口」**（Opus 评审 [medium]，本机端到端复现）。
+    # 此前只在「上报 `staging_recheck == "failed"`」时才冻结进度，而
+    # **一次运行完全可以从不登记任何结论**：`commit_stock` 的复校闸把它挡住了，
+    # `commit_final` 却照收 —— 同一份 payload，per-stock 拒、收尾收，
+    # 实测 cursor 1→3、files 4→8、committed_bytes +490 万。于是一棵**已被证明
+    # 动过**的 staging，只要把进度全走收尾这个入口，就能一轮一轮地把冻结宇宙与
+    # `--max-bytes` 预算烧光 —— 正是 P2-F3 存在的理由。
+    # ⭐ 新判据**完全涵盖**旧判据：上报 failed ⇒ 登记 failed（一致性检查）
+    #   ⇒ 欠一次复校且未通过（`attest` 不欠时拒绝登记），故合并成一条。
+    # ⚠️ 冻结的是**进度**而不是**提交**：这一轮仍要能把「我看见 fatal 了、
+    #   我停了」或「我撞了新逃逸」记下去 —— 已配正向档。
+    st = ledger._state()
+    if st.start_needs_recheck and st.recheck != "passed":
         if _progress_of(payload) != st.start_progress:
             raise ManifestInvalidError(
-                "本次 staging 全量复校失败，而这一轮**推进了进度**"
+                "这棵 staging 欠一次全量复校（账本带着必须复校才能解除的记录），"
+                f"本次运行的复校结论是 {st.recheck!r}，而这一轮**推进了进度**"
                 "（files / pool_order / cursor / committed_bytes 与运行起点不一致）。"
-                "spec P2-F3 规定复校失败的那一轮不得推进 cursor、不得新增 "
+                "spec P2-F3 规定这样的一轮不得推进 cursor、不得新增 "
                 "files/pool_order —— 否则每次重跑都继续消耗冻结宇宙与 --max-bytes "
-                "预算，却永远清不掉 fatal。请换新 staging + 新 seed 重拉。"
+                "预算，却永远清不掉 fatal。请先做完全量复校，或换新 staging + 新 seed 重拉。"
             )
 
     # ⚠️ **用了 `--skip-existing-verify` 的运行，收尾也不许发布 full/snapshot**
