@@ -1493,13 +1493,97 @@ grep -o 'S2-F[0-9]\+' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-desi
 grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md
 ```
 
-**期望**：第一条输出一串**从 `S2-F1` 开始、连号不跳**的编号（今天到 `S2-F11`，以后还会更多）；
+**期望**：第一条输出一串**从 `S2-F1` 开始、连号不跳**的编号（条数每次评审都会增长，**不要去记具体到几**——两条命令互相印证就够了）；
 第二条输出的数字**等于第一条的行数**。
 
 **通过判定**：编号连号不跳、且两条数字相等 → 通过。任一不满足 → 不通过。
 
 > ⚠️ 注意 `S2-F[0-9]\+` 的 `\+`：S2a 版写的是 `S2-F[0-9]`（只匹配一位数），
 > 到 `S2-F10` 就会把它截成 `S2-F1`、造成「看起来连号其实少了一条」的假绿。
+
+---
+
+### A8 · 亲眼看「欠一次全量复查的目录」推不动进度
+
+> 场景：上一次拉取时发现目录被人动过（安全警报）。你修好后重跑。
+> 规矩是：**必须先把整棵目录重新核对一遍（全量复查），核对通过之前，一只股票都不许提交。**
+> 不然每次重跑都会继续消耗「冻结的股票名单」和磁盘配额，而那条警报永远解除不掉
+> ——白白烧掉几个小时和几个 GB，最后还是解不开。
+>
+> ⚠️ 这条闸此前**只装在其中一个入口上**，另一个入口照收（评审两轮先后挖出），
+> 所以这里**两个入口各测一次**。
+
+**动作**
+
+```
+"$PY" -c "
+import os, sys, tempfile; sys.path.insert(0,'tests')
+from test_qmt_manifest import _valid_manifest, _fatal, _with_more_stocks
+from qmt_fsroot import open_root, atomic_write_json
+from qmt_manifest import (MANIFEST_NAME, begin_run, commit_stock, commit_final,
+                          attest_staging_recheck, clean_finish, read_manifest,
+                          ManifestInvalidError)
+d = os.path.join(os.path.realpath(tempfile.mkdtemp()), 'staging'); os.mkdir(d)
+fd = open_root(d)
+warned = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason='staging_path_escape')
+atomic_write_json(fd, MANIFEST_NAME, warned)
+grown = _with_more_stocks(warned)
+led = begin_run(fd)
+try: commit_stock(fd, grown, ledger=led); print('① 没复查就提交股票：没拦住 ❌')
+except ManifestInvalidError: print('① 没复查就提交股票：拦住了 ✅')
+try: commit_final(fd, grown, ledger=led, outcome=clean_finish()); print('② 没复查就想收尾推进：没拦住 ❌')
+except ManifestInvalidError: print('② 没复查就想收尾推进：拦住了 ✅')
+attest_staging_recheck(led, passed=False)
+try: commit_stock(fd, grown, ledger=led); print('③ 复查没通过还想提交：没拦住 ❌')
+except ManifestInvalidError: print('③ 复查没通过还想提交：拦住了 ✅')
+led2 = begin_run(fd); attest_staging_recheck(led2, passed=True)
+commit_stock(fd, grown, ledger=led2)
+print('④ 复查通过后继续拉：放行 ✅，文件记录', len(read_manifest(fd)['files']), '条')
+"
+```
+
+**期望**：四行，①②③ 都是「拦住了 ✅」，④ 是「放行 ✅，文件记录 6 条」。
+
+**通过判定**：四行全部带 ✅ → 通过。
+④ 那行**必须是放行**——只会拦不会放的闸等于把修好的目录永久锁死，同样是不通过。
+
+---
+
+### A9 · 亲眼看「账本被换成一个假东西」被挡住
+
+> 账本文件本身被换成**不是普通文件的东西**（比如一个通信管道、一个目录、
+> 一个 socket），说明这棵目录已经被动过。工具必须当场拒绝并给出恢复指引，
+> 而**不是**吐一堆看不懂的报错。
+>
+> ⚠️ socket 这一档此前是**漏的**：程序打不开它就直接崩了，根本走不到「这是不是
+> 普通文件」那一步（评审第三轮挖出）。
+
+**动作**
+
+```
+"$PY" -c "
+import os, socket, sys, tempfile; sys.path.insert(0,'tests')
+from qmt_fsroot import open_root
+from qmt_manifest import MANIFEST_NAME, read_manifest, begin_run, ManifestInvalidError
+d = os.path.join(os.path.realpath(tempfile.mkdtemp()), 'staging'); os.mkdir(d)
+fd = open_root(d); os.chdir(d)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(MANIFEST_NAME)
+for name, fn in (('读账本', read_manifest), ('启动闸', begin_run)):
+    try: fn(fd); print(name, '：没拦住 ❌')
+    except ManifestInvalidError as e: print(name, '：拦住了 ✅ ——', str(e).splitlines()[0][:34])
+s.close()
+"
+```
+
+**期望**：两行都是「拦住了 ✅」，后面跟着「存在但不是普通文件——拒绝。」
+
+**通过判定**：两行都带 ✅ → 通过。
+出现 `OSError` 或 `Operation not supported` 之类的原始报错 → **不通过**
+（那说明修复没生效，你拿到的会是一堆看不懂的东西而不是恢复指引）。
+
+> ⚠️ 脚本里那句 `os.chdir(d)` 不是多余的：socket 的路径长度上限约 104 个字符，
+> 临时目录的完整路径本身就超了（实测报 `AF_UNIX path too long`），
+> 所以要先切进目录、再用短名字创建。
 
 ---
 
