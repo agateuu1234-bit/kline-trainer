@@ -116,10 +116,10 @@ run "regression: Plan 1f schema versioning" \
 | **F16（订正）** | 闸门相关文件名单展开后是 **9 条路径**（`.claude/hooks/` 2 条 + config + settings + workflow-rules + `tests/hooks/` 2 条 + `hardening_6_framework.sh` + `hardening_6_gate.yml`），初稿写 8，**错**。「不含 `plan_1f` / `plan_1b`」这半句**属实** | 展开 `hardening_6_gate.yml` L50 的正则逐条数 |
 | **F17** | **`/tmp/p1f.log`（及 `/tmp/p1.log` / `p1b.log` / `p1c.log`）在全仓没有任何一处被打印** ⇒ CI 上 plan_1f 的失败细节完全不可见 | `grep -rn 'p1f.log' scripts/` 只命中 `hardening_6_framework.sh:99` 的重定向本身 |
 | **F18** | **`plan_1c_m0_3_swift_contracts.sh` L41–42 执行 `cd ios/Contracts && swift test`**，而 `plan_1f` L120 内嵌调用它 | 读两个脚本 |
-| **F19** | 闸门 job 跑在 **`ubuntu-latest`**，而验证 F14 用的环境是 **macOS** ⇒ **Linux 侧的 `swift test` 路径零证据** | 读 `hardening_6_gate.yml` `runs-on` + §5.1 的环境说明 |
+| **F19（订正）** | 闸门 job 跑在 **`ubuntu-latest`**，且 `hardening_6_gate.yml` 全文**零处**提到 `swift`（无任何 Swift 安装步骤）；而 `swift-contracts-smoke.yml` L20–24 特意用 **`runs-on: macos-15`** 并注明「依赖 runner 默认 Xcode（macos-15 image 预装 Xcode 16）提供 Swift 6.0+」⇒ **预期 `plan_1c` 的 `swift test` 在 gate 上因缺工具链而快速失败**（`command not found` 一类），而非挂住。初稿写「零证据」，**过强** | 读两份 workflow + `grep -ci swift hardening_6_gate.yml` = 0 |
 | **F20** | `plan_1b` 的 11 vs 19 早在 **2026-05-25** 就被记入 `docs/acceptance/2026-05-25-pr-e2-position-manager.md` 第 4 项并明示「可忽略」 | 读该文档 |
 | **F21** | `kline_trainer_modules_v1.4.md` L144–145 的矩阵**停在 `"1.5"` / `0003_v1.3`**，而 m01 与代码都是 `"1.13"` / `0004_...`（`Models.swift:7 = "1.13"`）⇒ **两份治理矩阵分叉、modules 落后 8 版**；而 `plan_e2` L37 正断言 modules = `"1.5"` 并**通过**（绿灯锁死错值） | 逐格比对三处 + `plan_e2` 实跑输出中该项未出现在 FAIL 列表 |
-| **F22** | 用户本机 `grep` 是 **ugrep 7.8.4**（被 shell 函数替换）；`grep -c "'^11 passed'"` 返回 **0**，`grep -cF` 与 `/usr/bin/grep -c` 返回 **1** | 本人在 worktree 实跑三种写法 |
+| **F22（归因已软化）** | 用户本机 `grep` 是 **ugrep 7.8.4**（被 shell 函数替换）；`grep -c "'^11 passed'"` 返回 **0**，`grep -cF` 与 `/usr/bin/grep -c` 返回 **1**。⚠️ **三个数字属实，但归因未证成**：该模式里带着一对多余的单引号、`^` 落在串中间，「ugrep 与 GNU/BSD 正则语义不同」与「模式本身写错」两种解释都成立，未做区分实验。**结论（一律用 `-F`）不受影响** | 本人在 worktree 实跑三种写法 |
 | **F23** | m01 文档 L125 有一条治理 backlog 明确描述「`plan_1f` 的 CONTRACT_VERSION 矩阵 6 行断言」 ⇒ 若删除那 6 条，该治理文本将指向不存在的对象 | 读 `docs/governance/m01-schema-versioning-contract.md:125` |
 | **F24** | `hardening_6_framework.sh` **L83 / L85 已在用 `bash -o pipefail -c`**（两条 pytest 断言，形态为「重定向 → 存 `ec` → `tail -3` → `exit $ec`」）⇒ 本次的 `-o pipefail` 用法是同仓既有写法，非新引入 | 读该文件 L83、L85 |
 | **F25** | `plan_1f` L118–123 **把三个嵌套脚本的输出各自重定向**到 `/tmp/p1.log` / `p1b.log` / `p1c.log` ⇒ 即使流式打印 `plan_1f` 自身输出，嵌套脚本的内部细节仍然看不到，故转储块必须保留这三个 | 读 `plan_1f` L118–123 |
@@ -127,6 +127,11 @@ run "regression: Plan 1f schema versioning" \
 | **F27** | `bash -o pipefail -c "test -x X && X 2>&1 \| tee LOG"` 的解析是 `A && (B \| C)`：X 不存在时**退出 1 且零输出**；X 存在且失败时**输出实时可见且退出 1** | scratchpad 两档实跑 |
 | **F28** | **改动前** `hardening_6_framework.sh` 的输出中 `matrix row:` 与 `PLAN 1f` 各出现 **0 次**（`plan_1f` 的 31 条断言明细一行都上浮不到）；顶层标签 `regression: Plan 1f` 出现 3 次（framework 自己打的） | 本 worktree 实跑并 `grep -c` |
 | **F29** | 顶层汇总数字**随环境变化**：本机无 venv 时 `11 passed, 3 failed`，CI 上 `13 passed, 1 failed` ⇒ 该数字**不可写死为判据**，只能做同环境前后对比 | 本机实跑 vs CI 日志比对 |
+| **F30** | **`tee` 只能转发已经离开生产者 stdio 缓冲区的字节。** 实测两档：无缓冲生产者（`echo` 后 `sleep 20`）3 秒后下游**已有内容**；块缓冲生产者（`python3 print` 未 flush 后 `sleep 20`）3 秒后下游**为空**，被 `kill -9` 后内容永久丢失 ⇒ **「流式 ⇒ 挂住时证据一定还在」是假的** | scratchpad 两档实跑 |
+| **F31** | **「只改 framework 一处」的半吊子实现能通过旧 §5 的全部判据**：实跑得 `matrix row:` = **16**、`PLAN 1f` = **1**（两条都「通过」），而嵌套层标记 `PLAN 1c` / `PLAN 1b` **全为 0** | 本 worktree 直接以半吊子形态实跑 |
+| **F32** | 结构判据的当前值：framework 的 `bash -o pipefail -c` = **2**、plan_1f = **0**；framework 的 `> /tmp/p1f.log` = **1**、plan_1f 的 `> /tmp/p1` = **3** | 本 worktree `grep -cF` 实跑 |
+| **F33** | `hardening_6_framework.sh` **L96–97** 还有**第 5 处**完全同型的重定向吞日志（`regression: Plan 1 DDL` → `> /tmp/p1.log`），本次**不改** | 读该文件 L96–97 |
+| **F34** | `plan_1b_m0_2_rest_api.sh` L35 有一处 **`\| tee` 但无 `-o pipefail`**；当前靠哨兵 `grep -q '^11 passed'` 兜住，不是活的假绿 | 读该文件 L35 |
 
 ---
 
@@ -162,7 +167,9 @@ run "regression: Plan 1c (M0.3 Swift Models) acceptance (间接覆盖 Plan 1d Ap
 > - **R2 版**：只把最外层改流式 + 事后转储三个嵌套日志 ⇒ **挂住时仍丢最关键的那份**
 >   （`swift test` 的输出被 `plan_1f` 重定向进 `/tmp/p1c.log`，转储块在 `run` 返回后才执行，
 >   而挂住时 `run` 永不返回）（R3 high）。
-> - **本版**：**每一层都流式** ⇒ 挂住时 `swift test` 已经打印的内容**已经在 CI 日志里**。
+> - **本版**：**每一层都流式** ⇒ 正常失败时拿到**完整**失败面；挂住时**能看出卡在哪一层**。
+>   ⚠️ 但**不是**「挂住时 Swift 的输出一定还在」—— 该说法已被 F30 实测证伪（`tee` 只转发
+>   已离开生产者 stdio 缓冲区的字节）。准确的收益边界见 **R8**。
 >   顺带**删掉**了 R2 版引入的 `_h6_fail_before` 转储机制，改动比 R2 版**更小**。
 
 **为什么这样写：**
@@ -220,61 +227,97 @@ modules 矩阵落后 8 版（F21）、m01 L125 的悬空 backlog（F23）、
 
 ## 5. 验证方案
 
-### 5.1 负向对照（必做）
+> ⚠️ **本节已按 codex/Opus R4 第三次重写。** 前两版的判据**对 4 处改写中的 3 处零判别力** ——
+> 评审员在真仓库上实测：一个「只改了 framework 那一处」的**半吊子实现**（正是 R3 判为致命缺陷的形态）
+> 能 **100% 通过**旧判据。我复跑确认：该形态下 `matrix row:` = **16**、`PLAN 1f` = **1**（两条都「通过」），
+> 而嵌套层标记 `PLAN 1c` / `PLAN 1b` **全为 0**。
+> ⇒ **判据必须同时锁住「结构」（4 处改写都在）与「行为」（每一层的输出都上浮）。**
 
-改动**之前**在当前树跑一次并存档：
+### 5.1 结构判据（锁住 4 处改写都落地，且没漏 `-o pipefail`）
+
+```bash
+grep -cF 'bash -o pipefail -c' scripts/acceptance/hardening_6_framework.sh
+grep -cF 'bash -o pipefail -c' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
+grep -cF '> /tmp/p1f.log' scripts/acceptance/hardening_6_framework.sh
+grep -cF '> /tmp/p1' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
+```
+
+| # | 命令 | **改动前**（已实跑） | **改动后**（期望） |
+|---|---|---|---|
+| S1 | framework 的 `bash -o pipefail -c` 计数 | **2**（既有 L83/L85） | **3** |
+| S2 | plan_1f 的 `bash -o pipefail -c` 计数 | **0** | **3** |
+| S3 | framework 的 `> /tmp/p1f.log` 计数 | **1** | **0** |
+| S4 | plan_1f 的 `> /tmp/p1` 计数 | **3** | **0** |
+
+**四条都是双向的**：既证明新形态到位（S1/S2），也证明旧形态消失（S3/S4）。
+S2 直接封掉「只改 framework 不改 plan_1f」的半吊子实现；
+S1/S2 的计数形式直接封掉「某一处漏写 `-o pipefail`」——
+漏一处，计数就少一个。
+
+> ⚠️ **必须用 `grep -cF`**（定长串）：本机 `grep` 是 ugrep（F22），模式里含 `>` 等字符时行为可能与 GNU/BSD 不同。
+> ⚠️ `grep -c` 计数为 0 时**退出码是 1**；这段若被粘进带 `set -e` 的脚本会中途中止
+> （`feedback_acceptance_grep_anchoring` 记过同款）。**一行一条单独敲，不要串成脚本。**
+
+### 5.2 行为判据 —— 负向对照（改动前必须全红）
 
 ```bash
 bash scripts/acceptance/hardening_6_framework.sh > /tmp/h6-before.log 2>&1
 grep -c 'matrix row:' /tmp/h6-before.log
-grep -c 'PLAN 1f' /tmp/h6-before.log
+grep -c 'PLAN 1c' /tmp/h6-before.log
+grep -c 'PLAN 1b' /tmp/h6-before.log
+grep -cE '^PLAN 1 (PASS|FAIL)$' /tmp/h6-before.log
 ```
 
-**两条期望值均为 `0`** —— 即 `plan_1f` 的 31 条断言明细**一行都到不了上层输出**。
-**已在本 worktree 实跑确认：两条均为 0**（另：`regression: Plan 1f` 这个**顶层标签**出现 3 次，
-那是 `framework` 自己打的，不是 `plan_1f` 的明细，勿混淆）。
+**四条期望值全为 `0`** —— 即 `plan_1f` 层与三个嵌套层的输出**一行都上浮不到**。
+**已在本 worktree 实跑确认前两条为 0**（F28）；后两条同理（同一重定向机制）。
 
-> 若改动**之前**这两条就不是 0，说明该判据零判别力，停下来查。
+> 若改动**之前**任何一条不是 0，说明该判据零判别力，停下来查。
 
-### 5.2 本地正向
-
-改动**之后**同样跑一次并对比：
+### 5.3 行为判据 —— 正向（改动后必须全绿）
 
 ```bash
 bash scripts/acceptance/hardening_6_framework.sh > /tmp/h6-after.log 2>&1
 grep -c 'matrix row:' /tmp/h6-after.log
-grep -c 'PLAN 1f' /tmp/h6-after.log
-grep -E 'acceptance: .* passed' /tmp/h6-before.log /tmp/h6-after.log
+grep -c 'PLAN 1c' /tmp/h6-after.log
+grep -c 'PLAN 1b' /tmp/h6-after.log
+grep -cE '^PLAN 1 (PASS|FAIL)$' /tmp/h6-after.log
+grep -cE '^Hardening-6 framework acceptance: ' /tmp/h6-before.log
+grep -cE '^Hardening-6 framework acceptance: ' /tmp/h6-after.log
 ```
 
-**判据三条：**
+| # | 判据 | 期望 | 它单独封掉什么 |
+|---|---|---|---|
+| B1 | `matrix row:` ≥ 1 | > 0 | framework 那一处改写生效 |
+| B2 | `PLAN 1c` ≥ 1 | > 0 | **plan_1f→plan_1c 那处改写生效**（半吊子实现在此为 0） |
+| B3 | `PLAN 1b` ≥ 1 | > 0 | **plan_1f→plan_1b 那处改写生效** |
+| B4 | `^PLAN 1 (PASS\|FAIL)$` ≥ 1 | > 0 | **plan_1f→plan_1 那处改写生效** |
+| B5 | 顶层汇总行数 | 前后**均为 1** | 汇总行没被嵌套层的同格式汇总污染 |
+| B6 | 两个汇总行**内容逐字相同** | 相同 | **断言结果零改变** —— 没有任何断言从红变绿 |
 
-1. `matrix row:` 计数 **> 0**（`plan_1f` 的逐条明细已上浮）；
-2. `PLAN 1f` 计数 **> 0**（其结论行已上浮）；
-3. **两次运行的顶层汇总行完全相同** —— 即 `N passed, M failed` 的两个数字不因本次改动而变化。
-   ⚠️ **不得写死这两个数字**：它们随本机是否装齐 Python 依赖而变
-   （无 venv 时实测 `11 passed, 3 failed`，CI 上是 `13 passed, 1 failed`）。
-   判据是**同环境前后一致**，不是某个具体值。
+> ⚠️ **B5 的锚必须是 `^Hardening-6 framework acceptance: `**，不能用宽松的 `acceptance: .* passed`。
+> 改动后四个嵌套脚本的汇总也会上浮，**全都匹配宽松正则** ——
+> 实测嵌套层会多出 `Plan 1f … acceptance: 24 passed, 7 failed`、`Plan 1 (M0.1 DDL) acceptance: …`、
+> `Plan 1b (M0.2 REST API) acceptance: …`、`Plan 1c (M0.3 Swift Contracts) acceptance: …` 四行，
+> 宽松写法会从 1 行变 5 行，非技术执行者会直接误判「不一致 → 失败」。
+>
+> ⚠️ **B6 不得写死具体数字**：本机无 venv 时是 `11 passed, 3 failed`，CI 上是 `13 passed, 1 failed`（F29）。
+> 判据是**同环境前后逐字相同**，不是某个具体值。
 
-### 5.3 CI 级（本 PR 自证，见 D4）
+### 5.4 CI 级（本 PR 自证，见 D4）
 
 PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确认：
 
-1. 出现 `plan_1f` 的逐条断言明细（`OK:` / `NG:` 行），而非只有一行顶层 `NG`；
-2. 出现三个嵌套脚本（Plan 1 / 1b / 1c）各自的输出；
-3. 记录下 `plan_1f` 在 **ubuntu-latest** 上的**完整失败项清单** —— 这是本 PR 的交付物。
+1. 出现 `plan_1f` 的逐条断言明细（`OK:` / `NG:` 行）；
+2. 出现三个嵌套脚本各自的输出（至少能看到 `PLAN 1b` / `PLAN 1c` / `PLAN 1 …` 三个结论行）；
+3. 记录 `plan_1f` 在 **ubuntu-latest** 上的**完整失败项清单** —— 这是本 PR 的交付物。
 
 > ⚠️ **判绿纪律不适用于本 PR** —— 成功判据不是「检查变绿」，而是**「失败面变得可读」**。
-> 若 `acceptance` 意外变绿，反而说明有别的东西不对，需要排查。
 
-### 5.4 明确不做的验证
+### 5.5 明确不做的验证
 
-- 不预测 `plan_1f` 在 Linux 上会失败在哪几项。任何此类预测都是猜测。
-- **不构造人工挂起测试**。codex R3 建议「加一个有界的挂起测试，验证输出在被终止前到达 CI」。
-  **不采纳**：要真实复现「CI 上 `swift test` 挂住」需要一个 Linux runner + 一个会挂的 Swift 工具链，
-  本机无法构造等价环境；用 `sleep` 伪造的挂起只能证明 `tee` 会流式（已由 D1 的实测档 A 证明），
-  证明不了真实场景。**流式与非流式的差别是结构性的**（输出在运行时进入 stdout vs 运行后才写出），
-  不依赖挂起测试来确立。
+- 不预测 `plan_1f` 在 Linux 上具体失败在哪几项（**但 F19 已给出一个有依据的预期，见该条**）。
+- **不构造人工挂起测试**。理由见 §8 方案 F —— 但注意该否决理由已按 R4 收窄：
+  「生产者缓冲」这一层本机**能**验、且**已验**（F30），只有「Linux 上真实的 Swift 挂起」本机不可复现。
 
 ## 6. 残留风险台账
 
@@ -283,11 +326,13 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 | **R1** | `plan_1f` 的 4 条矩阵断言 + `plan_1b` 的 `11 passed` **仍然是红的** | 本次有意不修（D2） | 待 D5 的修复 spec |
 | **R2** | `plan_e2_position_manager.sh` 带着 2 条红断言留在仓里（F9），且其 L37 用绿灯锁死了 modules 矩阵的错值（F21） | 既有故障，非本次引入；初稿曾错误声称其无问题 | 待 D5；**已在台账中订正，不再有「其余脚本干净」的错误陈述** |
 | **R3** | `kline_trainer_modules_v1.4.md` 矩阵落后 8 版（F21），与 m01 分叉 | 治理文档不一致，影响任何按它核对版本的人 | 待 D5；需先厘清两份矩阵谁是权威 |
-| **R4** | `plan_1f` 在 `ubuntu-latest` 上跑 `swift test`（F18/F19），可行性未知 | **本 PR 的存在就是为了回答它** | 由 §5.3 的 CI 运行给出答案 |
+| **R4（按 R4 轮订正）** | `plan_1f` 在 `ubuntu-latest` 上跑 `swift test`（F18），**预期因缺 Swift 工具链快速失败**（F19 订正） | 初稿写「可行性未知 / 零证据」**过强** —— 仓内已有指向性证据。但**具体失败文案与是否连带影响其它断言**仍需实测 | 由 §5.4 的 CI 运行给出答案 |
 | **R5** | 闸门仍对绝大多数 PR 短路放行（F4）⇒ 剩余断言仍是低频执行、仍可能腐烂 | 短路机制本身是正确的（防另一种死锁）；本次不改变执行频率 | 超出范围 |
 | **R6** | 「验收清单里口头豁免闸门失败」这一失效模式（F20）无任何机制约束 | 真实且已发生过一次 | 超出范围，记入独立 backlog |
+| **R9** | `hardening_6_framework.sh` **L96–97**（`regression: Plan 1 DDL`）还有第 5 处同型的重定向吞日志（F33），本次**不改** | **有意不改**：`plan_1f` 稍后会以流式重跑同一个 `plan_1`，其细节因此已被覆盖 ⇒ 改它是重复。§0「每一层都改」指的是**通往 `plan_1f` 的那条链**，不含这条平行分支 | 接受，记录在案 |
+| **R10** | `plan_1b_m0_2_rest_api.sh` L35 有一处 `\| tee` **无 `-o pipefail`**（F34） | 当前靠哨兵 `grep -q '^11 passed'` 兜住（pytest 失败时摘要行形如 `2 failed, 11 passed`，匹配不到 `^11 passed`）⇒ **不是活的假绿**；但属同族隐患 | 接受，**转入 D5 的修复 spec 一并处理** |
 | **R7** | 流式输出会让 CI 日志显著变长（**成功时也会**，且现在含三个嵌套脚本的全部输出，其中 `plan_1c` 的 `swift test` 输出可达数百行） | 该闸门 25 次运行里只有 2 次真跑满（F4），量级可接受；相比「完全看不见」是净收益。**这是本次有意付出的代价** | 接受 |
-| **R8** | 若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**，job 会跑到 GitHub 默认的 **360 分钟**上限才被杀 | **证据不会丢失**（流式输出已落在 CI 日志里，能看出停在哪一行）；代价只是等待时间与 runner 占用，而本仓为 PUBLIC、标准 runner 免费无限额 | 接受。**未采纳** codex R2 建议的「在脚本里加 `timeout`」—— 本机既无 `timeout` 也无 `gtimeout`（F26），写进去会让本地执行直接失败。若将来要限时，正确位置是 workflow 的 job 级 `timeout-minutes`，属独立改动 |
+| **R8（按 R4 降级）** | 若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**，job 会跑到 GitHub 默认的 **360 分钟**才被杀 | ⚠️ **初稿写「证据不会丢失」，该论断已被实测证伪（F30）**：`tee` 只转发已离开生产者 stdio 缓冲区的字节，而 Swift 的 `print` 走 C stdio、stdout 非终端时为**块缓冲** ⇒ 挂住时**能看出卡在哪一层**（`plan_1f` 自己 `echo` 的层级标题已 flush），但 **Swift 自身缓冲区里未 flush 的内容仍会丢**。<br>量级已按 **F19 订正**下调：gate 上无 Swift 工具链，预期是**快速失败**而非挂住，故本风险实际概率低 | 接受。**未采纳**「脚本内加 `timeout`」（本机无 `timeout`/`gtimeout`，F26）；若将来要限时，正确位置是 workflow 的 job 级 `timeout-minutes`，属独立改动 |
 
 ---
 
@@ -361,13 +406,19 @@ D5 的修复提交落地后，本节的提交清单会变。**合并前必须回
 ```bash
 grep -cF 'tee /tmp/p1f.log' scripts/acceptance/hardening_6_framework.sh
 grep -cF 'tee /tmp/p1' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
+grep -cF '> /tmp/p1f.log' scripts/acceptance/hardening_6_framework.sh
+grep -cF '> /tmp/p1' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
 ```
 
-**两条期望值依次为 `0` 与 `0`**（= 4 处流式改写已全部撤销）。
-**已在本 worktree 实跑确认两条均为 0**（当前树尚未实施）。
+**四条期望值依次为 `0` / `0` / `1` / `3`**（**已在本 worktree 实跑确认全部对上**，当前树尚未实施 = 等价于「回滚后」）。
 
-⚠️ 用 `grep -cF`（定长串）而非正则形式 —— 用户本机 `grep` 是 ugrep 7.8.4（F22），
-正则元字符的行为与 GNU/BSD grep 不同。
+> ⚠️ **前两条必须配后两条，缺一不可。** 只查前两条是**单向**判据 ——
+> 「把那 4 行整段删掉」或「解冲突时取错边留下裸命令」同样返回 `0 / 0`，
+> 于是「回滚成功」的结论是**假绿**，而实际上闸门少了几条断言（codex/Opus R4 的 [medium]）。
+> 后两条锁的是「旧形态确实回来了」。
+>
+> ⚠️ 用 `grep -cF`（定长串）—— 本机 `grep` 是 ugrep（F22）。
+> ⚠️ `grep -c` 计数为 0 时**退出码是 1**，**一行一条单独敲**，别串进带 `set -e` 的脚本。
 
 > ⚠️ **必须用 `-F`**：用户本机 `grep` 是 **ugrep 7.8.4**（F22），对含正则元字符的模式与
 > GNU/BSD grep 行为不同 —— 初稿的回滚核实命令正因此在用户机器上返回了错误的值（§11 Finding 5）。
@@ -493,3 +544,48 @@ grep -cF 'tee /tmp/p1' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
 2. **改了 D，必须同步查 §5 的判据。** 这是同一类错误的第二次（R2 改 D1 没动 §5）。
    凡是改动「产出什么」的决策，都要立刻回到「怎么验」那一节逐条对齐 ——
    否则会产出「正确实现却通不过验收」的自相矛盾交付物。
+
+---
+
+### R4 · **Opus 子代理**对抗性评审 · 2026-09-02 · HEAD `2ec3733` → **needs-attention**（1 high / 3 medium / 4 low）
+
+> ⚠️ **评审通道说明**：codex 配额于 2026-09-02 再次耗尽（恢复时间 **09-07 13:31**，约 5 天），
+> 本次调用产出 `Codex did not return valid structured JSON` + `Parse error: You've hit your usage limit`，
+> **无任何 Verdict 行、退出码 1、0 条命令**（判据 ④ = 0）⇒ 不算一轮，账本未写。
+> 用户明示改用独立 Opus 子代理。**本轮同样不写 attest 账本**；本线**至今没有任何 codex attest 条目**。
+> 该评审员复核了 **26 条**台账（要求 ≥10），其中 3 条因禁用 `gh` 未能复核。
+
+**七条我都复核成立，均已修或已记录。**
+
+| # | 严重度 | Finding | 我的复核 | 处置 |
+|---|---|---|---|---|
+| **H1** | **high** | **§5 的全部判据对 4 处改写中的 3 处零判别力** —— 「只改 framework 一处」的半吊子实现（R3 判为致命的那个形态）能 100% 通过；「某处漏写 `-o pipefail`」也一条抓不到 | **成立，且我自己复跑坐实**：半吊子形态下 `matrix row:` = **16**、`PLAN 1f` = **1**（两条都「通过」），嵌套层标记全为 **0**（F31） | §5 **第三次整节重写**：新增 **4 条结构判据**（S1–S4，双向：新形态到位 + 旧形态消失，且计数形式直接封掉漏 `-o pipefail`）+ **6 条行为判据**（B1–B6，逐处绑定每一层）。全部期望值已实跑（F32） |
+| **M1** | medium | R8 的承重论断「挂住时证据不会丢失」**是假的** —— `tee` 只转发已离开生产者 stdio 缓冲区的字节，Swift `print` 走 C stdio、非终端时块缓冲 | **成立，我自跑两档证实**：无缓冲生产者 3 秒后下游有内容；块缓冲生产者下游**为空**，`kill -9` 后永久丢失（F30） | R8 降级：改为「能看出卡在哪一层，但 Swift 缓冲区里未 flush 的内容仍会丢」 |
+| **M2** | medium | 「Linux 侧 `swift test` 零证据」**过强** —— `swift-contracts-smoke.yml` L20–24 特意用 `macos-15` 并注明依赖预装 Xcode 提供 Swift，而 gate 跑 ubuntu-latest 且**全文零处提到 swift** ⇒ 有指向性证据表明是**快速失败**而非未知 | **成立** —— 我实读两份 workflow + `grep -ci swift hardening_6_gate.yml` = **0**。⚠️ 而 F10 明确写着我读过 `swift-contracts-smoke.yml`，却没看到 3 行之外的 `runs-on` | F19 订正为「预期因缺工具链快速失败」；R4 残留同步降级 |
+| **M3** | medium | §9 回滚核实是**单向**的 —— 「把那几行整段删掉」或「解冲突取错边」同样返回 0/0，判「回滚成功」是假绿 | **成立** | §9 改为**四条**（0/0/**1/3**），后两条锁「旧形态确实回来了」。四条已实跑对上 |
+| **L1** | low | `framework` **L96–97** 还有**第 5 处**同型重定向（`regression: Plan 1 DDL`），既没改也没进残留台账 | **成立** | 新增 F33 + **R9**：有意不改（`plan_1f` 稍后会以流式重跑同一个 `plan_1`，细节已覆盖），并澄清 §0「每一层」指的是通往 `plan_1f` 的那条链 |
+| **L2** | low | §5 的汇总对比用了宽松正则，改动后会从 1 行变 **5 行**（四个嵌套汇总同格式），非技术执行者会误判 | **成立** | B5 的锚改为 `^Hardening-6 framework acceptance: ` 并写明会多出哪四行 |
+| **L3** | low | F22 的归因（ugrep 正则语义）**未证成** —— 那条模式带着多余单引号，「模式写错」是同样成立的解释 | **成立** | F22 加「归因未证成、结论不受影响」的限定 |
+| **L4** | low | `plan_1b` L35 还有一处 `\| tee` **无 `-o pipefail`**，而 D1 的理由 1 正是拿这个当核心论据 | **成立**（当前靠哨兵兜住，非活的假绿） | 新增 F34 + **R10**，转入 D5 |
+
+**评审员另外确认为「未发现问题」的方向**（我采信，因其给出了逐条证据）：
+D1 四处改写与现状**逐字符比对一致**（label / 缩进 / 续行 / 引号 / 路径 / 行号）；
+`A && B | C` 在每一处都解析为 `A && (B|C)`；四档实测全部复现，
+另加两档 A′（漏 `-o pipefail` → exit **0**，证明该选项不可省）与 E（`tee` 目标不可写 → exit 1，非新增风险）；
+`-Fx` 整行匹配不会被嵌套层的 `PLAN 1 PASS` / `PLAN 1b FAIL` 误伤；
+`/tmp/p1.log` 被 framework L97 与 plan_1f L119 共用但**次序安全**；
+**没有任何断言会从「会红」变成「会绿」**，唯一路径是漏写 `-o pipefail`（已由 S1/S2 封掉）。
+
+**本轮的方法论教训（第三次同族，必须记死）**：
+
+1. **⭐⭐ 「判据同步」有两层：标签同步 ≠ 判别力同步。**
+   R3 我学到「改了 D 要同步查 §5」，R4 我**照做了** —— 判据里的字符串确实换成了新产出。
+   但我**没问「这些判据能不能区分完整实现与半吊子实现」**。
+   结果：一个被上一轮明确判死的形态，能满分通过我的验收。
+   ⇒ **写完每条判据，必须构造「最像但错」的实现，实跑证明它会被判红。** 这就是变异验证用在判据上。
+2. **引用自己读过的文件时，要读全那一段。** F10 我声称读过 `swift-contracts-smoke.yml`
+   （用它论证 Swift 守卫的触发路径），却漏掉同一段里 3 行之外的 `runs-on: macos-15` ——
+   而那正是回答「Linux 上能不能跑 swift」的关键。**同一份文件，为 A 问题读过 ≠ 为 B 问题读够。**
+3. **本机能验的东西不要写成「本机无法验证」。** §8 方案 F 我以「需要 Linux runner + 会挂的
+   Swift 工具链」为由否决挂起测试，但真正要验的机制（stdio 缓冲）**本机 20 行就能验**，
+   评审员验了，我复跑也验了。**否决一个验证之前，先拆清它要验的到底是哪一层。**
