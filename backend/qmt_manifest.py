@@ -938,6 +938,12 @@ class _RunState:
     skip_existing_verify: bool
     # 运行**起点**的进度指纹（不随提交推进），供 P2-F3 的「不得推进」判据比对。
     start_progress: tuple = ()
+    # 起跑时账本上那份记录**是否必须先做 staging 全量复校才能解除**。
+    # ⚠️ 与 `lifecycle` 分开存：后者每次提交都会被 `_advance` 推进，
+    # 而这里要的是**运行起点**的事实。
+    start_needs_recheck: bool = False
+    # 本次运行登记的复校结论：`None`（还没做）/ `"passed"` / `"failed"`。
+    recheck: "str | None" = None
 
 
 class RunLedger:
@@ -1100,20 +1106,31 @@ def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
     # 放进转移守卫会被引导态的早退跳过，而引导态正是它最该管的那一档。
     # ⚠️ **只在写侧强制**：加进读侧必需键构成「新增必需字段」，按 O2-F8 必须
     # bump `manifest_version` —— 超出本片范围，已在 spec 登记为交给 S4/S5。
+    # ⚠️ **staged `export_log.csv` 也计入 `--max-bytes`**（spec:532，O2-F2：
+    # 它是**唯一的非股级计账对象**）。此前下限只加 `files`，于是：
+    #   ① 引导态账本 `files` 为空 → 整条判据被 `if files:` 跳过，而 export_log
+    #      在**第一份 manifest 之前**就已落盘（spec:538）——盘上已占 240 万字节
+    #      而账本记 0；
+    #   ② 有 files 时把 export_log 那一份漏掉，同样一路放行。
+    # 两者都让下一次运行从一个**被低估的总数**起步，`--max-bytes` 这条硬上限
+    # 被突破正好一份 export_log 的量（codex R16 [high]，本机复现两档）。
     files = payload.get("files")
     files = files if isinstance(files, list) else []
-    if files:
+    sel = payload.get("staged_export_log")
+
+    def _bytes_of(rec):
+        b = rec.get("bytes") if isinstance(rec, dict) else None
+        return b if isinstance(b, int) and not isinstance(b, bool) and b >= 0 else 0
+
+    if files or sel is not None:
         nb = payload.get("committed_bytes")
-        need = 0
-        for f in files:
-            if isinstance(f, dict) and isinstance(f.get("bytes"), int) \
-                    and not isinstance(f.get("bytes"), bool):
-                need += f["bytes"]
+        need = sum(_bytes_of(f) for f in files) + _bytes_of(sel)
         if not isinstance(nb, int) or isinstance(nb, bool) or nb < 0 or nb < need:
             raise ManifestInvalidError(
-                f"{where} 的账本里有 {len(files)} 条 files 记录，而 "
-                f"committed_bytes 是 {nb!r}（须为非负整数且不小于已记录文件"
-                f"字节之和 {need}）——缺了它，--max-bytes 这条硬上限就被无限期绕开。"
+                f"{where} 的账本里有 {len(files)} 条 files 记录 + staged "
+                f"export_log {_bytes_of(sel)} 字节，而 committed_bytes 是 "
+                f"{nb!r}（须为非负整数且不小于两者之和 {need}）——"
+                "缺了它，--max-bytes 这条硬上限就被无限期绕开。"
             )
 
     lst = payload.get("failures")
@@ -1268,6 +1285,33 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                 f"{where} 会把 {mk} 层已提交的池条目 {sorted(gone)} **回滚**掉"
                 + ("——超出本次崩溃恢复声明的范围。" if recovery is not None else
                    "——调用方交回来的很可能是一份过期副本。")
+            )
+        # ③b **池是有序的**：spec:545「`pool_order[market]` **按序追加**」，
+        #    且它是「pilot 的唯一消费顺序来源」（P4-D8）。只比集合时，
+        #    **重排已提交条目**、或**把新条目插到已提交条目之前**，成员一个
+        #    没少 → 一路放行，而 pilot 消费的次序已经被换掉：断点续跑的
+        #    `already_done` 与「池穷尽」判定双双失真，且**不改变任何身份**，
+        #    安静地发生（codex R16 [high]，本机复现两档）。
+        #    ⇒ 判据 = 上一份必须是新一份的**前缀**（恢复范围内先摘掉那一只）。
+        def _pool_seq(m):
+            lst = m.get("pool_order")
+            lst = lst.get(mk) if isinstance(lst, dict) else None
+            return list(lst) if isinstance(lst, list) else []
+        old_seq = _pool_seq(previous)
+        if recovery is not None and scoped_removed and mk == recovery.market:
+            # 授权删的那一只**摘掉**，其余条目的相对次序照旧必须保住。
+            old_seq = [e for e in old_seq
+                       if not (isinstance(e, dict)
+                               and e.get("code") == recovery.stock_code)]
+        new_seq = _pool_seq(payload)
+        if new_seq[:len(old_seq)] != old_seq:
+            raise ManifestInvalidError(
+                f"{where} 改写了 {mk} 层已提交池条目的**顺序**"
+                f"（上一份 {[e.get('code') if isinstance(e, dict) else e for e in old_seq]}"
+                f" → 本次 {[e.get('code') if isinstance(e, dict) else e for e in new_seq]}）"
+                "——spec 规定 pool_order 只许**按序追加**，它是 pilot 的唯一消费"
+                "顺序来源；次序被改写等于换掉了「先消费哪几只」，而成员一个没少，"
+                "断点续跑与池穷尽判定会双双失真。"
             )
         # ④ cursor 不得倒退（恢复范围内允许退到那一只股的下标）。
         old_c = previous.get("cursor", {}).get(mk) \
@@ -1440,8 +1484,9 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
         )
     seen = _read_manifest_with_digest(stg_fd)
     snapshot = lifecycle_snapshot(seen[0]) if seen is not None else {}
-    if skip_existing_verify and _needs_staging_recheck(
-            snapshot.get("stopped_reason"), snapshot.get("fetch_fatal_error")):
+    owes_recheck = _needs_staging_recheck(
+        snapshot.get("stopped_reason"), snapshot.get("fetch_fatal_error"))
+    if skip_existing_verify and owes_recheck:
         raise SkipVerifyWithEscapeError(
             "这棵 staging 的 manifest 里带着必须做全量复校才能解除的记录，"
             "而本次传了 --skip-existing-verify。两者互斥：跳过复校就无法证明"
@@ -1455,8 +1500,48 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
         lifecycle=snapshot,
         skip_existing_verify=skip_existing_verify,
         start_progress=_progress_of(seen[0] if seen is not None else None),
+        start_needs_recheck=owes_recheck,
     )
     return handle
+
+
+def attest_staging_recheck(ledger: RunLedger, *, passed: bool) -> None:
+    """登记**本次运行**那一趟 staging 全量存在性 + sha256 复校的结论（P2-F3 前提②）。
+
+    ⚠️ **为什么必须有这个入口**（codex R16 [high]）：P2-F3 要求复校失败的那一轮
+    「不得推进 `cursor`、不得新增 `files`/`pool_order`」。此前它只判在**收尾提交**，
+    而 per-stock 提交早已**逐只落盘** —— 收尾抛异常**收不回**磁盘上的进度：
+    下一次重跑从被推进过的 cursor 起步，继续消耗冻结宇宙与 `--max-bytes` 预算；
+    P2-F3 为这一轮指定的 `stopped_reason: "staging_recheck_failed"` 还一次都没记上。
+    ⇒ 唯一能兑现那条要求的做法是**把复校挪到任何 per-stock 提交之前**，
+    并让模块**自己记住**结论 —— 调用方口头上报的东西不能当凭据。
+
+    ⚠️ **结论不许改口**：复校在一次运行里只做一次。允许 `failed → passed`
+    就等于给「洗白一次没通过的复校」开了门（重复登记**同一个**结论是幂等的）。
+
+    ⚠️ **对 S4/S5 的硬性要求**（与 `begin_run` 那条同源、本模块强制不了）：
+    账本上带着这类记录时，启动序列必须是 `begin_run` → 做完整棵 staging 的
+    全量复校 → 本函数 → 才允许开拷。
+    """
+    if not isinstance(ledger, RunLedger) or ledger not in _LEDGER_STATE:
+        raise ValueError(
+            f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
+    # 必须是**真正的 bool**：非空字符串是真值，`passed="false"` 会把一次
+    # 失败的复校登记成通过（与 `revisited_fatal_path` 栽过的是同一条）。
+    if not isinstance(passed, bool):
+        raise ValueError(
+            "passed 必须是 True/False（真正的布尔值），"
+            f"收到 {passed!r}——它是「这棵 staging 已自证完整」的唯一凭据"
+        )
+    verdict = "passed" if passed else "failed"
+    st = ledger._state()
+    if st.recheck is not None and st.recheck != verdict:
+        raise ValueError(
+            f"本次运行**已登记**的复校结论是 {st.recheck!r}，不许改口成 "
+            f"{verdict!r}——复校一次运行只做一次，允许改口等于给"
+            "「洗白一次没通过的复校」开门。请换新 staging + 新 seed 重拉。"
+        )
+    st.recheck = verdict
 
 
 def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
@@ -1489,6 +1574,17 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
         raise ValueError(
             f"recovery 必须是 RecoveryScope 或 None，收到 {recovery!r}"
             "——它是「这次回退是有意的、范围到此为止」的唯一声明")
+    # ⚠️⚠️ **复校必须发生在任何 per-stock 提交之前**（spec P2-F3，codex R16 [high]）。
+    # 判在收尾是**收口点位置错了**：那时进度早已逐只落盘，抛异常收不回来。
+    st = ledger._state()
+    if st.start_needs_recheck and st.recheck != "passed":
+        raise ManifestInvalidError(
+            "这棵 staging 的账本带着「必须做 staging 全量复校才能解除」的记录，"
+            f"而本次运行的复校结论是 {st.recheck!r} —— 复校通过之前**一只股都不许提交**。"
+            "spec P2-F3 要求复校失败的那一轮不得推进 cursor、不得新增 "
+            "files/pool_order；只有把复校放在所有提交之前，这条要求才兑现得了"
+            "（提交完再拒绝，已经写进磁盘的进度收不回来）。"
+        )
     on_disk, previous = _expect_from_disk(stg_fd, ledger)
     payload = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}
     payload.update(on_disk)
@@ -1798,6 +1894,18 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     if not isinstance(ledger, RunLedger) or ledger not in _LEDGER_STATE:
         raise ValueError(
             f"ledger 必须是 begin_run() 产出的 RunLedger，收到 {type(ledger).__name__}")
+    # ⚠️⚠️ **收尾上报的复校结论必须等于本次运行登记过的那一个**（codex R16 [high]）。
+    # 不查这一条时，`attest_staging_recheck(passed=False)` 把 per-stock 提交挡住，
+    # 收尾却上报 `"passed"` —— 一次**没通过**的复校照样把 fatal 清掉，闸白立。
+    # 反方向同样拦：从没登记过却上报结论 —— 模块自己那份记录才是唯一真相，
+    # 调用方口头说的不算（这与 per-stock 提交「生命周期三字段只从磁盘读」同源）。
+    if ledger._state().recheck != outcome.staging_recheck:
+        raise ManifestInvalidError(
+            f"收尾上报的 staging 复校结论是 {outcome.staging_recheck!r}，"
+            f"而本次运行**登记**的是 {ledger._state().recheck!r} —— 两者必须一致。"
+            "复校结论请在做完复校后用 attest_staging_recheck() 登记；"
+            "上报一个没登记过的结论等于让调用方自己给自己发凭据。"
+        )
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
     # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
     # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
