@@ -3,7 +3,7 @@
 **日期**：2026-08-31（**2026-09-02 按对抗性评审重定范围**）
 **基线**：`origin/main` `1437529`
 **分支**：`fix/acceptance-stale-literals`，worktree `.dev/worktree/fix-acceptance-stale-literals`
-**改动面**：`scripts/acceptance/hardening_6_framework.sh` **单文件、单处**（失败时打印被吞掉的日志）
+**改动面**：`scripts/acceptance/hardening_6_framework.sh`（1 处）+ `scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`（3 处）—— **同一种改写重复 4 次**：把重定向改成流式 `tee`，让日志在运行时就进入 CI 输出
 
 **本 spec 自成一支**，决策编号 **D1–D5** 仅在本文件内有效。
 
@@ -30,8 +30,9 @@
 
 ## 0. 一句话
 
-必需闸门 `acceptance` 失败时，**把被重定向吞掉的 `plan_1f` 日志打印出来**，
-使「哪一小项挂了」在 CI 上直接可见；本次**不修复任何断言**。
+把 acceptance 闸门里被重定向吞掉的日志改成**运行时流式输出**（每一层都改），
+使「哪一小项挂了、为什么」在 CI 上直接可见，**且在进程挂住 / job 被取消时同样可见**；
+本次**不修复任何断言**。
 
 ---
 
@@ -123,60 +124,65 @@ run "regression: Plan 1f schema versioning" \
 | **F24** | `hardening_6_framework.sh` **L83 / L85 已在用 `bash -o pipefail -c`**（两条 pytest 断言，形态为「重定向 → 存 `ec` → `tail -3` → `exit $ec`」）⇒ 本次的 `-o pipefail` 用法是同仓既有写法，非新引入 | 读该文件 L83、L85 |
 | **F25** | `plan_1f` L118–123 **把三个嵌套脚本的输出各自重定向**到 `/tmp/p1.log` / `p1b.log` / `p1c.log` ⇒ 即使流式打印 `plan_1f` 自身输出，嵌套脚本的内部细节仍然看不到，故转储块必须保留这三个 | 读 `plan_1f` L118–123 |
 | **F26** | 本机**既无 `timeout` 也无 `gtimeout`** ⇒ 在脚本里写 `timeout N ...` 会让本地执行直接 `command not found` | `command -v timeout` / `command -v gtimeout` 实跑，均无 |
+| **F27** | `bash -o pipefail -c "test -x X && X 2>&1 \| tee LOG"` 的解析是 `A && (B \| C)`：X 不存在时**退出 1 且零输出**；X 存在且失败时**输出实时可见且退出 1** | scratchpad 两档实跑 |
+| **F28** | **改动前** `hardening_6_framework.sh` 的输出中 `matrix row:` 与 `PLAN 1f` 各出现 **0 次**（`plan_1f` 的 31 条断言明细一行都上浮不到）；顶层标签 `regression: Plan 1f` 出现 3 次（framework 自己打的） | 本 worktree 实跑并 `grep -c` |
+| **F29** | 顶层汇总数字**随环境变化**：本机无 venv 时 `11 passed, 3 failed`，CI 上 `13 passed, 1 failed` ⇒ 该数字**不可写死为判据**，只能做同环境前后对比 | 本机实跑 vs CI 日志比对 |
 
 ---
 
 ## 4. 决策
 
-### D1　`hardening_6_framework.sh`：`plan_1f` 失败时打印其日志与三个嵌套日志
+### D1　让 acceptance 的日志在**每一层**都流式输出
 
-在第 98–99 行的 `run` 调用**前后**加入失败检测与日志转储，**不修改共享的 `run()` 函数**：
+**两个文件、共 4 处，全部是同一种改写**：`> FILE 2>&1` → `2>&1 | tee FILE`，
+并把 `bash -c` 换成 `bash -o pipefail -c`。
+
+**A. `scripts/acceptance/hardening_6_framework.sh`（1 处，L98–99）**
 
 ```bash
-_h6_fail_before=$FAIL
 run "regression: Plan 1f schema versioning" \
   bash -o pipefail -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh 2>&1 | tee /tmp/p1f.log && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
-if [[ $FAIL -ne $_h6_fail_before ]]; then
-  for _h6_log in /tmp/p1.log /tmp/p1b.log /tmp/p1c.log; do
-    [[ -f "$_h6_log" ]] || continue
-    echo ""; echo "---------- $_h6_log ----------"; cat "$_h6_log"
-  done
-fi
 ```
 
-> ⚠️ **本段初稿用的是「先重定向、失败后再 `cat`」，已按 codex R2 改为流式**（见 §11）。
-> 原因：日志只在 `run` 返回**之后**才打印；若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**
-> 或 job 被超时/取消，控制流**永远到不了**那个转储块 —— 闸门会对**恰恰是本 PR 要调查的那种
-> 退化行为**保持完全沉默，产出零证据。流式写法让输出**边跑边出现**，挂住时也能看到它停在哪一行。
+**B. `scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`（3 处，L118–123）**
+
+```bash
+run "regression: Plan 1 (M0.1 DDL) acceptance" \
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh 2>&1 | tee /tmp/p1.log"
+run "regression: Plan 1b (M0.2 OpenAPI) acceptance" \
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh 2>&1 | tee /tmp/p1b.log"
+run "regression: Plan 1c (M0.3 Swift Models) acceptance (间接覆盖 Plan 1d AppError swift test)" \
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh 2>&1 | tee /tmp/p1c.log"
+```
+
+**不再需要任何事后转储块。** 所有输出在**运行时**就进入 CI 日志。
+
+> ⚠️ **本节已按 codex R3 第二次重写**（见 §11）。演化过程本身是判据的一部分：
+> - **初稿**：`> log` + 失败后 `cat` ⇒ **挂住时零证据**（R2 high）。
+> - **R2 版**：只把最外层改流式 + 事后转储三个嵌套日志 ⇒ **挂住时仍丢最关键的那份**
+>   （`swift test` 的输出被 `plan_1f` 重定向进 `/tmp/p1c.log`，转储块在 `run` 返回后才执行，
+>   而挂住时 `run` 永不返回）（R3 high）。
+> - **本版**：**每一层都流式** ⇒ 挂住时 `swift test` 已经打印的内容**已经在 CI 日志里**。
+>   顺带**删掉**了 R2 版引入的 `_h6_fail_before` 转储机制，改动比 R2 版**更小**。
 
 **为什么这样写：**
 
-1. **用「失败计数前后比较」而非匹配 label 字符串** —— 后者依赖标签文本，改标签即静默失效。
-2. **不碰 `run()`** —— 它被全部 14 条断言共用，改它会把风险面从 1 条扩到 14 条。
-3. **同时转储三个嵌套日志** —— `plan_1f` 自己把 `plan_1` / `plan_1b` / `plan_1c` 的输出也重定向了（其末行提示了这三个路径）。只打印 `p1f.log` 只能知道**哪一层**挂了，知道不了**为什么**；一次 CI 就要拿到完整失败面。
-4. **`[[ -f ]] || continue` 而非直接 `cat`** —— 文件可能不存在（例如 `plan_1f` 在到达嵌套段之前就失败），`set -euo pipefail` 下直接 `cat` 会中断脚本。
-5. **`bash -o pipefail -c` + `| tee` 而非 `> file`** —— 让 `plan_1f` 的输出**实时进入 CI 日志**，
-   从而在**挂住 / 被取消**时仍留下证据（codex R2 的 [high]）。`-o pipefail` 是必须的：
-   没有它，管道的退出码取自 `tee`（恒 0），`plan_1f` 的失败会被吞掉。
-   **同仓已有此写法先例**：`hardening_6_framework.sh` L83 / L85 的两条 pytest 断言即用 `bash -o pipefail -c`（F24）。
-6. **转储列表里去掉了 `/tmp/p1f.log`** —— 它已经流式输出过，再 `cat` 一遍是重复。
-   保留三个**嵌套**日志（`p1.log` / `p1b.log` / `p1c.log`），因为它们是被 `plan_1f` 内部
-   重定向掉的（F25），流式看不到。
+1. **`-o pipefail` 不可省** —— 没有它，管道退出码取自 `tee`（恒 0），被测脚本的失败会被吞掉，
+   直接制造假绿。**同仓已有此写法先例**：`hardening_6_framework.sh` L83 / L85（F24）。
+2. **保留 `tee` 写文件而不是纯 `echo`** —— `plan_1f` 末尾会提示「失败日志位置：`/tmp/p1.log` …」，
+   保留文件不破坏该提示；且 `grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log` 这条**哨兵检查依赖该文件存在**。
+3. **`test -x X && X | tee` 的优先级已实测**（F27）：shell 解析为 `A && (B | C)`，
+   脚本不存在时直接失败且不产生输出，脚本存在时管道正常运行、`pipefail` 正确传递失败。
+4. **不碰任何 `run()` 函数** —— 两个文件的 `run()` 都被各自全部断言共用，改它会把风险面从 4 处扩到几十处。
 
-**已隔离实测三档（`bash -o pipefail -c` 流式写法，scratchpad）：**
+**已隔离实测（scratchpad，`bash -o pipefail -c` 形态）：**
 
 | 档 | 输入 | 实际 |
 |---|---|---|
-| A | 脚本失败退出 1 | 输出**实时可见**，整体退出码 **1** ✅ |
-| B | 脚本成功且哨兵 `PLAN 1f PASS` 存在 | 退出码 **0** ✅ |
-| C | 脚本**静默返回 0 但哨兵缺失** | 退出码 **1** ✅ —— **原有的哨兵防护未被削弱**（这正是 L96–97 注释所防的「捕获了失败却返回 0」） |
-
-**已隔离实测**（scratchpad，`set -euo pipefail` 环境下）：
-
-| 档 | 输入 | 实际结果 |
-|---|---|---|
-| 失败档 | `FAIL` 由 0 变 1、4 个日志中只存在 2 个 | **打印存在的 2 个、跳过缺失的 2 个，脚本正常走完（退出码 0）** ✅ |
-| 成功档 | `FAIL` 未变 | **零额外输出** ✅ |
+| A | 被测脚本失败退出 1 | 输出**实时可见**，整体退出码 **1** ✅ |
+| B | 被测脚本成功且哨兵 `PLAN 1f PASS` 存在 | 退出码 **0** ✅ |
+| C | 被测脚本**静默返回 0 但哨兵缺失** | 退出码 **1** ✅ —— **原有哨兵防护未被削弱**（L96–97 注释所防的正是「捕获了失败却返回 0」） |
+| D | `test -x` 目标不存在 | 退出码 **1**、零输出 ✅ |
 
 ### D2　本次**不做**任何断言修复
 
@@ -216,35 +222,59 @@ modules 矩阵落后 8 版（F21）、m01 L125 的悬空 backlog（F23）、
 
 ### 5.1 负向对照（必做）
 
-改动**之前**在当前树跑 `bash scripts/acceptance/hardening_6_framework.sh`，
-断言输出中**不含** `---------- /tmp/p1f.log ----------` 这一行。
-若改动前就含有，说明该判据零判别力。
+改动**之前**在当前树跑一次并存档：
+
+```bash
+bash scripts/acceptance/hardening_6_framework.sh > /tmp/h6-before.log 2>&1
+grep -c 'matrix row:' /tmp/h6-before.log
+grep -c 'PLAN 1f' /tmp/h6-before.log
+```
+
+**两条期望值均为 `0`** —— 即 `plan_1f` 的 31 条断言明细**一行都到不了上层输出**。
+**已在本 worktree 实跑确认：两条均为 0**（另：`regression: Plan 1f` 这个**顶层标签**出现 3 次，
+那是 `framework` 自己打的，不是 `plan_1f` 的明细，勿混淆）。
+
+> 若改动**之前**这两条就不是 0，说明该判据零判别力，停下来查。
 
 ### 5.2 本地正向
 
-改动**之后**同样跑一遍，断言：
+改动**之后**同样跑一次并对比：
 
-1. 输出**包含** `---------- /tmp/p1f.log ----------`；
-2. 输出**包含** `plan_1f` 内部逐条断言的 `NG:` 明细（即真正拿到了失败面）；
-3. 顶层汇总行仍为 `Hardening-6 framework acceptance: 13 passed, 1 failed`
-   —— **断言结果本身零改变**，只多了输出。
+```bash
+bash scripts/acceptance/hardening_6_framework.sh > /tmp/h6-after.log 2>&1
+grep -c 'matrix row:' /tmp/h6-after.log
+grep -c 'PLAN 1f' /tmp/h6-after.log
+grep -E 'acceptance: .* passed' /tmp/h6-before.log /tmp/h6-after.log
+```
+
+**判据三条：**
+
+1. `matrix row:` 计数 **> 0**（`plan_1f` 的逐条明细已上浮）；
+2. `PLAN 1f` 计数 **> 0**（其结论行已上浮）；
+3. **两次运行的顶层汇总行完全相同** —— 即 `N passed, M failed` 的两个数字不因本次改动而变化。
+   ⚠️ **不得写死这两个数字**：它们随本机是否装齐 Python 依赖而变
+   （无 venv 时实测 `11 passed, 3 failed`，CI 上是 `13 passed, 1 failed`）。
+   判据是**同环境前后一致**，不是某个具体值。
 
 ### 5.3 CI 级（本 PR 自证，见 D4）
 
 PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确认：
 
-1. 出现 `---------- /tmp/p1f.log ----------` 及后续明细；
-2. 记录下 `plan_1f` 在 **ubuntu-latest** 上的**完整失败项清单** —— 这是本 PR 的交付物。
+1. 出现 `plan_1f` 的逐条断言明细（`OK:` / `NG:` 行），而非只有一行顶层 `NG`；
+2. 出现三个嵌套脚本（Plan 1 / 1b / 1c）各自的输出；
+3. 记录下 `plan_1f` 在 **ubuntu-latest** 上的**完整失败项清单** —— 这是本 PR 的交付物。
 
-> ⚠️ **判绿纪律不适用于本 PR** —— 本 PR 的成功判据不是「检查变绿」，而是
-> **「失败面变得可读」**。若 `acceptance` 意外变绿，反而说明日志转储没被触发，需要排查。
+> ⚠️ **判绿纪律不适用于本 PR** —— 成功判据不是「检查变绿」，而是**「失败面变得可读」**。
+> 若 `acceptance` 意外变绿，反而说明有别的东西不对，需要排查。
 
 ### 5.4 明确不做的验证
 
-不预测 `plan_1f` 在 Linux 上会失败在哪几项。任何此类预测都是猜测，
-本 spec 拒绝把它写成事实（初稿正是栽在这里）。
-
----
+- 不预测 `plan_1f` 在 Linux 上会失败在哪几项。任何此类预测都是猜测。
+- **不构造人工挂起测试**。codex R3 建议「加一个有界的挂起测试，验证输出在被终止前到达 CI」。
+  **不采纳**：要真实复现「CI 上 `swift test` 挂住」需要一个 Linux runner + 一个会挂的 Swift 工具链，
+  本机无法构造等价环境；用 `sleep` 伪造的挂起只能证明 `tee` 会流式（已由 D1 的实测档 A 证明），
+  证明不了真实场景。**流式与非流式的差别是结构性的**（输出在运行时进入 stdout vs 运行后才写出），
+  不依赖挂起测试来确立。
 
 ## 6. 残留风险台账
 
@@ -256,7 +286,7 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 | **R4** | `plan_1f` 在 `ubuntu-latest` 上跑 `swift test`（F18/F19），可行性未知 | **本 PR 的存在就是为了回答它** | 由 §5.3 的 CI 运行给出答案 |
 | **R5** | 闸门仍对绝大多数 PR 短路放行（F4）⇒ 剩余断言仍是低频执行、仍可能腐烂 | 短路机制本身是正确的（防另一种死锁）；本次不改变执行频率 | 超出范围 |
 | **R6** | 「验收清单里口头豁免闸门失败」这一失效模式（F20）无任何机制约束 | 真实且已发生过一次 | 超出范围，记入独立 backlog |
-| **R7** | 流式输出会让 CI 日志变长（**成功时也会**，因为 `tee` 无条件流式） | `plan_1f` 共 31 条断言，输出量级为百行；相比「完全看不见」是净收益 | 接受 |
+| **R7** | 流式输出会让 CI 日志显著变长（**成功时也会**，且现在含三个嵌套脚本的全部输出，其中 `plan_1c` 的 `swift test` 输出可达数百行） | 该闸门 25 次运行里只有 2 次真跑满（F4），量级可接受；相比「完全看不见」是净收益。**这是本次有意付出的代价** | 接受 |
 | **R8** | 若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**，job 会跑到 GitHub 默认的 **360 分钟**上限才被杀 | **证据不会丢失**（流式输出已落在 CI 日志里，能看出停在哪一行）；代价只是等待时间与 runner 占用，而本仓为 PUBLIC、标准 runner 免费无限额 | 接受。**未采纳** codex R2 建议的「在脚本里加 `timeout`」—— 本机既无 `timeout` 也无 `gtimeout`（F26），写进去会让本地执行直接失败。若将来要限时，正确位置是 workflow 的 job 级 `timeout-minutes`，属独立改动 |
 
 ---
@@ -264,7 +294,10 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 ## 7. 本 spec 明确不做
 
 - 不修改任何 acceptance 断言（D2）；
-- 不修改 `plan_1f` / `plan_1b` / `plan_e2` / `plan_1c` / `plan_1`；
+- 不修改 `plan_1b` / `plan_e2` / `plan_1c` / `plan_1`；
+- `plan_1f` **仅允许**把 L118–123 三处的重定向改成流式 `tee`（D1-B），
+  **不得**触碰它的任何一条断言、任何期望值、任何其它行
+  —— 这是 codex R3 后从「完全不改」放宽的唯一一点，理由见 D1 的演化说明；
 - 不修改 `M01MatrixSyncGuardTests.swift`（当前为绿且维护良好，F11/F12）；
 - 不修改 `m01-schema-versioning-contract.md` 与 `kline_trainer_modules_v1.4.md`；
 - 不修改 `hardening_6_gate.yml`（含其相关文件名单）；
@@ -281,7 +314,8 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 | **B** | 修改 `run()` 函数，让所有断言失败时都转储对应日志 | 风险面从 1 条扩到 14 条；且多数断言根本没有对应日志文件。YAGNI |
 | **C** | 只转储 `/tmp/p1f.log`，不转储三个嵌套日志 | 只能知道**哪一层**挂了，知道不了**为什么** —— 还要再跑一轮 CI 才能定位，与本次「一次拿到完整失败面」的目的相悖 |
 | **D** | 把 `plan_1f` / `plan_1b` 加进闸门相关文件名单，让修复 PR 自证 | 改变「哪些 PR 付出完整 acceptance 成本」，是行为面改动需独立论证；且本 PR 触碰 `hardening_6_framework.sh` 已天然自证（D4），无需此改动 |
-| **E** | 让 `plan_1f` 自己在失败时打印嵌套日志（改 `plan_1f` 而非 `framework`） | 需要改**被诊断的对象本身**，且 `plan_1f` 仍会被 D5 的修复改动 —— 诊断设施应放在**不打算改**的那一侧 |
+| **E** | 只改 `framework`、完全不碰 `plan_1f`（初稿与 R2 版的立场） | **已否决（codex R3）**：`plan_1f` 把三个嵌套脚本的输出各自重定向（F25），只改外层则 `swift test` 的输出仍在临时文件里；而事后转储块在 `run` 返回后才执行 —— **挂住时永远到不了**。「诊断设施放在不打算改的那一侧」这条美学考虑，敌不过「诊断在最该用的场景下失效」这个硬缺陷。故 §7 已放宽为「`plan_1f` 仅允许改这 3 处重定向」 |
+| **F** | 加一个人工构造的「挂起测试」验证输出能在被终止前到达 CI（codex R3 建议） | **否决**：真实复现需要 Linux runner + 会挂的 Swift 工具链，本机无法构造等价环境；用 `sleep` 伪造只能证明 `tee` 会流式（已由 D1 实测档 A 证明），证明不了真实场景。流式与非流式的差别是**结构性的**（输出在运行时进 stdout vs 运行后才写出），不依赖挂起测试来确立 |
 
 ---
 
@@ -325,12 +359,15 @@ D5 的修复提交落地后，本节的提交清单会变。**合并前必须回
 **回滚后核实**：
 
 ```bash
-grep -cF '_h6_fail_before' scripts/acceptance/hardening_6_framework.sh
-grep -cF 'bash -o pipefail -c "./scripts/acceptance/plan_1f' scripts/acceptance/hardening_6_framework.sh
+grep -cF 'tee /tmp/p1f.log' scripts/acceptance/hardening_6_framework.sh
+grep -cF 'tee /tmp/p1' scripts/acceptance/plan_1f_m0_1_schema_versioning.sh
 ```
 
-**两条期望值依次为 `0` 与 `0`**（= 诊断改动已完全撤销；第 2 条覆盖流式改写那一处）。
-第 1 条的期望值 **0 已在本 worktree 实跑确认**（当前树尚未实施）。
+**两条期望值依次为 `0` 与 `0`**（= 4 处流式改写已全部撤销）。
+**已在本 worktree 实跑确认两条均为 0**（当前树尚未实施）。
+
+⚠️ 用 `grep -cF`（定长串）而非正则形式 —— 用户本机 `grep` 是 ugrep 7.8.4（F22），
+正则元字符的行为与 GNU/BSD grep 不同。
 
 > ⚠️ **必须用 `-F`**：用户本机 `grep` 是 **ugrep 7.8.4**（F22），对含正则元字符的模式与
 > GNU/BSD grep 行为不同 —— 初稿的回滚核实命令正因此在用户机器上返回了错误的值（§11 Finding 5）。
@@ -425,3 +462,34 @@ grep -cF 'bash -o pipefail -c "./scripts/acceptance/plan_1f' scripts/acceptance/
 我原来的写法在「正常失败」下工作良好，却在「挂住」下完全失效 ——
 而挂住恰恰是这次最该担心的那种失败（Linux 上从未跑过的 `swift test`）。
 ⇒ **为「拿证据」而做的改动，要先问「它在最糟的那种失败下还产出证据吗」。**
+
+---
+
+### R3 · codex `adversarial-review` · 2026-09-02 · HEAD `03db644` → **needs-attention**（1 high / 1 medium）
+
+> ✅ 真 verdict（收口行存在，判据 ④ = 1）。账本未写入（verdict ≠ approve）。
+
+**两条我都复核成立，均已修。而且 [high] 那条说明 R2 的修法只修对了一半。**
+
+| # | 严重度 | Finding | 我的复核 | 处置 |
+|---|---|---|---|---|
+| 1 | **high** | R2 版只把**最外层**改成流式，但 `plan_1f` 把三个嵌套脚本的输出**各自重定向**（F25）；转储块又在 `run` 返回后才执行 ⇒ **`swift test` 挂住时，CI 只看得到外层那行 `========== Plan 1c ==========`，Swift 自己的进度与报错仍在临时文件里、永远不会被打印** ⇒ 承诺的「一次拿到完整失败面」在最该用的场景下做不到 | **成立。R2 只修对了一半** —— 我在 F25 里其实写下了这个事实，却没意识到它意味着「关键那份仍然丢」 | D1 改为**每一层都流式**（framework 1 处 + `plan_1f` 3 处，同一种改写）。**事后转储块整个删除**，连带删掉 R2 引入的 `_h6_fail_before` 机制 —— 改动反而比 R2 版**更小更简单** |
+| 2 | medium | §5 的验证判据要求出现 `---------- /tmp/p1f.log ----------`，但 D1 已把 `p1f.log` 移出转储列表、根本不产出该标记 ⇒ **正确实现必然通不过自己的验收标准** | **成立，且是我在 R2 修订时自己制造的** —— 改了 D1 却没同步 §5，三处（L220/227/236）全留着旧标记 | §5 整节重写：负向对照改为「`matrix row:` 与 `PLAN 1f` 计数为 0」（**已实跑确认均为 0**，F28），正向改为「两者 > 0 且顶层汇总前后一致」 |
+
+**未采纳的部分（附理由）**：
+
+- codex 建议「加一个有界的挂起测试，验证输出在被终止前到达 CI」。**未采纳**（§8 方案 F）——
+  真实复现需要 Linux runner + 会挂的 Swift 工具链，本机无法构造等价环境；
+  用 `sleep` 伪造只能证明 `tee` 会流式（已由 D1 实测档 A 证明），证明不了真实场景。
+  **流式与非流式的差别是结构性的**（输出在运行时进 stdout vs 运行后才写出），不依赖挂起测试来确立。
+
+**本轮的方法论教训（两条，都很硬）**：
+
+1. **⭐ 我把关键事实写进了台账，却没读懂它的含义。** F25 是我自己写的：
+   「`plan_1f` 把三个嵌套脚本的输出各自重定向 ⇒ 即使流式打印 `plan_1f` 自身输出，
+   嵌套脚本的内部细节仍然看不到」。我把它当成「已知限制」记了一笔就过去了，
+   **没有把它和「挂住时转储块到不了」这条连起来** —— 两条一连，结论就是「最关键的那份必丢」。
+   ⇒ **台账不是记完就完事；每加一条事实，要回头问它是否推翻了现有决策。**
+2. **改了 D，必须同步查 §5 的判据。** 这是同一类错误的第二次（R2 改 D1 没动 §5）。
+   凡是改动「产出什么」的决策，都要立刻回到「怎么验」那一节逐条对齐 ——
+   否则会产出「正确实现却通不过验收」的自相矛盾交付物。
