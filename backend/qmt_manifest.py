@@ -32,6 +32,7 @@ from qmt_fsroot import (
     atomic_write_bytes,
     encode_json,
     open_regular_probe,
+    NotARegularFileError,
     split_relative_components,
 )
 from qmt_normalize import QmtSchemaError, parse_qmt_filename
@@ -786,6 +787,14 @@ def read_manifest(stg_fd: int) -> dict | None:
     return None if seen is None else seen[0]
 
 
+# 「不是普通文件」这句结论有**两条路**通向它（`S_ISREG` 判否 / `open` 直接失败），
+# 文案写死一处，免得两条路给出不同的指引。
+_NOT_REGULAR_DETAIL = (
+    f"{MANIFEST_NAME} 存在但不是普通文件——拒绝。"
+    "这棵 staging 已被动过，请换新 staging + 新 seed 重拉。"
+)
+
+
 def _read_manifest_with_digest(stg_fd: int) -> tuple[dict, str] | None:
     """`read_manifest` 的实现，另外返回**磁盘上那批原始字节的 sha256**。
 
@@ -796,16 +805,19 @@ def _read_manifest_with_digest(stg_fd: int) -> tuple[dict, str] | None:
         fd, st = open_regular_probe(stg_fd, MANIFEST_NAME, flags=os.O_RDONLY)
     except FileNotFoundError:
         return None
+    except NotARegularFileError as e:
+        # socket 等「存在但打不开成文件」的对象 —— `open` 就失败了，
+        # **走不到**下面那句 `S_ISREG`（Opus 评审 [medium]，本机复现：
+        # FIFO/目录拿到干净拒绝，socket 抛裸 OSError [Errno 102]）。
+        # 两条路必须给**同一句**结论，否则枚举「FIFO/目录/设备/socket」只兑现一半。
+        raise ManifestInvalidError(_NOT_REGULAR_DETAIL) from e
     try:
         if not stat.S_ISREG(st.st_mode):
             # FIFO / 目录 / 设备 / socket：**先探类型再读**。目录能被
             # O_RDONLY|O_NOFOLLOW 成功打开，随后 os.read 抛原始 IsADirectoryError；
             # FIFO 则让裸 open 永久阻塞。两者都会让这份自称 fail-closed 的校验
             # 在最该工作的时候印不出一个字的恢复指引。
-            raise ManifestInvalidError(
-                f"{MANIFEST_NAME} 存在但不是普通文件——拒绝。"
-                "这棵 staging 已被动过，请换新 staging + 新 seed 重拉。"
-            )
+            raise ManifestInvalidError(_NOT_REGULAR_DETAIL)
         chunks: list[bytes] = []
         total = 0
         while True:

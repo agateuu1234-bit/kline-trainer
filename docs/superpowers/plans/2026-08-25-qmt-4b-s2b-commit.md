@@ -129,6 +129,10 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D54 | Task 17 进度指纹 | 四个分量只有 `files` 被钉住（Opus-2 [low]，spec **S2-F52**）| 补两条单分量推进档 |
 | D55 | Task 15 耐久性 | `F_FULLFSYNC` 文件内容那半被目录那半掩盖（Opus-2 [low]，spec **S2-F53**）| 断言 `os.fsync` 零次 + `replace` 两侧各有屏障 |
 | D56 | Task 15/16 正则 | `_STOCK_CODE_RE` 的 `\Z` 没人守；**补档第一版还是假的**（Opus-2 [low]，spec **S2-F54**）| 走 `RecoveryScope` + 断言判据专属措辞 |
+| D57 | Task 15 探测器 | socket 型对象让「先 open 后查 S_ISREG」整个失效，四个调用点全抛裸 `OSError`（Opus-3 [medium]，spec **S2-F56**）| 修在共用探测器：打不开就回头 `lstat`；新异常继承 `OSError` 故 S1 三个调用点行为不变 |
+| D58 | Task 18 收尾剥键 | 剥生命周期三键那步没人守，注入方向可写伪造 fatal（Opus-3 [low]，spec **S2-F57**）| 补对称的注入档 |
+| D59 | Task 17 进度指纹 | `files`/`pool_order` 互相掩盖（Opus-3 [low]，spec **S2-F58**）| 端到端造不出隔离 → 直接对纯函数下四档参数化断言 |
+| D60 | Task 16/17 小守卫 | 三条守卫零覆盖（Opus-3 [low]，spec **S2-F59**）| 各补专属档 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1575,6 +1579,7 @@ grep -c '^| S2-F' ../docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.m
 | **Opus** | needs-attention（1 high + 3 medium + 1 low）| ⚠️ **换了评审通道**（user 指定：codex 配额掐断后改用另一个 Opus 5 做对抗性评审；它**写不了账本**，故不兑现治理闸门，只当找缺陷用）。**五条全部本机复现坐实、零误报**。⭐⭐ **两条是 R16 那次修复自己引入的**：①一致性检查写成无条件相等，把 `max_bytes_stop()`/`escape_stop()` 两个合法结局全堵死 —— **唯一合法的恢复路径被自己封了**，还劝操作者报废一棵健康 staging；②新加的配额下限把两条累计字节老攻击档抬到门槛以下，**两条守卫从此零红**。另三条：登记「复校失败」在无 fatal 账本上被静默丢弃、`--skip-existing-verify` 互斥窄于 spec 原文、AST 守卫自己漏了一半判据。**10 组变异全部命中、零红为 0**（含两个注入诱饵函数坐实 AST 守卫的加强）。⚠️ 评审自报未覆盖：S2a 期的读侧校验器（~240-455 行）与本轮新增测试的大部分 |
 | **自查③** | 1 档（控制者，非评审）| 放开「非 clean 结局不查一致性」之后，`elif` 那一支只剩「clean 且取值不等」一种情形，而两条新正向档都不经过它 —— 补 `test_a_passing_recheck_must_still_be_reported_at_the_final_commit` 钉住「登记通过却不上报」。变异实测（把判据窄化成 `is not None and …`）**只有它一条红**，判别力隔离 |
 | **Opus-2** | needs-attention（1 medium + 3 low）| ⭐⭐ **本片第一次没有 high**。评审对**安全核心做了穷尽验证并判定找不到洞**，方法可核：`resolve_final_lifecycle` 的 **10 种合法前态 × 9 种结局**全枚举；走**真入口**的**两轮链路 2916 条**全枚举（凡产出「无 fatal」账本的链路**无一例外**都经过「登记通过 + 上报通过 + 重走过路径」）；**84 个决策表输出**逐个回喂读侧全部往返成功。①medium = 复校闸只立在 per-stock 入口（同一份 payload：per-stock 拒、收尾收）；②③④ 全是**测试判别力**（生产代码正确但判据没人守）。四条**全部本机复核属实、零误报**。8 组变异 7 组一次命中；**P7 首轮零红 —— 追下去发现我补的那条档本身是假的**（邻居 `endswith` 抢先抛且文案同样含 `stock_code`），改成断言判据专属措辞后判别力才成立 ⇒ **同一族错误在修它的过程中原地又踩一次**（见 S2-F49/F54）|
+| **Opus-3** | needs-attention（1 medium + 3 low）| **连续第二轮没有 high**。①medium = **socket 型 `fetch_manifest.json` 逃过「不是普通文件」那道闸**：`O_NONBLOCK` 只解决 FIFO 阻塞，socket 上 `open(2)` 直接失败 ⇒ 走不到 `S_ISREG`，四个入口全抛裸 `OSError`；而注释里那条枚举写着「FIFO/目录/设备/socket」—— **列四项只兑现两项**。②③④ 全是**判据没人守**（收尾剥键 / 进度指纹两分量互相掩盖 / 三条小守卫）。四条**全部本机复核属实**（6 组复核变异全存活）。修完 **9 组变异全部命中、零红为 0**，四个进度分量各杀各的。⚠️ 评审另指出 `acquire_lock` 有同样 socket 盲区 —— **S1 既有代码、不在 diff 里**，按规矩不动，已登记 |
 
 > ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；

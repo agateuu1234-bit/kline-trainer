@@ -5424,3 +5424,151 @@ def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
     for bad in ("600004.SH\n", "600004.SH\n\n", "\n600004.SH"):
         with pytest.raises(ValueError, match="形如"):
             RecoveryScope(stock_code=bad, market="SH", universe_idx=1)
+
+
+# ── Opus 对抗性评审 第 3 轮 ──────────────────────────────────────
+# 1 medium（socket 型账本逃过「不是普通文件」那道闸）+ 3 low（判据没人守）。
+
+# `_progress_of` 是私有的纯函数 —— 端到端档造不出「只动一个分量」的隔离
+# （R21-F3 把 files 与 pool 结构性绑死），只能直接对它下断言。
+from qmt_manifest import _progress_of
+
+
+def test_read_manifest_refuses_a_socket_manifest(tmp_path, monkeypatch):
+    """⭐⭐ [Opus-3 medium] 「先 open、后查 S_ISREG」对 **socket** 整个失效。
+
+    `O_NONBLOCK` 解决了 FIFO 阻塞，但 socket 上 `open(2)` **直接失败**
+    （macOS `ENOTSUP`=102，别处 `EOPNOTSUPP`/`ENXIO`）—— 于是**根本走不到**
+    那句 `S_ISREG`，四个入口（`read_manifest` / `begin_run` / 两个提交）
+    全部抛**裸 `OSError`**，而不是 fail-closed 的 `ManifestInvalidError` +
+    恢复指引。本机复现：FIFO 与目录都拿到干净拒绝，socket 抛
+    `OSError: [Errno 102] Operation not supported on socket`。
+    ⚠️ 而模块注释白纸黑字写着这条枚举是「FIFO / 目录 / 设备 / **socket**」——
+    **穷尽性主张必须按字面量逐条兑现**，我列了四项只兑现两项。
+
+    ⚠️ 定级：**不是洗白洞**（没有任何东西被放行），但 `read_manifest` 文档
+    声明的异常集合被突破，照文档写 `except` 的 S4/S5 接不住，操作者拿到的是
+    traceback 而不是「请换新 staging + 新 seed 重拉」。
+
+    判别力：把 `_open_regular_probe` 里那段「打不开就回头 lstat 问它是什么」
+    删掉，本条必红。
+    """
+    import socket as _socket
+    d, fd = _staging(tmp_path)
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    # ⚠️ `AF_UNIX` 的路径上限约 104 字节，pytest 的 tmp_path 本身就超了
+    # （实测 `OSError: AF_UNIX path too long`）——切进目录再用相对名绑定。
+    monkeypatch.chdir(d)
+    try:
+        sock.bind(MANIFEST_NAME)
+        for entry in (read_manifest, begin_run):
+            with pytest.raises(ManifestInvalidError, match="不是普通文件"):
+                entry(fd)
+    finally:
+        sock.close()
+        os.close(fd)
+
+
+def test_commit_final_does_not_let_the_caller_inject_a_lifecycle_field(tmp_path):
+    """⭐ [Opus-3 low] 收尾入口剥掉生命周期三键那一步**没人守**。
+
+    实测把 `basis = {k: v ... if k not in LIFECYCLE_KEYS}` 换成 `dict(manifest)`，
+    全量 1307 条一条都不红 —— 而它是真承重的：一棵**干净**的 staging 上，
+    调用方内存里塞一条伪造的 `fetch_fatal_error`，收尾就会把它**写上磁盘**
+    （`basis.update(on_disk)` 只挡得住「抹掉」方向，挡不住「注入」方向）。
+    方向是 fail-closed（凭空报警，不是洗白），故 low —— 但一棵健康的 staging
+    会被一条假警报永久锁死。
+    ⚠️ `commit_stock` 那一侧的同族档**是有的**，所以这是**测试集的不对称**，
+    不是代码的不对称。
+
+    判别力：把那句改成 `dict(manifest)`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 磁盘上干干净净
+        ledger = begin_run(fd)
+        forged = copy.deepcopy(_valid_manifest())
+        forged["stopped_reason"] = "staging_path_escape"  # 调用方内存里伪造的
+        forged["fetch_fatal_error"] = _fatal()
+        written = commit_final(fd, forged, ledger=ledger, outcome=clean_finish())
+        assert "fetch_fatal_error" not in written
+        assert "stopped_reason" not in written
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("component,mutate", [
+    ("files", lambda m: m["files"].append(
+        _file_rec("600004.SH", "浦发银行", "1m"))),
+    ("pool_order", lambda m: m["pool_order"]["SH"].append(
+        {"code": "600004.SH", "universe_idx": 1})),
+    ("cursor", lambda m: m["cursor"].__setitem__("SH", 2)),
+    ("committed_bytes", lambda m: m.__setitem__(
+        "committed_bytes", m["committed_bytes"] + 1)),
+])
+def test_progress_fingerprint_reacts_to_each_component_alone(component, mutate):
+    """⭐ [Opus-3 low] 进度指纹的 `files` 与 `pool_order` 两个分量**互相掩盖**。
+
+    实测把其中**任意一个**从 `_progress_of` 的元组里删掉，全量 1307 条一条不红：
+    每个推进进度的档都是「加一只股」，files 与 pool 必然**同时**变化，于是
+    留下的那个分量自己就让不等式成立。而 P2-F3 的原文恰恰是
+    「不得新增 `files`/`pool_order`」。
+    ⚠️ 端到端档造不出隔离（R21-F3 把两者结构性绑死：每个池条目恰配两条 files），
+    故直接对**纯函数**下断言 —— 这是唯一能把四个分量各自钉住的写法。
+
+    判别力：从元组里删掉对应分量，对应那一档必红。
+    """
+    base = _valid_manifest()
+    moved = copy.deepcopy(base)
+    mutate(moved)
+    assert _progress_of(moved) != _progress_of(base), (
+        f"{component} 单独变化时进度指纹没有变 —— P2-F3 的「不得推进」"
+        f"对这个分量形同虚设")
+
+
+def test_a_forged_handles_property_access_is_refused_too(tmp_path):
+    """⭐ [Opus-3 low] `commit_stock` 的 docstring 说「真正的防线在句柄的
+    **属性访问**上（每次读取都查注册表）」，而唯一那条伪造句柄的档走的是
+    **入口**那道检查 —— 被它称为主防线的那一道**没有任何测试守着**
+    （实测关掉它，全量一条不红）。
+
+    判别力：把 `_state()` 里的注册表查找关掉，本条必红。
+    """
+    forged = object.__new__(RunLedger)
+    for attr in ("existed", "digest", "lifecycle", "skip_existing_verify",
+                 "owes_staging_recheck"):
+        with pytest.raises(ValueError, match="注册表|begin_run"):
+            getattr(forged, attr)
+
+
+def test_commit_stock_refuses_a_recovery_that_is_not_a_scope(tmp_path):
+    """⭐ [Opus-3 low] 「恢复声明必须是 RecoveryScope」这条检查没人守。
+
+    它是「这次回退是有意的、范围到此为止」的**唯一**声明；收一个鸭子类型
+    对象等于让调用方自己定义范围。
+
+    判别力：把那条 isinstance 检查关掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _multi_stock())
+        for junk in (True, {"stock_code": "600004.SH", "market": "SH",
+                            "universe_idx": 1}, "600004.SH"):
+            with pytest.raises(ValueError, match="RecoveryScope"):
+                commit_stock(fd, _multi_stock(), ledger=ledger, recovery=junk)
+    finally:
+        os.close(fd)
+
+
+def test_final_outcome_refuses_escape_evidence_that_is_not_a_mapping():
+    """⭐ [Opus-3 low] 「escape 证据必须是映射」这条检查没人守。
+
+    关掉它之后 `dict(escape)` 会对一个 list 抛原始 `ValueError`/`TypeError`，
+    构造期校验的报错指引整个走错。
+
+    判别力：把那条 isinstance 检查关掉，本条必红。
+    """
+    for junk in (["kind", "x"], "staging_path_escape", 42, None):
+        with pytest.raises(ValueError, match="映射|escape"):
+            FinalOutcome(kind="escape", escape=junk)

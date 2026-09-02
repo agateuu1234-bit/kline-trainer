@@ -23,6 +23,7 @@ __all__ = [
     # 异常
     "PathDisciplineError", "PathEscapeError", "DirectoryExistsError",
     "LockUnavailableError", "LockDisciplineError", "MarkerInvalidError",
+    "NotARegularFileError",
     "BoundaryError",
     # 路径规则
     "normalize_abs_path", "split_components", "split_relative_components",
@@ -51,6 +52,30 @@ _MARKER_MAX_BYTES = 64 * 1024
 
 class PathDisciplineError(ValueError):
     """路径字符串本身不合规：相对/绝对方向不对、或含 `.` / `..` / 空分量。"""
+
+
+class NotARegularFileError(OSError):
+    """目标**存在、但打不开成文件**（unix socket 等）。
+
+    ⚠️ **`O_NONBLOCK` 只解决了 FIFO 阻塞，解决不了这一类**（Opus 对抗性评审
+    [medium]，本机复现）：socket 上 `open(2)` **直接失败**（macOS `ENOTSUP`=102，
+    别处 `EOPNOTSUPP`/`ENXIO`），于是**根本走不到**调用方那句 `S_ISREG` ——
+    本函数的四个调用点（取锁 ×2 / 读归属标记 / 读账本）全部抛**裸 `OSError`**，
+    而它们各自 fail-closed 的恢复指引一个字都印不出来。
+    「守卫自己被它该抓的那种损坏弄坏了」在本仓是第三次。
+
+    ⚠️ **判据不枚举 errno**（各平台不同、还会变，本仓栽过「按概念搜词」的亏）：
+    打不开就回头 `lstat` 问文件系统「那到底是个什么东西」，不是普通文件即归此类。
+
+    ⚠️ 继承 `OSError`，故**既有的 `except OSError` 一个字都不用改**；
+    `FileNotFoundError` / `IsADirectoryError` 原样上抛（调用点各自有分支），
+    `PathEscapeError` 不是 `OSError` 的子类，不会被这条捕获吞掉。
+    """
+
+    def __init__(self, name: str, st: os.stat_result):
+        super().__init__(f"{name!r} 存在但不是普通文件（无法作为文件打开）")
+        self.name_probed = name
+        self.st = st
 
 
 class PathEscapeError(Exception):
@@ -432,7 +457,19 @@ def _open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600
     （本仓纪律：凡断言某个系统调用有某种性质，都必须对着 man page 逐条核实）。
     三个打开点（取锁、探测、读标记）统一走本函数，避免「同一条纪律只落在其中一处」。
     """
-    fd = open_under(dir_fd, name, flags=flags | os.O_NONBLOCK, mode=mode)
+    try:
+        fd = open_under(dir_fd, name, flags=flags | os.O_NONBLOCK, mode=mode)
+    except (FileNotFoundError, IsADirectoryError):
+        raise                       # 调用点各自有分支，语义一个字不动
+    except OSError as e:
+        # 打不开 ≠ 打不开的原因我们猜得到 —— 回头 lstat 问它到底是什么。
+        try:
+            probed = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            raise                   # 连 lstat 都做不到 → 原样上抛
+        if not stat.S_ISREG(probed.st_mode):
+            raise NotARegularFileError(name, probed) from e
+        raise
     try:
         st = os.fstat(fd)
         if stat.S_ISREG(st.st_mode):
