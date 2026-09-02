@@ -86,6 +86,32 @@ struct FinalizeAlertSafeExitTests {
         #expect(coord.activeEngine == nil, "有东西保住了 ⇒ 可以安全退出")
     }
 
+    @Test("存档必须**属于本局**：别的会话留下的 pending 不算数（codex R3-high）")
+    func foreignCheckpointDoesNotCount() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)
+        let mine = try #require(try pending.loadPending())
+        #expect(coord.hasDurablePendingCheckpoint(for: engine), "前置：自己的存档当然算数")
+
+        // 把磁盘上那条换成**别的会话**留下的（只改 sessionKey，其余逐字段照抄）
+        let foreign = PendingTraining(
+            trainingSetFilename: mine.trainingSetFilename, globalTickIndex: mine.globalTickIndex,
+            upperPeriod: mine.upperPeriod, lowerPeriod: mine.lowerPeriod,
+            positionData: mine.positionData, cashBalance: mine.cashBalance,
+            feeSnapshot: mine.feeSnapshot, tradeOperations: mine.tradeOperations,
+            lossy: mine.lossy, startedAt: mine.startedAt,
+            accumulatedCapital: mine.accumulatedCapital, drawdown: mine.drawdown,
+            sessionKey: mine.sessionKey + "-别的会话",
+            drawingDefaultStyle: mine.drawingDefaultStyle)
+        try pending.savePending(foreign)
+
+        // 它能读出来（非 nil），但**不是本局的** ⇒ 不得据此认为「退出是安全的」
+        #expect(try pending.loadPending() != nil, "前置：磁盘上确实有一条能读出来的记录")
+        #expect(!coord.hasDurablePendingCheckpoint(for: engine),
+                "⛔ 只证明『那行能读出来』不够 —— 必须证明它属于本局")
+    }
+
     @Test("反向对照：安全退出**不是**弃局 —— 它一次都不该碰清空那条路")
     func neverClearsPending() async throws {
         let (coord, _, pending, _) = PIFixtures.makeCoordinator()
