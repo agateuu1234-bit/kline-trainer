@@ -127,6 +127,23 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "结算那一支也必须在（否则终局用户失去重试入口）")
     }
 
+    @Test("⭐⭐来源必须在 Task **之外**捕获，⛔ Task 里再读就是读一个已被清空的值")
+    func originIsCapturedBeforeTheDeferredHop() throws {
+        let block = try alertBlock(try code(tv), titled: "放弃未完成")
+        // 本弹窗的 isPresented 是个 Binding：关闭时它的 set 会把 discardFailedFrom 清成 nil。
+        // 而回弹刻意放到**下一轮** MainActor（见 recoveryAlertsAreWired），那时来源早没了。
+        // ⇒ 必须在跳到下一轮**之前**先把值取出来。
+        let hop = try #require(block.range(of: sq("Task { @MainActor in")),
+                               "锚点失效：找不到延迟回弹的那一跳")
+        #expect(block[..<hop.lowerBound].contains(sq("let origin = discardFailedFrom")),
+                "来源必须在跳到下一轮之前捕获")
+        // ⛔ 关键的一半：跳之后不得再碰它。只查前半条会被「捕获了但不用」骗过去。
+        // 实证：把捕获挪进 Task 内部，本文件其余守卫与全部行为测试**照样 24 条全绿**，
+        //      而回弹会静默失效 —— 训练中途返回的用户被无声地留在原地（Kimi R1-low）。
+        #expect(!block[hop.upperBound...].contains(sq("discardFailedFrom")),
+                "⛔ 下一轮里读 discardFailedFrom 读到的是 nil —— 回弹静默失效，没有任何测试会红")
+    }
+
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
     func anchorAndButtonCount() throws {
         let code = try code(tv)

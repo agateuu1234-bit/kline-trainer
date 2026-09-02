@@ -994,14 +994,16 @@ public final class TrainingSessionCoordinator {
         replayHasPersisted = false
     }
 
-    /// Q13（codex R2-high）：磁盘上**是否已有一份可回退的存档**。
-    /// 供「安全退出」在落盘失败时判断：还有东西可退回 ⇒ 结束会话是安全的；
+    /// Q13（codex R2-high）：磁盘上那份可回退的存档**处于什么状态**（不是 Bool —— 见 `CheckpointStatus`）。
+    /// 供「安全退出」判断（落盘成功与失败**两条路都要查**，codex R5-high）：还有东西可退回 ⇒ 结束会话是安全的；
     /// **什么都没有 ⇒ 结束会话等于把整局唯一的副本扔掉**（实测：`startNewNormalSession` 不落盘，
     /// 开局那一刻 `loadPending()` 就是 nil；若整局的自动存档又全部失败，磁盘上始终空无一物）。
     ///
-    /// ⚠️ **读失败一律当作「没有」**（fail-closed）：磁盘正在坏的时候读本身也可能失败，
-    ///    此时保守地留住会话，比乐观地放走它安全。
-    /// ⚠️ **只查正常局的槽**；非 normal 一律返回 false（同样 fail-closed ⇒ 调用方会保留会话）。
+    /// ⚠️ **读失败返回 `.unreadable`**（fail-closed，仍然留住会话）：磁盘正在坏的时候读本身也可能失败。
+    ///    ⛔ **不得并回 `.none`**（codex R5-medium）：「读不出来」与「压根没有」要给用户的补救动作不同，
+    ///    合并回去就等于叫人去清理存储空间 —— 对一个损坏的存档文件而言那是无效建议。
+    ///    本段曾写着「读失败一律当作『没有』」，那是 Bool 时代的写法（Kimi R1-low：已随实现订正）。
+    /// ⚠️ **只查正常局的槽**；非 normal 返回 `.none`（同样 fail-closed ⇒ 调用方会保留会话）。
     ///    今天唯一的调用方是「结算入账失败」弹窗，而它只在正常局出现（replay 被 `routeEndOfSession`
     ///    分流、review 不可达）。⛔ 日后若给 replay 复用，必须先补 `pending_replay` 那一支。
     /// ⚠️ **「那行能读出来」不等于「它是本局的」**（codex R3-high）：`pending_training` 是单例行，
