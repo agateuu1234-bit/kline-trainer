@@ -517,13 +517,24 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   同步理由：不同步的话下一轮读到的仍是旧基线 1861，窗口下限锁死在 1861−30=1831，而当前真实
 #   总数已是 1864 ⇒ 从 1864 掉到 1831 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
+#   【Q13 结算弹窗诚实出口 PR（本轮）】total 1864→1890（+26）：本片新增 13 条源码守卫
+#   （FinalizeFailureAlertSourceGuardTests）+ 13 条行为测试（FinalizeAlertSafeExitTests，
+#   含 DiscardFailureOriginTests 3 条），13+13=26 与增量精确对账。**零条 UIKit-gated 新增**
+#   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场、无缺失）。
+#   同步理由：不同步的话下一轮读到的仍是旧基线 1864，窗口下限锁死在 1864−30=1834，而当前真实
+#   总数已是 1890 ⇒ 从 1890 掉到 1834 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。
+#   ⚠️ 本轮曾漏做这一步（Kimi 评审指出）：基线上调了、fixture 没重裁 ⇒ 「活基线覆盖」自测从此
+#   验证的是一份比活基线低 26 条的日志，低端余量只剩 5 条，这道自测会慢慢失去意义。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 78 行 UIKit 结果行取自
+#   本轮真冷构建日志 原文，断行伪影 XCTestOutputBarrie 前缀保留作解析健壮性素材）。
+#   另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1（非假绿）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1864" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1864）→ GATE PASS 且回显 1864 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1890" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1890）→ GATE PASS 且回显 1890 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1864，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1890，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

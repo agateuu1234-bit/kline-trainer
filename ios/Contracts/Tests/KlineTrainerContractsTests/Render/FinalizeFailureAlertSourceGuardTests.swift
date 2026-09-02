@@ -144,6 +144,45 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "⛔ 下一轮里读 discardFailedFrom 读到的是 nil —— 回弹静默失效，没有任何测试会红")
     }
 
+    @Test("⭐验收清单里声称的守卫条数必须与实际相符（同一份文档已连栽两轮）")
+    func acceptanceDocCountsMatchReality() throws {
+        // 验收清单是给**非技术复核者**看的，那两个数字是他对账的唯一抓手；写错等于给假凭据。
+        // 本条把「文档里的数」与「文件里真实的 @Test 数」机械绑定，让它不能再默默过期。
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let doc = try String(contentsOf: root
+            .appendingPathComponent("docs/superpowers/acceptance/2026-09-01-finalize-alert-truthful-exit.md"),
+                             encoding: .utf8)
+        for (claim, file) in [("条源码守卫", "Render/FinalizeFailureAlertSourceGuardTests.swift"),
+                              ("条真行为测试", "FinalizeAlertSafeExitTests.swift")] {
+            let hit = try #require(doc.range(of: claim), "锚点失效：验收清单里找不到「\(claim)」")
+            // 往前吃掉数字（文档里数字与量词之间有空格，先跳过空白）
+            var digits = ""
+            var i = hit.lowerBound
+            while i > doc.startIndex, doc[doc.index(before: i)].isWhitespace {
+                i = doc.index(before: i)
+            }
+            while i > doc.startIndex {
+                let prev = doc.index(before: i)
+                guard doc[prev].isNumber else { break }
+                digits.insert(doc[prev], at: digits.startIndex)
+                i = prev
+            }
+            let claimed = try #require(Int(digits), "「\(claim)」前面必须是阿拉伯数字（中文数字请改写）")
+            let src = try String(contentsOf: root
+                .appendingPathComponent("ios/Contracts/Tests/KlineTrainerContractsTests/\(file)"),
+                                 encoding: .utf8)
+            // ⛔ 只数**行首的真声明**：按子串数会把注释里提到的 `@Test` 字样一并算进去
+            //    （本条自己的注释就提了两次，首版因此把 13 数成 15）。
+            let actual = src.split(separator: "\n")
+                .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("@Test(") }.count
+            #expect(claimed == actual,
+                    "验收清单声称 \(claimed) 条，\(file) 实际 \(actual) 条 —— 复核者会按文档对账")
+        }
+    }
+
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
     func anchorAndButtonCount() throws {
         let code = try code(tv)
