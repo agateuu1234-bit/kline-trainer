@@ -120,6 +120,9 @@ run "regression: Plan 1f schema versioning" \
 | **F21** | `kline_trainer_modules_v1.4.md` L144–145 的矩阵**停在 `"1.5"` / `0003_v1.3`**，而 m01 与代码都是 `"1.13"` / `0004_...`（`Models.swift:7 = "1.13"`）⇒ **两份治理矩阵分叉、modules 落后 8 版**；而 `plan_e2` L37 正断言 modules = `"1.5"` 并**通过**（绿灯锁死错值） | 逐格比对三处 + `plan_e2` 实跑输出中该项未出现在 FAIL 列表 |
 | **F22** | 用户本机 `grep` 是 **ugrep 7.8.4**（被 shell 函数替换）；`grep -c "'^11 passed'"` 返回 **0**，`grep -cF` 与 `/usr/bin/grep -c` 返回 **1** | 本人在 worktree 实跑三种写法 |
 | **F23** | m01 文档 L125 有一条治理 backlog 明确描述「`plan_1f` 的 CONTRACT_VERSION 矩阵 6 行断言」 ⇒ 若删除那 6 条，该治理文本将指向不存在的对象 | 读 `docs/governance/m01-schema-versioning-contract.md:125` |
+| **F24** | `hardening_6_framework.sh` **L83 / L85 已在用 `bash -o pipefail -c`**（两条 pytest 断言，形态为「重定向 → 存 `ec` → `tail -3` → `exit $ec`」）⇒ 本次的 `-o pipefail` 用法是同仓既有写法，非新引入 | 读该文件 L83、L85 |
+| **F25** | `plan_1f` L118–123 **把三个嵌套脚本的输出各自重定向**到 `/tmp/p1.log` / `p1b.log` / `p1c.log` ⇒ 即使流式打印 `plan_1f` 自身输出，嵌套脚本的内部细节仍然看不到，故转储块必须保留这三个 | 读 `plan_1f` L118–123 |
+| **F26** | 本机**既无 `timeout` 也无 `gtimeout`** ⇒ 在脚本里写 `timeout N ...` 会让本地执行直接 `command not found` | `command -v timeout` / `command -v gtimeout` 实跑，均无 |
 
 ---
 
@@ -132,14 +135,19 @@ run "regression: Plan 1f schema versioning" \
 ```bash
 _h6_fail_before=$FAIL
 run "regression: Plan 1f schema versioning" \
-  bash -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh > /tmp/p1f.log 2>&1 && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
+  bash -o pipefail -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh 2>&1 | tee /tmp/p1f.log && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
 if [[ $FAIL -ne $_h6_fail_before ]]; then
-  for _h6_log in /tmp/p1f.log /tmp/p1.log /tmp/p1b.log /tmp/p1c.log; do
+  for _h6_log in /tmp/p1.log /tmp/p1b.log /tmp/p1c.log; do
     [[ -f "$_h6_log" ]] || continue
     echo ""; echo "---------- $_h6_log ----------"; cat "$_h6_log"
   done
 fi
 ```
+
+> ⚠️ **本段初稿用的是「先重定向、失败后再 `cat`」，已按 codex R2 改为流式**（见 §11）。
+> 原因：日志只在 `run` 返回**之后**才打印；若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**
+> 或 job 被超时/取消，控制流**永远到不了**那个转储块 —— 闸门会对**恰恰是本 PR 要调查的那种
+> 退化行为**保持完全沉默，产出零证据。流式写法让输出**边跑边出现**，挂住时也能看到它停在哪一行。
 
 **为什么这样写：**
 
@@ -147,6 +155,21 @@ fi
 2. **不碰 `run()`** —— 它被全部 14 条断言共用，改它会把风险面从 1 条扩到 14 条。
 3. **同时转储三个嵌套日志** —— `plan_1f` 自己把 `plan_1` / `plan_1b` / `plan_1c` 的输出也重定向了（其末行提示了这三个路径）。只打印 `p1f.log` 只能知道**哪一层**挂了，知道不了**为什么**；一次 CI 就要拿到完整失败面。
 4. **`[[ -f ]] || continue` 而非直接 `cat`** —— 文件可能不存在（例如 `plan_1f` 在到达嵌套段之前就失败），`set -euo pipefail` 下直接 `cat` 会中断脚本。
+5. **`bash -o pipefail -c` + `| tee` 而非 `> file`** —— 让 `plan_1f` 的输出**实时进入 CI 日志**，
+   从而在**挂住 / 被取消**时仍留下证据（codex R2 的 [high]）。`-o pipefail` 是必须的：
+   没有它，管道的退出码取自 `tee`（恒 0），`plan_1f` 的失败会被吞掉。
+   **同仓已有此写法先例**：`hardening_6_framework.sh` L83 / L85 的两条 pytest 断言即用 `bash -o pipefail -c`（F24）。
+6. **转储列表里去掉了 `/tmp/p1f.log`** —— 它已经流式输出过，再 `cat` 一遍是重复。
+   保留三个**嵌套**日志（`p1.log` / `p1b.log` / `p1c.log`），因为它们是被 `plan_1f` 内部
+   重定向掉的（F25），流式看不到。
+
+**已隔离实测三档（`bash -o pipefail -c` 流式写法，scratchpad）：**
+
+| 档 | 输入 | 实际 |
+|---|---|---|
+| A | 脚本失败退出 1 | 输出**实时可见**，整体退出码 **1** ✅ |
+| B | 脚本成功且哨兵 `PLAN 1f PASS` 存在 | 退出码 **0** ✅ |
+| C | 脚本**静默返回 0 但哨兵缺失** | 退出码 **1** ✅ —— **原有的哨兵防护未被削弱**（这正是 L96–97 注释所防的「捕获了失败却返回 0」） |
 
 **已隔离实测**（scratchpad，`set -euo pipefail` 环境下）：
 
@@ -233,7 +256,8 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 | **R4** | `plan_1f` 在 `ubuntu-latest` 上跑 `swift test`（F18/F19），可行性未知 | **本 PR 的存在就是为了回答它** | 由 §5.3 的 CI 运行给出答案 |
 | **R5** | 闸门仍对绝大多数 PR 短路放行（F4）⇒ 剩余断言仍是低频执行、仍可能腐烂 | 短路机制本身是正确的（防另一种死锁）；本次不改变执行频率 | 超出范围 |
 | **R6** | 「验收清单里口头豁免闸门失败」这一失效模式（F20）无任何机制约束 | 真实且已发生过一次 | 超出范围，记入独立 backlog |
-| **R7** | 日志转储会让失败时的 CI 输出显著变长 | 仅在失败时发生；相比「完全看不见」是净收益 | 接受 |
+| **R7** | 流式输出会让 CI 日志变长（**成功时也会**，因为 `tee` 无条件流式） | `plan_1f` 共 31 条断言，输出量级为百行；相比「完全看不见」是净收益 | 接受 |
+| **R8** | 若 `plan_1c` 的 `swift test` 在 Linux 上**挂住**，job 会跑到 GitHub 默认的 **360 分钟**上限才被杀 | **证据不会丢失**（流式输出已落在 CI 日志里，能看出停在哪一行）；代价只是等待时间与 runner 占用，而本仓为 PUBLIC、标准 runner 免费无限额 | 接受。**未采纳** codex R2 建议的「在脚本里加 `timeout`」—— 本机既无 `timeout` 也无 `gtimeout`（F26），写进去会让本地执行直接失败。若将来要限时，正确位置是 workflow 的 job 级 `timeout-minutes`，属独立改动 |
 
 ---
 
@@ -263,10 +287,38 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 
 ## 9. 回滚方案
 
-单文件、单处、纯新增输出、**零断言语义改动**。本次实施只产生**一个**提交。
+> ⚠️ **本节初稿与 D3 自相矛盾，已按 codex R2 重写**（见 §11）。
+> 初稿写「本次实施只产生**一个**提交」并让操作者「revert squash 提交」——
+> 但 D3 明确要求**修复提交会追加到同一个 PR**。合并后 revert 那个 squash 会把
+> **诊断与修复一起撤销**，等于把坏掉的闸门原样放回去，而不是「只回滚日志输出」。
 
-- **已合并进 `main` 后**：`git revert --no-edit <squash 提交 sha>`；若为 merge commit 则 `git revert --no-edit -m 1 <sha>`。
-- **分支上**：`git revert --no-edit <该提交 sha>`。
+**本 spec 覆盖的实施只产生一个提交**（诊断），但**本 PR 最终会包含更多提交**（D5 的修复）。
+因此回滚要分清撤的是哪一层：
+
+### 9.1 只想撤掉「诊断输出」这一层（PR 尚未合并时）
+
+```bash
+git revert --no-edit <诊断那一个提交的 sha>
+```
+
+撤完后 `acceptance` 会回到「红且看不见原因」的状态 —— 这通常**不是**你想要的，除非诊断本身出了问题。
+
+### 9.2 想撤掉整个 PR（已合并进 `main` 之后）
+
+本仓近期 PR 多为 squash 合并（单提交、标题带 `(#NNN)`）：
+
+```bash
+git revert --no-edit <squash 提交 sha>
+```
+
+若为 merge commit 则 `git revert --no-edit -m 1 <sha>`。
+
+⚠️ **这会同时撤销诊断与修复** ⇒ `acceptance` 会退回本次事故前的状态（红、且失败原因不可见）。
+**撤销后必须立刻重跑一次闸门确认其实际状态**，不得假设「回滚 = 回到好的状态」。
+
+### 9.3 §9 需在 PR 最终范围确定后复核
+
+D5 的修复提交落地后，本节的提交清单会变。**合并前必须回来把 9.1 的 sha 清单补全**。
 
 ⛔ `git revert` **没有 `-q` 选项**，误写会只打印 usage 而**什么都不做**（已实测 `git revert -h`）。
 
@@ -274,9 +326,11 @@ PR 开出后，`acceptance` 检查**预期为红**（D3）。在其日志中确�
 
 ```bash
 grep -cF '_h6_fail_before' scripts/acceptance/hardening_6_framework.sh
+grep -cF 'bash -o pipefail -c "./scripts/acceptance/plan_1f' scripts/acceptance/hardening_6_framework.sh
 ```
 
-期望 **0**（= 回到基线）。
+**两条期望值依次为 `0` 与 `0`**（= 诊断改动已完全撤销；第 2 条覆盖流式改写那一处）。
+第 1 条的期望值 **0 已在本 worktree 实跑确认**（当前树尚未实施）。
 
 > ⚠️ **必须用 `-F`**：用户本机 `grep` 是 **ugrep 7.8.4**（F22），对含正则元字符的模式与
 > GNU/BSD grep 行为不同 —— 初稿的回滚核实命令正因此在用户机器上返回了错误的值（§11 Finding 5）。
@@ -338,3 +392,36 @@ grep -cF '_h6_fail_before' scripts/acceptance/hardening_6_framework.sh
 3. **⭐ 最重要的一条：在「无法观测失败」的前提下设计修复，等于猜。**
    初稿把「本地 macOS + Python 依赖」称作「CI 等价环境」，而 CI 是 Linux 且要跑 `swift test` ——
    一个从未被任何证据触及的路径。**先让失败可见，再谈修复**，是本次范围重定的全部理由。
+
+---
+
+### R2 · codex `adversarial-review` · 2026-09-02 · HEAD `e7be906` → **needs-attention**（1 high / 1 medium）
+
+> ✅ **本轮是真 verdict**：收口行 `[codex-attest] verdict=needs-attention` 存在（判据 ④ = 1）。
+> 与 2026-08-31 那两次配额期假 approve（④ = 0）性质完全不同。**账本未写入**（verdict ≠ approve）。
+
+**两条我都复核成立，均已修。**
+
+| # | 严重度 | Finding | 我的复核 | 处置 |
+|---|---|---|---|---|
+| 1 | **high** | 「先重定向、失败后再 `cat`」的诊断**对挂住 / 超时 / 取消无效** —— 日志只在 `run` 返回后才打印，若 `plan_1c` 的 `swift test` 在 Linux 上挂住或 job 被取消，控制流永远到不了转储块 ⇒ 闸门对**恰恰是本 PR 要调查的那种退化行为**完全沉默 | **成立，且直击本 PR 的唯一目的**（拿证据）。若它在最可能出问题的路径上产出零证据，这个 PR 就白做了 | D1 改为 `bash -o pipefail -c` + `\| tee` **流式**输出；转储块只保留三个嵌套日志。**已隔离实测三档**（失败/成功/静默返回 0 但哨兵缺失），其中档 C 证明**原有哨兵防护未被削弱** |
+| 2 | medium | §9 回滚与 D3 自相矛盾：§9 说「只产生一个提交、revert squash」，而 D3 要求修复提交追加到同一 PR ⇒ revert squash 会把诊断与修复**一起**撤掉 | **成立** —— L266 与 L171/L293 直接打架 | §9 重写为 9.1（只撤诊断层）/ 9.2（撤整个 PR，并警告会同时撤掉修复、撤后必须重跑闸门确认）/ 9.3（最终范围确定后必须回来补 sha 清单） |
+
+**未采纳的部分（附理由与证据）**：
+
+- codex 建议「add an explicit bounded timeout」（在脚本里加超时）。**未采纳** ——
+  本机 `command -v timeout` 与 `command -v gtimeout` **均无输出**（F26），
+  把 `timeout` 写进 acceptance 脚本会让**本地执行直接 `command not found`**。
+  这正是 `feedback_codex_review_killed_not_verdict` 记录过的坑：
+  「给长命令加超时这种顺手的保护本身也是判据的一部分，它一失败，被保护的命令零执行」。
+  若将来确需限时，正确位置是 workflow 的 job 级 `timeout-minutes`，属独立改动。
+  **该风险已量化记为 R8**：流式输出已保证证据不丢失，挂住的代价只是等待时间，
+  且本仓 PUBLIC、标准 runner 免费无限额。
+- codex 建议「`if: always()` artifact 上传」。**未采纳** —— 需要改
+  `hardening_6_gate.yml`（§7 明确不改），而流式输出已经把证据直接放进 CI 日志，
+  artifact 是同一目的的更重手段。
+
+**本轮的方法论收获**：**诊断设施本身也要按「最坏路径」设计。**
+我原来的写法在「正常失败」下工作良好，却在「挂住」下完全失效 ——
+而挂住恰恰是这次最该担心的那种失败（Linux 上从未跑过的 `swift test`）。
+⇒ **为「拿证据」而做的改动，要先问「它在最糟的那种失败下还产出证据吗」。**
