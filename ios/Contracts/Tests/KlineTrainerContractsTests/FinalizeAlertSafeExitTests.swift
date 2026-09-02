@@ -62,8 +62,8 @@ struct FinalizeAlertSafeExitTests {
 
         let outcome = await lifecycle.exitPreservingProgress()
 
-        #expect(outcome == .cannotPreserve,
-                "既没存成、磁盘上也没有旧存档 ⇒ 必须如实报告『保不住』")
+        #expect(outcome == .cannotPreserve(reason: .none),
+                "既没存成、磁盘上也没有旧存档 ⇒ 必须报告『保不住』**且原因是「没有存档」**")
         #expect(coord.activeEngine === engine,
                 "⛔ 会话必须保留 —— 此刻结束会话 = 把整局唯一的副本扔掉")
     }
@@ -92,7 +92,7 @@ struct FinalizeAlertSafeExitTests {
         let engine = try await coord.startNewNormalSession()
         try await coord.saveProgress(engine: engine)
         let mine = try #require(try pending.loadPending())
-        #expect(coord.hasDurablePendingCheckpoint(for: engine), "前置：自己的存档当然算数")
+        #expect(coord.pendingCheckpointStatus(for: engine) == .usable, "前置：自己的存档当然算数")
 
         // 把磁盘上那条换成**别的会话**留下的（只改 sessionKey，其余逐字段照抄）
         let foreign = PendingTraining(
@@ -108,8 +108,8 @@ struct FinalizeAlertSafeExitTests {
 
         // 它能读出来（非 nil），但**不是本局的** ⇒ 不得据此认为「退出是安全的」
         #expect(try pending.loadPending() != nil, "前置：磁盘上确实有一条能读出来的记录")
-        #expect(!coord.hasDurablePendingCheckpoint(for: engine),
-                "⛔ 只证明『那行能读出来』不够 —— 必须证明它属于本局")
+        #expect(coord.pendingCheckpointStatus(for: engine) == .none,
+                "⛔ 只证明『那行能读出来』不够 —— 别的会话的记录必须归入『没有存档』")
     }
 
     @Test("⭐训练组文件已被缓存淘汰：存档行还在也**不算退得安全**（codex R4-high）")
@@ -117,7 +117,7 @@ struct FinalizeAlertSafeExitTests {
         let (coord, _, cache, pending) = PIFixtures.makeProvenanceCoordinator(files: ["a.sqlite"], corrupt: [])
         let engine = try await coord.startNewNormalSession()
         try await coord.saveProgress(engine: engine)
-        #expect(coord.hasDurablePendingCheckpoint(for: engine), "前置：文件还在时当然算数")
+        #expect(coord.pendingCheckpointStatus(for: engine) == .usable, "前置：文件还在时当然算数")
 
         // 模拟后台下载把它挤掉（缓存 LRU 淘汰**不保护在用文件**）。
         // ⚠️ 关键状态：此刻 reader **仍开着**，所以这一局其实还能继续玩 ——
@@ -127,8 +127,25 @@ struct FinalizeAlertSafeExitTests {
         let f = try #require(try cache.listAvailable().first { $0.filename == saved.trainingSetFilename })
         try cache.delete(f)
 
-        #expect(!coord.hasDurablePendingCheckpoint(for: engine),
-                "⛔ 文件没了 ⇒ 那条存档续不回来 ⇒ 绝不能据此关掉还开着的 reader")
+        // ⚠️ 必须是 `.trainingSetMissing` 而不是笼统的「保不住」——两种成因要给用户完全不同的说法与建议
+        #expect(coord.pendingCheckpointStatus(for: engine) == .trainingSetMissing,
+                "⛔ 文件没了 ⇒ 续不回来 ⇒ 既不能关掉还开着的 reader，也不能说成『本局没存过档』")
+    }
+
+    @Test("⛔ 非正常局必须被显式挡住：复盘会谎称已落盘、回放会永远退不出去（Opus 对抗评审）")
+    func rejectsNonNormalModes() async throws {
+        // 复盘：saveProgress 因 shouldPersistProgress()==false 直接早返、**一个字节都没写**，
+        //       若照旧返回 .savedCurrentState 就是谎称「当前进度已落盘」。
+        // 回放：saveProgress 若抛错 → pendingCheckpointStatus 因 mode 守卫恒返 .none
+        //       → 恒 .cannotPreserve ⇒ **会话永远结束不了**，调用方陷在「退不出去」的死循环。
+        // ⇒ 与其让它给出与事实相反的结论，不如显式报「不适用」。
+        let (coord, _, _, _) = PIFixtures.makeCoordinator()
+        for mode in [TrainingMode.review, .replay] {
+            let engine = TrainingEngine.preview(mode: mode)
+            let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+            #expect(await lifecycle.exitPreservingProgress() == .notApplicable,
+                    "\(mode) 不是本方法的适用场景，必须显式报『不适用』")
+        }
     }
 
     @Test("反向对照：安全退出**不是**弃局 —— 它一次都不该碰清空那条路")

@@ -1016,13 +1016,28 @@ public final class TrainingSessionCoordinator {
     /// ⚠️ **但它仍不保证「将来一定续得回来」**：用户退出**之后**那份文件照样可能被淘汰。
     ///    在这一层关不上那个洞 —— 真正的修法是**把在用 / 被 pending 引用的文件钉住不许淘汰**，
     ///    属缓存子系统，已另立待办（见本片验收清单 §五）。⛔ 别把本判据当成「保证可续」。
-    public func hasDurablePendingCheckpoint(for engine: TrainingEngine) -> Bool {
-        guard engine.flow.mode == .normal, let key = activeSessionKey else { return false }
+    /// ⚠️ **返回「原因」而不是 Bool**（Opus 对抗评审）：「保不住」有**三种互不相同**的成因，
+    ///    而它们对用户的正确说法与正确建议**完全不同**。上一稿把三者压成一个 `false`，
+    ///    UI 只好把原因写死成其中一种 —— 在另一种情形下那句话就是**假的**，
+    ///    随附的建议也无效。⇒ 判据必须把原因带出来。
+    public enum CheckpointStatus: Equatable, Sendable {
+        /// 有一份属于本局的存档，且它依赖的训练组文件仍在缓存里 ⇒ 退出是安全的。
+        case usable
+        /// 磁盘上没有属于本局的存档（本局一次都没存成，或那条记录属于别的会话）。
+        case none
+        /// 存档在、也是本局的，**但它依赖的训练组数据文件已被缓存清理掉**。
+        /// ⛔ 对这一种，「清理设备存储空间」是**无效建议** —— 文件已经删了，腾空间也回不来。
+        case trainingSetMissing
+    }
+
+    public func pendingCheckpointStatus(for engine: TrainingEngine) -> CheckpointStatus {
+        guard engine.flow.mode == .normal, let key = activeSessionKey else { return .none }
         do {
-            guard let pending = try pendingRepo.loadPending(), pending.sessionKey == key else { return false }
-            _ = try cachedFile(filename: pending.trainingSetFilename)   // 文件没了 → throw → 下面 catch 返 false
-            return true
-        } catch { return false }
+            guard let pending = try pendingRepo.loadPending(), pending.sessionKey == key else { return .none }
+            do { _ = try cachedFile(filename: pending.trainingSetFilename) }
+            catch { return .trainingSetMissing }
+            return .usable
+        } catch { return .none }
     }
 
     /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。

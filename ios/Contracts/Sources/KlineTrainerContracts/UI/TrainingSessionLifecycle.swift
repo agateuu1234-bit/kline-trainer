@@ -57,6 +57,15 @@ public struct TrainingSessionLifecycle {
     /// - Returns: 三种结局之一，见 `SafeExitOutcome`。
     @discardableResult
     public func exitPreservingProgress() async -> SafeExitOutcome {
+        // ⛔ **显式挡住非正常局**（Opus 对抗评审）：把「今天只有一个调用点」这个前提写进代码，
+        //    而不是只写在另一份文件的注释里 —— 这是个 public 方法，看起来像通用出口。
+        //    · 复盘：`saveProgress` 因 `shouldPersistProgress() == false` 直接早返、**一个字节都没写**，
+        //      若不挡住就会返回 `.savedCurrentState`（字面意思是「当前进度已落盘」）—— 与事实相反；
+        //    · 回放：`saveProgress` 若抛错，`pendingCheckpointStatus` 因其自身的 mode 守卫恒返 `.none`
+        //      ⇒ 恒 `.cannotPreserve` ⇒ **会话永远结束不了**，调用方陷在「退不出去」的死循环，
+        //      哪怕 `pending_replay` 槽里其实躺着一份完好的存档。
+        //    ⇒ 日后要给 replay 复用，必须先补 `pending_replay` 那一支，再放开这道守卫。
+        guard engine.flow.mode == .normal else { return .notApplicable }
         do {
             try await coordinator.saveProgress(engine: engine)
         } catch {
@@ -64,8 +73,9 @@ public struct TrainingSessionLifecycle {
             // ⛔ 这一步不能省（codex R2-high）：上一版本无条件 `endSession()`，
             //    而开新局时磁盘上本来就没有存档——若整局的自动存档又全部失败，
             //    那一退就把**整局唯一的副本**扔掉了，而文案还承诺着「保留进度」。
-            guard coordinator.hasDurablePendingCheckpoint(for: engine) else {
-                return .cannotPreserve      // ⛔ 刻意不 endSession：会话必须留着
+            let status = coordinator.pendingCheckpointStatus(for: engine)
+            guard status == .usable else {
+                return .cannotPreserve(reason: status)   // ⛔ 刻意不 endSession：会话必须留着
             }
             await coordinator.endSession()
             return .keptEarlierCheckpoint
@@ -82,9 +92,13 @@ public struct TrainingSessionLifecycle {
         case savedCurrentState
         /// 当前进度没落成，但磁盘上**已有**一份更早的存档 ⇒ 退出是安全的，只是会回到那一档。
         case keptEarlierCheckpoint
-        /// 既没落成、磁盘上**也没有任何存档** ⇒ **未退出，会话原样保留**。
+        /// 落盘没成功、且磁盘上那份存档**不可用** ⇒ **未退出，会话原样保留**。
         /// 调用方必须如实告诉用户「现在退不出去」，⛔ 不得假装已经退了。
-        case cannotPreserve
+        /// ⚠️ **带上原因**：不同成因要给不同说法与不同建议（见 `CheckpointStatus`）。
+        case cannotPreserve(reason: TrainingSessionCoordinator.CheckpointStatus)
+        /// **本方法不适用于该模式**（今天只支持正常训练局），会话未被改动。
+        /// ⚠️ 与 `cannotPreserve` 刻意分开：那个是「适用但此刻保不住」，这个是「压根不该问我」。
+        case notApplicable
     }
 
     /// 自动结束（plan v1.5 §6.2.5）：正式结束入账，返 recordId（Normal）/ nil（review/replay 非保存分支）。

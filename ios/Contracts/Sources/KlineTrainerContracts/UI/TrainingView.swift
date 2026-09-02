@@ -82,6 +82,8 @@ public struct TrainingView: View {
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     // Q13（codex R2-high）：安全退出**什么都没保住**时的诚实提示（既没落盘、磁盘上也没有旧存档）。
     @State private var cannotPreserveOnExit = false
+    // 「保不住」的成因决定说法与建议（Opus 对抗评审）：文件被清理时，「清理存储空间」是无效建议。
+    @State private var cannotPreserveIsFileMissing = false
     // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
     @State private var discardFailed = false
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
@@ -197,7 +199,15 @@ public struct TrainingView: View {
                     switch await lifecycle.exitPreservingProgress() {
                     case .savedCurrentState, .keptEarlierCheckpoint:
                         onExit()
-                    case .cannotPreserve:
+                    case .cannotPreserve(let reason):
+                        cannotPreserveIsFileMissing = (reason == .trainingSetMissing)
+                        cannotPreserveOnExit = true
+                    case .notApplicable:
+                        // 结构上不可达：本弹窗只在正常训练局出现（`routeEndOfSession` 已把 replay
+                        // 分流走、review 连 `shouldAutoFinalize` 都被抑制）。但 switch 必须穷尽，
+                        // 且 fail-closed —— **不离开本局**，走与「保不住」相同的诚实提示，
+                        // 绝不静默 onExit()（那会把用户带走却什么都没保存）。
+                        cannotPreserveIsFileMissing = false
                         cannotPreserveOnExit = true
                     }
                 }
@@ -232,16 +242,23 @@ public struct TrainingView: View {
         // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
         // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
         // Q13（codex R2-high）：安全退出什么都没保住时的诚实提示。
+        // ⚠️ 「知道了」在**下一轮 MainActor** 里把结算弹窗弹回来（与同文件既有重弹先例同时序）：
+        //    在一个 alert 正被关闭的同一次刷新里置另一个 alert 的 isPresented 有被吞的风险；
+        //    一旦被吞，会话还活着但 didFinalize 已置位 ⇒ maybeAutoEnd 不再触发 ⇒ 结算弹窗永远回不来。
         // ⚠️ 关掉它要把结算失败弹窗**重新弹回来** —— 否则用户回到训练页、屏幕上什么都没有，
         //    会以为刚才那一下"没反应"，比不给出口更糟。
         .alert("暂时退不出本局", isPresented: $cannotPreserveOnExit) {
-            Button("知道了", role: .cancel) { finalizeFailed = true }
+            Button("知道了", role: .cancel) { Task { @MainActor in finalizeFailed = true } }
         } message: {
-            Text("存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。")
+            // ⚠️ 两支说法必须分开（Opus 对抗评审）：把原因写死成其中一种，另一种情形下就是假话，
+            //    而且随附建议也会失效（文件已被清理时，腾出存储空间不会让它回来）。
+            Text(cannotPreserveIsFileMissing
+                 ? "本局的存档还在，但它依赖的训练组数据文件已被清理掉了 —— 现在退出的话这一局将无法继续，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+                 : "存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。")
         }
         // Q13（codex R2-medium）：弃局没做成时的诚实提示（会话仍在，未离开本局）。
         .alert("放弃未完成", isPresented: $discardFailed) {
-            Button("知道了", role: .cancel) { finalizeFailed = true }
+            Button("知道了", role: .cancel) { Task { @MainActor in finalizeFailed = true } }
         } message: {
             Text("清除本局存档时出错，本局没有被放弃，你仍在这一局里。可稍后再试。")
         }
@@ -276,7 +293,12 @@ public struct TrainingView: View {
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()   // durable 弃局退出
+                    // ⛔ 同「结算入账失败」那处一样：discardSession() 是**故意**在清槽失败时先抛错、
+                    //    不 endSession；吞掉它再 onExit() 会造成「界面回了首页、协调器里会话还活着、
+                    //    pending 也还在」，而用户被告知已丢弃。更糟的是首页会显示「继续训练」，
+                    //    一点就直接 resumePending()（AppRouter 未先 endSession）→ 违反 D10 前置条件。
+                    do { try await lifecycle.discard(); onExit() }
+                    catch { discardFailed = true }
                 }
             }
         } message: {
