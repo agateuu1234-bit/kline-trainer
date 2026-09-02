@@ -1486,7 +1486,14 @@ def begin_run(stg_fd: int, *, skip_existing_verify: bool = False) -> RunLedger:
     snapshot = lifecycle_snapshot(seen[0]) if seen is not None else {}
     owes_recheck = _needs_staging_recheck(
         snapshot.get("stopped_reason"), snapshot.get("fetch_fatal_error"))
-    if skip_existing_verify and owes_recheck:
+    # ⚠️ **互斥的对象是「账本带 escape 记录」，spec §4.5:484 原文没有限定 kind**。
+    # 此前只挡 `_needs_staging_recheck` 那两种（staging 侧）—— 于是带
+    # `source_path_escape` 的账本配上该 flag 能正常起跑，**并在同一轮把 fatal
+    # 清掉**（清除 source escape 只要前提①）；而这一轮恰恰跳过了「已 staged 的
+    # 文件与源对不对得上」，正是该 flag 跳过的那件事（Opus 评审 [medium]，
+    # 本机端到端复现）。判据用 `fetch_fatal_error` 在不在 —— 它才是 O4-F1 定的
+    # **粘性信任状态**，`stopped_reason` 只是人读附注。
+    if skip_existing_verify and snapshot.get("fetch_fatal_error") is not None:
         raise SkipVerifyWithEscapeError(
             "这棵 staging 的 manifest 里带着必须做全量复校才能解除的记录，"
             "而本次传了 --skip-existing-verify。两者互斥：跳过复校就无法证明"
@@ -1535,6 +1542,24 @@ def attest_staging_recheck(ledger: RunLedger, *, passed: bool) -> None:
         )
     verdict = "passed" if passed else "failed"
     st = ledger._state()
+    # ⚠️⚠️ **这一轮不欠复校时一律拒绝登记**（Opus 评审 [medium]，本机复现）。
+    # 不拒的后果：干净账本上 `attest(passed=False)` 会被**静默丢弃** ——
+    # 闸只看起跑状态所以 per-stock 提交照样放行，收尾走决策表分支②
+    # （上次没有 fatal）返回 `{}`，「这棵树复校没过」哪都没写。
+    # ⚠️ **为什么修法是「拒绝」而不是「把它记下来」**：pilot 的 fail-closed 判据
+    # 是「`fetch_fatal_error` 存在」（O4-F1），`stopped_reason` 只是人读附注 ——
+    # 只写 reason 是**假安全**；要真生效就得**凭空造一个 fatal**（四字段一个都
+    # 造不出来）。本入口只为 P2-F3 的前提②存在，账本上没有那类记录时它没有
+    # 可写入的位置。这一轮的失败由 S4/S5 在**运行级**（rc≠0 + 报告）表达 ——
+    # 与 S2-F14 已接受的那条残留同规格，已在 spec 登记。
+    if not st.start_needs_recheck:
+        raise ValueError(
+            "这棵 staging 的账本上没有「必须做全量复校才能解除」的记录，"
+            f"本次运行不欠一次复校，因而登记 {verdict!r} 没有可写入的位置。"
+            "本入口只为 P2-F3 的前提②存在；若你确实跑了复校且没通过，"
+            "请在运行级（非零退出码 + 报告）表达，本模块不会凭空造一个 "
+            "fetch_fatal_error。"
+        )
     if st.recheck is not None and st.recheck != verdict:
         raise ValueError(
             f"本次运行**已登记**的复校结论是 {st.recheck!r}，不许改口成 "
@@ -1689,6 +1714,17 @@ class FinalOutcome:
             raise ValueError(
                 "staging_recheck 只能是 None/'passed'/'failed'，"
                 f"收到 {self.staging_recheck!r}"
+            )
+        # ⚠️ **只有 clean 这一支会去清除/保留 fatal，前提②才被消费**：
+        # `max_bytes` 一律保留（O4-F1）、`escape` 一律覆盖为本次的，两者都不看它。
+        # 两个工厂函数因此不收这个参数（「让它不可表达」），但本类是**公开的**
+        # dataclass、可以被直接构造 —— 守卫立在工厂等于守卫不存在（R1 的教训）。
+        # 不挡住时能造出一个「决策表永远不看、而 commit_final 会拿去比对」的取值。
+        if self.kind != "clean" and self.staging_recheck is not None:
+            raise ValueError(
+                f"kind={self.kind!r} 的结局不得携带 staging_recheck="
+                f"{self.staging_recheck!r} —— 决策表对这一支根本不看它，"
+                "可传而被静默忽略是**安静的那种错**"
             )
         # 跨字段配对：kind == "escape" ⟺ 带着证据。
         if (self.kind == "escape") != (self.escape is not None):
@@ -1899,10 +1935,34 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     # 收尾却上报 `"passed"` —— 一次**没通过**的复校照样把 fatal 清掉，闸白立。
     # 反方向同样拦：从没登记过却上报结论 —— 模块自己那份记录才是唯一真相，
     # 调用方口头说的不算（这与 per-stock 提交「生命周期三字段只从磁盘读」同源）。
-    if ledger._state().recheck != outcome.staging_recheck:
+    attested = ledger._state().recheck
+    if attested == "failed":
+        # 复校**已被证明失败**：这一轮只许发布 P2-F3 那个具名结局。
+        # 放开非 clean 结局之后若不加这条，`max_bytes_stop()` 会把「复校没过」
+        # 整个丢掉——盘上只剩上一轮的 reason 加一条 max_bytes 附注。
+        if outcome.kind != "clean" or outcome.staging_recheck != "failed":
+            raise ManifestInvalidError(
+                "本次运行登记的复校结论是**失败**，那么收尾只能发布 P2-F3 "
+                f"规定的具名结局（staging_recheck_failed），而不是 "
+                f"kind={outcome.kind!r} / staging_recheck="
+                f"{outcome.staging_recheck!r}。"
+                "一次被证明没通过的复校必须留下痕迹，不许被别的结局盖过去。"
+            )
+    elif outcome.kind == "clean" and outcome.staging_recheck != attested:
+        # ⚠️ **只在 clean 这一支比对**（Opus 评审 [high]，本机端到端复现）：
+        # 只有它会去清除/保留 fatal、真正消费前提②。写成无条件相等时，
+        # `max_bytes_stop()` / `escape_stop()` 的 `staging_recheck` 恒为 None
+        # （工厂不收这个参数），而一旦这一轮拉过股就必然登记过 `"passed"`
+        # （per-stock 提交的复校闸逼着它登记）—— 于是**唯一合法的恢复路径**
+        # 被自己堵死：Run2 修好树、复校通过、拉了股、触到 --max-bytes
+        # （O4-F1 说这几乎必然），收尾当场被拒，还劝操作者把一棵几百只股的
+        # 健康 staging 报废，而 O4-F1 要产出的 secondary 诊断一个字没写。
+        # ⚠️ 根因是**版本化不变量漏检**：`max_bytes_stop()` 的理由「决策表这一支
+        # 根本不看它们」对 `resolve_final_lifecycle` 成立，而 R16 给
+        # `outcome.staging_recheck` **加了第二个消费者**，那句理由没被重核。
         raise ManifestInvalidError(
             f"收尾上报的 staging 复校结论是 {outcome.staging_recheck!r}，"
-            f"而本次运行**登记**的是 {ledger._state().recheck!r} —— 两者必须一致。"
+            f"而本次运行**登记**的是 {attested!r} —— 两者必须一致。"
             "复校结论请在做完复校后用 attest_staging_recheck() 登记；"
             "上报一个没登记过的结论等于让调用方自己给自己发凭据。"
         )

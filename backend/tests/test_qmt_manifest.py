@@ -2973,14 +2973,34 @@ def test_only_one_place_decides_whether_a_staging_recheck_is_required():
     src = pathlib.Path(inspect.getsourcefile(_qm))
     tree = _ast.parse(src.read_text(encoding="utf-8"))
 
+    # ⚠️ **两处都要扫，两个字面量都要认**（Opus 评审 [low]）：
+    #   ① 只看 `comparators` 时，`"staging_path_escape" == kind`（常量在**左边**）
+    #      与 `kind in ("staging_path_escape",)`（比较项是 Tuple 而非 Constant）
+    #      都能溜过去；
+    #   ② `_needs_staging_recheck` 是**按两个字面量**判定的（O4-F3 让
+    #      `staging_recheck_failed` 的 kind 可以是 source_path_escape），
+    #      只认第一个时，拿第二个字面量另判一处照样查不出来。
+    #   守卫本来就是为「同一件事判在两处、改了一处忘了另一处」而立的，
+    #   它自己漏掉一半判据就等于没立。
+    STRICT_LITERALS = {"staging_path_escape", "staging_recheck_failed"}
+
+    def _literals(node):
+        """一个比较节点里出现的字符串常量（含 Tuple/List/Set 容器里的）。"""
+        out = set()
+        for side in [node.left, *node.comparators]:
+            if isinstance(side, _ast.Constant):
+                out.add(side.value)
+            elif isinstance(side, (_ast.Tuple, _ast.List, _ast.Set)):
+                out |= {e.value for e in side.elts
+                        if isinstance(e, _ast.Constant)}
+        return out
+
     found = []
     for fn in _ast.walk(tree):
         if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             continue
         for node in _ast.walk(fn):
-            if isinstance(node, _ast.Compare) and any(
-                    isinstance(c, _ast.Constant) and c.value == "staging_path_escape"
-                    for c in node.comparators):
+            if isinstance(node, _ast.Compare) and _literals(node) & STRICT_LITERALS:
                 found.append(fn.name)
 
     assert found, ("AST 遍历一处都没找到——守卫可能被改坏了，"
@@ -3709,7 +3729,12 @@ def _committed(fd, m):
 
 
 @pytest.mark.parametrize("label,mutate", [
-    ("committed_bytes 被调小", lambda t: t.__setitem__("committed_bytes", 1)),
+    # ⚠️ 值必须**停在固有下限之上**：写成 1 时 R16 新加的
+    #    「committed_bytes ≥ files 之和 + export_log」会**抢先**把它拒掉，
+    #    单调守卫删掉本档也照样绿（Opus 评审 [medium]，本机变异实测零红）。
+    #    退到**恰好等于**下限 ⇒ 只有单调守卫能拦它。
+    ("committed_bytes 被调小", lambda t: t.__setitem__("committed_bytes",
+                                                       _min_bytes(t))),
     ("failures[].attempts 被清零", lambda t: t["failures"][0].__setitem__("attempts", 0)),
     ("batches 历史被丢弃", lambda t: t.__setitem__("batches", [])),
     ("inflight_rollbacks 遥测被丢弃", lambda t: t.__setitem__("inflight_rollbacks", {})),
@@ -4527,13 +4552,17 @@ def test_committed_bytes_must_grow_with_newly_added_files(tmp_path):
     """
     d, fd = _staging(tmp_path)
     try:
-        m = _fix_bytes(_valid_manifest())
+        # ⚠️ 必须留出**足够的余量**：不留时新增文件把固有下限抬到 _base 之上，
+        #    R16 那条下限会**抢先**拒掉，本档对增量判据零判别力
+        #    （Opus 评审 [medium]，本机变异实测：判据删掉后本档仍绿）。
+        m = _fix_bytes(_valid_manifest(), extra=5_000_000)
         _base = m["committed_bytes"]
         ledger = _committed(fd, m)
         flat = _with_more_stocks(m)          # 加了两条文件记录
-        flat["committed_bytes"] = _base      # 累计值原地不动
+        flat["committed_bytes"] = _base      # 累计值原地不动（仍在固有下限之上）
         _recompute_evidence(flat)
-        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+        assert flat["committed_bytes"] >= _min_bytes(flat), "本档必须绕过固有下限"
+        with pytest.raises(ManifestInvalidError, match="至少涨够"):
             commit_stock(fd, flat, ledger=ledger)
     finally:
         os.close(fd)
@@ -5085,5 +5114,180 @@ def test_a_bootstrap_manifest_that_accounts_for_it_is_accepted(tmp_path):
         ledger = begin_run(fd)
         commit_stock(fd, empty, ledger=ledger)
         assert read_manifest(fd)["committed_bytes"] == 2399554
+    finally:
+        os.close(fd)
+
+
+# ── Opus 对抗性评审（替代 codex 那一轮）的五条 ────────────────────
+# ⚠️ 其中 A 与 C **都是 R16 那次修复自己引入的**：一致性检查把两个工厂函数
+#    产出的合法结局全挡了；固有下限把两条老攻击档抬到了门槛以下。
+
+
+def test_a_max_bytes_stop_is_publishable_after_a_passing_recheck(tmp_path):
+    """⭐⭐ [Opus high] R16 的一致性检查把**唯一合法的恢复路径**堵死了。
+
+    场景（正是 spec O4-F1 说「几乎必然」的那一个）：Run1 撞 `staging_path_escape`
+    停在 56 只股；操作者修好目录树；Run2 做完 P2-F3 无条件要求的全量复校（通过）、
+    登记、继续拉股，然后触到 `--max-bytes`（累计字节含 Run1）。
+    此时 `max_bytes_stop()` 的 `staging_recheck` 恒为 `None`（工厂不收这个参数，
+    因为决策表这一支根本不看它），而凭据里登记的是 `"passed"` ——
+    R16 那条「上报必须等于登记」于是**拒绝发布**，报的还是
+    「这份账本已不可信，请换新 staging + 新 seed 重拉」：
+    **一棵几百只股的健康 staging 被劝报废**，而 O4-F1 特意要产出的
+    `stopped_reason_secondary: "max_bytes"` 诊断一个字都没写下去。
+
+    根因是**版本化不变量的漏检**：`max_bytes_stop()` 的注释说「决策表对这一支
+    根本不看它们」——对 `resolve_final_lifecycle` 成立，但 R16 给
+    `outcome.staging_recheck` **加了第二个消费者**，那句理由没被重核。
+
+    判别力：把 `commit_final` 的一致性检查退回「无条件相等」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        prev = _warned()
+        _seed_disk(fd, prev)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_stock(fd, _with_more_stocks(prev), ledger=ledger)
+        written = commit_final(fd, _with_more_stocks(prev), ledger=ledger,
+                               outcome=max_bytes_stop())
+        assert written["fetch_fatal_error"] == _fatal()          # 一律保留
+        assert written["stopped_reason"] == "staging_path_escape"
+        assert written["stopped_reason_secondary"] == "max_bytes"
+    finally:
+        os.close(fd)
+
+
+def test_a_new_escape_is_recordable_after_a_passing_recheck(tmp_path):
+    """⭐⭐ [Opus high 同族] `escape_stop()` 同样被堵死 —— 后果更重：
+    本次**新发生**的信任边界破坏根本记不进账本。
+
+    判别力：同上。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        prev = _warned()
+        _seed_disk(fd, prev)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        written = commit_final(fd, prev, ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="日K线_前复权/z.csv",
+            component="日K线_前复权", errno="ELOOP"))
+        assert written["fetch_fatal_error"]["relative_path"] == "日K线_前复权/z.csv"
+        assert written["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_an_attested_failure_may_only_publish_the_named_outcome(tmp_path):
+    """⭐ 反方向：登记为**失败**的那一轮，只许发布 P2-F3 那个具名结局。
+
+    放开「非 clean 结局不查一致性」之后，若不加这条，`attest(False)` 之后
+    发一个 `max_bytes_stop()` 就会把「复校没过」这个结论整个丢掉
+    ——盘上只留下上一轮的 reason 加一条 max_bytes 附注。
+
+    判别力：删掉 `attested == "failed"` 那一支，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        with pytest.raises(ManifestInvalidError, match="失败|具名"):
+            commit_final(fd, _warned(), ledger=ledger, outcome=max_bytes_stop())
+    finally:
+        os.close(fd)
+
+
+def test_a_non_clean_outcome_may_not_carry_a_recheck_verdict():
+    """⭐ 「不可表达」必须落在 `__post_init__`，不能只落在工厂函数。
+
+    两个工厂不收这个参数，但 `FinalOutcome` 是公开的 dataclass，
+    直接构造 `FinalOutcome(kind="max_bytes", staging_recheck="passed")`
+    能造出一个**决策表永远不看、而 commit_final 会拿去比对**的取值。
+
+    判别力：把守卫挪回工厂函数，本条必红。
+    """
+    for kind, extra in [("max_bytes", {}),
+                        ("escape", {"escape": {"kind": "staging_path_escape",
+                                               "relative_path": "a/b.csv",
+                                               "component": "a", "errno": "ELOOP"}})]:
+        FinalOutcome(kind=kind, **extra)                        # 正向：不带就合法
+        for verdict in ("passed", "failed"):
+            with pytest.raises(ValueError, match="staging_recheck"):
+                FinalOutcome(kind=kind, staging_recheck=verdict, **extra)
+
+
+def test_attesting_a_recheck_the_run_does_not_owe_is_refused(tmp_path):
+    """⭐ [Opus medium] 账本上**没有**那类记录时，登记复校结论会被静默丢弃。
+
+    本机复现：干净账本 + `attest(passed=False)` → per-stock 提交**照样放行**
+    （闸只看起跑状态），收尾走决策表分支②（上次没有 fatal）返回 `{}` ——
+    「这棵树复校没过」这个结论**哪都没写**，而 4c 的 fail-closed 判据读到的
+    是一份完全干净的账本。
+
+    ⚠️ **为什么修法是「拒绝登记」而不是「把它记下来」**：pilot 的 fail-closed
+    判据是「`fetch_fatal_error` 存在」（O4-F1），`stopped_reason` 只是人读附注 ——
+    所以只写 reason 是**假安全**；要真生效就得**凭空造一个 fatal**
+    （造不出 kind / relative_path / component / errno 四字段）。
+    本入口只为 P2-F3 的前提②存在，账本上没有那类记录时它没有可写入的位置。
+    这一轮的失败由 S4/S5 在**运行级**（rc≠0 + 报告）表达 —— 与 S2-F14
+    已接受的那条残留同规格。已在 spec 登记。
+
+    判别力：删掉这道前置检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                  # 干净账本
+        ledger = begin_run(fd)
+        for verdict in (True, False):
+            with pytest.raises(ValueError, match="没有|不欠"):
+                attest_staging_recheck(ledger, passed=verdict)
+    finally:
+        os.close(fd)
+
+
+def test_skip_existing_verify_is_refused_for_a_source_escape_too(tmp_path):
+    """⭐ [Opus medium] 互斥判据**窄于 spec 原文**。
+
+    spec §4.5:484 原文：「`--skip-existing-verify` 与「manifest 带 **escape 记录**」
+    互斥——撞上即拒绝启动」，**没有限定 kind**。而实现只挡
+    `_needs_staging_recheck` 那两种（staging 侧），于是带 `source_path_escape`
+    的账本配上该 flag 能正常起跑，**并在同一轮把 fatal 清掉**
+    （清除 source escape 只要前提①）——而这一轮恰恰跳过了「已 staged 的文件
+    与源对不对得上」的校验，正是该 flag 跳过的那件事。本机端到端复现。
+
+    判别力：把判据退回 `_needs_staging_recheck`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(
+            fetch_fatal_error=_fatal("source_path_escape"),
+            stopped_reason="source_path_escape"))
+        with pytest.raises(SkipVerifyWithEscapeError, match="互斥|escape|复校"):
+            begin_run(fd, skip_existing_verify=True)
+    finally:
+        os.close(fd)
+
+
+def test_a_passing_recheck_must_still_be_reported_at_the_final_commit(tmp_path):
+    """⭐ 自查补档（控制者，非评审）：`attested == "passed"` 而收尾**不上报**。
+
+    放开非 clean 结局之后，`elif` 那一支只剩「clean 且取值不等」这一种情形，
+    而上面两条新正向档（max_bytes / escape）都不经过它 —— 若有人把判据窄化成
+    `outcome.staging_recheck is not None and ...`，**一次做过且通过的复校被
+    悄悄隐去**（fatal 于是不被清除，方向虽是 fail-closed，但账本与事实不符，
+    且操作者会以为「我明明复校过了怎么还锁着」）。
+
+    判别力：把 `elif` 的判据加上 `outcome.staging_recheck is not None`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _warned(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True))
     finally:
         os.close(fd)
