@@ -66,22 +66,24 @@ public struct TrainingSessionLifecycle {
         //      哪怕 `pending_replay` 槽里其实躺着一份完好的存档。
         //    ⇒ 日后要给 replay 复用，必须先补 `pending_replay` 那一支，再放开这道守卫。
         guard engine.flow.mode == .normal else { return .notApplicable }
-        do {
-            try await coordinator.saveProgress(engine: engine)
-        } catch {
-            // 落盘失败 → 先确认磁盘上到底还有没有东西可退回。
-            // ⛔ 这一步不能省（codex R2-high）：上一版本无条件 `endSession()`，
-            //    而开新局时磁盘上本来就没有存档——若整局的自动存档又全部失败，
-            //    那一退就把**整局唯一的副本**扔掉了，而文案还承诺着「保留进度」。
-            let status = coordinator.pendingCheckpointStatus(for: engine)
-            guard status == .usable else {
-                return .cannotPreserve(reason: status)   // ⛔ 刻意不 endSession：会话必须留着
-            }
-            await coordinator.endSession()
-            return .keptEarlierCheckpoint
+
+        var savedCurrent = true
+        do { try await coordinator.saveProgress(engine: engine) } catch { savedCurrent = false }
+
+        // ⛔⛔ **落盘成功与失败两条路都必须过这一关**（codex R5-high）。
+        //    上一稿只在 `catch` 里检查 ⇒ 「落盘成功、但训练组文件已被淘汰」那条路径直接
+        //    `endSession()` 走掉。而 `saveProgress` **只写 pending 那一行、根本不碰缓存** ——
+        //    它成功**不代表**退得安全：关掉 reader 之后，那条存档指向一个已经不存在的文件，
+        //    「继续训练」再也打不开，方法却报告 `.savedCurrentState`（一句假话）。
+        //    ⚠️ 这是「同一道判据只加在两条路中的一条」——本片已经栽过一次，别再犯。
+        // ⛔ 这道关本身也不能省（codex R2-high）：开新局时磁盘上本来就没有存档，
+        //    若整局的自动存档又全部失败，无条件 `endSession()` 就把**整局唯一的副本**扔掉了。
+        let status = coordinator.pendingCheckpointStatus(for: engine)
+        guard status == .usable else {
+            return .cannotPreserve(reason: status)   // ⛔ 刻意不 endSession：会话必须留着
         }
         await coordinator.endSession()
-        return .savedCurrentState
+        return savedCurrent ? .savedCurrentState : .keptEarlierCheckpoint
     }
 
     /// 安全退出的三种结局（Q13 / codex R2-high）。

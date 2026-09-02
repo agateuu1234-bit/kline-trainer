@@ -82,8 +82,9 @@ public struct TrainingView: View {
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     // Q13（codex R2-high）：安全退出**什么都没保住**时的诚实提示（既没落盘、磁盘上也没有旧存档）。
     @State private var cannotPreserveOnExit = false
-    // 「保不住」的成因决定说法与建议（Opus 对抗评审）：文件被清理时，「清理存储空间」是无效建议。
-    @State private var cannotPreserveIsFileMissing = false
+    // 「保不住」的成因决定说法与建议（Opus 对抗评审 + codex R5-medium）：三种成因的补救动作互不相同，
+    // 压成一种就必然对另两种说假话（文件被清理 / 存档读不出来时，「清理存储空间」都是无效建议）。
+    @State private var cannotPreserveReason: TrainingSessionCoordinator.CheckpointStatus = .none
     // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
     @State private var discardFailed = false
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
@@ -200,14 +201,14 @@ public struct TrainingView: View {
                     case .savedCurrentState, .keptEarlierCheckpoint:
                         onExit()
                     case .cannotPreserve(let reason):
-                        cannotPreserveIsFileMissing = (reason == .trainingSetMissing)
+                        cannotPreserveReason = reason
                         cannotPreserveOnExit = true
                     case .notApplicable:
                         // 结构上不可达：本弹窗只在正常训练局出现（`routeEndOfSession` 已把 replay
                         // 分流走、review 连 `shouldAutoFinalize` 都被抑制）。但 switch 必须穷尽，
                         // 且 fail-closed —— **不离开本局**，走与「保不住」相同的诚实提示，
                         // 绝不静默 onExit()（那会把用户带走却什么都没保存）。
-                        cannotPreserveIsFileMissing = false
+                        cannotPreserveReason = .none
                         cannotPreserveOnExit = true
                     }
                 }
@@ -250,11 +251,10 @@ public struct TrainingView: View {
         .alert("暂时退不出本局", isPresented: $cannotPreserveOnExit) {
             Button("知道了", role: .cancel) { Task { @MainActor in finalizeFailed = true } }
         } message: {
-            // ⚠️ 两支说法必须分开（Opus 对抗评审）：把原因写死成其中一种，另一种情形下就是假话，
-            //    而且随附建议也会失效（文件已被清理时，腾出存储空间不会让它回来）。
-            Text(cannotPreserveIsFileMissing
-                 ? "本局的存档还在，但它依赖的训练组数据文件已被清理掉了 —— 现在退出的话这一局将无法继续，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
-                 : "存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。")
+            // ⚠️ 三支说法必须分开（Opus 对抗评审 + codex R5-medium）：把原因写死成其中一种，
+            //    另两种情形下就是假话，而且随附建议也会失效（文件已被清理 / 存档读不出来时，
+            //    腾出存储空间都不会让它回来 —— 让用户白忙一场还以为自己没救回来）。
+            Text(cannotPreserveCopy)
         }
         // Q13（codex R2-medium）：弃局没做成时的诚实提示（会话仍在，未离开本局）。
         .alert("放弃未完成", isPresented: $discardFailed) {
@@ -724,6 +724,21 @@ public struct TrainingView: View {
     // 此门兜 UI 层——防 onSessionEnded 双发/alert 与 settlement 路由交错）。@MainActor 串行置位无 race。
     // replay 的 finalizeForSettlement 是不抛的早返 nil（shouldSaveRecord()==false）→ 仍走
     // onSessionEnded(nil) = 正常 retreat 路径，不受本 alert 影响。
+    /// 「暂时退不出本局」的文案 —— 按**保不住的成因**分支。
+    /// ⛔ 三支不得合并：补救动作不同（能腾空间 / 不能腾空间 / 只能重试），说错等于把用户支去做无效操作。
+    private var cannotPreserveCopy: String {
+        switch cannotPreserveReason {
+        case .trainingSetMissing:
+            return "本局的存档还在，但它依赖的训练组数据文件已被清理掉了 —— 现在退出的话这一局将无法继续，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        case .unreadable:
+            return "本局的存档读取失败（存档文件可能已损坏）—— 没法确认退出后还能不能回到这一局，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        case .none, .usable:
+            // `.usable` 结构上到不了这里（能用就不会走「保不住」这支），但 switch 必须穷尽；
+            // 归到最保守的一支：不承诺存档存在。
+            return "存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        }
+    }
+
     private func runFinalize() {
         guard !finalizing else { return }
         finalizing = true

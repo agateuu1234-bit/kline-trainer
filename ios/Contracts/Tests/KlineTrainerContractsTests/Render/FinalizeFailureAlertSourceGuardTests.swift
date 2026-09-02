@@ -197,6 +197,8 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "①『本局一次都没存成』那一支的文案仍应存在（对它而言那是真话）")
         #expect(code.contains(sq("训练组数据文件")),
                 "③『文件被淘汰』那一支必须如实说明是数据文件没了，⛔ 不得复用①那句假话")
+        #expect(code.contains(sq("存档读取失败")),
+                "④『存档读不出来』（数据库损坏 / IO）也必须有自己的说法 —— 报成①会让用户做无效补救")
         // ⛔ ③ 那一支不得建议「清理存储空间」——文件已被删除，腾出空间也回不来。
         // ⚠️ 范围必须切到**那一条字面量自己的收尾引号**为止：上一稿取「附近 160 字符」，
         //    会串进紧邻的①那一支（它本来就该有这条建议）⇒ 假阳性。
@@ -206,6 +208,12 @@ struct FinalizeFailureAlertSourceGuardTests {
         let missingBranchCopy = String(rest[..<endQuote])
         #expect(!missingBranchCopy.contains(sq("清理设备存储空间")),
                 "⛔ 对『文件已被清理』那一支，建议清理存储空间是无效建议")
+        // ④ 同理：存档读不出来时，清存储也解决不了
+        let hit4 = try #require(code.range(of: sq("存档读取失败")))
+        let rest4 = code[hit4.upperBound...]
+        let end4 = try #require(rest4.firstIndex(of: "\""), "找不到该文案的收尾引号（锚点失效）")
+        #expect(!String(rest4[..<end4]).contains(sq("清理设备存储空间")),
+                "⛔ 对『存档读不出来』那一支，建议清理存储空间同样无效")
     }
 
     @Test("文案必须属实：不含旧假话、指对回去的地方、并说清「最坏保留到哪」")

@@ -1028,16 +1028,21 @@ public final class TrainingSessionCoordinator {
         /// 存档在、也是本局的，**但它依赖的训练组数据文件已被缓存清理掉**。
         /// ⛔ 对这一种，「清理设备存储空间」是**无效建议** —— 文件已经删了，腾空间也回不来。
         case trainingSetMissing
+        /// **读不出来**（数据库损坏 / IO 错误）——⚠️ 与 `.none` 刻意分开（codex R5-medium）：
+        /// 「读失败」不等于「没有存档」。把它报成「没有」会让用户去做无效的补救（清存储），
+        /// 更糟的是可能让他以为没什么可救、直接放弃一份其实还在的数据。
+        case unreadable
     }
 
     public func pendingCheckpointStatus(for engine: TrainingEngine) -> CheckpointStatus {
         guard engine.flow.mode == .normal, let key = activeSessionKey else { return .none }
-        do {
-            guard let pending = try pendingRepo.loadPending(), pending.sessionKey == key else { return .none }
-            do { _ = try cachedFile(filename: pending.trainingSetFilename) }
-            catch { return .trainingSetMissing }
-            return .usable
-        } catch { return .none }
+        let loaded: PendingTraining?
+        do { loaded = try pendingRepo.loadPending() }
+        catch { return .unreadable }                       // ⛔ 读失败 ≠ 没有
+        guard let pending = loaded, pending.sessionKey == key else { return .none }
+        do { _ = try cachedFile(filename: pending.trainingSetFilename) }
+        catch { return .trainingSetMissing }
+        return .usable
     }
 
     /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。

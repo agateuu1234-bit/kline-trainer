@@ -148,6 +148,37 @@ struct FinalizeAlertSafeExitTests {
         }
     }
 
+    @Test("⭐⭐落盘**成功**但文件已被淘汰：同样不许退（codex R5-high —— 检查不能只放在失败那条路上）")
+    func successfulSaveStillChecksTrainingSet() async throws {
+        let (coord, _, cache, pending) = PIFixtures.makeProvenanceCoordinator(files: ["a.sqlite"], corrupt: [])
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)
+        let saved = try #require(try pending.loadPending())
+
+        // 文件被淘汰。⚠️ 注意 saveProgress **仍会成功** —— 它只写 pending 那一行，根本不碰缓存。
+        let f = try #require(try cache.listAvailable().first { $0.filename == saved.trainingSetFilename })
+        try cache.delete(f)
+
+        let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        let outcome = await lifecycle.exitPreservingProgress()
+
+        #expect(outcome == .cannotPreserve(reason: .trainingSetMissing),
+                "⛔ 落盘成功≠退得安全：文件没了，那条存档续不回来")
+        #expect(coord.activeEngine === engine,
+                "⛔ 会话必须留着 —— 关掉 reader 就等于毁掉最后一个能打开这局的句柄")
+    }
+
+    @Test("存档**读不出来**（数据库损坏 / IO 错误）必须与「压根没有存档」区分开（codex R5-medium）")
+    func unreadableCheckpointIsNotReportedAsAbsent() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)      // 确实存过档
+
+        pending.failNextLoadPending = .persistence(.dbCorrupted)   // 读的时候坏了
+        #expect(coord.pendingCheckpointStatus(for: engine) == .unreadable,
+                "⛔ 读失败 ≠ 没有存档 —— 报成『没有』会让用户去做无效的补救（清存储），还可能让他放弃可恢复的数据")
+    }
+
     @Test("反向对照：安全退出**不是**弃局 —— 它一次都不该碰清空那条路")
     func neverClearsPending() async throws {
         let (coord, _, pending, _) = PIFixtures.makeCoordinator()
