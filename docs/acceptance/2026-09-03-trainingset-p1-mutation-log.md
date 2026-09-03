@@ -20,8 +20,8 @@
 | **B7** | `_CLOSE_LABELLED = frozenset({"3m","15m","60m"})` → 加入 `"daily"` | `test_assign_daily_unchanged_by_the_split`（brief 预期）+ `test_period_end_daily_is_end_of_that_trading_day`（daily 被当收盘标注后，`period_end` 对 daily 直接返回输入本身、不再算到 23:59:59） | **符合预期且更强** |
 | **B9** | `SCHEMA_VERSION = 2` → `= 1`（DDL 字面量段落 `PRAGMA user_version = 2;` 保持不动） | `test_build_sqlite_user_version_meta_and_rowcount`（`PRAGMA user_version` 实际写入的是 DDL 字面量 `2`，断言对比的 `SCHEMA_VERSION` 变量却是 `1` ⇒ `2 == 1` 断言失败） | **符合预期**（与 brief 逐字一致）|
 | **B34** | `zip_and_hash` body 改回重构前（`08fd4e7^`）写法：去掉固定 `ZipInfo`/`date_time`/`external_attr`，改用 `with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf: zf.write(db_path, arcname=db_path.name)` | `test_zip_and_hash_is_deterministic_across_runs`（`h1='9f2b4648'` ≠ `h2='bd732af3'`，随 mtime 变化） | **符合预期**（与 brief 逐字一致）|
-| **B66** | `select_period_window` 函数体内新增一份嵌套闭包 `def _week_end_date(open_epoch): ...`（逐字对齐重构前 `6f9b8e9^` 版本），**模块级 `_week_end_date` 保留不动**（否则 `period_end` 里对模块级 `_week_end_date` 的调用会因 `NameError` 炸掉大批无关用例，偏离本条要测的「两份实现漂移」这个具体缺陷） | `test_week_end_date_is_module_level_and_shared`（`hasattr` 通过，但 `monkeypatch.setattr(g, "_week_end_date", spy)` 后 `select_period_window` 走的是自己函数体内的闭包、spy 未被调用 ⇒ `assert calls` 失败） | **符合预期**（唯一红、无旁及，与 brief 逐字一致）|
-| **B1+B3 组合** | 同时段落施加 B1 与 B3。⚠️ **说明**：B1 的定义（spec §4 line 484「删掉语义分流，全部走下一根−1」）在作用范围上是 B3（spec §4 line 486「仅开盘侧改回下一根−1」）的**超集**——二者都落在 `assign_global_indices` 同一处代码，B1 把「开盘侧 + 收盘标注侧」都退化成老公式，B3 只退化开盘侧。两者「同时施加」在这段代码上唯一自洽的合并态就是 B1 的全量退化版本（它已完整包含 B3 描述的效果）。据此把组合变异实现为 B1 那份改动，验证组合态下依旧有红、且红的用例包含 B1 单独施加时与 B3 单独施加时的**公共项** `test_assign_weekly_hole_uses_calendar_period_end` | `test_assign_end_global_index_interior_historical_trailing`、`test_assign_intraday_crosses_lunch_and_day_boundary`、`test_assign_weekly_hole_uses_calendar_period_end`（与 B1 单独施加时完全一致；`test_assign_weekly_hole_uses_calendar_period_end` 同时也是 B3 单独施加时的红名单成员，证明两条变异不互相掩盖） | **符合预期** —— 组合下仍有测试红，未出现「两条变异互相抵消回到绿」的情况 |
+| **B66** | `select_period_window` 函数体内新增一份嵌套闭包 `def _week_end_date(open_epoch): ...`（逐字对齐重构前 `6f9b8e9^` 版本），**模块级 `_week_end_date` 保留不动**（否则 `period_end` 里对模块级 `_week_end_date` 的调用会因 `NameError` 炸掉大批无关用例，偏离本条要测的「两份实现漂移」这个具体缺陷） | `test_week_end_date_is_module_level_and_shared`（`hasattr` 通过，但 `monkeypatch.setattr(g, "_week_end_date", spy)` 后 `select_period_window` 走的是自己函数体内的闭包、spy 未被调用 ⇒ `assert calls` 失败） | **符合预期**（唯一红、无旁及，**红名单**与 brief 预期逐字一致；具体改法是对 brief 字面「挪回函数体内」的窄化替代实现，见下方小节说明与「控制者补跑」段落）|
+| **B1+B3 组合** | 同时段落施加 B1 与 B3。⚠️ **说明**：B1 的定义（spec §4 line 484「删掉语义分流，全部走下一根−1」）在作用范围上是 B3（spec §4 line 486「仅开盘侧改回下一根−1」）的**超集**——二者都落在 `assign_global_indices` 同一处代码，B1 把「开盘侧 + 收盘标注侧」都退化成老公式，B3 只退化开盘侧。两者「同时施加」在这段代码上唯一自洽的合并态就是 B1 的全量退化版本（它已完整包含 B3 描述的效果）。据此把组合变异实现为 B1 那份改动 | `test_assign_end_global_index_interior_historical_trailing`、`test_assign_intraday_crosses_lunch_and_day_boundary`、`test_assign_weekly_hole_uses_calendar_period_end`（与 B1 单独施加时完全一致） | ⚠️ **过度宣称已更正**：由于 B1 是 B3 在这段代码上的**真超集**，二者从一开始就不是两个可能互相掩盖的独立变异，组合态下**没有发生任何真实的「两条变异共存/交互」**——本组**测不出**「互相掩盖会不会发生」，详见下方小节 |
 
 ## 逐条实测记录（含实际 pytest 输出片段）
 
@@ -68,12 +68,32 @@ FAILED tests/test_generate_training_sets.py::test_assign_weekly_hole_uses_calend
      d = trading_date(datetime_epoch)
 ```
 
-实际输出（节选 —— 42 个失败用例覆盖 `test_generate_training_sets.py`、`test_b2_reconnect_integration.py` 全部、`test_qmt_e2e_generation.py`）：
+实际输出（**全部 42 条**，补齐评审指出少列的一条 —— 原稿只写了 41 条具名用例 + 一处「节选」占位符，
+下面是重新真跑一遍拿到的完整清单，与 `42 failed, 1076 passed` 逐条对上）：
 
 ```
 FAILED tests/test_b2_reconnect_integration.py::test_real_sweep_registers_at_least_one_training_set
 FAILED tests/test_b2_reconnect_integration.py::test_registered_zip_exists_and_hash_matches
-... (共 21 条 test_b2_reconnect_integration.py 全部用例)
+FAILED tests/test_b2_reconnect_integration.py::test_registered_content_hash_is_8_lowercase_hex
+FAILED tests/test_b2_reconnect_integration.py::test_intermediate_db_removed_only_zip_kept
+FAILED tests/test_b2_reconnect_integration.py::test_training_set_sqlite_has_all_six_periods
+FAILED tests/test_b2_reconnect_integration.py::test_end_datetime_matches_eight_month_boundary
+FAILED tests/test_b2_reconnect_integration.py::test_dropped_1m_date_never_spanned_by_selected_window
+FAILED tests/test_b2_reconnect_integration.py::test_uq_stock_start_not_reused
+FAILED tests/test_b2_reconnect_integration.py::test_registration_conflict_skips_without_crashing
+FAILED tests/test_b2_reconnect_integration.py::test_stale_db_from_crash_does_not_block_regeneration
+FAILED tests/test_b2_reconnect_integration.py::test_orphan_zip_from_crash_is_self_healing
+FAILED tests/test_b2_reconnect_integration.py::test_generate_batch_produces_requested_count
+FAILED tests/test_b2_reconnect_integration.py::test_skip_budget_reaches_qualifying_stock_past_old_cap
+FAILED tests/test_b2_reconnect_integration.py::test_skip_budget_does_not_stop_early_when_eligible_stock_keeps_producing
+FAILED tests/test_b2_reconnect_integration.py::test_predecheck_does_not_delete_concurrent_winners_file
+FAILED tests/test_b2_reconnect_integration.py::test_stale_exclude_snapshot_does_not_overwrite_registered_winner
+FAILED tests/test_b2_reconnect_integration.py::test_fetch_existing_starts_returns_registered_set
+FAILED tests/test_b2_reconnect_integration.py::test_register_training_set_atomic_conflict_returns_none
+FAILED tests/test_b2_reconnect_integration.py::test_write_critical_section_acquires_and_releases_lock
+FAILED tests/test_b2_reconnect_integration.py::test_lock_released_even_when_registration_conflicts
+FAILED tests/test_b2_reconnect_integration.py::test_gen_takes_stock_lock_before_rr_snapshot
+FAILED tests/test_b2_reconnect_integration.py::test_canonical_stock_code_still_produces_normally
 FAILED tests/test_generate_training_sets.py::test_assign_3m_global_index_and_end_equal
 FAILED tests/test_generate_training_sets.py::test_assign_non_min_period_global_index_is_null
 FAILED tests/test_generate_training_sets.py::test_assign_end_global_index_interior_historical_trailing
@@ -96,6 +116,8 @@ FAILED tests/test_generate_training_sets.py::test_assign_weekly_hole_uses_calend
 FAILED tests/test_qmt_e2e_generation.py::test_real_bundle_drives_real_generate_batch_to_zip
 42 failed, 1076 passed in 32.57s
 ```
+
+（重新真跑一遍核实：`grep -c '^FAILED'` = 42，与上面清单条数一致。）
 
 **为什么比 brief 预期（2 条）大得多**：反转后 `if period not in _CLOSE_LABELLED` 对 `period="3m"/"15m"/"60m"` 不再提前 return，落入 `if period=="daily"/elif "weekly"/elif "monthly"/else: raise ValueError` 分支，三者都不匹配 → 直接 `raise ValueError`。任何调用 `period_end` 传入 3m/15m/60m 的路径（`assign_global_indices` 对每个窗口都会调用）都会因异常整条用例报错，而不仅仅是断言值错——这是**更强**的判别力，brief 列出的两条只是这批红里的一部分，`test_assign_daily_unchanged_by_the_split` 与 `test_assign_monthly_realistic_scale` 均在实际红名单内，无不符情形。
 
@@ -291,6 +313,45 @@ FAILED tests/test_generate_training_sets.py::test_week_end_date_is_module_level_
 
 复原后：`1118 passed in 37.30s`；`git status --short backend/` 无输出。
 
+#### 补：字面版 B66（控制者补跑，本 agent 独立复核一致）
+
+控制者按 brief **字面**做法补跑了一次：删掉模块级 `_week_end_date`（`generate_training_sets.py:62-71`），
+只在 `select_period_window` 函数体内保留一份嵌套闭包（不再是「新增一份、模块级原样保留」）。本 agent
+用同样的改法独立复核了一遍（改前 `cp` 备份、改后手工用备份复原、复原后确认 `git status --short backend/`
+无输出、全套 `1118 passed`），结果与控制者报告的完全一致：
+
+```
+FAILED tests/test_generate_training_sets.py::test_week_end_date_is_module_level_and_shared
+E       AssertionError: _week_end_date 必须提到模块级（现在还在函数体内）
+E       assert False
+E        +  where False = hasattr(<module 'generate_training_sets' ...>, '_week_end_date')
+
+tests/test_generate_training_sets.py:797: AssertionError
+...
+39 failed, 1079 passed in 30.31s
+```
+
+（另 38 条为 `period_end` 对模块级 `_week_end_date` 的调用触发 `NameError` 的连带失败，覆盖
+`test_period_end_weekly_is_that_weeks_sunday`、几乎全部 `test_assign_*`/`test_build_sqlite_*`/
+`test_assemble_from_windows_*`、`test_b2_reconnect_integration.py` 大部分用例、
+`test_qmt_e2e_generation.py::test_real_bundle_drives_real_generate_batch_to_zip`。）
+
+`test_week_end_date_is_module_level_and_shared` 这一条测试内部其实是**两句判据**：
+
+1. `:797` 的 `assert hasattr(g, "_week_end_date")` —— 断言模块级定义**存在**；
+2. `:810` 的 `assert calls`（spy 是否被调用）—— 断言 `select_period_window` **共用**模块级那一份，而非自己另有一份闭包。
+
+- **字面版 B66**（本段）锤到的是**第 1 句**：直接删掉模块级定义，`hasattr` 先炸。
+- 本记录主表采用的**窄化版 B66**（新增一份重复闭包、模块级保留）锤到的是**第 2 句**：`hasattr` 通过，
+  但 `calls` 落空，暴露「表面上模块级还在、实际未被共用」这个更隐蔽的场景。
+
+⇒ **两种变异互补而非替代**，该测试的两半判据现已各自被证明有判别力。窄化版留在主表里的理由仍然成立：
+字面版会连带 38 条 `NameError`，观测量被大量无关信号淹没，不利于精确核对「红的是哪一条」；但字面版
+单独验证「第 1 句判据本身是否真会被某种实现方式命中」这件事也确实成立，故补记于此、不并入主表计数
+（主表仍是「10 组 + 1 组组合」，本段是对 B66 这一组的**追加交叉验证**，不额外计数）。
+
+复原：改回后 `git status --short backend/` 无输出，`1118 passed`。
+
 ### B1+B3 组合
 
 改：同 B1（`assign_global_indices` 循环体整体退化为「下一根−1」，见上）。
@@ -304,7 +365,14 @@ FAILED tests/test_generate_training_sets.py::test_assign_weekly_hole_uses_calend
 3 failed, 1115 passed in 37.29s
 ```
 
-`test_assign_weekly_hole_uses_calendar_period_end` 同时是 B1 单独施加、B3 单独施加两份红名单的**公共项**，组合态下依旧红 ⇒ 两条变异未互相掩盖。
+⚠️ **过度宣称已更正**（评审 Important）：由于 B1 在 `assign_global_indices` 这段代码上是 B3 的**真超集**
+（B1 破坏全部周期、B3 只破坏开盘侧），两者**无法作为两个独立、正交的文本改动同时存在**；「同时施加」
+唯一自洽的合并态就是 B1 本身。⇒ 本组实质上是 **B1 的重跑**，**无法验证**「两条相互独立的变异是否会
+互相掩盖」这一原始目的（brief 给这一组的目的正是这个）—— 这不是判据不成立，而是 **B1/B3 在这段代码上
+并非独立变异**所致。已确认组合态下仍有测试红（红名单与 B1 单独施加时完全一致，`test_assign_weekly_hole_uses_calendar_period_end`
+同时也是 B3 单独施加时的红名单成员），但这只说明 B1 的判别力仍在，⛔ **不构成**对「无互相掩盖」的正面证明。
+⇒ 若后续需要一组真正独立、可能互相掩盖的组合变异，需另选两个不落在同一段代码/同一分支结构上的变异
+配对（本片 10 组里目前没有这样一对可组合的候选）。
 
 复原后：`1118 passed in 37.29s`；`git status --short backend/` 无输出。
 
