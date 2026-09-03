@@ -27,7 +27,7 @@ grep -qF 'format(zlib.crc32(data) & 0xFFFFFFFF, "08x")' backend/generate_trainin
 grep -q 'crc32_hex(zip_path.read_bytes())' backend/generate_training_sets.py
 
 echo "== G6: SQLite schema 语义（D8）=="
-grep -q 'PRAGMA user_version = 1' backend/generate_training_sets.py
+grep -q 'PRAGMA user_version = 2' backend/generate_training_sets.py
 grep -q 'end_global_index INTEGER NOT NULL' backend/generate_training_sets.py
 
 echo "== G7: 双层边界 — 纯层不顶层 import asyncpg（D1/D13）=="

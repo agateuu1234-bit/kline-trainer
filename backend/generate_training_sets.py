@@ -41,7 +41,7 @@ from qmt_normalize import _SH as _SHANGHAI      # ⭐ 刻意复用私有常量�
                                                 #    tz 对象的单一真相在 qmt_normalize。
 from qmt_resample import period_boundaries
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIN_PERIOD = "3m"
 # 训练组包含的周期（plan §8.3 period_configs；最细=3m）
 PERIODS = ("monthly", "weekly", "daily", "60m", "15m", "3m")
@@ -361,10 +361,12 @@ def _float_or_none(v: Any) -> Optional[float]:
 
 
 # 训练组 SQLite DDL（逐字 backend/sql/training_set_schema_v1.sql，D8；本 PR 只读不改源文件）
-# 注：`PRAGMA user_version = 1` 用字面 1（== SCHEMA_VERSION）以逐字对齐冻结 schema 文件
-# （原 f-string `{SCHEMA_VERSION}` 渲染后不含子串 "user_version = 1"，会让验收 grep 锚失配）。
+# 注：`PRAGMA user_version = 2` 用字面 2（== SCHEMA_VERSION）以逐字对齐冻结 schema 文件
+# （原 f-string `{SCHEMA_VERSION}` 渲染后不含子串 "user_version = 2"，会让验收 grep 锚失配）。
+# 锚点在：scripts/acceptance/plan_b2_generate_training_sets.sh:30
+#         docs/acceptance/2026-05-29-pr-b2-generate-training-sets.md:46
 _TRAINING_SET_DDL = """
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 CREATE TABLE meta (
     stock_code TEXT NOT NULL, stock_name TEXT NOT NULL,
     start_datetime INTEGER NOT NULL, end_datetime INTEGER NOT NULL
