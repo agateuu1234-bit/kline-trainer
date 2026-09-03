@@ -517,9 +517,9 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   同步理由：不同步的话下一轮读到的仍是旧基线 1861，窗口下限锁死在 1861−30=1831，而当前真实
 #   总数已是 1864 ⇒ 从 1864 掉到 1831 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
-#   【Q13 结算弹窗诚实出口 PR（本轮）】total 1864→1890（+26）：本片新增 13 条源码守卫
-#   （FinalizeFailureAlertSourceGuardTests）+ 13 条行为测试（FinalizeAlertSafeExitTests，
-#   含 DiscardFailureOriginTests 3 条），13+13=26 与增量精确对账。**零条 UIKit-gated 新增**
+#   【Q13 结算弹窗诚实出口 PR（本轮）】total 1864→1890（+26）：本片新增 14 条源码守卫
+#   （FinalizeFailureAlertSourceGuardTests）+ 12 条行为测试（FinalizeAlertSafeExitTests，
+#   含 DiscardFailureOriginTests 3 条），14+12=26 与增量精确对账。**零条 UIKit-gated 新增**
 #   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场、无缺失）。
 #   同步理由：不同步的话下一轮读到的仍是旧基线 1864，窗口下限锁死在 1864−30=1834，而当前真实
 #   总数已是 1890 ⇒ 从 1890 掉到 1834 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。

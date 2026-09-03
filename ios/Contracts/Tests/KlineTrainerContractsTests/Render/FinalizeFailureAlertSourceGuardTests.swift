@@ -127,6 +127,31 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "结算那一支也必须在（否则终局用户失去重试入口）")
     }
 
+    @Test("⭐⭐两处来源与两支回弹的**配对方向**必须钉死，⛔ 只钉『名字在不在』挡不住互换")
+    func originAndRestoreDirectionsArePinned() throws {
+        // Kimi R3-medium 实测：把两处赋值与两支回弹**同时互换**，R6-high 的洞原样回来，
+        // 而当时的 26 条测试全绿 —— 因为两条守卫都只是 `contains(名字)` 的存在性断言，
+        // 互换之后两个名字仍然都在文件里、都在弹窗块里。
+        let code = try code(tv)
+
+        // ① 赋值方向：各自只能出现在**自己那个**弹窗块里
+        for (title, mine, other) in [("结算入账失败", "settlementFailure", "saveProgressFailure"),
+                                     ("保存进度失败", "saveProgressFailure", "settlementFailure")] {
+            let block = try alertBlock(code, titled: title)
+            #expect(block.contains(sq("discardFailedFrom = .\(mine)")),
+                    "「\(title)」的放弃失败必须记 .\(mine)")
+            #expect(!block.contains(sq("discardFailedFrom = .\(other)")),
+                    "⛔ 「\(title)」里出现 .\(other) = 来源记反，用户会被送去另一个弹窗")
+        }
+
+        // ② 回弹方向：case 与它置位的状态必须**紧邻成对**
+        let restore = try alertBlock(code, titled: "放弃未完成")
+        #expect(restore.contains(sq("case .settlementFailure: finalizeFailed = true")),
+                "结算那一支必须弹回结算弹窗")
+        #expect(restore.contains(sq("case .saveProgressFailure: backFailed = true")),
+                "⛔ 返回那一支必须弹回「保存进度失败」—— 落到结算弹窗就是 R6-high")
+    }
+
     @Test("⭐⭐来源必须在 Task **之外**捕获，⛔ Task 里再读就是读一个已被清空的值")
     func originIsCapturedBeforeTheDeferredHop() throws {
         let block = try alertBlock(try code(tv), titled: "放弃未完成")

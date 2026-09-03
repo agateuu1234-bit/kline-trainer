@@ -68,23 +68,11 @@ struct FinalizeAlertSafeExitTests {
                 "⛔ 会话必须保留 —— 此刻结束会话 = 把整局唯一的副本扔掉")
     }
 
-    @Test("有旧存档 + 落盘失败：可以退出，如实报告『退回到旧存档』")
-    func fallsBackToCheckpoint() async throws {
-        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
-        let engine = try await coord.startNewNormalSession()
-        try await coord.saveProgress(engine: engine)
-        let checkpoint = try #require(try pending.loadPending())
-
-        let lifecycle = TrainingSessionLifecycle(engine: engine, coordinator: coord)
-        pending.failNextSavePending = .persistence(.diskFull)
-
-        let outcome = await lifecycle.exitPreservingProgress()
-
-        #expect(outcome == .keptEarlierCheckpoint, "必须区分『存成了』与『退回旧存档』")
-        #expect(try pending.loadPending()?.globalTickIndex == checkpoint.globalTickIndex,
-                "旧存档必须原样留着")
-        #expect(coord.activeEngine == nil, "有东西保住了 ⇒ 可以安全退出")
-    }
+    // ⚠️ 这里原有一条 `fallsBackToCheckpoint`，已删（Kimi R3-low）：它与上面的
+    //    `exitsNonDestructivelyWhenSaveFails` 是同一场景（同样 startNewNormalSession →
+    //    saveProgress → failNextSavePending(.diskFull) → 断言 .keptEarlierCheckpoint），
+    //    断言是后者的真子集，判别力增量为零，却让「行为测试有几条」这个数字虚高。
+    //    ⛔ 别再补回来 —— 要加就加一个**新场景**，不是同一条路再走一遍。
 
     @Test("存档必须**属于本局**：别的会话留下的 pending 不算数（codex R3-high）")
     func foreignCheckpointDoesNotCount() async throws {
@@ -206,17 +194,22 @@ struct FinalizeAlertSafeExitTests {
 @Suite("放弃失败后的回弹目标（codex R6-high）")
 struct DiscardFailureOriginTests {
 
+    // ⚠️ 这三条曾经是**恒真**的（Kimi R3-medium）：当时 `alertToRestore` 返回 `self`，
+    //    编译器保证它不可能写反 ⇒ 任何接线错误下都不会红。实测：把来源赋值与回弹映射
+    //    **同时互换**（R6-high 的洞原样回来），26 条测试全绿。
+    //    ⇒ 回弹目标改用**独立类型** `RecoveryAlert`，映射从此可以写反，这三条才有判别力。
+
     @Test("从结算失败弹窗发起的放弃失败 → 回结算失败弹窗")
     func settlementOriginRestoresSettlementAlert() {
-        #expect(DiscardFailureOrigin.settlementFailure.alertToRestore == .settlementFailure)
+        #expect(DiscardFailureOrigin.settlementFailure.alertToRestore == RecoveryAlert.settlementFailure)
     }
 
     @Test("⭐⭐从**返回保存失败**弹窗发起的放弃失败 → 回它自己，⛔ 绝不能落到结算弹窗")
     func saveProgressOriginMustNotRestoreSettlementAlert() {
         let restored = DiscardFailureOrigin.saveProgressFailure.alertToRestore
-        #expect(restored == .saveProgressFailure)
+        #expect(restored == RecoveryAlert.saveProgressFailure)
         // 显式钉死这条路：落到结算弹窗 = 把「重试入账」按钮递给一局还没打完的用户。
-        #expect(restored != .settlementFailure,
+        #expect(restored != RecoveryAlert.settlementFailure,
                 "⛔ 这一局还没结束，结算弹窗的「重试」会直接 finalizeForSettlement() 把它入账")
     }
 

@@ -201,8 +201,28 @@ public enum DiscardFailureOrigin: Equatable, Sendable {
     /// 训练**中途**点返回、保存进度失败后在那个弹窗里选了「放弃」。本局尚未结束。
     case saveProgressFailure
 
-    /// 关掉「放弃未完成」提示后必须回到的弹窗 —— 恒等回发起方。
+    /// 关掉「放弃未完成」提示后必须回到的弹窗。
     /// 之所以不能「什么都不弹」：用户会回到训练页、屏幕上什么都没有，
     /// 以为刚才那一下没反应，比不给出口更糟。
-    public var alertToRestore: DiscardFailureOrigin { self }
+    ///
+    /// ⛔ **返回类型必须与本枚举不同**（Kimi R3-medium）：上一稿返回 `self`，于是这个映射
+    ///    只能写成恒等式、**编译器保证它不可能写反** ⇒ 针对它的三条行为测试是恒真的。
+    ///    实测：把两处来源赋值与两支回弹**同时互换**（R6-high 的洞原样回来），26 条测试全绿。
+    ///    换成独立类型后，这个映射可以写反，那三条测试才真正在测东西。
+    public var alertToRestore: RecoveryAlert {
+        switch self {
+        case .settlementFailure: return .settlementFailure
+        case .saveProgressFailure: return .saveProgressFailure
+        }
+    }
+}
+
+/// 关掉「放弃未完成」之后要弹回来的那个弹窗。
+/// ⚠️ 与 `DiscardFailureOrigin` 是**两个**类型，尽管 case 同名 —— 一个说「谁发起的」，
+///    一个说「该弹哪个」。合成一个就等于把这条映射变成编译期恒等式（见上）。
+public enum RecoveryAlert: Equatable, Sendable {
+    /// 「结算入账失败」—— ⚠️ 它的「重试」直接 `finalizeForSettlement()`，只有终局的会话该被弹回这里。
+    case settlementFailure
+    /// 「保存进度失败」—— 训练中途返回那条路，本局尚未结束。
+    case saveProgressFailure
 }
