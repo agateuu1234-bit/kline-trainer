@@ -137,6 +137,11 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D62 | Task 15 写侧上限 | 那条档的后半段其实钉的是**读侧**（Kimi K1 [low]，spec **S2-F61**）| 换一棵空 staging（引导态读侧无从插手）+ 断言写侧专属措辞「拒绝发布」|
 | D63 | Task 18 注释 | 注释引用改名前的 `_lifecycle_from_disk`（Kimi K1 [low]，spec **S2-F62**）| 改为 `_expect_from_disk` |
 | D64 | Task 16 池访问器 | 整族扫描只覆盖读侧 → 写侧 7 类 34 个逃逸全在 `_pool_ids`（控制者自查，spec **S2-F63**）| `_pool_ids` 从 `_pool_seq` 派生（合并两处）；`sorted(gone, key=repr)`；扫描的写侧对偶固化成常驻测试 |
+| D65 | Task 16 单调守卫 | 旧值坏型把整条检查关掉；`attempts` 缺席即可凭空移出（Opus-4 [medium]，spec **S2-F64**）| `attempts` 与 `stock_code` 同等待遇；「凭空移出」判定前移；旧值坏型即拒（三处）|
+| D66 | Task 17/18 重新武装 | 复校凭据与进度冻结只锚定运行起点，本轮自己发布的 fatal 不重新武装（Opus-4 [medium]，spec **S2-F65**）| `_advance` 按「生命周期变了且需要复校」重锚；判据不用「现在需不需要」（已配修过头档）|
+| D67 | Task 15 异常声明 | 权限错误逃出文档声明的异常集合（Opus-4 [low]，spec **S2-F66**）| 如实补进 `OSError` 一族 + 写明「绝不翻译」的理由；补专属档 |
+| D68 | Task 16 恢复豁免 | 「必须是那一只」没人守（Opus-4 [low]，spec **S2-F67**）| 补「移除 R 同时改绑 X」的档 |
+| D69 | Task 16 冻结清单 | `staged_export_log` 那一项没人守（Opus-4 [low]，spec **S2-F68**）| 补两档 |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1676,6 +1681,7 @@ s.close()
 | **Opus-3** | needs-attention（1 medium + 3 low）| **连续第二轮没有 high**。①medium = **socket 型 `fetch_manifest.json` 逃过「不是普通文件」那道闸**：`O_NONBLOCK` 只解决 FIFO 阻塞，socket 上 `open(2)` 直接失败 ⇒ 走不到 `S_ISREG`，四个入口全抛裸 `OSError`；而注释里那条枚举写着「FIFO/目录/设备/socket」—— **列四项只兑现两项**。②③④ 全是**判据没人守**（收尾剥键 / 进度指纹两分量互相掩盖 / 三条小守卫）。四条**全部本机复核属实**（6 组复核变异全存活）。修完 **9 组变异全部命中、零红为 0**，四个进度分量各杀各的。⚠️ 评审另指出 `acquire_lock` 有同样 socket 盲区 —— **S1 既有代码、不在 diff 里**，按规矩不动，已登记 |
 | **Kimi-1** | needs-attention（1 medium + 2 low）| ⚠️ **换通道**（user 指定；codex 配额要等到 9/7、Opus 子代理撞 session 限流）。⭐ **Kimi 通道能写 `attest-ledger.json`**（账本里已有先例 PR #166 的 `reviewer: kimi-code/k3@…`）⇒ 它拿到真 approve 就**兑现得了治理条款 1**，不必 override。跑前按纪律先跑探针（`kimi -p` 极小提示，不算评审不写账本）确认通道健康。三条**全部本机复现属实、零误报**：①medium = **不可哈希的 JSON 值让四处新守卫抛裸 `TypeError`** —— `failures` 是扩展字段、**读侧从不校验**，而守卫又排在读侧校验之前 ⇒ 没有任何上游判据接得住；「守卫自己被它该抓的损坏弄坏」第四次。②③ = 写侧上限那条档其实钉的是读侧（两侧报错都含「过大」，**第三次**互相掩盖）、注释引用了改名前的函数。7 组变异 6 组一次命中；**K7 零红 —— 我在 `_hashable` 注释里claim 的「不同坏值→不同键」那半没人守**（退化成返回常量全量不红），补两条纯函数档后变异红 3 条 |
 | **Kimi-2** | **不算一轮**（额度掐断）| `[kimi-attest] kimi exited 1; ledger not updated.`，日志**无 `Verdict:` 也无原因** —— 正是记忆里记过的形态（渲染器只打 assistant JSON 行，CLI 纯文本报错被吞）。按纪律**不盲目重跑**，一条探针定位：`403 provider.auth_error: You've reached your **5-hour usage limit**`（K1 那次完整评审烧掉的）。账本确认未写。⭐ **但它死前的分析轨迹里有一条真线索**（「查 `test_no_field_of_any_json_type_can_escape_as_a_raw_exception` 的上下文」）→ 控制者顺着追出 **S2-F63**（写侧 7 类 34 个逃逸）。与 4a-2b 那次「追查：线索来自被掐断的 R8」同一条做法 |
+| **Opus-4** | needs-attention（2 medium + 3 low）| ⚠️ 换回 Opus 通道（user 指定；Kimi 撞 5 小时窗口）。**五条全部本机复现属实、零误报**（连续第五轮零误报）。⭐⭐ medium① **不需要任何篡改、用本模块自己的公开 API 就走得通**：写侧当时只校验 `stock_code` 类型 ⇒ 自己写得出没有 `attempts` 的 failures 记录，下一次提交就能把它凭空移出、复活一个已耗尽重试的候选。它同时**推翻了我自己的两条理由**（见 S2-F64）。medium② = 复校凭据/进度冻结只锚定运行起点，而 `commit_final` 不是每轮一次。⭐ 评审自身的验证强度可核：22/23 条语义变异被杀（唯一存活是真等价变异）、152+287 条机械变异逐条归因、对洗白路径做穷尽 BFS（0 条泄漏）。**9 组变异全部命中**，其中 N6「修过头」档证明重新武装的判据没写宽。⚠️ N3 首轮**零红** —— 又是我自己的断言太宽（`match` 用了两条判据共有的字段名），**同族第四次**，改判据专属措辞后命中 |
 
 > ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；

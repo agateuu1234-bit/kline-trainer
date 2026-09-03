@@ -763,7 +763,7 @@ def read_manifest(stg_fd: int) -> dict | None:
 
     抛：
 
-    - `ManifestInvalidError` —— 不是普通文件（FIFO / 目录 / 设备）/ 空文件 /
+    - `ManifestInvalidError` —— 不是普通文件（FIFO / 目录 / 设备 / socket）/ 空文件 /
       截断 / 不是 JSON 对象 / 超过大小上限 / 任一读侧判据不过；
     - `ManifestVersionError` —— 版本三档（**不在本层抹平成 Invalid**）；
     - `PathEscapeError` —— manifest 这一段被换成符号链接（`open_under` 逐段
@@ -771,6 +771,14 @@ def read_manifest(stg_fd: int) -> dict | None:
       那是一次**信任边界破坏**，处置是 `stopped_reason: staging_path_escape` +
       顶层 `fetch_fatal_error` + rc≠0（S4/S5 负责），报成「账本坏了」会让恢复指引
       整个走错。
+    - `OSError`（及其子类）—— **环境错误**：账本是一个**普通文件**、却打不开
+      （权限 `EACCES`、进程 fd 耗尽 `EMFILE` 等）。**如实上浮，绝不翻译成
+      `ManifestInvalidError`**（Opus 第 4 轮 [low]，本机复现 `PermissionError`）：
+      那一族的恢复指引是「换新 staging + 新 seed 重拉」，而这里正确的动作是
+      `chmod` / 释放 fd —— 把它报成「这棵 staging 已被动过」会让操作者**报废一棵
+      几百只股的健康目录**。⚠️ 探测器的兜底因此**必须**先问「它到底是不是普通
+      文件」；去掉那一问，一次 `EACCES` 就会被当成「被动过手脚」（已配专属档）。
+      **对 S4/S5 的硬性要求**：`except` 清单里要把它与上面三族分开处置。
 
     ⚠️ **必须经 `open_regular_probe`（带 `O_NONBLOCK`）而不是裸 `open_under`**：
     `open(O_RDONLY)` 打开 FIFO 会**一直阻塞等写入方**，于是一个被篡改的 staging
@@ -1043,12 +1051,32 @@ class RunLedger:
         """
         return self._state().start_needs_recheck
 
-    def _advance(self, digest: str, lifecycle: dict) -> None:
-        """把预期推进到刚写出去的那一份（**只许本模块调用**）。"""
+    def _advance(self, digest: str, lifecycle: dict, payload: dict) -> None:
+        """把预期推进到刚写出去的那一份（**只许本模块调用**）。
+
+        ⚠️⚠️ **本轮自己发布的 fatal 必须重新武装复校闸与进度冻结**
+        （Opus 第 4 轮 [medium]，本机复现两档）：两者原本只锚定**运行起点**，
+        而 `commit_final` **不是每轮只能调一次**。
+        · 场景 B：账本带旧逃逸 → 登记复校通过（针对**旧**那条路径）→ 收尾发布
+          一条**新路径**的逃逸 → 同一轮再收尾一次，fatal 被清光 ——
+          那份凭据**早于**它要清掉的那条逃逸。
+        · 场景 C：干净起步 → 收尾发布 escape → `commit_stock` 照样推进
+          files 4→6、cursor 1→2，而盘上带着未解除的逃逸（spec:1035 明禁）。
+
+        ⚠️ **判据是「生命周期变了」而不是「现在需要复校」**：per-stock 提交把
+        三个字段**原样带过去**，若只看后者，一次登记通过的运行提交第二只股时
+        就会把自己的凭据清掉、从此卡死（已配正向档：整轮三次 per-stock 提交）。
+        """
         st = self._state()
+        rearm = (lifecycle != st.lifecycle and _needs_staging_recheck(
+            lifecycle.get("stopped_reason"), lifecycle.get("fetch_fatal_error")))
         st.existed = True
         st.digest = digest
         st.lifecycle = lifecycle
+        if rearm:
+            st.start_needs_recheck = True
+            st.recheck = None
+            st.start_progress = _progress_of(payload)
 
 
 _LEDGER_STATE: "weakref.WeakKeyDictionary[RunLedger, _RunState]" = \
@@ -1208,6 +1236,20 @@ def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
                 f"（读到 {type(code).__name__}：{code!r}）——它是「哪只股失败过、"
                 "还剩几次重试」的唯一标识，不是字符串时补拉的归并与有界重试"
                 "都无从谈起。"
+            )
+        # ⚠️ **`attempts` 才是真正携带重试次数的那个字段**（Opus-4 [medium]）。
+        # 上一轮给 `stock_code` 加类型校验时，理由写的是「它是『哪只股失败过、
+        # 还剩几次重试』的唯一标识」—— 而**记着还剩几次的是这一个**，当时漏了。
+        # 「按字段穷尽而不是按判据句穷尽」的又一次。
+        # ⚠️ 评审同时推翻了我不做校验的理由：**「键存在时校验它的类型」既不是
+        # 新增必需字段、也不需要 bump `manifest_version`**（O2-F8 管的是前者）。
+        att = f.get("attempts")
+        if not isinstance(att, int) or isinstance(att, bool) or att < 0:
+            raise ManifestInvalidError(
+                f"{where} 的 failures 里 {code!r} 的 attempts 是 {att!r}"
+                "——它必须是**非负整数**（spec §4.4 明写 failures 含 attempts）。"
+                "缺席或坏型会让「凭空移出必须自证成功」那条守卫整条失效，"
+                "一个已经耗尽重试的候选就能被悄悄复活。"
             )
         if code in seen_codes:
             raise ManifestInvalidError(
@@ -1431,6 +1473,17 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     def _int_or_none(v):
         return v if isinstance(v, int) and not isinstance(v, bool) else None
 
+    # ⚠️ **上一份的值坏型时，此前是「跳过整条」而不是「拒绝」**（Opus-4 [medium]）。
+    # R10 那次只把「新值必须良型」补上了，**旧值仍然是整条检查的前置条件** ——
+    # 而「对坏输入要健壮」（S2-F9）说的是**别崩**，**不是别拦**，这句话就写在
+    # 上面那段注释里。三处同族：committed_bytes / inflight_rollbacks / attempts。
+    if "committed_bytes" in previous and _int_or_none(
+            previous.get("committed_bytes")) is None:
+        raise ManifestInvalidError(
+            f"{where} 读到的上一份里 committed_bytes 是 "
+            f"{previous.get('committed_bytes')!r}（不是非负整数）——它是 "
+            "--max-bytes 的累计基准，坏型时无从比较，拒绝在它之上继续提交。"
+        )
     ob = _int_or_none(previous.get("committed_bytes"))
     if ob is not None:
         nb = _int_or_none(payload.get("committed_bytes"))
@@ -1484,7 +1537,10 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         for k, v in orb.items():
             ov = _int_or_none(v)
             if ov is None:
-                continue
+                raise ManifestInvalidError(
+                    f"{where} 读到的上一份里 inflight_rollbacks[{k!r}] 是 {v!r}"
+                    "（不是非负整数）——坏型时无从比较，拒绝在它之上继续提交。"
+                )
             nv = _int_or_none(nrb.get(k))
             if nv is None or nv < ov:
                 raise ManifestInvalidError(
@@ -1519,8 +1575,12 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
 
     oa, na = _attempts(previous), _attempts(payload)
     for code, v in oa.items():
-        if v is None:
-            continue
+        # ⚠️⚠️ **「凭空移出」必须先判，且与旧值是不是良型数字无关**（Opus-4 [medium]）。
+        # 此前 `if v is None: continue` 排在最前面，于是一条 `attempts` 缺席/坏型的
+        # 记录**连「移出要自证成功」都一起跳过了** —— 而本模块自己就写得出这种
+        # 记录（读侧不碰 failures、写侧当时只校验 stock_code）。
+        # 端到端复现：第一次写进一条没有 attempts 的记录，第二次整个删掉，
+        # 那只股既不在池里也没有 files 记录（毫无成功证据）却被凭空移出。
         if code not in na:
             # ⚠️ **spec §4.4:350 + O2-F14 明写「重试成功即把该条目移出 failures
             # 并计入 batches 历史」** —— 一律拒会把这条路堵死，让一个只是瞬时
@@ -1533,6 +1593,8 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                 "（`pool_order` 里的锚点条目 + `files` 里恰好两条记录）"
                 "——凭空移出等于复活一个已经耗尽重试的候选。"
             )
+        if v is None:
+            continue                    # 旧值不是数字 ⇒ 无从比大小（条目仍在即可）
         nv = na[code]
         if nv is None or nv < v:
             raise ManifestInvalidError(
@@ -1707,7 +1769,7 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
     # 唯一正当的回退理由是崩溃恢复（spec §4.4 恢复第③档），且必须**声明范围**；
     # 范围之外的一切不变量照旧强制。
     _require_no_progress_rollback(previous, payload, "per-stock 提交", recovery)
-    ledger._advance(_write_manifest(stg_fd, payload), on_disk)
+    ledger._advance(_write_manifest(stg_fd, payload), on_disk, payload)
     return payload
 
 
@@ -2101,5 +2163,5 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
         payload["source_verification_evidence"] = {"level": "partial", "passes": []}
     # 收尾提交**永远**没有正当理由回滚进度（崩溃恢复不走这个入口），故无声明可传。
     _require_no_progress_rollback(previous, payload, "收尾提交")
-    ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle)
+    ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle, payload)
     return payload

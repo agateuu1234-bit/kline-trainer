@@ -5780,3 +5780,243 @@ def test_no_field_of_any_json_type_escapes_as_a_raw_exception_on_the_write_side(
     assert not escapes, (
         f"{len(escapes)} 处以**原始异常**逃逸（守卫自己被它该抓的损坏弄坏了）：\n"
         + "\n".join(escapes[:12]))
+
+
+# ── Opus 对抗性评审 第 4 轮 ─────────────────────────────────────
+# 2 medium + 3 low。⭐ medium ① 不需要任何篡改，用本模块自己的公开 API 就走得通。
+
+
+@pytest.mark.parametrize("first", [
+    pytest.param({}, id="attempts 整个缺席"),
+    pytest.param({"attempts": "2"}, id="attempts 是字符串"),
+    pytest.param({"attempts": None}, id="attempts 是 null"),
+])
+def test_a_failures_entry_cannot_vanish_even_when_its_attempts_was_never_a_number(
+        tmp_path, first):
+    """⭐⭐ [Opus-4 medium①] **单调守卫被「上一份的值必须已经是良型 int」整条关掉**。
+
+    R10 那次修的是**新值**（`nv is None or nv < v`），而**旧值**仍然是整条检查的
+    前置条件（`if v is None: continue`）—— 于是「凭空移出必须自证成功」这一条
+    也被一起跳过了。
+    ⚠️⚠️ **不需要任何篡改**：本模块**自己**就写得出没有 `attempts` 的 failures 记录
+    （读侧完全不碰 `failures`，写侧此前只校验 `stock_code` 的类型、没校验 `attempts`）。
+    本机端到端复现：第一次提交写进一条没有 `attempts` 的记录，第二次把它整个删掉
+    —— 那只股既不在 `pool_order` 里、也没有 `files` 记录（**毫无成功证据**），
+    却被凭空移出 ⇒ 下一次补拉会重新挑中它，正是 codex R10/R12 定为 high 的
+    「**复活一个已经耗尽重试的候选**」。
+
+    判别力：把「凭空移出」那一段挪回 `if v is None: continue` 之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rec = {"stock_code": "600004.SH", "universe_idx": 1, **first}
+        # ⚠️ 加了写侧类型校验之后，本模块**自己已经写不出**这种记录了；
+        #    但读侧仍不校验 `failures`，所以它可能来自旧版本或外部编辑 ——
+        #    转移守卫必须照样拦住「凭空移出」。（种进磁盘而不是走 commit_stock。）
+        _seed_disk(fd, _valid_manifest(failures=[rec]))
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="移出|成功的证据"):
+            commit_stock(fd, _valid_manifest(failures=[]), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("bad", [pytest.param("__absent__", id="整个缺席"),
+                                "2", -1, True, 1.5, [2]])
+def test_failures_attempts_must_be_a_non_negative_int_when_present(tmp_path, bad):
+    """⭐ 同族的**另一半：让它一开始就不可能是坏型**。
+
+    `stock_code` 上一轮已经加了类型校验，理由是「它是『哪只股失败过、还剩几次
+    重试』的唯一标识」——而 `attempts` 才是**真正携带重试次数**的那个字段，
+    当时漏了。⚠️ 这是「按字段穷尽而不是按判据句穷尽」的又一次。
+
+    ⚠️ 评审同时推翻了我不做读侧校验的理由：**「键存在时校验它的类型」既不是
+    新增必需字段、也不需要 bump `manifest_version`**（O2-F8 管的是前者）。
+    这条落在写侧固有检查里，正是同一个道理。
+
+    判别力：删掉这条类型检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rec = {"stock_code": "600004.SH", "universe_idx": 1}
+        if bad != "__absent__":
+            rec["attempts"] = bad
+        m = _valid_manifest(failures=[rec])
+        with pytest.raises(ManifestInvalidError, match="attempts"):
+            commit_stock(fd, m, ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("field,seed", [
+    ("committed_bytes", lambda m: m.__setitem__("committed_bytes", "9000000")),
+    ("inflight_rollbacks", lambda m: m.__setitem__("inflight_rollbacks", {"1": "2"})),
+])
+def test_a_corrupt_previous_monotonic_value_is_refused_not_skipped(tmp_path, field, seed):
+    """⭐ 同族第三处：**上一份**的单调计数是坏型时，守卫整条被跳过而不是拒绝。
+
+    「对坏输入要健壮」（S2-F9）指的是**别崩**，**不是别拦** —— 这句话就写在
+    这段代码自己的注释里，而它只落实到了新值那一半。
+
+    ⚠️⚠️ **断言必须用新判据的专属措辞「读到的上一份」**（控制者变异实测）：
+    只写 `match="inflight_rollbacks"` 时本条**零红** —— 关掉新判据后，
+    `_carry_forward_persisted_keys` 把坏值从磁盘带进 payload，于是**旧的那条
+    「新值必须良型」接住了它**，而两条消息里都含字段名。
+    同一族「判据互相掩盖」在本片是第四次，这次是我自己的断言太宽。
+
+    判别力：把新加的「上一份坏型即拒」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rotten = _valid_manifest()
+        seed(rotten)
+        _seed_disk(fd, rotten)                 # 读侧不校验这两个扩展字段 ⇒ 它进得去
+        with pytest.raises(ManifestInvalidError, match="读到的上一份"):
+            commit_stock(fd, _valid_manifest(), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_published_this_run_re_arms_the_recheck_gate(tmp_path):
+    """⭐⭐ [Opus-4 medium②] 复校凭据只锚定**运行起点**，而 `commit_final`
+    **不是每轮只能调一次**。
+
+    本机复现：账本带旧逃逸 → 登记复校通过（针对**旧**那条路径）→ 收尾发布一条
+    **新路径**的 staging 逃逸 → **同一轮**再收尾一次，fatal 被清光。
+    那份凭据**早于**它要清掉的那条逃逸 —— 等于拿昨天的体检报告证明今天没病。
+
+    判别力：把 `_advance` 里「本轮自己发布的 fatal 要重新武装」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="新路径/x.csv",
+            component="新路径", errno="ELOOP"))
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _valid_manifest(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert read_manifest(fd)["fetch_fatal_error"]["relative_path"] == "新路径/x.csv"
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_published_this_run_freezes_progress(tmp_path):
+    """⭐⭐ [Opus-4 medium② 的另一面] 干净起步的运行发布了一条 escape 之后，
+    **进度冻结闸也没被武装**：`commit_stock` 照样推进 `files` / `cursor`。
+
+    本机复现：files 4→6、cursor SH 1→2，而盘上带着一条**未解除的**
+    `staging_path_escape`。spec:1035 / P2-F3 明写这样的一轮不得推进。
+
+    判别力：同上，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 干净起步
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="a/x.csv",
+            component="a", errno="ELOOP"))
+        before = read_manifest(fd)
+        with pytest.raises(ManifestInvalidError, match="复校|推进|进度"):
+            commit_stock(fd, _with_more_stocks(_valid_manifest()), ledger=ledger)
+        assert read_manifest(fd) == before
+    finally:
+        os.close(fd)
+
+
+def test_a_permission_error_is_not_mislabelled_as_a_tampered_staging(tmp_path, monkeypatch):
+    """⭐ [Opus-4 low] 一个**普通文件**打不开（权限/资源）时，绝不能被报成
+    「这棵 staging 已被动过，请换新 staging + 新 seed 重拉」。
+
+    ⚠️ **两个方向都要钉**：
+    ① 探测器的兜底**必须**先问「它到底是不是普通文件」——去掉那一问，一次
+       `EACCES` 就会让操作者把一棵几百只股的健康 staging 报废（评审实测该判据
+       无人守）；
+    ② 于是权限错误**如实**以 `OSError` 冒出来。它**不属于**
+       `ManifestInvalidError` 那族 —— 恢复动作是 `chmod`，不是重拉。
+       故 `read_manifest` 的 docstring 把它列进声明的异常集合，而不是硬翻译成
+       一句会误导人的指引。
+
+    ⚠️ 用 monkeypatch 而不是 `chmod 000`：CI 上可能以 root 跑，那样 chmod 拦不住
+    读取，本条会在 Linux 上无声失效（本仓「零跳过」，不能靠 skip 绕过）。
+
+    判别力：把探测器兜底里的 `S_ISREG` 判断删掉，本条必红。
+    """
+    import qmt_fsroot as _fs
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 盘上是**普通文件**
+        real = _fs.open_under
+
+        def deny(dir_fd, name, **kw):
+            if name == MANIFEST_NAME:
+                raise PermissionError(13, "Permission denied")
+            return real(dir_fd, name, **kw)
+
+        monkeypatch.setattr(_fs, "open_under", deny)
+        with pytest.raises(PermissionError):
+            read_manifest(fd)
+        with pytest.raises(PermissionError):
+            begin_run(fd)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_rebind_a_different_stocks_files(tmp_path):
+    """⭐ [Opus-4 low] 恢复豁免里的「**必须是那一只**」没人守。
+
+    实测删掉 `and key[0] == recovery.stock_code`，全量一条不红。而它真承重：
+    一次合法地移除在途股 R 的提交，可以**同时**把**另一只**已提交股 X 的两条
+    `files` 记录改绑到别的路径 —— 正是 codex R13 定为 high 的
+    「一只已提交的股票被重新绑定到不同的文件，pilot 的 `staging_intact`
+    从此校验的是被换过的基线」。
+    ⚠️ 既有那条 `..._may_not_rebind_a_committed_stock_to_different_files` 改绑的是
+    **恢复目标本身**，被 `scoped_removed` 保持 False 接住，**走不到这条豁免**。
+
+    判别力：删掉那半个条件，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)                      # 合法：移除在途的 600004
+        bad["cursor"]["SH"] = 1                      # 合法：耦合的游标回退
+        for f in bad["files"]:                       # 非法：顺手改绑**另一只**股
+            if f["stock_code"] == "600000.SH":
+                f["relative_path"] = f["relative_path"].replace(".csv", "_换过.csv")
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="回滚|范围"):
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda m: m["staged_export_log"].__setitem__(
+        "relative_path", "别处/export_log.csv"), id="relative_path 被换"),
+    pytest.param(lambda m: m["staged_export_log"].__setitem__("bytes", 1),
+                 id="bytes 被调小"),
+])
+def test_the_staged_export_log_record_is_frozen(tmp_path, mutate):
+    """⭐ [Opus-4 low] `staged_export_log` 在 `_FROZEN_KEYS` 里的那一项没人守。
+
+    实测把它从冻结清单里删掉，全量一条不红 —— `sha256` 的漂移被冻结的
+    `source_snapshot` 掩盖了，但 `relative_path` 与 `bytes` **没有**：
+    把 `bytes` 调小会让 `--max-bytes` 的下限**少算**一整份 export_log。
+
+    判别力：从 `_FROZEN_KEYS` 里删掉 `staged_export_log`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _valid_manifest())
+        tampered = copy.deepcopy(_valid_manifest())
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError, match="冻结"):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
