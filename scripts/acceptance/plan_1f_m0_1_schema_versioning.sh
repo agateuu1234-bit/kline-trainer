@@ -116,11 +116,11 @@ run "regression: m04 still cross-refs Plan 3 P1 (闭合前 TODO 或闭合后 com
 # ---- 不 regression Plan 1/1b/1c acceptance ----
 # 不直接 nested plan_1d_m0_4_apperror.sh——其 TODO 断言 transient；改为下方 Plan 1d 稳定断言内联
 run "regression: Plan 1 (M0.1 DDL) acceptance" \
-    bash -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh 2>&1 | tee /tmp/p1.log"
 run "regression: Plan 1b (M0.2 OpenAPI) acceptance" \
-    bash -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh > /tmp/p1b.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh 2>&1 | tee /tmp/p1b.log"
 run "regression: Plan 1c (M0.3 Swift Models) acceptance (间接覆盖 Plan 1d AppError swift test)" \
-    bash -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh > /tmp/p1c.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh 2>&1 | tee /tmp/p1c.log"
 
 # ---- Plan 1d 稳定断言内联（AppError 结构不变量；排除 TODO transient state）----
 run "plan-1d stable: AppError.swift file" test -s "$APPERROR"

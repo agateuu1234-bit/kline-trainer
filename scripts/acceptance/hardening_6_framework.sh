@@ -94,9 +94,9 @@ fi
 # or caught failures while returning 0 would pass acceptance. Now we
 # require the sentinel line to appear in the captured log.
 run "regression: Plan 1 DDL" \
-  bash -c "./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1 && grep -Fxq 'PLAN 1 PASS' /tmp/p1.log"
+  bash -o pipefail -c "./scripts/acceptance/plan_1_m0_1_db_schema.sh 2>&1 | tee /tmp/p1.log && grep -Fxq 'PLAN 1 PASS' /tmp/p1.log"
 run "regression: Plan 1f schema versioning" \
-  bash -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh > /tmp/p1f.log 2>&1 && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
+  bash -o pipefail -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh 2>&1 | tee /tmp/p1f.log && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
 
 echo ""; echo "============================================"
 echo "Hardening-6 framework acceptance: $PASS passed, $FAIL failed"
