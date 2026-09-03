@@ -789,8 +789,12 @@ def _ep(y, m, d, H=0, M=0):
 def test_week_end_date_is_module_level_and_shared(monkeypatch):
     """B66：period_end(weekly) 与 select_period_window 必须共用同一个 _week_end_date。
 
-    判据 = monkeypatch 模块级函数后，select_period_window 确实调到了它。
-    若 select_period_window 内部仍有一份嵌套闭包，spy 不会被调用 ⇒ 本测试红
+    判据 = monkeypatch 模块级函数后，两个消费者各自确实调到了它——
+    - select_period_window：若内部仍有一份嵌套闭包，spy 不会被调用 ⇒ 本测试红；
+    - period_end(weekly)：若 weekly 分支就地内联了等价公式（例如
+      `d + timedelta(days=(6 - d.weekday()))`），语义不变但没调模块级函数，spy 同样不会被调用
+      ⇒ 本测试红。
+    两处都要各自断言，缺一侧就挡不住那一侧漂移出第二份实现
     ⇒ 「共用」没有兑现（这正是 spec §3.3 行 3e 要防的「两份实现漂移」）。
     """
     import generate_training_sets as g
@@ -808,6 +812,10 @@ def test_week_end_date_is_module_level_and_shared(monkeypatch):
     g.select_period_window(bars, _ep(2026, 4, 2), before_cap=None,
                            after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
     assert calls, "select_period_window 没有调用模块级 _week_end_date（说明它还在用内部闭包）"
+
+    calls.clear()
+    g.period_end(_ep(2026, 3, 23), "weekly")
+    assert calls, "period_end(weekly) 没有调用模块级 _week_end_date（说明它另抄了一份公式）"
 
 
 # ── Task 2：period_end 纯函数（spec §2.2）
@@ -1030,6 +1038,14 @@ def test_zip_and_hash_is_deterministic_across_runs(tmp_path):
 
     assert h1 == h2, "CRC32 随 mtime 变化 ⇒ 确定性不成立"
     assert b1 == b2, "zip 字节随 mtime 变化 ⇒ 确定性不成立"
+
+    import stat as _st
+    import zipfile as _z
+    with _z.ZipFile(z1) as zf:
+        info = zf.infolist()[0]
+        assert info.external_attr == (_st.S_IFREG | 0o644) << 16, (
+            f"external_attr 必须含常规文件类型位 S_IFREG —— App 侧 DefaultZipExtractor "
+            f"按 entry.type 分流（实测 {info.external_attr:#x}）")
 
 
 def test_zip_member_name_is_db_basename(tmp_path):

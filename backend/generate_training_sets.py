@@ -25,6 +25,7 @@ import datetime as _dt
 import json
 import random
 import sqlite3
+import stat
 import tempfile
 import zipfile
 import zlib
@@ -428,7 +429,10 @@ def zip_and_hash(db_path: Path, zip_path: Path) -> str:
     """
     info = zipfile.ZipInfo(filename=db_path.name, date_time=(1980, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
-    info.external_attr = 0o644 << 16          # 固定权限位，避免 umask 影响字节
+    # 固定权限位，避免 umask 影响字节；必须带 S_IFREG 类型位——消费端
+    # （ios DefaultZipExtractor）按 entry.type 分流，缺类型位只能靠解压库的
+    # 兜底启发式（无尾部斜杠猜 .file），不是靠这一位本身。
+    info.external_attr = (stat.S_IFREG | 0o644) << 16
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr(info, db_path.read_bytes())
     return crc32_hex(zip_path.read_bytes())
