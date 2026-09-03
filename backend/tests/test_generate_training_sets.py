@@ -952,6 +952,10 @@ def test_assign_monthly_realistic_scale():
     ⛔ 本条对**时区**变异（B4：period_end 里 tzinfo 改 UTC）**没有**判别力 —— 实测三根仍是
        [0, 0, 7]（月末整体晚 8 小时，但相对轴首/轴末的位置没变）。B4 由 test_period_end_daily /
        _weekly / _monthly 三条抓：它们直接断言 Asia/Shanghai 下的 23:59:59。
+    ⛔ 本条对**旧公式本身**（B1，即把改动整体还原）在本 fixture 上同样**没有**判别力 ——
+       三根巧合地新旧公式都给出 [0, 0, 7]。B1 对 monthly 的判别力由
+       test_assign_end_global_index_interior_historical_trailing 更新后的期望值
+       （[1, 5] → [5, 5]）覆盖。
     """
     axis = _intraday_axis()
     windows = {
