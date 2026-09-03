@@ -919,6 +919,43 @@ _FROZEN_KEYS = ("manifest_version", "seed", "source_snapshot", "source_mount",
 #   句柄没有任何可写字段（`__slots__` 为空），也没有公开的构造路径。
 
 
+def _hashable(value: object) -> object:
+    """把任意 JSON 值变成**能当字典键 / 集合成员**的东西（总是成功，从不抛）。
+
+    ⚠️⚠️ **为什么需要它**（Kimi 评审 [medium]，本机复现）：几条转移守卫拿
+    JSON 里读来的值直接当键 —— `_attempts` 的字典键、`_by_id` 的元组键、
+    `_progress_of` 的 frozenset 成员。而 `failures` 是**扩展字段，读侧
+    `validate_manifest` 完全不碰它**（实测：`stock_code` 是 list 的账本读侧照样
+    放行），且这些守卫都排在 `_write_manifest` 的读侧校验**之前** ——
+    于是一份 `stock_code: ["600004.SH"]` 的 payload 让守卫**自己**抛
+    `TypeError: unhashable type: 'list'`，调用方拿到的是 traceback 而不是
+    `ManifestInvalidError` 的恢复指引。
+    **「守卫自己被它该抓的那种损坏弄坏了」在本仓是第四次**（S2-F9 / S2-F27 同族）。
+
+    ⚠️ **不是「跳过坏值」而是「换一个稳定的键」**：两个**相等**的不可哈希值
+    仍映到同一个键（dict 按键名排序后归一），于是重名 / 单调那几条判据照常成立
+    —— S2-F29 的教训是「对坏输入健壮」不许写成「对坏输入放行」。
+
+    ⚠️ 正常取值**原样返回**（`_hashable("600000.SH") is "600000.SH"`），
+    所以 `_proved_success` 那类「拿键回去比对原值」的逻辑一个字都不受影响；
+    只有坏值会变成一个永远配不上原值的包装元组 —— 方向是 fail-closed。
+    """
+    try:
+        hash(value)
+    except TypeError:
+        pass
+    else:
+        return value
+    if isinstance(value, dict):
+        # JSON 的键必然是字符串且互不相同 ⇒ 按键名排序后次序唯一，
+        # 且 sorted 永远比不到第二个元素（不会拿不可比的值去比大小）。
+        return ("<dict>", tuple(sorted(
+            (str(k), _hashable(v)) for k, v in value.items())))
+    if isinstance(value, (list, tuple)):
+        return ("<list>", tuple(_hashable(v) for v in value))
+    return ("<other>", repr(value))
+
+
 def _progress_of(manifest: "dict | None") -> tuple:
     """一份 manifest 的**进度指纹**：实拷清单 / 各层池 / 游标 / 累计字节。
 
@@ -927,12 +964,13 @@ def _progress_of(manifest: "dict | None") -> tuple:
     """
     m = manifest or {}
     files = frozenset(
-        (f.get("stock_code"), f.get("period"), f.get("relative_path"))
+        (_hashable(f.get("stock_code")), _hashable(f.get("period")),
+         _hashable(f.get("relative_path")))
         for f in (m.get("files") if isinstance(m.get("files"), list) else [])
         if isinstance(f, dict))
     pool = m.get("pool_order") if isinstance(m.get("pool_order"), dict) else {}
     pools = tuple(
-        frozenset((e.get("code"), e.get("universe_idx"))
+        frozenset((_hashable(e.get("code")), _hashable(e.get("universe_idx")))
                   for e in (pool.get(mk) if isinstance(pool.get(mk), list) else [])
                   if isinstance(e, dict))
         for mk in MARKETS)
@@ -1161,6 +1199,16 @@ def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
         if not isinstance(f, dict):
             continue
         code = f.get("stock_code")
+        # ⚠️ **先验类型再比取值**（本仓既有做法，Kimi 评审 [medium]）：
+        # 重名判据只对字符串有意义，而 `failures` 读侧从不校验 ⇒ 这里是它
+        # 唯一的把关处。不验类型时 `code in seen_codes` 直接抛裸 TypeError。
+        if not isinstance(code, str):
+            raise ManifestInvalidError(
+                f"{where} 的 failures 里有一条 stock_code 不是字符串"
+                f"（读到 {type(code).__name__}：{code!r}）——它是「哪只股失败过、"
+                "还剩几次重试」的唯一标识，不是字符串时补拉的归并与有界重试"
+                "都无从谈起。"
+            )
         if code in seen_codes:
             raise ManifestInvalidError(
                 f"{where} 的 failures 里有**重复**的 {code!r} 记录。"
@@ -1258,8 +1306,8 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         out = {}
         for f in m.get("files", []) if isinstance(m.get("files"), list) else []:
             if isinstance(f, dict):
-                out[(f.get("stock_code"), f.get("period"),
-                     f.get("relative_path"))] = f
+                out[(_hashable(f.get("stock_code")), _hashable(f.get("period")),
+                     _hashable(f.get("relative_path")))] = f
         return out
 
     # ② 已提交的 files 记录：不得消失，也不得被改写。
@@ -1437,7 +1485,7 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         lst = m.get("failures")
         for f in lst if isinstance(lst, list) else []:
             if isinstance(f, dict):
-                out[f.get("stock_code")] = _int_or_none(f.get("attempts"))
+                out[_hashable(f.get("stock_code"))] = _int_or_none(f.get("attempts"))
         return out
 
     def _proved_success(m, code):
@@ -1990,7 +2038,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
         )
     # ⚠️⚠️ **磁盘是「当前真相」，启动快照是「预期」，两者必须对上**（codex R6 [high]）。
     # 只信磁盘时，「运行中把账本删掉」就成了新的洗白入口。判定与 per-stock 提交
-    # **共用** `_lifecycle_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
+    # **共用** `_expect_from_disk`——同一件事绝不判在两处（S2-F15 的教训）。
     on_disk, previous = _expect_from_disk(stg_fd, ledger)
 
     basis = {k: v for k, v in manifest.items() if k not in LIFECYCLE_KEYS}

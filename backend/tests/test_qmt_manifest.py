@@ -3171,11 +3171,24 @@ def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_pa
         commit_stock(fd, m, ledger=_expect(fd))                        # 恰好等于上限 → 放行
         assert (d / MANIFEST_NAME).read_bytes() == \
             _json_rw.dumps(published, ensure_ascii=False).encode("utf-8")
-        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
-        with pytest.raises(ManifestInvalidError, match="过大"):
-            commit_stock(fd, m, ledger=_expect(fd))                    # 少一个字节 → 拒
     finally:
         os.close(fd)
+    # ⚠️⚠️ **「少一个字节 → 拒」这一半必须换一棵空的 staging**（Kimi 评审 [low]，
+    #    控制者变异复核坐实）：留在同一棵目录上时，盘里已有那份**恰好 exact
+    #    字节**的账本，`begin_run` 一读就先被**读侧**上限拒掉，`commit_stock`
+    #    根本没被调用 —— 实测把写侧那段大小检查整个删掉，本档这一半仍然绿，
+    #    它钉的是读侧而不是写侧。
+    # ⚠️ `match` 也必须换成**写侧专属措辞**：两侧的报错都含「过大」，
+    #    拿它做断言等于让两条判据互相掩盖（S2-F49 / S2-F54 同族，第三次）。
+    (tmp_path / "fresh").mkdir()
+    d2, fd2 = _staging(tmp_path / "fresh")
+    try:
+        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
+        with pytest.raises(ManifestInvalidError, match="拒绝发布"):
+            commit_stock(fd2, m, ledger=_expect(fd2))       # 引导态：读侧无从插手
+        assert not (d2 / MANIFEST_NAME).exists()            # 一个字节都没写出去
+    finally:
+        os.close(fd2)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -5431,7 +5444,7 @@ def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
 
 # `_progress_of` 是私有的纯函数 —— 端到端档造不出「只动一个分量」的隔离
 # （R21-F3 把 files 与 pool 结构性绑死），只能直接对它下断言。
-from qmt_manifest import _progress_of
+from qmt_manifest import _progress_of, _hashable
 
 
 def test_read_manifest_refuses_a_socket_manifest(tmp_path, monkeypatch):
@@ -5572,3 +5585,131 @@ def test_final_outcome_refuses_escape_evidence_that_is_not_a_mapping():
     for junk in (["kind", "x"], "staging_path_escape", 42, None):
         with pytest.raises(ValueError, match="映射|escape"):
             FinalOutcome(kind="escape", escape=junk)
+
+
+# ── Kimi(K3) 对抗性评审 K1 ───────────────────────────────────────
+# 1 medium（不可哈希的 JSON 值让写侧新守卫抛裸 TypeError）+ 2 low。
+
+
+@pytest.mark.parametrize("bad", [["600004.SH"], {"a": 1}, 600004, None])
+def test_a_failures_stock_code_that_is_not_a_string_is_refused(tmp_path, bad):
+    """⭐⭐ [Kimi K1 medium] 守卫拿 JSON 里读来的值**当集合成员**，而
+    `failures` 是扩展字段、**读侧 `validate_manifest` 完全不碰它**
+    （本机实测：`stock_code` 是 list 的账本读侧照样放行），
+    且这些守卫都排在 `_write_manifest` 的读侧校验**之前** ——
+    于是一份 `stock_code: ["600004.SH"]` 的 payload 让守卫**自己**抛
+    `TypeError: unhashable type: 'list'`，调用方拿到 traceback 而不是
+    `ManifestInvalidError` 的恢复指引。
+    「**守卫自己被它该抓的那种损坏弄坏了**」在本仓是第四次（S2-F9 / S2-F27 同族）。
+
+    ⇒ 按本仓既有做法「**先验类型再比取值**」：`stock_code` 必须是字符串。
+
+    判别力：删掉那条类型检查，list / dict 两档必红（抛 TypeError 而非本类）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": bad, "attempts": 1}])
+        with pytest.raises(ManifestInvalidError, match="stock_code"):
+            commit_stock(fd, m, ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_transfer_guards_survive_an_unhashable_failures_record_on_disk(tmp_path):
+    """⭐ 同族的**另一半**：坏记录**已经躺在磁盘上**（读侧从不校验 `failures`，
+    所以它进得去），而这次的 payload 自己是干净的。
+
+    此时 payload 侧的类型检查够不着它，`_attempts(previous)` 会拿它当字典键
+    → 裸 `TypeError`。守卫必须**总是**能算出一个键来，而不是崩掉。
+
+    ⚠️ 判据不是「跳过坏记录」而是「换一个稳定的键」——S2-F29 的教训是
+    「对坏输入健壮」不许写成「对坏输入放行」，单调/重名那几条判据仍须成立。
+
+    判别力：把 `_hashable` 换回直接取值，本条必红（TypeError）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rotten = _valid_manifest(failures=[{"stock_code": ["600004.SH"],
+                                            "attempts": 1}])
+        _seed_disk(fd, rotten)                      # 读侧放行 → 它进得去
+        ledger = begin_run(fd)
+        clean = _valid_manifest(failures=[{"stock_code": "600006.SH",
+                                           "attempts": 1}])
+        with pytest.raises(ManifestInvalidError):   # 而**不是** TypeError
+            commit_stock(fd, clean, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_transfer_guards_survive_unhashable_file_records(tmp_path):
+    """⭐ 同族第三处：`_by_id` 用 `(stock_code, period, relative_path)` 做元组键，
+    元组里塞一个 list 同样不可哈希。
+
+    判别力：把 `_by_id` 里的 `_hashable` 去掉，本条必红（TypeError）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _valid_manifest())          # 先有一份 previous
+        broken = copy.deepcopy(_valid_manifest())
+        broken["files"][0]["stock_code"] = ["600000.SH"]
+        with pytest.raises(ManifestInvalidError):           # 而**不是** TypeError
+            commit_stock(fd, broken, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("files", [{"stock_code": ["x"], "period": "1m", "relative_path": "a.csv"}]),
+    ("pool_order", {"SH": [{"code": {"a": 1}, "universe_idx": 0}],
+                    "SZ": [], "BJ": []}),
+])
+def test_the_progress_fingerprint_survives_unhashable_input(field, value):
+    """⭐ 同族第四处：`_progress_of` 把这些值装进 `frozenset`。
+
+    它在收尾提交的进度闸里被调用，**排在读侧校验之前**，所以拿到的
+    完全可能是一份没被校验过的 payload。它必须**算得出**一个指纹，
+    而不是抛 `TypeError` 把整次提交炸掉。
+
+    判别力：把 `_progress_of` 里的 `_hashable` 去掉，本条必红。
+    """
+    m = copy.deepcopy(_valid_manifest())
+    m[field] = value
+    fp = _progress_of(m)                       # 不许抛
+    assert fp != _progress_of(_valid_manifest())
+
+
+@pytest.mark.parametrize("a,b,same", [
+    (["600004.SH"], ["600004.SH"], True),          # 相等的坏值 → 同一个键
+    (["600004.SH"], ["600006.SH"], False),         # 不同的坏值 → 不同的键
+    ({"a": 1, "b": 2}, {"b": 2, "a": 1}, True),    # 键序不同但相等 → 同一个键
+    ({"a": 1}, {"a": 2}, False),
+    ([{"x": [1]}], [{"x": [1]}], True),            # 嵌套
+    ([{"x": [1]}], [{"x": [2]}], False),
+    ("600000.SH", "600000.SH", True),              # 正常值不受影响
+    ("600000.SH", "600004.SH", False),
+])
+def test_hashable_preserves_equality_and_distinctness(a, b, same):
+    """⭐ `_hashable` 的注释claim「**相等**的坏值映到同一个键」——
+    而「**不同**的坏值必须映到**不同**的键」是同一句话的另一半，
+    控制者变异实测发现**没有任何测试守它**：把它退化成「所有坏值都返回同一个
+    常量」，全量 1324 条一条不红。
+
+    那一半失守的后果是**放行方向**：磁盘上两条 `stock_code` 不同的坏记录会被
+    `_attempts` 折叠成同一个键、后者覆盖前者 —— 单调判据对被覆盖的那条整个
+    不生效，而 S2-F29 的教训正是「对坏输入健壮」不许写成「对坏输入放行」。
+
+    判别力：把归一逻辑换成任何**丢信息**的写法（返回常量 / 只看类型），本条必红。
+    """
+    ka, kb = _hashable(a), _hashable(b)
+    hash(ka); hash(kb)                              # 必须真的可哈希
+    assert (ka == kb) is same
+
+
+def test_hashable_returns_hashable_values_untouched():
+    """⭐ 正常取值必须**原样返回**（同一个对象），否则
+    `_proved_success` 那类「拿键回去比对原值」的逻辑会静默失配。
+
+    判别力：改成无条件包一层，本条必红。
+    """
+    for value in ("600000.SH", 42, None, True, ("a", 1), frozenset({"x"})):
+        assert _hashable(value) is value

@@ -133,6 +133,9 @@ S2a 的结果：82 条守卫、29 条无隔离覆盖——其中绝大多数是*
 | D58 | Task 18 收尾剥键 | 剥生命周期三键那步没人守，注入方向可写伪造 fatal（Opus-3 [low]，spec **S2-F57**）| 补对称的注入档 |
 | D59 | Task 17 进度指纹 | `files`/`pool_order` 互相掩盖（Opus-3 [low]，spec **S2-F58**）| 端到端造不出隔离 → 直接对纯函数下四档参数化断言 |
 | D60 | Task 16/17 小守卫 | 三条守卫零覆盖（Opus-3 [low]，spec **S2-F59**）| 各补专属档 |
+| D61 | Task 16/17 转移守卫 | 不可哈希的 JSON 值让四处守卫抛裸 `TypeError`（Kimi K1 [medium]，spec **S2-F60**）| ①`failures[].stock_code` 先验类型；②`_hashable()` 让四处守卫总算得出键。⚠️ 补档时自查发现「不同坏值要不同键」那半没人守，另补两条纯函数档 |
+| D62 | Task 15 写侧上限 | 那条档的后半段其实钉的是**读侧**（Kimi K1 [low]，spec **S2-F61**）| 换一棵空 staging（引导态读侧无从插手）+ 断言写侧专属措辞「拒绝发布」|
+| D63 | Task 18 注释 | 注释引用改名前的 `_lifecycle_from_disk`（Kimi K1 [low]，spec **S2-F62**）| 改为 `_expect_from_disk` |
 
 **另有一处测试判别力订正**：Task 18 那条「内存预置 `stopped_reason`」的档判别力不够
 （决策表会把同一个值塞回去，剥不剥都绿），改成预置一条**陈旧的 `stopped_reason_secondary`**
@@ -1396,12 +1399,18 @@ mkdir -p /tmp/nofs
 ```
 
 ```
-printf 'import fcntl\ndef pytest_configure(config):\n    if hasattr(fcntl, "F_FULLFSYNC"):\n        del fcntl.F_FULLFSYNC\n' > /tmp/nofs/nofullfsync.py
+printf 'import fcntl\ndef pytest_configure(config):\n    if hasattr(fcntl, "F_FULLFSYNC"):\n        del fcntl.F_FULLFSYNC\n        print("[nofullfsync] 已抹掉 F_FULLFSYNC")\n' > /tmp/nofs/nofullfsync.py
 ```
 
 ```
 PYTHONPATH=/tmp/nofs "$PY" -m pytest tests/ -q -p nofullfsync
 ```
+
+> ⚠️ 输出里**必须**出现一行 `[nofullfsync] 已抹掉 F_FULLFSYNC`。
+> 没有它就说明那个「藏起来」的动作根本没发生，这一步等于没做
+> ——本仓的 A3 存在的理由就是「看执行量，不看结论字样」，这里同理。
+> （另：`-p` 指向一个不存在的插件时 pytest 会**硬报 `ImportError`**、
+> 不会静默跳过，所以命令能跑完本身也是加载成功的旁证。两条都实测过。）
 
 **期望**：与 A2 相同的通过数，**没有** `failed` / `skipped` / `error`。
 
@@ -1664,6 +1673,7 @@ s.close()
 | **自查③** | 1 档（控制者，非评审）| 放开「非 clean 结局不查一致性」之后，`elif` 那一支只剩「clean 且取值不等」一种情形，而两条新正向档都不经过它 —— 补 `test_a_passing_recheck_must_still_be_reported_at_the_final_commit` 钉住「登记通过却不上报」。变异实测（把判据窄化成 `is not None and …`）**只有它一条红**，判别力隔离 |
 | **Opus-2** | needs-attention（1 medium + 3 low）| ⭐⭐ **本片第一次没有 high**。评审对**安全核心做了穷尽验证并判定找不到洞**，方法可核：`resolve_final_lifecycle` 的 **10 种合法前态 × 9 种结局**全枚举；走**真入口**的**两轮链路 2916 条**全枚举（凡产出「无 fatal」账本的链路**无一例外**都经过「登记通过 + 上报通过 + 重走过路径」）；**84 个决策表输出**逐个回喂读侧全部往返成功。①medium = 复校闸只立在 per-stock 入口（同一份 payload：per-stock 拒、收尾收）；②③④ 全是**测试判别力**（生产代码正确但判据没人守）。四条**全部本机复核属实、零误报**。8 组变异 7 组一次命中；**P7 首轮零红 —— 追下去发现我补的那条档本身是假的**（邻居 `endswith` 抢先抛且文案同样含 `stock_code`），改成断言判据专属措辞后判别力才成立 ⇒ **同一族错误在修它的过程中原地又踩一次**（见 S2-F49/F54）|
 | **Opus-3** | needs-attention（1 medium + 3 low）| **连续第二轮没有 high**。①medium = **socket 型 `fetch_manifest.json` 逃过「不是普通文件」那道闸**：`O_NONBLOCK` 只解决 FIFO 阻塞，socket 上 `open(2)` 直接失败 ⇒ 走不到 `S_ISREG`，四个入口全抛裸 `OSError`；而注释里那条枚举写着「FIFO/目录/设备/socket」—— **列四项只兑现两项**。②③④ 全是**判据没人守**（收尾剥键 / 进度指纹两分量互相掩盖 / 三条小守卫）。四条**全部本机复核属实**（6 组复核变异全存活）。修完 **9 组变异全部命中、零红为 0**，四个进度分量各杀各的。⚠️ 评审另指出 `acquire_lock` 有同样 socket 盲区 —— **S1 既有代码、不在 diff 里**，按规矩不动，已登记 |
+| **Kimi-1** | needs-attention（1 medium + 2 low）| ⚠️ **换通道**（user 指定；codex 配额要等到 9/7、Opus 子代理撞 session 限流）。⭐ **Kimi 通道能写 `attest-ledger.json`**（账本里已有先例 PR #166 的 `reviewer: kimi-code/k3@…`）⇒ 它拿到真 approve 就**兑现得了治理条款 1**，不必 override。跑前按纪律先跑探针（`kimi -p` 极小提示，不算评审不写账本）确认通道健康。三条**全部本机复现属实、零误报**：①medium = **不可哈希的 JSON 值让四处新守卫抛裸 `TypeError`** —— `failures` 是扩展字段、**读侧从不校验**，而守卫又排在读侧校验之前 ⇒ 没有任何上游判据接得住；「守卫自己被它该抓的损坏弄坏」第四次。②③ = 写侧上限那条档其实钉的是读侧（两侧报错都含「过大」，**第三次**互相掩盖）、注释引用了改名前的函数。7 组变异 6 组一次命中；**K7 零红 —— 我在 `_hashable` 注释里claim 的「不同坏值→不同键」那半没人守**（退化成返回常量全量不红），补两条纯函数档后变异红 3 条 |
 
 > ⚠️ **R1 三条的共同根因**：我校验了「想到的那几个字段」（`kind` /
 > `staging_recheck` / `relative_path` / `component`），漏了 `revisited_fatal_path`；
