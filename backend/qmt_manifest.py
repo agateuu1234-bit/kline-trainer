@@ -1338,11 +1338,27 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
             )
 
     for mk in MARKETS:
+        def _pool_seq(m):
+            """取 `pool_order[mk]` 的**列表** —— 全函数唯一一处这么取。
+
+            ⚠️⚠️ **`.get(mk, [])` 在「键存在、值是 null」时交出的是那个 `None`**
+            （默认值只在键**缺席**时才生效）。`_pool_ids` 原本正是这么写的，于是
+            `pool_order.SH = null` 让守卫抛裸 `TypeError: 'NoneType' object is not
+            iterable`；同族还有把它写成 int/str/bool/dict 的五种。
+            ⚠️ 这两个 bug 我**已经在旁边那个帮手里修过了**（上一轮加 `_pool_seq`
+            时写的是 `isinstance(lst, list)`），只是没回头看隔壁 —— **同一件事
+            判在两处、只改对了一处**，本片第三次。⇒ 合并成一个访问器。
+            （控制者把「整族坏值扫描」从读侧扩到写侧后挖出，7 类 34 个逃逸全在这里。）
+            """
+            lst = m.get("pool_order")
+            lst = lst.get(mk) if isinstance(lst, dict) else None
+            return list(lst) if isinstance(lst, list) else []
+
         def _pool_ids(m):
-            lst = m.get("pool_order", {})
-            lst = lst.get(mk, []) if isinstance(lst, dict) else []
-            return {(e.get("code"), e.get("universe_idx"))
-                    for e in lst if isinstance(e, dict)}
+            # ⚠️ 成员要进 `set` ⇒ 必须过 `_hashable`，否则 `code` 是 list/dict 时
+            # 集合推导自己抛裸 TypeError（与 `_progress_of` 同一条纪律）。
+            return {(_hashable(e.get("code")), _hashable(e.get("universe_idx")))
+                    for e in _pool_seq(m) if isinstance(e, dict)}
         # ③ 池条目不得消失。
         gone = _pool_ids(previous) - _pool_ids(payload)
         # ⚠️ 本条的 `scoped_removed` 前置**造不出专属档**（如实登记，第五次撞同一耦合）：
@@ -1352,7 +1368,7 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
             gone -= {(recovery.stock_code, recovery.universe_idx)}
         if gone:
             raise ManifestInvalidError(
-                f"{where} 会把 {mk} 层已提交的池条目 {sorted(gone)} **回滚**掉"
+                f"{where} 会把 {mk} 层已提交的池条目 {sorted(gone, key=repr)} **回滚**掉"
                 + ("——超出本次崩溃恢复声明的范围。" if recovery is not None else
                    "——调用方交回来的很可能是一份过期副本。")
             )
@@ -1363,10 +1379,6 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         #    `already_done` 与「池穷尽」判定双双失真，且**不改变任何身份**，
         #    安静地发生（codex R16 [high]，本机复现两档）。
         #    ⇒ 判据 = 上一份必须是新一份的**前缀**（恢复范围内先摘掉那一只）。
-        def _pool_seq(m):
-            lst = m.get("pool_order")
-            lst = lst.get(mk) if isinstance(lst, dict) else None
-            return list(lst) if isinstance(lst, list) else []
         old_seq = _pool_seq(previous)
         if recovery is not None and scoped_removed and mk == recovery.market:
             # 授权删的那一只**摘掉**，其余条目的相对次序照旧必须保住。

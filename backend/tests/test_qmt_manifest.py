@@ -5444,7 +5444,7 @@ def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
 
 # `_progress_of` 是私有的纯函数 —— 端到端档造不出「只动一个分量」的隔离
 # （R21-F3 把 files 与 pool 结构性绑死），只能直接对它下断言。
-from qmt_manifest import _progress_of, _hashable
+from qmt_manifest import _progress_of, _hashable, _require_no_progress_rollback
 
 
 def test_read_manifest_refuses_a_socket_manifest(tmp_path, monkeypatch):
@@ -5713,3 +5713,70 @@ def test_hashable_returns_hashable_values_untouched():
     """
     for value in ("600000.SH", 42, None, True, ("a", 1), frozenset({"x"})):
         assert _hashable(value) is value
+
+
+def test_no_field_of_any_json_type_escapes_as_a_raw_exception_on_the_write_side():
+    """⭐⭐ **读侧那条整族扫描的写侧对偶**（控制者自查补，非评审要求）。
+
+    读侧那条只喂 `validate_manifest` —— **写侧守卫一个都没被它扫过**。
+    Kimi K1 那条 medium（不可哈希的值让守卫抛裸 `TypeError`）正是从这个缺口
+    漏出去的；而把同一套扫描对准写侧之后，**又当场挖出 7 类 34 个逃逸**，
+    全在 `_pool_ids` 一处：
+      · `.get(mk, [])` 的默认值只在键**缺席**时生效 ⇒ `pool_order.SH = null`
+        交出来的是那个 `None`，随后 `for e in None` 抛裸 TypeError（6 值 × 3 层）；
+      · 集合成员没过 `_hashable` ⇒ `code` 是 list/dict 时集合推导自己崩（16 个）。
+    两个 bug 都是我**已经在旁边那个帮手里修过**的 —— 同一件事判在两处、
+    只改对了一处，本片第三次。
+
+    ⚠️ **不直接跑 `commit_stock`**：它每次都要真落盘（`F_FULLFSYNC`），
+    ~3000 次组合会把整套测试拖慢一个量级。**入口确实接上了这些守卫**，
+    由那四条走真 `commit_stock` / `commit_final` 的点测钉住（分工写在这里，
+    免得将来有人以为本条覆盖了入口）。
+
+    ⚠️ **防空转**：断言探测数下限 —— `_leaf_paths` 哪天被改坏、只枚举出几个
+    位置时，这条会「零逃逸」通过而实际什么都没测。
+    """
+    allowed = (ManifestInvalidError, ManifestVersionError, PathEscapeError)
+    bases = [
+        _valid_manifest(),
+        _valid_manifest(stopped_reason="source_path_escape",
+                        fetch_fatal_error=_fatal(kind="source_path_escape")),
+    ]
+    for b in bases:
+        _recompute_evidence(b)
+    bad_values = {"list": [], "dict": {}, "null": None,
+                  "int": 0, "str": "x", "bool": True}
+    previous = _valid_manifest()
+
+    probed = 0
+    escapes = []
+    for base in bases:
+        for path in list(_leaf_paths(base)):
+            if not path:
+                continue
+            for name, value in bad_values.items():
+                victim = copy.deepcopy(base)
+                _set_at(victim, path, value)
+                for label, call in (
+                    ("引导态", lambda v: _require_no_progress_rollback(
+                        None, v, "写侧整族扫描")),
+                    ("有上一份", lambda v: _require_no_progress_rollback(
+                        copy.deepcopy(previous), v, "写侧整族扫描")),
+                    ("进度指纹", _progress_of),
+                ):
+                    probed += 1
+                    try:
+                        call(victim)
+                    except allowed:
+                        pass
+                    except Exception as exc:            # noqa: BLE001
+                        escapes.append(
+                            f"{label} / {'.'.join(map(str, path))} = {name}"
+                            f" → {type(exc).__name__}: {exc}")
+
+    assert probed >= 2500, (
+        f"只探测了 {probed} 次——`_leaf_paths` 可能被改坏了，本次运行对本判据"
+        "零判别力")
+    assert not escapes, (
+        f"{len(escapes)} 处以**原始异常**逃逸（守卫自己被它该抓的损坏弄坏了）：\n"
+        + "\n".join(escapes[:12]))
