@@ -80,6 +80,15 @@ public struct TrainingView: View {
     @State private var confirmingDeleteDrawing = false      // 1b-i PR-4：🗑 的删除确认框
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
+    // Q13（codex R2-high）：安全退出**什么都没保住**时的诚实提示（既没落盘、磁盘上也没有旧存档）。
+    @State private var cannotPreserveOnExit = false
+    // 「保不住」的成因决定说法与建议（Opus 对抗评审 + codex R5-medium）：三种成因的补救动作互不相同，
+    // 压成一种就必然对另两种说假话（文件被清理 / 存档读不出来时，「清理存储空间」都是无效建议）。
+    @State private var cannotPreserveReason: TrainingSessionCoordinator.CheckpointStatus = .none
+    // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
+    // ⛔ 承载**来源**而非 Bool（codex R6-high）：两个弹窗的「放弃」都会失败，丢掉来源就只能猜一个回。
+    //    猜错的代价不对称 —— 把中途返回的用户送进结算弹窗，一点「重试」就把没打完的局入账。
+    @State private var discardFailedFrom: DiscardFailureOrigin? = nil
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
     // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
@@ -166,24 +175,111 @@ public struct TrainingView: View {
     // 两段各自独立类型检查，纯行为中性重构（无逻辑改动，仅表达式分割）。
     public var body: some View {
         trainingContent
+        // Q13：本弹窗曾在**三件事**上与同文件紧邻的另外两个弹窗不一致，现已全部对齐：
+        //   ① **缺非破坏性出口** —— 未支持数据 / 磁盘满等持续性失败下，「重试」撞同一道门必然再失败，
+        //      用户手上只剩一个**会删数据**的按钮，等于被界面推向不可逆丢失；
+        //   ② **破坏性按钮标成了 `.cancel`** —— iOS 因此不会把它渲染成红色，看起来像"安全的那个"；
+        //   ③ **文案与行为相反** —— 原文说「进度保留至最近存档」，而「放弃」走 `discardSession()` →
+        //      `pendingRepo.clearPending()`，**永久删除整局 pending**（含本可靠新版本救回的数据）。
+        //   ⇒ 对齐对象：replay 的「结算失败」弹窗（非破坏性出口走 `back()`）与「保存进度失败」弹窗
+        //     （破坏性按钮标 `.destructive`）。本次**不改任何行为逻辑**，只是把出口补齐、把话说实。
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
-            // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
-            Button("放弃", role: .cancel) {
+            // 退出本局 = **非破坏性**出口，且**不依赖正在坏掉的那条存储路**（codex R1-high）。
+            // ⛔ 不用 `lifecycle.back()`：它必须 `saveProgress` **成功**才 `endSession`，而本弹窗
+            //    最现实的触发原因**正是写盘失败**（磁盘满 / DB 损坏 / IO）—— 那条出口会在最需要它的
+            //    时候恰好也坏掉，把用户弹进「保存进度失败」（只剩再写一次 或 破坏性弃局），
+            //    等于仍然没有安全出口。
+            // ⇒ 改用 `exitPreservingProgress()`：尽力落盘，**失败也照样安全退出**
+            //   （`endSession` 是纯内存收尾、不写盘），磁盘上最近一次自动存档原样留存；**永不弃局**。
+            Button("退出本局", role: .cancel) {
                 guard !exitInFlight else { return }
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()
+                    // ⛔ 三态必须分开处置（codex R2-high）：`.cannotPreserve` 表示**会话没有被结束**，
+                    //    此刻 onExit() 会把用户带走，而整局只剩内存里那一份 —— 等于亲手丢掉它。
+                    switch await lifecycle.exitPreservingProgress() {
+                    case .savedCurrentState, .keptEarlierCheckpoint:
+                        onExit()
+                    case .cannotPreserve(let reason):
+                        cannotPreserveReason = reason
+                        cannotPreserveOnExit = true
+                    case .notApplicable:
+                        // 结构上不可达：本弹窗只在正常训练局出现（`routeEndOfSession` 已把 replay
+                        // 分流走、review 连 `shouldAutoFinalize` 都被抑制）。但 switch 必须穷尽，
+                        // 且 fail-closed —— **不离开本局**，走与「保不住」相同的诚实提示，
+                        // 绝不静默 onExit()（那会把用户带走却什么都没保存）。
+                        cannotPreserveReason = .none
+                        cannotPreserveOnExit = true
+                    }
+                }
+            }
+            // 放弃本局 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）。
+            // ⚠️ 标 `.destructive` 而非 `.cancel`：它**真的会永久删除整局 pending**，iOS 据此渲染成红色。
+            // ⛔ 别为了"安全"把它改成不弃局 —— 用户确实想扔掉这一局时必须扔得干净，
+            //    否则每次开 App 都会被同一个结算不了的坏局纠缠。
+            Button("放弃本局", role: .destructive) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    // ⛔ 不得吞错就走（codex R2-medium）：`discardSession()` 是**故意**在清槽失败时
+                    //    先抛错、**不** endSession（其文档逐字：「清槽失败 → 保留 active session
+                    //    （不 teardown）供 retry，透传 AppError」）。吞掉它再 onExit() 会造成
+                    //    「界面回了首页、协调器里会话还活着、那条 pending 也还在」，而用户被告知"已丢弃"
+                    //    —— 在触发本弹窗的同一个降级存储场景下极可能发生。
+                    do { try await lifecycle.discard(); onExit() }
+                    catch { discardFailedFrom = .settlementFailure }
                 }
             }
         } message: {
-            Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
+            // ⚠️ 指路必须对（codex R1-medium）：正常局的 pending **不在历史记录里**（历史记录放的是
+            //    已入账的 `TrainingRecord`，而本局恰恰是没入账才走到这个弹窗），它从**首页那个主按钮**
+            //    回去 —— `HomeContent.swift:59` 逐字 `hasPending ? "继续训练" : "开始训练"`。
+            //    ⛔ 别照抄 replay 弹窗的「历史记录」：那个绑在一条已入账记录上，语境不同。
+            Text("本局结果尚未写入历史记录。可重试入账；或退出本局（保留进度，可在首页「继续训练」返回；若此刻无法写入，则保留到最近一次自动存档）；或放弃本局（本局进度将被丢弃）。")
         }
         // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
         // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
         // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
         // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
+        // Q13（codex R2-high）：安全退出什么都没保住时的诚实提示。
+        // ⚠️ 「知道了」在**下一轮 MainActor** 里把结算弹窗弹回来（与同文件既有重弹先例同时序）：
+        //    在一个 alert 正被关闭的同一次刷新里置另一个 alert 的 isPresented 有被吞的风险；
+        //    一旦被吞，会话还活着但 didFinalize 已置位 ⇒ maybeAutoEnd 不再触发 ⇒ 结算弹窗永远回不来。
+        // ⚠️ 关掉它要把结算失败弹窗**重新弹回来** —— 否则用户回到训练页、屏幕上什么都没有，
+        //    会以为刚才那一下"没反应"，比不给出口更糟。
+        .alert("暂时退不出本局", isPresented: $cannotPreserveOnExit) {
+            Button("知道了", role: .cancel) { Task { @MainActor in finalizeFailed = true } }
+        } message: {
+            // ⚠️ 三支说法必须分开（Opus 对抗评审 + codex R5-medium）：把原因写死成其中一种，
+            //    另两种情形下就是假话，而且随附建议也会失效（文件已被清理 / 存档读不出来时，
+            //    腾出存储空间都不会让它回来 —— 让用户白忙一场还以为自己没救回来）。
+            Text(cannotPreserveCopy)
+        }
+        // Q13（codex R2-medium）：弃局没做成时的诚实提示（会话仍在，未离开本局）。
+        .alert("放弃未完成", isPresented: Binding(
+            get: { discardFailedFrom != nil },
+            set: { if !$0 { discardFailedFrom = nil } }
+        )) {
+            Button("知道了", role: .cancel) {
+                // ⚠️ 关掉它必须把**发起它的那个**弹窗弹回来（codex R6-high）。
+                //    什么都不弹 → 用户回到训练页、屏幕上什么都没有，以为刚才那下没反应；
+                //    一律回结算弹窗 → 中途返回的用户拿到「重试入账」按钮，而 runFinalize()
+                //    不过 didFinalize / forceCloseManually() 任何一道终局门。
+                let origin = discardFailedFrom
+                Task { @MainActor in
+                    switch origin?.alertToRestore {
+                    case .settlementFailure: finalizeFailed = true
+                    case .saveProgressFailure: backFailed = true
+                    case nil: break
+                    }
+                }
+            }
+        } message: {
+            Text("清除本局存档时出错，本局没有被放弃，你仍在这一局里。可稍后再试。")
+        }
         .alert("结算失败", isPresented: $replaySettlementFailed) {
             Button("重试") { runReplaySettlement() }
             Button("退出本局", role: .cancel) {
@@ -215,7 +311,12 @@ public struct TrainingView: View {
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()   // durable 弃局退出
+                    // ⛔ 同「结算入账失败」那处一样：discardSession() 是**故意**在清槽失败时先抛错、
+                    //    不 endSession；吞掉它再 onExit() 会造成「界面回了首页、协调器里会话还活着、
+                    //    pending 也还在」，而用户被告知已丢弃。更糟的是首页会显示「继续训练」，
+                    //    一点就直接 resumePending()（AppRouter 未先 endSession）→ 违反 D10 前置条件。
+                    do { try await lifecycle.discard(); onExit() }
+                    catch { discardFailedFrom = .saveProgressFailure }
                 }
             }
         } message: {
@@ -641,6 +742,21 @@ public struct TrainingView: View {
     // 此门兜 UI 层——防 onSessionEnded 双发/alert 与 settlement 路由交错）。@MainActor 串行置位无 race。
     // replay 的 finalizeForSettlement 是不抛的早返 nil（shouldSaveRecord()==false）→ 仍走
     // onSessionEnded(nil) = 正常 retreat 路径，不受本 alert 影响。
+    /// 「暂时退不出本局」的文案 —— 按**保不住的成因**分支。
+    /// ⛔ 三支不得合并：补救动作不同（能腾空间 / 不能腾空间 / 只能重试），说错等于把用户支去做无效操作。
+    private var cannotPreserveCopy: String {
+        switch cannotPreserveReason {
+        case .trainingSetMissing:
+            return "本局的存档还在，但它依赖的训练组数据文件已被清理掉了 —— 现在退出的话这一局将无法继续，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        case .unreadable:
+            return "本局的存档读取失败（存档文件可能已损坏）—— 没法确认退出后还能不能回到这一局，所以没有退出。可重试入账；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        case .none, .usable:
+            // `.usable` 结构上到不了这里（能用就不会走「保不住」这支），但 switch 必须穷尽；
+            // 归到最保守的一支：不承诺存档存在。
+            return "存储写不进去，而且本局还没有过任何自动存档 —— 现在退出会把这一局全部丢失，所以没有退出。请先清理设备存储空间再试；若确实不要这一局了，可在上一个提示里选择「放弃本局」。"
+        }
+    }
+
     private func runFinalize() {
         guard !finalizing else { return }
         finalizing = true

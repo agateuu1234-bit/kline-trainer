@@ -994,6 +994,59 @@ public final class TrainingSessionCoordinator {
         replayHasPersisted = false
     }
 
+    /// Q13（codex R2-high）：磁盘上那份可回退的存档**处于什么状态**（不是 Bool —— 见 `CheckpointStatus`）。
+    /// 供「安全退出」判断（落盘成功与失败**两条路都要查**，codex R5-high）：还有东西可退回 ⇒ 结束会话是安全的；
+    /// **什么都没有 ⇒ 结束会话等于把整局唯一的副本扔掉**（实测：`startNewNormalSession` 不落盘，
+    /// 开局那一刻 `loadPending()` 就是 nil；若整局的自动存档又全部失败，磁盘上始终空无一物）。
+    ///
+    /// ⚠️ **读失败返回 `.unreadable`**（fail-closed，仍然留住会话）：磁盘正在坏的时候读本身也可能失败。
+    ///    ⛔ **不得并回 `.none`**（codex R5-medium）：「读不出来」与「压根没有」要给用户的补救动作不同，
+    ///    合并回去就等于叫人去清理存储空间 —— 对一个损坏的存档文件而言那是无效建议。
+    ///    本段曾写着「读失败一律当作『没有』」，那是 Bool 时代的写法（Kimi R1-low：已随实现订正）。
+    /// ⚠️ **只查正常局的槽**；非 normal 返回 `.none`（同样 fail-closed ⇒ 调用方会保留会话）。
+    ///    今天唯一的调用方是「结算入账失败」弹窗，而它只在正常局出现（replay 被 `routeEndOfSession`
+    ///    分流、review 不可达）。⛔ 日后若给 replay 复用，必须先补 `pending_replay` 那一支。
+    /// ⚠️ **「那行能读出来」不等于「它是本局的」**（codex R3-high）：`pending_training` 是单例行，
+    ///    必须比对 `sessionKey` 才能证明它属于当前这一局；否则会把**别的会话**留下的记录
+    ///    当成自己的退路，据此放走一个其实无处可退的会话。
+    /// ⚠️ **必须同时确认那份训练组文件还在缓存里**（codex R4-high）：缓存的 LRU 淘汰
+    ///    **不保护正在用的文件**（`DefaultFileSystemCacheManager.evictIfNeededLocked`，上限 20 个，
+    ///    每次下载入库都会触发）。**最要命的状态**是：文件已被淘汰，但本局的 reader 还开着
+    ///    （POSIX 下已打开的句柄在文件被删后仍可用）⇒ **这一局其实还能继续玩**，
+    ///    而「安全退出」会关掉那个 reader。此时若判据仍说「退得安全」，
+    ///    就是**亲手**把一个还能用的会话变成打不开的存档。
+    /// ⚠️ **但它仍不保证「将来一定续得回来」**：用户退出**之后**那份文件照样可能被淘汰。
+    ///    在这一层关不上那个洞 —— 真正的修法是**把在用 / 被 pending 引用的文件钉住不许淘汰**，
+    ///    属缓存子系统，已另立待办（见本片验收清单 §五）。⛔ 别把本判据当成「保证可续」。
+    /// ⚠️ **返回「原因」而不是 Bool**（Opus 对抗评审）：「保不住」有**三种互不相同**的成因，
+    ///    而它们对用户的正确说法与正确建议**完全不同**。上一稿把三者压成一个 `false`，
+    ///    UI 只好把原因写死成其中一种 —— 在另一种情形下那句话就是**假的**，
+    ///    随附的建议也无效。⇒ 判据必须把原因带出来。
+    public enum CheckpointStatus: Equatable, Sendable {
+        /// 有一份属于本局的存档，且它依赖的训练组文件仍在缓存里 ⇒ 退出是安全的。
+        case usable
+        /// 磁盘上没有属于本局的存档（本局一次都没存成，或那条记录属于别的会话）。
+        case none
+        /// 存档在、也是本局的，**但它依赖的训练组数据文件已被缓存清理掉**。
+        /// ⛔ 对这一种，「清理设备存储空间」是**无效建议** —— 文件已经删了，腾空间也回不来。
+        case trainingSetMissing
+        /// **读不出来**（数据库损坏 / IO 错误）——⚠️ 与 `.none` 刻意分开（codex R5-medium）：
+        /// 「读失败」不等于「没有存档」。把它报成「没有」会让用户去做无效的补救（清存储），
+        /// 更糟的是可能让他以为没什么可救、直接放弃一份其实还在的数据。
+        case unreadable
+    }
+
+    public func pendingCheckpointStatus(for engine: TrainingEngine) -> CheckpointStatus {
+        guard engine.flow.mode == .normal, let key = activeSessionKey else { return .none }
+        let loaded: PendingTraining?
+        do { loaded = try pendingRepo.loadPending() }
+        catch { return .unreadable }                       // ⛔ 读失败 ≠ 没有
+        guard let pending = loaded, pending.sessionKey == key else { return .none }
+        do { _ = try cachedFile(filename: pending.trainingSetFilename) }
+        catch { return .trainingSetMissing }
+        return .usable
+    }
+
     /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。
     /// 清槽失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
     /// 新需求10(A6)：replay 清 pending_replay（条件清，fail-closed）；normal 清 pending_training（原逻辑）。
