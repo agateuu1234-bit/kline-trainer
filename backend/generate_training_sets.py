@@ -417,9 +417,18 @@ def build_training_set_sqlite(db_path: Path, *, stock_code: str, stock_name: str
 
 
 def zip_and_hash(db_path: Path, zip_path: Path) -> str:
-    """D3：把 .db 压进 zip → 返回整个 zip 文件字节的 CRC32（8 字符小写）。"""
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(db_path, arcname=db_path.name)
+    """D3：把 .db 压进 zip → 返回整个 zip 文件字节的 CRC32（8 字符小写）。
+
+    ⭐ **确定性**（spec §3.4「其它硬要求」）：固定 `ZipInfo.date_time` 与权限位，使同一输入
+    **恒产出同一字节** —— `zipfile` 默认把文件 mtime 嵌进 zip 头，不固定就每跑一次 CRC 都变，
+    而运维侧「产物有疑就重跑、必得同一批包」这条恢复前提完全架在本条上。
+    ⛔ 成员名仍是 `db_path.name`（`<code>_<start>.db`），契约不变。
+    """
+    info = zipfile.ZipInfo(filename=db_path.name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o644 << 16          # 固定权限位，避免 umask 影响字节
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(info, db_path.read_bytes())
     return crc32_hex(zip_path.read_bytes())
 
 

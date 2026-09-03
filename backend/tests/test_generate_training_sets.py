@@ -1001,3 +1001,44 @@ def test_assign_weekly_hole_uses_calendar_period_end():
     }
     out = assign_global_indices(windows)
     assert list(out["weekly"]["end_global_index"]) == [1]
+
+
+# ── Task 4：确定性压缩（spec §3.4「其它硬要求」；变异 B34）
+
+def test_zip_and_hash_is_deterministic_across_runs(tmp_path):
+    """同一输入连跑两次 ⇒ zip 字节与 CRC32 完全相同。
+
+    ⭐ 这是 P4 恢复模型的唯一依据（「产物有疑就重跑 R2，必得同一批包」）。
+    默认 zipfile 会把 db 文件的 mtime 嵌进 zip 头 ⇒ 不固定 date_time 就每跑一次都变。
+    构造：先造一份 .db，再改它的 mtime（模拟两次运行落在不同时刻），压两次比字节。
+    """
+    import os
+    from generate_training_sets import zip_and_hash
+
+    db = tmp_path / "x.db"
+    db.write_bytes(b"deterministic-payload" * 64)
+
+    z1 = tmp_path / "a.zip"
+    os.utime(db, (1_600_000_000, 1_600_000_000))
+    h1 = zip_and_hash(db, z1)
+    b1 = z1.read_bytes()
+
+    z2 = tmp_path / "b.zip"
+    os.utime(db, (1_700_000_000, 1_700_000_000))   # mtime 变了
+    h2 = zip_and_hash(db, z2)
+    b2 = z2.read_bytes()
+
+    assert h1 == h2, "CRC32 随 mtime 变化 ⇒ 确定性不成立"
+    assert b1 == b2, "zip 字节随 mtime 变化 ⇒ 确定性不成立"
+
+
+def test_zip_member_name_is_db_basename(tmp_path):
+    """成员名契约不变（`<code>_<start>.db`）—— 改确定性时不得顺手改它。"""
+    import zipfile as _z
+    from generate_training_sets import zip_and_hash
+    db = tmp_path / "600519.SH_1762099200.db"
+    db.write_bytes(b"payload")
+    zp = tmp_path / "out.zip"
+    zip_and_hash(db, zp)
+    with _z.ZipFile(zp) as zf:
+        assert zf.namelist() == ["600519.SH_1762099200.db"]
