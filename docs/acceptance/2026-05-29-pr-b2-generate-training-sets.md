@@ -43,7 +43,7 @@
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| F.1 | `grep -nc 'PRAGMA user_version = 1' backend/generate_training_sets.py` | 1 (schema_version) | =1 |
+| F.1 | `grep -nc 'PRAGMA user_version = 2' backend/generate_training_sets.py` | 1 (schema_version) | =1 |
 | F.2 | `grep -nc 'end_global_index INTEGER NOT NULL' backend/generate_training_sets.py` | 1 (逐字 schema) | =1 |
 
 ## §G 双层边界：纯层不顶层依赖 asyncpg（D1/D13）

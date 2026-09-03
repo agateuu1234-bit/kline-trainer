@@ -7,10 +7,10 @@ trap 'rm -f "$DB"' EXIT
 
 sqlite3 "$DB" < "$SCHEMA"
 
-# PRAGMA user_version 必须 = 1
+# PRAGMA user_version 必须 = 2（spec 2026-09-01 §2.3：end_global_index 语义变更 ⇒ 新旧产物互不可读 ⇒ 第 2 代）
 UV=$(sqlite3 "$DB" "PRAGMA user_version;")
-if [[ "$UV" != "1" ]]; then
-  echo "FAIL: expected user_version=1, got $UV"
+if [[ "$UV" != "2" ]]; then
+  echo "FAIL: expected user_version=2, got $UV"
   exit 1
 fi
 
@@ -35,4 +35,4 @@ if [[ "$ENDIDX_NOTNULL" != "1" ]]; then
   exit 1
 fi
 
-echo "PASS: training_set_schema_v1.sql deploys with user_version=1"
+echo "PASS: training_set_schema_v1.sql deploys with user_version=2"
