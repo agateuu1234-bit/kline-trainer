@@ -140,10 +140,19 @@ def test_assign_non_min_period_global_index_is_null():
     assert out["60m"]["global_index"].isna().all()
 
 def test_assign_end_global_index_interior_historical_trailing():
+    """新公式（spec §2.2）下的期望值。3m 轴 = [0,10,20,30,40,50]（n3=6）。
+
+    · 15m 标收盘 [0,30,60]  ⇒ upper 即本根 ⇒ bisect_right = 1/4/6 ⇒ −1 ⇒ [0,3,5]
+    · 60m 标收盘 [-100,-90,40] ⇒ upper=-100/-90 落在轴前 ⇒ clamp 到 0；40 ⇒ 5−1=4 ⇒ [0,0,4]
+    · monthly 标开盘侧 [-100,20] ⇒ 两者都落在 1970-01，月末 = 2649599（1970-01-31
+      23:59:59 Asia/Shanghai）已超过轴末根 50 ⇒ 均 clamp 到 5 ⇒ [5,5]
+    ⚠️ monthly 这组在本 fixture 上判别力归零（两根都被 clamp），
+       真实量级的 monthly 判据见 test_assign_monthly_realistic_scale。
+    """
     out = assign_global_indices(_index_windows())
-    assert list(out["15m"]["end_global_index"]) == [2, 5, 5]
-    assert list(out["60m"]["end_global_index"]) == [0, 3, 5]
-    assert list(out["monthly"]["end_global_index"]) == [1, 5]
+    assert list(out["15m"]["end_global_index"]) == [0, 3, 5]
+    assert list(out["60m"]["end_global_index"]) == [0, 0, 4]
+    assert list(out["monthly"]["end_global_index"]) == [5, 5]
 
 def test_assign_end_global_index_monotonic_and_in_range():
     out = assign_global_indices(_index_windows())
@@ -867,3 +876,124 @@ def test_period_end_rejects_unknown_period():
     import pytest as _pt
     with _pt.raises(ValueError):
         period_end(_ep(2026, 4, 2), "30m")
+
+
+# ── Task 3：分流后的边界判据（spec §1.2 / §1.3；变异 B1 / B2 / B3 / B4 / B5 / B7）
+
+def _intraday_axis():
+    """两个交易日、每日 4 根 3m：09:33 / 11:30 / 14:57 / 15:00。
+
+    ⇒ 11:30→14:57 之间是**午休缺口**、15:00→次日 09:33 之间是**日界**。
+    下标：[0]=04-02 09:33 [1]=04-02 11:30 [2]=04-02 14:57 [3]=04-02 15:00
+          [4]=04-03 09:33 [5]=04-03 11:30 [6]=04-03 14:57 [7]=04-03 15:00
+    """
+    return [_ep(2026, 4, d, H, M)
+            for d in (2, 3)
+            for (H, M) in ((9, 33), (11, 30), (14, 57), (15, 0))]
+
+
+def test_assign_intraday_crosses_lunch_and_day_boundary():
+    """B1 / B5：日内周期必须用【本根 datetime】当 upper，不得用「下一根 − 1」或固定偏移。
+
+    15m 标收盘 [04-02 11:30, 04-02 15:00, 04-03 11:30, 04-03 15:00]
+      新公式 ⇒ [1, 3, 5, 7]      （每根都精确指向它自己那一刻的 3m）
+      旧公式 ⇒ [2, 4, 6, 7]      （跨午休 / 跨日各晚 1 根；末根因退化而恰好相同）
+    60m 标收盘 [04-02 15:00, 04-03 15:00]
+      新公式 ⇒ [3, 7]            旧公式 ⇒ [6, 7]（第一根晚了 3 根 = 跨了一整个日界）
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3], axis[5], axis[7]]),
+        "60m": _df("60m", [axis[3], axis[7]]),
+        "daily": _df("daily", [_ep(2026, 4, 2), _ep(2026, 4, 3)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["15m"]["end_global_index"]) == [1, 3, 5, 7]
+    assert list(out["60m"]["end_global_index"]) == [3, 7]
+
+
+def test_assign_daily_unchanged_by_the_split():
+    """正向对照（spec §4.1 ①）：`daily` 在新旧两式下**逐根相同** ⇒ 必须放行。
+
+    daily 标开盘侧 [04-02 00:00, 04-03 00:00]
+      新公式：period_end = 当日 23:59:59 ⇒ [3, 7]
+      旧公式：下一根 − 1 / 末根退化 ⇒ 同样 [3, 7]
+    ⇒ 若把分流方向弄反（变异 B2）或顺手也改了 daily（变异 B7），本条会红。
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3], axis[5], axis[7]]),
+        "60m": _df("60m", [axis[3], axis[7]]),
+        "daily": _df("daily", [_ep(2026, 4, 2), _ep(2026, 4, 3)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["daily"]["end_global_index"]) == [3, 7]
+    assert list(out["3m"]["end_global_index"]) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(out["3m"]["global_index"]) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def test_assign_monthly_realistic_scale():
+    """monthly 在真实量级上的判据（spec §3.3 行 4c 要求的专用用例）。
+
+    3m 轴同上（2026-04-02 / 04-03，8 根）。monthly 标开盘侧：
+      2026-02-02 ⇒ 月末 02-28 23:59:59，早于轴首 ⇒ clamp 0
+      2026-03-02 ⇒ 月末 03-31 23:59:59，早于轴首 ⇒ clamp 0
+      2026-04-01 ⇒ 月末 04-30 23:59:59，晚于轴末 ⇒ clamp 7
+    ⇒ [0, 0, 7]。⭐ 前两根落在 0 = spec §4.1 特征①「≥2 根落在 end_global_index = 0」。
+    ⭐ 判别力：若把分流方向弄反（变异 B2，monthly 被当成收盘标注）⇒ upper 变成
+       02-02 / 03-02 / 04-01 这三个开盘侧时刻本身，全都早于轴首 ⇒ 结果变成 [0, 0, 0]，本条红。
+       把「月末」误算成月初/月中同理会红。
+    ⛔ 本条对**时区**变异（B4：period_end 里 tzinfo 改 UTC）**没有**判别力 —— 实测三根仍是
+       [0, 0, 7]（月末整体晚 8 小时，但相对轴首/轴末的位置没变）。B4 由 test_period_end_daily /
+       _weekly / _monthly 三条抓：它们直接断言 Asia/Shanghai 下的 23:59:59。
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3]]),
+        "60m": _df("60m", [axis[3]]),
+        "daily": _df("daily", [_ep(2026, 4, 2)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 2, 2), _ep(2026, 3, 2), _ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["monthly"]["end_global_index"]) == [0, 0, 7]
+
+
+def test_assign_weekly_hole_uses_calendar_period_end():
+    """B3：开盘侧**不得**用「下一根 − 1」—— 周线序列允许有洞（spec §1.3）。
+
+    3m 轴 = 03-27(Fri) / 03-30(Mon) / 04-02(Thu) 各 2 根（09:33、15:00），共 6 根：
+      [0]=03-27 09:33 [1]=03-27 15:00 [2]=03-30 09:33 [3]=03-30 15:00
+      [4]=04-02 09:33 [5]=04-02 15:00
+    起点设 04-02（**周四，周中**）⇒ select_period_window 的 weekly before 过滤会删掉
+    03-30 那根（其周末 04-05 ≥ start 日 04-02）⇒ 窗口里只剩 03-23 一根 ⇒ **有洞**。
+
+      新公式：period_end(03-23, weekly) = 03-29 23:59:59 ⇒ 指向 03-27 15:00 = 下标 1
+      旧公式：「下一根」已被删 ⇒ 退化成轴末根 ⇒ 下标 5
+    ⇒ 差 4 根，判别力充足。
+    """
+    axis = [_ep(y, m, d, H, M)
+            for (y, m, d) in ((2026, 3, 27), (2026, 3, 30), (2026, 4, 2))
+            for (H, M) in ((9, 33), (15, 0))]
+    raw_weekly = _df("weekly", [_ep(2026, 3, 23), _ep(2026, 3, 30)])
+    win_weekly = select_period_window(raw_weekly, _ep(2026, 4, 2), before_cap=None,
+                                      after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
+    assert len(win_weekly) == 1, "03-30 那根应被 weekly 跨界过滤删掉（这是本用例的前提）"
+
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[5]]),
+        "60m": _df("60m", [axis[5]]),
+        "daily": _df("daily", [_ep(2026, 4, 2)]),
+        "weekly": win_weekly,
+        "monthly": _df("monthly", [_ep(2026, 3, 2)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["weekly"]["end_global_index"]) == [1]

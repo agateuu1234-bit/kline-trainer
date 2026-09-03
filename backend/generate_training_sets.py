@@ -13,7 +13,8 @@
 # 决议：
 # - D2 最小周期 = 3m，global_index 仅赋 3m（其它 NULL）
 # - D3 content_hash = format(zlib.crc32(zip_file_bytes) & 0xFFFFFFFF, '08x')（8 字符小写；modules L750 字面）
-# - D4 end_global_index = bisect_right(3m_dts, [open,下一open) 上界) - 1，clamp[0,N-1]
+# - D4 end_global_index = bisect_right(3m_dts, period_end(本根 datetime, 周期)) - 1，clamp[0,N-1]
+#      （spec 2026-09-01 §2.2；⛔ 旧表述「[open,下一open) 上界」已作废，见 §1.1）
 # - D5 起始 idx ∈ [30, len-9]，rng 可注入；月线<39 → GenerateSkipException
 # - D6 before=min(pivot,cap)（monthly=ALL），after=[start, after_end]；per-period before≥30 & after≥1 硬校验
 # - D8 SQLite 逐字 training_set_schema_v1.sql；numpy→python int/float，NaN→None
@@ -316,9 +317,15 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
 
 
 def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """D2/D4：3m 升序赋 global_index 0,1,2…（其它周期 NULL）；所有周期(含3m)
-    end_global_index = 覆盖区间 [open, 下一根 open) 内最后一根 3m 的 global_index
-    = bisect_right(3m_dts, upper) - 1，clamp[0, N3-1]（datetime 二分匹配）。"""
+    """D2/D4：3m 升序赋 global_index 0,1,2…（其它周期 NULL）；所有周期（含 3m）
+    end_global_index = 「这根 K 线在全局 3 分钟轴上**于第几刻形成**」
+    = bisect_right(3m_dts, period_end(本根 datetime, 周期)) - 1，clamp[0, N3-1]。
+
+    ⭐ upper 由 `period_end` 按 datetime 标注语义分流（spec §2.1 / §2.2）：
+       收盘标注（3m/15m/60m）取本根 datetime；开盘侧标注（daily/weekly/monthly）
+       取该【日历周期】的结束时刻。
+    ⛔ **不得退化成「下一根 open − 1」** —— 开盘侧序列允许有洞（spec §1.3）。
+    """
     three = windows[MIN_PERIOD].sort_values("datetime").reset_index(drop=True)
     three_dts = three["datetime"].tolist()
     n3 = len(three_dts)
@@ -330,9 +337,8 @@ def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         d = df.sort_values("datetime").reset_index(drop=True).copy()
         opens = d["datetime"].tolist()
         egi = []
-        for i, _open in enumerate(opens):
-            nxt = opens[i + 1] if i + 1 < len(opens) else None
-            upper = (nxt - 1) if nxt is not None else three_dts[-1]
+        for _open in opens:
+            upper = period_end(_open, period)
             j = bisect_right(three_dts, upper) - 1
             egi.append(max(0, min(j, n3 - 1)))
         d["end_global_index"] = egi
