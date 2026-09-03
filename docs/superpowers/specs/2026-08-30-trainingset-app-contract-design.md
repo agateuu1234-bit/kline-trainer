@@ -183,7 +183,8 @@ App 侧 `DefaultTrainingSetReader.loadAllCandles()` 第 90 行要求**每个周�
 ### 4.1 「非递减」足以让二分查找正确
 
 App 里所有依赖 `end_global_index` 的查询都是 `partitioningIndex`（Swift 的分区二分），使用点：
-`TrainingEngine.swift:541 / :563 / :727`、`MarkersLayout.swift:25`、`PanLinkage.swift:27,31`。
+`TrainingEngine.swift:541 / :563 / :720 / :727`、`MarkersLayout.swift:25`、`RenderStateBuilder.swift:266`、`PartialAggregateCandle.swift:20`、`DefaultTrainingSetReader.swift:182`、`PreviewTrainingSetReader.swift:130`。
+⚠️ **本清单 2026-09-03 经 Kimi 评审 K1-② 订正**：上一版把 `PanLinkage.swift:27,31` 列为使用点，实测那两行只是 `candles[idx].endGlobalIndex` **取值**、没有二分；真正的二分在 `RenderStateBuilder.swift:266`（`currentCandleIndex`），反而不在原清单里。⛔ **切片二若按原清单去核「所有依赖 `end_global_index` 序关系的消费方」，会漏掉那个真正的二分点。**（§4.1 的论证实质——分区性不要求严格递增——不受影响。）
 
 `partitioningIndex` 的前置条件是「数组按谓词**已分区**」（前段全 false、后段全 true），而不是「严格递增」。谓词形如 `$0.endGlobalIndex > current` / `>= target`，在**非递减**序列上分区性成立。故放宽不破坏任何一处二分。
 
