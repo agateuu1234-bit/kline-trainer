@@ -766,3 +766,36 @@ def test_stock_lock_key_deterministic_and_int4():
     assert a == b and 0 <= a <= 0x7FFFFFFF          # 同 code 恒定、落 int4 正区间
     assert isinstance(stock_lock_key("000002.SZ"), int)  # 别股也返 int（碰撞允许，故不断言不等）
     assert IMPORT_GEN_LOCK_KEY != B2_GENERATION_LOCK_KEY
+
+
+# ── Task 1：_week_end_date 必须在模块级，且 select_period_window 用的就是它（变异 B66）
+
+def _ep(y, m, d, H=0, M=0):
+    """构造 Asia/Shanghai 的 Unix 秒（测试内独立实现，⛔ 不 import 被测模块的时区常量）。"""
+    import datetime as _d
+    from zoneinfo import ZoneInfo
+    return int(_d.datetime(y, m, d, H, M, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+
+def test_week_end_date_is_module_level_and_shared(monkeypatch):
+    """B66：period_end(weekly) 与 select_period_window 必须共用同一个 _week_end_date。
+
+    判据 = monkeypatch 模块级函数后，select_period_window 确实调到了它。
+    若 select_period_window 内部仍有一份嵌套闭包，spy 不会被调用 ⇒ 本测试红
+    ⇒ 「共用」没有兑现（这正是 spec §3.3 行 3e 要防的「两份实现漂移」）。
+    """
+    import generate_training_sets as g
+    assert hasattr(g, "_week_end_date"), "_week_end_date 必须提到模块级（现在还在函数体内）"
+
+    calls = []
+    real = g._week_end_date
+
+    def spy(e):
+        calls.append(e)
+        return real(e)
+
+    monkeypatch.setattr(g, "_week_end_date", spy)
+    bars = _df("weekly", [_ep(2026, 3, 23), _ep(2026, 3, 30)])
+    g.select_period_window(bars, _ep(2026, 4, 2), before_cap=None,
+                           after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
+    assert calls, "select_period_window 没有调用模块级 _week_end_date（说明它还在用内部闭包）"

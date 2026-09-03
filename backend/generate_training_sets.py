@@ -54,6 +54,18 @@ B2_GENERATION_LOCK_KEY = 0x42345CEE
 IMPORT_GEN_LOCK_KEY = 0x42345CF0
 
 
+def _week_end_date(open_epoch: int) -> _dt.date:
+    """该周的周日（Asia/Shanghai 交易日历）。
+
+    ⭐ 单一真相：`select_period_window` 的 weekly 过滤与 `period_end(weekly)` **共用本函数**
+    —— 两处各写一份正是本次整个缺陷的成因（spec §1.4 / §3.1）。
+    ⛔ **不得用 `isocalendar()` 的周数反推**：`date(2024,12,30).isocalendar()` 的 ISO 年是
+    **2025**，任何以 `(iso_year, iso_week)` 为键的写法都会在跨年周出错。实现一律 `6 - weekday()`。
+    """
+    d = trading_date(open_epoch)
+    return d + _dt.timedelta(days=(6 - d.weekday()))
+
+
 def stock_lock_key(stock_code: str) -> int:
     """按股 advisory lock 的第二参数：crc32 落 int4 正区间。
     碰撞只影响并发度、不影响正确性（B1 import 侧也 import 本函数，保证两端同一把 key）。"""
@@ -92,10 +104,6 @@ def select_period_window(bars: pd.DataFrame, start_datetime: int, before_cap: Op
     before_count = pivot if before_cap is None else min(pivot, before_cap)
     before = b.iloc[pivot - before_count: pivot]
     after = b[(b["datetime"] >= start_datetime) & (b["datetime"] <= after_end)]
-
-    def _week_end_date(open_epoch):
-        d = trading_date(open_epoch)
-        return d + _dt.timedelta(days=(6 - d.weekday()))   # 该周周日
 
     if period == "weekly":
         ae_date = trading_date(after_end)
