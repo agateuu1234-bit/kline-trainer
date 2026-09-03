@@ -19,6 +19,7 @@
 # - D8 SQLite 逐字 training_set_schema_v1.sql；numpy→python int/float，NaN→None
 from __future__ import annotations
 
+import calendar
 import datetime as _dt
 import json
 import random
@@ -34,6 +35,9 @@ from typing import Any, Optional, Sequence
 import pandas as pd
 
 from qmt_normalize import is_valid_stock_code, trading_date
+from qmt_normalize import _SH as _SHANGHAI      # ⭐ 刻意复用私有常量而非另建一个 ZoneInfo：
+                                                #    本片的整个主题就是「不要写第二份」，
+                                                #    tz 对象的单一真相在 qmt_normalize。
 from qmt_resample import period_boundaries
 
 SCHEMA_VERSION = 1
@@ -64,6 +68,39 @@ def _week_end_date(open_epoch: int) -> _dt.date:
     """
     d = trading_date(open_epoch)
     return d + _dt.timedelta(days=(6 - d.weekday()))
+
+
+# 周期 → datetime 标注约定（spec §2.1）。⛔ 显式常量表，不得用「周期名里有没有 m」之类的字符串把戏。
+_CLOSE_LABELLED = frozenset({"3m", "15m", "60m"})
+
+
+def period_end(datetime_epoch: int, period: str) -> int:
+    """spec §2.2：这根 K 线所属【日历周期】的**结束时刻**（Unix 秒）。
+
+    - **收盘标注**（`3m` / `15m` / `60m`）：`datetime` 本身就是收盘时刻 ⇒ 原样返回；
+    - **开盘侧标注**（`daily` / `weekly` / `monthly`）：返回该日历周期的最后一秒。
+
+    时区一律 tz 数据库的 `Asia/Shanghai`（⛔ 不得写固定 `+08:00`）。
+    ⚠️ 当前数据下两种写法结果完全相同（1991 年及更早的夏令时区间全在 3m 轴起点之前、
+    一律 clamp 到 0）⇒ **没有任何测试能抓住这个差异**，故只写进规矩、不设守卫。
+
+    ⛔ **开盘侧不得退化成「下一根 − 1」**：那些序列**允许有洞**（spec §1.3 —— `select_period_window`
+    会故意删掉跨训练起点 / 跨 `after_end` 的那根周线），洞前那根会被判成「在洞里某个时刻才完成」。
+    """
+    if period in _CLOSE_LABELLED:
+        return int(datetime_epoch)
+    d = trading_date(datetime_epoch)
+    if period == "daily":
+        last = d
+    elif period == "weekly":
+        last = _week_end_date(datetime_epoch)
+    elif period == "monthly":
+        last = _dt.date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
+    else:
+        raise ValueError(f"period_end: 未知周期 {period!r}（认识的只有 {sorted(_CLOSE_LABELLED)} "
+                         f"+ daily/weekly/monthly）")
+    return int(_dt.datetime(last.year, last.month, last.day, 23, 59, 59,
+                            tzinfo=_SHANGHAI).timestamp())
 
 
 def stock_lock_key(stock_code: str) -> int:

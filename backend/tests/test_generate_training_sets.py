@@ -799,3 +799,71 @@ def test_week_end_date_is_module_level_and_shared(monkeypatch):
     g.select_period_window(bars, _ep(2026, 4, 2), before_cap=None,
                            after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
     assert calls, "select_period_window 没有调用模块级 _week_end_date（说明它还在用内部闭包）"
+
+
+# ── Task 2：period_end 纯函数（spec §2.2）
+
+def _sh_dt(epoch):
+    """Unix 秒 → Asia/Shanghai 的 datetime（测试内独立实现）。"""
+    import datetime as _d
+    from zoneinfo import ZoneInfo
+    return _d.datetime.fromtimestamp(int(epoch), ZoneInfo("Asia/Shanghai"))
+
+
+def test_period_end_close_labelled_returns_input_unchanged():
+    """3m / 15m / 60m 的 datetime 本身就是收盘时刻 ⇒ 原样返回（spec §2.1）。"""
+    from generate_training_sets import period_end
+    e = _ep(2026, 4, 2, 11, 30)
+    for p in ("3m", "15m", "60m"):
+        assert period_end(e, p) == e
+
+
+def test_period_end_daily_is_end_of_that_trading_day():
+    from generate_training_sets import period_end
+    got = _sh_dt(period_end(_ep(2026, 4, 2), "daily"))
+    assert (got.year, got.month, got.day) == (2026, 4, 2)
+    assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_weekly_is_that_weeks_sunday():
+    """含两类真实边界（spec §3.1 实测）：首日非周一、跨年周。
+
+    ⛔ 跨年周是 isocalendar() 的坑：date(2024,12,30).isocalendar() 的 ISO 年是 2025。
+    本函数一律 6 - weekday()，与 ISO 年无关。
+    """
+    from generate_training_sets import period_end
+    import datetime as _d
+    cases = [
+        (_ep(2024, 12, 30), _d.date(2025, 1, 5)),    # 跨年周（周一 → 次年周日）
+        (_ep(2025, 12, 29), _d.date(2026, 1, 4)),    # 跨年周
+        (_ep(2025, 2, 5),   _d.date(2025, 2, 9)),    # 首日非周一（春节后周三）
+        (_ep(2025, 10, 9),  _d.date(2025, 10, 12)),  # 首日非周一（国庆后周四）
+        (_ep(2026, 3, 23),  _d.date(2026, 3, 29)),   # 常规周一
+    ]
+    for e, expected_date in cases:
+        got = _sh_dt(period_end(e, "weekly"))
+        assert got.date() == expected_date, f"{_sh_dt(e).date()} 的周日应为 {expected_date}"
+        assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_monthly_is_last_moment_of_that_month():
+    from generate_training_sets import period_end
+    import datetime as _d
+    cases = [
+        (_ep(2026, 2, 2),  _d.date(2026, 2, 28)),   # 平年 2 月
+        (_ep(2024, 2, 5),  _d.date(2024, 2, 29)),   # 闰年 2 月
+        (_ep(2026, 4, 1),  _d.date(2026, 4, 30)),
+        (_ep(2026, 12, 1), _d.date(2026, 12, 31)),  # 跨年边界
+    ]
+    for e, expected_date in cases:
+        got = _sh_dt(period_end(e, "monthly"))
+        assert got.date() == expected_date
+        assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_rejects_unknown_period():
+    """⛔ 显式常量表，不做字符串把戏 ⇒ 未知周期必须炸，不能静默走某个分支。"""
+    from generate_training_sets import period_end
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        period_end(_ep(2026, 4, 2), "30m")
