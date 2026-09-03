@@ -1002,6 +1002,9 @@ class _RunState:
     start_needs_recheck: bool = False
     # 本次运行登记的复校结论：`None`（还没做）/ `"passed"` / `"failed"`。
     recheck: "str | None" = None
+    # 本轮**自己发布过** `fetch_fatal_error` 吗（整次 fetch 致命 ⇒ 之后不许再提交、
+    # 也不许在同一轮里把它清掉）。
+    fatal_published: bool = False
 
 
 class RunLedger:
@@ -1067,16 +1070,33 @@ class RunLedger:
         三个字段**原样带过去**，若只看后者，一次登记通过的运行提交第二只股时
         就会把自己的凭据清掉、从此卡死（已配正向档：整轮三次 per-stock 提交）。
         """
+        # ⚠️⚠️ **两件事必须拆开**（Opus 第 5 轮两条 high —— **都是上一轮这个
+        # 修复自己捅出来的**，判据当时绑在 `_needs_staging_recheck` 上）：
+        #   ①「整次 fetch 致命」⇒ 冻结进度 + 本轮不许再清，对**任何** kind 成立
+        #     （spec:1025 与 spec:1035 措辞一致）。绑在需不需要复校上时，对
+        #     `source_path_escape` 整个不生效：实测发布它之后 `commit_stock` 照样把
+        #     files 4→6、cursor SH 1→2、累计字节 733 万→980 万。
+        #   ② `_needs_staging_recheck` 只回答「**清除它要哪一道前提**」。
         st = self._state()
-        rearm = (lifecycle != st.lifecycle and _needs_staging_recheck(
-            lifecycle.get("stopped_reason"), lifecycle.get("fetch_fatal_error")))
+        published_fatal = lifecycle.get("fetch_fatal_error") is not None
+        changed = lifecycle != st.lifecycle
         st.existed = True
         st.digest = digest
         st.lifecycle = lifecycle
-        if rearm:
-            st.start_needs_recheck = True
-            st.recheck = None
+        if changed and published_fatal:
+            st.fatal_published = True
             st.start_progress = _progress_of(payload)
+            if _needs_staging_recheck(lifecycle.get("stopped_reason"),
+                                      lifecycle.get("fetch_fatal_error")):
+                st.start_needs_recheck = True
+            # ⚠️⚠️ **`failed` 是粘性的**：P2-F3 那个**明令要发布**的具名结局
+            # （`staging_recheck_failed` + 保留 fatal）本身就满足
+            # `_needs_staging_recheck` ⇒ 照旧重置会把本轮自己的「复校失败」凭据
+            # 清掉，「结论不许改口」那道闸凭空消失。实测：随后 `attest(True)`
+            # 被接受、再收尾一次 fatal 与 stopped_reason **全被删掉** ——
+            # 一棵已被证明复校没通过的 staging 带着干净账本出货。
+            if st.recheck != "failed":
+                st.recheck = None
 
 
 _LEDGER_STATE: "weakref.WeakKeyDictionary[RunLedger, _RunState]" = \
@@ -1515,7 +1535,16 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                 "突破 --max-bytes 硬上限。"
             )
 
+    # ⚠️ **容器这一层此前漏了**（Opus 第 5 轮 [low]）：同一次提交里刚给
+    # `committed_bytes` 与**内层取值**改成「拒绝」（注释自称「三处同族」），
+    # 而 `isinstance(容器)` 不成立时整条判据仍然被**跳过**。这两个都是扩展字段、
+    # 读侧写侧都不校验 ⇒ 本模块自己就可能把坏容器写上盘，下一次提交把历史抹空。
     obt = previous.get("batches")
+    if "batches" in previous and not isinstance(obt, list):
+        raise ManifestInvalidError(
+            f"{where} 读到的上一份里 batches 是 {obt!r}（不是列表）——"
+            "它是只追加的历史，容器坏型时无从比较前缀，拒绝在它之上继续提交。"
+        )
     if isinstance(obt, list):
         nbt = payload.get("batches")
         # ⚠️ **只比长度不够**：一次**等长改写**就能把历史悄悄换掉（本机复现过）。
@@ -1527,6 +1556,11 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
             )
 
     orb = previous.get("inflight_rollbacks")
+    if "inflight_rollbacks" in previous and not isinstance(orb, dict):
+        raise ManifestInvalidError(
+            f"{where} 读到的上一份里 inflight_rollbacks 是 {orb!r}（不是对象）——"
+            "它是基础设施故障的遥测，容器坏型时无从比较，拒绝在它之上继续提交。"
+        )
     if isinstance(orb, dict):
         nrb = payload.get("inflight_rollbacks")
         if not isinstance(nrb, dict):
@@ -1696,6 +1730,19 @@ def attest_staging_recheck(ledger: RunLedger, *, passed: bool) -> None:
     # 造不出来）。本入口只为 P2-F3 的前提②存在，账本上没有那类记录时它没有
     # 可写入的位置。这一轮的失败由 S4/S5 在**运行级**（rc≠0 + 报告）表达 ——
     # 与 S2-F14 已接受的那条残留同规格，已在 spec 登记。
+    # ⚠️⚠️ **该 flag 的定义就是「跳过对既有文件的校验」**，因此这样的一轮
+    # **不可能**产出「全量存在性 + sha256 复校通过」这个结论。P2-F3 的互斥此前
+    # 只在 `begin_run` 判过一次，而一次**干净起步**的运行自己发布一条逃逸之后，
+    # 状态与「启动时就带着 escape 记录」完全等价、模块却什么都没复判
+    # （Opus 第 5 轮 [medium]，实测：那之后 attest(True) 被接受、下一次收尾清掉 fatal）。
+    # `attest_staging_recheck` 存在的全部理由是「调用方口头上报的不能当凭据」——
+    # 这恰恰是它**唯一能交叉核对却没核**的那个调用方声明。
+    if st.skip_existing_verify:
+        raise SkipVerifyWithEscapeError(
+            "本次运行传了 --skip-existing-verify —— 它的定义就是**跳过**对既有"
+            "文件的校验，因此这一轮不可能产出「全量复校通过」这个结论，"
+            "两者互斥。请去掉该 flag 重跑，或换新 staging + 新 seed 重拉。"
+        )
     if not st.start_needs_recheck:
         raise ValueError(
             "这棵 staging 的账本上没有「必须做全量复校才能解除」的记录，"
@@ -1746,6 +1793,12 @@ def commit_stock(stg_fd: int, manifest: dict, *, ledger: RunLedger,
     # ⚠️⚠️ **复校必须发生在任何 per-stock 提交之前**（spec P2-F3，codex R16 [high]）。
     # 判在收尾是**收口点位置错了**：那时进度早已逐只落盘，抛异常收不回来。
     st = ledger._state()
+    if st.fatal_published:
+        raise ManifestInvalidError(
+            "本次运行已经**自己发布**过 fetch_fatal_error —— spec 把撞逃逸定为"
+            "**整次 fetch 致命**（不记 failure、不加 attempts、不推进 cursor、rc≠0），"
+            "此后一只股都不许再提交。请修好之后重跑，由新的一轮继续。"
+        )
     if st.start_needs_recheck and st.recheck != "passed":
         raise ManifestInvalidError(
             "这棵 staging 的账本带着「必须做 staging 全量复校才能解除」的记录，"
@@ -1958,6 +2011,17 @@ def resolve_final_lifecycle(manifest: dict, outcome: FinalOutcome) -> dict:
             "输入 manifest 有 fetch_fatal_error 却没有 stopped_reason——"
             "读侧明令这是非法配对，决策表拒绝在它之上产出新状态"
         )
+    # ⚠️ **反方向此前没查**（Opus 第 5 轮 [low]）：`_require_escape_pairing` 在
+    # `fatal is None` 时直接返回，于是「reason 属于 REASONS_REQUIRING_FATAL 却
+    # 没有 fatal」掉进下面分支②被当成「上次没有 fatal」，返回 `{}` ——
+    # **静默丢掉一个「已证明复校没通过」的结论**。走 `commit_final` 到不了这里
+    # （磁盘那份先过读侧），所以这纯粹是本 docstring 自称提供的那层纵深防御没做全。
+    if prev_fatal is None and prev_reason in REASONS_REQUIRING_FATAL:
+        raise ManifestInvalidError(
+            f"输入 manifest 的 stopped_reason = {prev_reason!r} 属于 "
+            f"{sorted(REASONS_REQUIRING_FATAL)}，却**没有 fetch_fatal_error**——"
+            "读侧明令这是非法配对，决策表拒绝在它之上产出新状态"
+        )
     # 纵深防御：本函数是**公开的纯函数**，可以不经 read_manifest 直接调用。
     # 读侧堵上之后它仍要自己 fail closed，而不是「把不匹配的当成 source escape
     # 处理」——那正是 codex R2 [high] 被利用的那条路径。
@@ -2079,7 +2143,8 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     # 收尾却上报 `"passed"` —— 一次**没通过**的复校照样把 fatal 清掉，闸白立。
     # 反方向同样拦：从没登记过却上报结论 —— 模块自己那份记录才是唯一真相，
     # 调用方口头说的不算（这与 per-stock 提交「生命周期三字段只从磁盘读」同源）。
-    attested = ledger._state().recheck
+    st = ledger._state()
+    attested = st.recheck
     if attested == "failed":
         # 复校**已被证明失败**：这一轮只许发布 P2-F3 那个具名结局。
         # 放开非 clean 结局之后若不加这条，`max_bytes_stop()` 会把「复校没过」
@@ -2120,6 +2185,20 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     basis.update(on_disk)
 
     new_lifecycle = resolve_final_lifecycle(basis, outcome)   # ← 可能抛，必须在写之前
+    # ⚠️⚠️ **本轮自己发布的 fatal 不许在同一轮里清掉**（Opus 第 5 轮 [high]，
+    # 本机复现两种 kind）：任何清除前提（重走过那条路径 / 全量复校通过）都与它
+    # **同一轮**产生，而 spec 把撞逃逸定为**整次 fetch 致命** —— 那一轮该以
+    # rc≠0 结束，本来就不该再走到干净收尾。
+    # ⚠️ 判据取「本轮发布过就不许清」而**不是**「凭据要晚于它」：后者要去追先后，
+    # 而且会允许一条 spec 说不该存在的流程；让它**不可表达**更省事也更硬。
+    # ⚠️ 这条**不看 kind**，所以它同时兜住了「发布 P2-F3 具名结局后又改口」那条路。
+    if st.fatal_published and new_lifecycle.get("fetch_fatal_error") is None:
+        raise ManifestInvalidError(
+            "本次运行**自己发布**的 fetch_fatal_error 不许在同一轮里清掉 ——"
+            "清除它的前提与它同一轮产生，证明不了任何东西；而撞逃逸是**整次 "
+            "fetch 致命**，这一轮应当以非零码结束。请修好之后**重跑**，"
+            "由新的一轮来清除它。"
+        )
     payload = {k: v for k, v in basis.items() if k not in LIFECYCLE_KEYS}
     payload.update(new_lifecycle)
     # ⚠️ **复校失败的那一轮，进度必须原地未动**（spec P2-F3，codex R15 [high]）：
@@ -2139,8 +2218,7 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
     #   ⇒ 欠一次复校且未通过（`attest` 不欠时拒绝登记），故合并成一条。
     # ⚠️ 冻结的是**进度**而不是**提交**：这一轮仍要能把「我看见 fatal 了、
     #   我停了」或「我撞了新逃逸」记下去 —— 已配正向档。
-    st = ledger._state()
-    if st.start_needs_recheck and st.recheck != "passed":
+    if (st.start_needs_recheck and st.recheck != "passed") or st.fatal_published:
         if _progress_of(payload) != st.start_progress:
             raise ManifestInvalidError(
                 "这棵 staging 欠一次全量复校（账本带着必须复校才能解除的记录），"

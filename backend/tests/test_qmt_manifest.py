@@ -6020,3 +6020,238 @@ def test_the_staged_export_log_record_is_frozen(tmp_path, mutate):
             commit_stock(fd, tampered, ledger=ledger)
     finally:
         os.close(fd)
+
+
+# ── Opus 对抗性评审 第 5 轮 ─────────────────────────────────────
+# 2 high + 1 medium + 2 low。⚠️⚠️ **两条 high 都是 Opus-4 那次「重新武装」
+# 修复自己捅出来的**：我把判据绑在 `_needs_staging_recheck` 上，而
+#   ① P2-F3 那个具名结局本身就满足它 ⇒ 发布它会把本轮自己的凭据清掉；
+#   ② `source_path_escape` 不满足它 ⇒ 对源侧逃逸整个不生效。
+# ⇒ 把两件事拆开：「整次致命 ⇒ 冻结 + 需要新凭据」对**任何** fatal 生效，
+#   `_needs_staging_recheck` 只回答「清除它要哪一道前提」。
+
+
+def test_publishing_the_named_failed_recheck_outcome_keeps_the_verdict_sticky(tmp_path):
+    """⭐⭐ [Opus-5 high①] 发布 P2-F3 **明令要发布**的那个结局，把本轮自己的
+    「复校失败」凭据清掉了 —— 于是「结论不许改口」那道闸凭空消失。
+
+    本机端到端复现（**全程公开 API、没有篡改也没有说谎**）：
+      `attest(False)` → `commit_final(staging_recheck="failed")`（盘上正确记下
+      `staging_recheck_failed` + 保留 fatal）→ **`attest(True)` 被接受** →
+      再收尾一次 → **fatal 与 stopped_reason 全被删掉**。
+    一棵**已被证明复校没通过**的 staging 就这样带着干净账本出货，
+    而 pilot 的 fail-closed 判据（`fetch_fatal_error` 存在，O4-F1）没了。
+
+    ⚠️ 既有那条 `test_the_recheck_verdict_cannot_be_flipped_once_attested`
+    之所以是绿的，只因为它把两次 `attest` **背靠背**放在一起、中间没有
+    `commit_final` —— 有意思的那个次序它的 setup 根本到不了。
+
+    判别力：把 `failed` 的粘性去掉（让 `_advance` 照常重置它），本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        commit_final(fd, _warned(), ledger=ledger,
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="failed"))
+        assert read_manifest(fd)["stopped_reason"] == "staging_recheck_failed"
+        with pytest.raises(ValueError, match="改口|已登记"):
+            attest_staging_recheck(ledger, passed=True)
+        assert "fetch_fatal_error" in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("kind", ["source_path_escape", "staging_path_escape"])
+def test_a_fatal_published_this_run_blocks_further_stock_commits(tmp_path, kind):
+    """⭐⭐ [Opus-5 high②(a)] 「整次 fetch 致命」对**两种** kind 都成立
+    （spec:1025 与 spec:1035 措辞一致：不记 failure / 不加 attempts / 不推进 cursor），
+    而重新武装此前绑在 `_needs_staging_recheck` 上 —— 它对源侧逃逸是 False。
+
+    本机复现（source 侧）：发布 `source_path_escape` 之后 `commit_stock` 照样
+    把 files 4→6、cursor SH 1→2、累计字节 733 万→980 万 —— 一棵**已被证明
+    分量被换过**的树继续烧冻结宇宙与 `--max-bytes` 预算。
+
+    判别力：把冻结判据换回 `_needs_staging_recheck`，source 那一档必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind=kind, relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        before = read_manifest(fd)
+        with pytest.raises(ManifestInvalidError, match="致命|复校"):
+            commit_stock(fd, _with_more_stocks(_valid_manifest()), ledger=ledger)
+        assert read_manifest(fd) == before
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("kind,fresh_attest", [
+    ("source_path_escape", False),      # 清它只要前提①
+    ("staging_path_escape", True),      # 清它另需前提②，故本轮补登记一次复校
+])
+def test_a_fatal_published_this_run_cannot_be_cleared_in_the_same_run(
+        tmp_path, kind, fresh_attest):
+    """⭐⭐ [Opus-5 high②(b)] **本轮自己发布的 fatal 不许在同一轮里清掉**。
+
+    任何清除前提（重走过那条路径 / 全量复校通过）**都必然早于**它 ——
+    拿昨天的体检报告证明今天没病。本机复现（source 侧，payload 与推进后的
+    磁盘状态一致，避免被回滚守卫以别的理由拒掉）：第二次收尾声称
+    `revisited_fatal_path=True`，fatal 与 stopped_reason 全被清光。
+
+    ⚠️ 这条判据**不看 kind**，所以它同时兜住了 high① 那条路。
+    ⚠️ **判据取「本轮发布过就不许清」而不是「凭据要晚于它」**：spec 把撞逃逸
+    定为**整次 fetch 致命**（rc≠0 就该结束），所以「发布 fatal 之后又干净收尾」
+    这条流程本来就不该存在 —— 与其去追凭据的先后，不如让它不可表达。
+    ⚠️⚠️ **断言必须用这条判据的专属措辞「自己发布」**（控制者变异实测）：
+    第一版写 `match="同一轮|本次运行"` 时**两档都假绿** —— 它撞上了既有
+    一致性检查的文案「而**本次运行**登记的是 None」。同一族第五次，
+    其中第三次是我自己的断言太宽（前两次是 `match="过大"` 与裸字段名）。
+
+    判别力：删掉「本轮发布过 fatal 就不许清」这条，两档都必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind=kind, relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        payload = {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+        if fresh_attest:
+            attest_staging_recheck(ledger, passed=True)     # 本轮补做的复校
+            outcome = clean_finish(revisited_fatal_path=True,
+                                   staging_recheck="passed")
+        else:
+            outcome = clean_finish(revisited_fatal_path=True)
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, payload, ledger=ledger, outcome=outcome)
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == kind
+    finally:
+        os.close(fd)
+
+
+def test_a_fatal_published_this_run_may_still_be_overwritten_by_a_stricter_one(tmp_path):
+    """⭐ **正向档**：本轮发布过 fatal 之后，**换成同级或更严的那一条**必须照常允许
+    （新的生命周期里仍然带着 fatal，不构成「清掉」）。
+
+    判别力：把判据写成「本轮发布过 fatal 就一律拒绝收尾」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        payload = {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+        w = commit_final(fd, payload, ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="1分钟K线_前复权/y.csv",
+            component="1分钟K线_前复权", errno="ELOOP"))
+        assert w["fetch_fatal_error"]["kind"] == "staging_path_escape"   # 升级成功
+    finally:
+        os.close(fd)
+
+
+def test_a_skip_verify_run_can_never_attest_a_full_recheck(tmp_path):
+    """⭐ [Opus-5 medium] `--skip-existing-verify` 的互斥**只在启动时判**。
+
+    干净起步的运行带着该 flag 合法启动，随后**自己发布**一条 staging 逃逸 →
+    此时它与「启动时就带着 escape 记录」完全等价，而模块什么都没复判：
+    `attest(passed=True)` 被接受，下一次收尾把 fatal 清掉。
+    而 `attest_staging_recheck` 存在的全部理由就是「调用方口头上报的东西不能
+    当凭据」—— 这恰恰是它**唯一能交叉核对却没核**的那个调用方声明。
+
+    判别力：删掉 attest 里的 skip-verify 检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd, skip_existing_verify=True)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="a/x.csv",
+            component="a", errno="ELOOP"))
+        with pytest.raises(SkipVerifyWithEscapeError, match="互斥|跳过"):
+            attest_staging_recheck(ledger, passed=True)
+    finally:
+        os.close(fd)
+
+
+def test_resolve_refuses_a_reason_that_requires_a_fatal_without_one():
+    """⭐ [Opus-5 low] 决策表的纵深防御**只查了配对的一个方向**。
+
+    它 fail-close「有 fatal 却没 reason」，而 `_require_escape_pairing` 在
+    `fatal is None` 时直接返回 ⇒ 反方向（reason 属于 `REASONS_REQUIRING_FATAL`
+    却没有 fatal）掉进分支②被当成「上次没有 fatal」，返回 `{}`
+    —— **静默丢掉一个「已证明复校没通过」的结论**。
+    ⚠️ 走 `commit_final` 到不了这里（磁盘那份先过读侧），所以这纯粹是
+    docstring 自称提供的那层纵深防御没做全。
+
+    判别力：删掉新加的反方向检查，本条必红。
+    """
+    for reason in sorted(REASONS_REQUIRING_FATAL):
+        m = _valid_manifest(stopped_reason=reason)          # 没有 fetch_fatal_error
+        with pytest.raises(ManifestInvalidError, match="配对|没有 fetch_fatal_error"):
+            resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True))
+
+
+@pytest.mark.parametrize("field,rotten,payload", [
+    ("batches", {"batches": {"n": 1}}, {"batches": []}),
+    ("inflight_rollbacks", {"inflight_rollbacks": ["x"]}, {"inflight_rollbacks": {}}),
+])
+def test_a_wrong_typed_previous_container_is_refused_not_skipped(
+        tmp_path, field, rotten, payload):
+    """⭐ [Opus-5 low] 上一份的**容器类型**不对时，整条 append-only / 单调判据
+    被跳过 —— 正是同一次提交里刚给 `committed_bytes` 与**内层取值**改成「拒绝」
+    的那个形态（注释里自己写着「三处同族」），**容器这一层漏了**。
+
+    本机复现：盘上 `batches` 是 dict / `inflight_rollbacks` 是 list 时，
+    下一次提交把历史抹成空，无人拦。而这两个都是扩展字段、读侧写侧都不校验
+    ⇒ 本模块自己就可能把坏容器写上盘。
+
+    判别力：把新加的「容器类型不对即拒」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(**rotten))
+        with pytest.raises(ManifestInvalidError, match="读到的上一份"):
+            commit_stock(fd, _valid_manifest(**payload), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_a_fatal_published_this_run_also_freezes_progress_at_the_final_commit(tmp_path):
+    """⭐ 发布 fatal 之后，**收尾入口**也不许推进进度（控制者变异自查补）。
+
+    `commit_stock` 已经被整个挡住了，但 `commit_final` **自己交回来的 payload
+    仍然会落盘** —— 一次「覆盖成更严的 fatal」的收尾（新生命周期里仍有 fatal，
+    所以「不许清」那条拦不住它）可以顺手把 `files` / `cursor` / 累计字节推上去，
+    继续烧冻结宇宙与 `--max-bytes` 预算。
+
+    判别力：把进度冻结条件里的 `or st.fatal_published` 去掉，本条必红
+    （变异实测：去掉后全量一条不红，此档就是补上的那一条）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        grown = _with_more_stocks(
+            {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS})
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger, outcome=escape_stop(
+                kind="staging_path_escape", relative_path="1分钟K线_前复权/y.csv",
+                component="1分钟K线_前复权", errno="ELOOP"))
+        assert len(read_manifest(fd)["files"]) == len(cur["files"])
+    finally:
+        os.close(fd)
