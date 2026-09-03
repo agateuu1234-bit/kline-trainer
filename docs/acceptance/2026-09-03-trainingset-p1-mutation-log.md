@@ -395,4 +395,60 @@ git status --short backend/
 (无输出)
 ```
 
+## 基线更新（最终整支分支评审 I1/I1b/M1 修复后重跑，2026-09-03）
+
+> 触发原因：本文件上方记录的执行基线是 HEAD `58a8773`，此后 `feebe5b`（docs-only）与 `a1266bd`
+> （docs-only）两个提交未改代码，取证与代码树保持等价。本节对应的提交**改了代码**
+> （`backend/generate_training_sets.py` + `backend/tests/test_generate_training_sets.py`），
+> 等价性到此断开，故本节是新的独立取证，不覆盖上方任何一组。
+>
+> 环境同上：`backend/`，解释器
+> `/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3`；每组变异前后先清
+> `__pycache__` 再跑 `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/ -q`（或按需 `-k` 缩小范围，
+> 全量结论以本节末尾"最终验证"为准）。
+
+修复内容：
+- **I1**：`zip_and_hash` 的 `info.external_attr = 0o644 << 16` 缺 `S_IFREG` 类型位 → 改成
+  `(stat.S_IFREG | 0o644) << 16`，并加 `import stat`。
+- **I1b**：`test_zip_and_hash_is_deterministic_across_runs` 补 `external_attr` 断言。
+- **M1**：`test_week_end_date_is_module_level_and_shared` 补一段对 `period_end(weekly)` 的
+  monkeypatch spy 断言（原来只测了 `select_period_window` 那一侧）。
+
+| 变异 | 改了什么 | 红的是哪一条测试 | 结论 |
+|---|---|---|---|
+| **B34（重跑）** | `zip_and_hash` 改回 `with zipfile.ZipFile(zip_path, "w") as zf: zf.write(db_path, arcname=db_path.name)`（去掉固定 `ZipInfo`/`date_time`/`external_attr`） | `test_zip_and_hash_is_deterministic_across_runs`（`assert h1 == h2` 处即失败：`'5295bc3a' != 'e840a22f'`，未到本轮新加的 `external_attr` 断言就已经红） | **符合预期**（修复后判别力不变） |
+| **B66（重跑）** | `select_period_window` 函数体内新增嵌套闭包 `_shadow_week_end_date`（逐字复刻模块级 `_week_end_date` 的公式），调用点改用它；模块级 `_week_end_date` 保留不动 | `test_week_end_date_is_module_level_and_shared`（`select_period_window` 那段 `assert calls` 失败：`assert []`） | **符合预期**（修复后判别力不变；本轮新加的 `period_end` 侧断言在它之后，未及触达） |
+| **B66b（新增，M1 修复的判别力证明）** | `period_end` 的 weekly 分支 `last = _week_end_date(datetime_epoch)` → 就地内联 `last = d + _dt.timedelta(days=(6 - d.weekday()))`（语义完全等价，只是不再调用模块级函数） | **两个方向都实测**：<br>① **修复前**（用改动前的原版 `test_generate_training_sets.py`，即本节修复引入之前的测试文件）施加本变异 → 全套 `pytest tests/ -q` **`1118 passed`，零红**——这正是 M1 指出的洞：旧断言只查了 `select_period_window` 一侧，`period_end` 另抄一份公式没有任何测试能拦住。<br>② **修复后**（当前测试文件，含本轮新加的 `period_end` 断言）施加同一变异 → `test_week_end_date_is_module_level_and_shared` 红，失败点精确落在新加的那行：`assert calls, "period_end(weekly) 没有调用模块级 _week_end_date（说明它另抄了一份公式）"`，`assert []` | **修复前不红、修复后红**，与 M1 修复的目的完全吻合 |
+| **B34b（新增，I1 修复的判别力证明）** | `info.external_attr = (stat.S_IFREG \| 0o644) << 16` 改回 `info.external_attr = 0o644 << 16`（丢类型位） | `test_zip_and_hash_is_deterministic_across_runs`（`h1==h2`/`b1==b2` 两条旧断言仍然通过——mtime 无关的确定性没被这处改动破坏；新加的 `external_attr` 断言失败：`assert 27525120 == ((32768 \| 420) << 16)`，实测值 `0x1a40000`，与评审预判的旧缺陷值逐位一致） | **符合预期**（新断言有判别力：I1 修复不存在时会被它抓住） |
+
+### B66b 逐步记录（两个方向）
+
+**方向①：修复前**（临时把 `backend/tests/test_generate_training_sets.py` 换回本轮修复前的原文，
+`generate_training_sets.py` 施加上述内联变异）：
+
+```
+1118 passed in 37.08s
+```
+
+零红——`period_end` 分支的公式漂移在旧断言下完全不可见。
+
+**方向②：修复后**（把 `backend/tests/test_generate_training_sets.py` 换回本轮修复后的当前版本，
+`generate_training_sets.py` 保持同一份内联变异不变）：
+
+```
+FAILED tests/test_generate_training_sets.py::test_week_end_date_is_module_level_and_shared
+  AssertionError: period_end(weekly) 没有调用模块级 _week_end_date（说明它另抄了一份公式）
+  assert []
+1 failed, 55 deselected in 0.29s
+```
+
+复原（源码与测试文件均手工改回，⛔ 未用 `git checkout`）后重跑：
+
+```
+1118 passed in 37.22s
+```
+
+`git status --short backend/` 无输出；`git diff --stat backend/` 仅剩本轮预期的两处改动
+（`generate_training_sets.py` + `tests/test_generate_training_sets.py`）。
+
 `git diff --stat HEAD -- backend/` 同样无输出，确认 10 组独立变异 + 1 组组合变异全部复原干净，未在 `backend/` 留下任何残余改动。
