@@ -108,3 +108,87 @@ def test_build_windows_goes_through_production_select_period_window(monkeypatch)
     assert sorted(calls) == sorted(PERIODS), (
         f"build_windows 没有对每个周期各调一次生产切窗函数（实测 {calls}）"
         f"—— 说明它绕过了 select_period_window，特征③就成了手工摆出来的假象")
+
+
+# ── Task 2：生产者半边断言（spec §4.1 note 3）
+
+import contextlib          # noqa: E402
+import sqlite3             # noqa: E402
+import tempfile            # noqa: E402
+import zipfile             # noqa: E402
+from pathlib import Path   # noqa: E402
+
+# ⛔ 手写字面量。推导见本片计划 Task 2 的表格。
+# ⛔ **绝不**允许写成运行时调 `period_end` / `assign_global_indices` 现算（spec 变异 B18）：
+#    那样生产者与校验者接到同一个公式上，公式改错两边**一起绿**，缺陷原样藏住。
+EXPECTED_END_GLOBAL_INDEX: dict[str, list[int]] = {
+    # 收盘标注：各自指向自己那一刻
+    "3m":      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+    "15m":     [3, 5, 9, 11, 15, 17, 21, 23],
+    "60m":     [5, 11, 17, 23],
+    # 开盘侧标注：指向所属日历周期的最后一刻
+    "daily":   [0, 5, 11, 17, 23],
+    "weekly":  [0, 5],                 # 03-30 那根被删 ⇒ 03-23 那根按【日历周末】落在 5
+    "monthly": [0, 0, 17, 23],         # 前两根月末早于 3m 轴首 ⇒ clamp 0（特征①）
+}
+
+
+@contextlib.contextmanager
+def _open_zip_db(zip_path):
+    """打开训练组 zip 里那**唯一**一个成员，落临时文件后用 sqlite3 打开。
+
+    顺带兑现 spec §4.1 note 3 的压缩包清单判据：恰好 1 个成员、无 sidecar。
+    """
+    zip_path = Path(zip_path)
+    with zipfile.ZipFile(zip_path) as zf:
+        members = zf.namelist()
+        assert len(members) == 1, f"训练组 zip 必须恰好 1 个成员（无 sidecar），实测 {members}"
+        blob = zf.read(members[0])
+    with tempfile.TemporaryDirectory() as td:
+        member_path = Path(td) / "member.db"
+        member_path.write_bytes(blob)
+        conn = sqlite3.connect(str(member_path))
+        try:
+            yield members, conn
+        finally:
+            conn.close()
+
+
+@pytest.mark.parametrize("source", ["fresh"])
+def test_fixture_matches_hand_written_expectations(source, tmp_path):
+    """逐周期索引向量必须等于**独立人工推算**的期望（spec §4.1 note 3）。
+
+    ⚠️ Task 3 会把 `source` 的取值扩成 ["fresh", "committed"]，让**已提交的那份产物**
+    也过同一套断言 —— 现在还没有已提交产物，先只跑现场重建这一路。
+    """
+    zip_path = build_fixture(tmp_path).path if source == "fresh" else FIXTURE_ZIP
+
+    with _open_zip_db(zip_path) as (members, conn):
+        # 压缩包清单
+        assert len(members) == 1
+        assert Path(members[0]).suffix in (".sqlite", ".db"), (
+            f"训练组 zip 成员后缀必须是 .sqlite 或 .db，实测 {members[0]!r}")
+        # 产物代际（⛔ 写字面量 2，不 import SCHEMA_VERSION：import 会让断言自我实现）
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+        # 逐周期索引向量
+        for period, expected in EXPECTED_END_GLOBAL_INDEX.items():
+            got = [r[0] for r in conn.execute(
+                "SELECT end_global_index FROM klines WHERE period=? ORDER BY id", (period,))]
+            assert got == expected, f"{period} 的 end_global_index 与手写期望不符：{got} != {expected}"
+
+        # global_index：仅 3m 赋值、其余全 NULL（D2/D4 契约，本片顺带钉住）
+        gi3 = [r[0] for r in conn.execute(
+            "SELECT global_index FROM klines WHERE period='3m' ORDER BY id")]
+        assert gi3 == EXPECTED_END_GLOBAL_INDEX["3m"]
+        non_null = conn.execute(
+            "SELECT count(*) FROM klines WHERE period<>'3m' AND global_index IS NOT NULL"
+        ).fetchone()[0]
+        assert non_null == 0, "非 3m 周期的 global_index 必须全为 NULL"
+
+        # meta 单行（含非 ASCII 股票名的 UTF-8 往返）
+        assert conn.execute(
+            "SELECT stock_code, stock_name, start_datetime, end_datetime FROM meta").fetchall() == [
+            ("999002.SZ", "跨端契约样例", 1774972800, 1775059199)]
+        assert conn.execute("SELECT count(*) FROM klines").fetchone()[0] == 47   # 4+2+5+4+8+24
