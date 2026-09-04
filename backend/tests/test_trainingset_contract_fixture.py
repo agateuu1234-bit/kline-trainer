@@ -177,6 +177,16 @@ def test_fixture_matches_hand_written_expectations(source, tmp_path):
         assert len(members) == 1
         assert Path(members[0]).suffix in (".sqlite", ".db"), (
             f"训练组 zip 成员后缀必须是 .sqlite 或 .db，实测 {members[0]!r}")
+        # ⭐ 压缩**方法**也要钉（最终评审 Important 1，实证：改成 BZIP2 后全仓 126 passed / 0 failed）：
+        # App 侧解压用 ZIPFoundation（`ios/Contracts/Package.swift` 钉 0.9.0..<1.0.0），
+        # 它只实现 store 与 deflate ⇒ 换成 BZIP2 / LZMA 会在**手机上**解不开，而生产者半边
+        # 与已提交 fixture **两边都还是绿的** —— 正是本切片要堵的那个「两边绿、缝里烂」机制。
+        # ⚪ `compress_type` 是个**声明常量**（8 = deflate），不是压缩后的字节 ⇒ 跨机器稳定，
+        #    不犯「比字节导致跨机假红」那类错（见本片计划 §前置事实 F3）。
+        with zipfile.ZipFile(zip_path) as _zf:
+            got_method = _zf.getinfo(members[0]).compress_type
+        assert got_method == zipfile.ZIP_DEFLATED, (
+            f"压缩方法必须是 deflate（{zipfile.ZIP_DEFLATED}），实测 {got_method}")
         # 产物代际（⛔ 写字面量 2，不 import SCHEMA_VERSION：import 会让断言自我实现）
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
@@ -258,6 +268,13 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert set(c) == {"members", "user_version", "schema", "meta", "klines"}, (
         f"漂移闸的比较面被改窄/改宽了：{sorted(c)}")
 
+    # members / user_version：本条规则对**每个**键都适用，不能只贯彻三个（最终评审 Important 3）
+    assert isinstance(c["members"], list) and all(isinstance(m, str) for m in c["members"]), (
+        f"members 必须是成员名清单，⛔ 不得退化成计数 —— 退化后 `.db`→`.sqlite` 这类改名"
+        f"就没人看着了（实测 {c['members']!r}）")
+    assert isinstance(c["user_version"], int), (
+        f"user_version 必须是取回的那个整数值本身（实测 {type(c['user_version']).__name__}）")
+
     # klines：必须是【逐行 × 逐列】的完整表，⛔ 不得退化成计数或摘要
     assert isinstance(c["klines"], list) and len(c["klines"]) == 47, (
         f"klines 必须逐行比（期望 47 行的 list，实测 {type(c['klines']).__name__}）")
@@ -273,4 +290,5 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert "end_global_index" in schema_sql, (
         "schema 必须包含 DDL 原文（`sqlite_master.sql`）——只比表名的话，改列型/加列都不会红")
     assert not any(name.startswith("sqlite_") for _, name, _ in c["schema"]), (
-        "sqlite_ 开头的内部表不得进比较面（sqlite_sequence 随 AUTOINCREMENT 变动，会造假红）")
+        "sqlite_ 开头的内部表不得进比较面 —— 它们的 DDL 文本是 **sqlite 版本相关**的实现细节，"
+        "跨机器会造假红（⚠️ 理由**不是**「sqlite_sequence 会变」：本 fixture 里它恒为 klines/47）")

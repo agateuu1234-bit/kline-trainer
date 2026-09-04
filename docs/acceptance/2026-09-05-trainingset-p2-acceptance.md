@@ -51,7 +51,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_trainingset_contract_fixture.py -v
 ```
 
-**期望看到**：9 行，每行结尾都是 `PASSED`，最后一行是 `9 passed`。九条分别在管：
+**期望看到**：9 行，每行都**含有** `PASSED` 这个词（行尾还会跟一个百分比，如 `[ 22%]`），最后一行是 `9 passed`。九条分别在管：
 
 | 序 | 这条在管什么 |
 |---|---|
@@ -67,7 +67,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 
 **通过判定**：
 
-- ✅ 通过 —— 9 行全是 `PASSED`，且最后一行是 `9 passed`。
+- ✅ 通过 —— 9 行都含 `PASSED`，且最后一行是 `9 passed`。
 - ❌ 不通过 —— 任何一行是 `FAILED`；或条数不是 9 条。
 
 ---
@@ -80,9 +80,10 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" && unzip -l tests/contract-fixtures/training-set/999002.SZ_1774972800.zip
 ```
 
-**期望看到**（逐字对照）：
+**期望看到**（`Archive:` 那一行的路径可能因你所在目录而略有不同，其余逐字对照）：
 
 ```
+Archive:  tests/contract-fixtures/training-set/999002.SZ_1774972800.zip
   Length      Date    Time    Name
 ---------  ---------- -----   ----
     32768  01-01-1980 00:00   999002.SZ_1774972800.db
@@ -134,6 +135,18 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" &
 
 ⚠️ 这一条为什么重要：以后如果那道对账闸报错，唯一正确的办法是先搞清楚「程序的行为是不是**有意**改的」。如果重新生成本身就不稳定（同样输入产出不同文件），那这套办法整个就立不住了。
 
+### 如果 A4 判了 ❌ 该怎么办（**必读**，这一步会改动仓库里的文件）
+
+A4 第二步那条命令会**覆盖**仓库里那份样本文件。如果第三步比出了差异，仓库里那份**已经被换掉了** —— 但你在第一步已经备份过，一条命令就能还原：
+
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" && cp /tmp/verify_before.zip tests/contract-fixtures/training-set/999002.SZ_1774972800.zip && git status --short
+```
+
+还原成功的标志：这条命令**没有任何输出**。
+
+⚠️ **换一台电脑跑出差异是预期之内的，不是缺陷** —— 原因见下面的残留 R4。在**同一台**电脑上跑出差异才说明有问题，那时请把第二步的完整输出发给开发者。
+
 ⚠️ 顺带一句：命令打印出来的那个 `content_hash`（一串 8 位字符）**换一台电脑就会变** —— 因为数据库文件里存了「写它的那个数据库程序的版本号」。所以**任何检查都不许拿这串字符当判据**，本片的对账闸比的是内容不是字节。
 
 ---
@@ -174,7 +187,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" &
 
 ---
 
-## A7 · 本片一共动了哪 7 个文件
+## A7 · 本片一共动了哪 9 个文件
 
 **动作**：
 
@@ -182,12 +195,14 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" &
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" && git diff --name-only origin/main...HEAD
 ```
 
-**期望看到**（7 行，次序可能不同）：
+**期望看到**（9 行，次序可能不同）：
 
 ```
 backend/scripts/regen_trainingset_contract_fixture.py
 backend/tests/_trainingset_contract_fixture.py
 backend/tests/test_trainingset_contract_fixture.py
+docs/acceptance/2026-09-05-trainingset-p2-acceptance.md
+docs/acceptance/2026-09-05-trainingset-p2-mutation-log.md
 docs/superpowers/plans/2026-09-04-trainingset-p2-crossboundary-fixture.md
 tests/contract-fixtures/README.md
 tests/contract-fixtures/training-set/999002.SZ_1774972800.zip
@@ -201,15 +216,19 @@ tests/contract-fixtures/training-set/README.md
 | `backend/scripts/regen_…py` | 重新生成样本文件的**唯一**入口（人工执行，带「重生 = 改约定」的警告） |
 | `backend/tests/_trainingset_contract_fixture.py` | 造样本的模具：合成一批行情数据，再走**生产程序**切窗、打包 |
 | `backend/tests/test_trainingset_contract_fixture.py` | 上面那 9 条检查 |
-| `docs/superpowers/plans/2026-09-04-…md` | 这一片的施工计划（含施工过程中被评审打回后的两次订正） |
+| `docs/acceptance/2026-09-05-…-acceptance.md` | ⭐ **就是你正在读的这份清单** |
+| `docs/acceptance/2026-09-05-…-mutation-log.md` | 「故意改坏、看它红不红」的逐条实测记录 |
+| `docs/superpowers/plans/2026-09-04-…md` | 这一片的施工计划（含施工过程中被评审打回后的多次订正） |
 | `tests/contract-fixtures/README.md` | 原有的跨语言约定说明，**只在末尾加了一节**指路 |
 | `tests/contract-fixtures/training-set/999002.SZ_1774972800.zip` | ⭐ **样本文件本体** |
 | `tests/contract-fixtures/training-set/README.md` | 样本文件的说明书：它是什么、怎么重生、**什么时候不该重生** |
 
 **通过判定**：
 
-- ✅ 通过 —— 恰好这 7 个，没有多余的。
+- ✅ 通过 —— 恰好这 9 个，没有多余的。
 - ❌ 不通过 —— 出现清单之外的文件。
+
+⚠️ 这一条本来写的是「7 个」，被最终评审当场抓了个正着：我是在**还没提交这两份验收文档之前**跑的那条命令，然后把当时的结果抄了进来 —— 于是这份清单自己成了让它自己判「不通过」的那两个文件之一。一条**在自己身上就不成立**的验收判据，比没有还糟。
 
 ---
 
@@ -245,7 +264,21 @@ App 侧一行代码没改，它仍然读不了任何真实训练组（它只认�
 
 这个洞从更早的版本就在，不是这一片造成的。混进来会把评审面搅浑 ⇒ **建议归 P3**（P3 本来就在处理约定文本的一致性）。
 
-### R6 · 一个今天到不了、但记下来的地雷
+### R6 · 这份样本**照不到**生产切窗程序的另外两条路
+
+样本里的周线只经过了「删掉跨起点那根」这一条过滤；另一条「删掉跨结束点那根」在这份样本上作用于**空数据**，而「每个周期往前最多取多少根」的那几个上限（18/3/4/3/6/2）也全都远低于设定值。⇒ **把这两处删掉，这份样本一动不动。**
+
+这是本片有意的取舍（样本要小到期望值能手写），但**切片二和 P3 不能误以为「这份样本覆盖了整个切窗逻辑」**。
+
+### R7 · CI 配置里有一句话现在是错的，但本片不许改它
+
+`.github/workflows/backend-tests.yml` 的注释里列举了「谁会读 `tests/contract-fixtures/`」，写的是两处。本片加了第三处。本片被明令禁止碰 CI 配置文件，所以只能记下来：**下一个动 CI 的 PR 顺手改掉**。
+
+### R8 · 重新生成脚本在极端时机会留一个残渣文件
+
+脚本先写到一个临时名、再原子替换。如果进程恰好死在这两步之间，样本目录里会留下一个 `999002.SZ_1774972800.zip.tmp`。它会出现在 `git status` 里（不会被误提交），但没有任何东西自动清理它。手动删掉即可。
+
+### R9 · 一个今天到不了、但记下来的地雷
 
 如果生成程序哪天真的往数据库里存了一个「非数字」（NaN），因为「非数字不等于它自己」这条语言规则，那道对账闸会**永久报红，而且没法通过重新生成来消解**。今天到不了 —— 程序在写库前会把非数字转成空值。仅作记录，本片不处理。
 

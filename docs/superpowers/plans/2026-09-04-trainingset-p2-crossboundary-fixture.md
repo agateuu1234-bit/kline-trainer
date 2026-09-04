@@ -518,6 +518,16 @@ def test_fixture_matches_hand_written_expectations(source, tmp_path):
         assert len(members) == 1
         assert Path(members[0]).suffix in (".sqlite", ".db"), (
             f"训练组 zip 成员后缀必须是 .sqlite 或 .db，实测 {members[0]!r}")
+        # ⭐ 压缩**方法**也要钉（最终评审 Important 1，实证：改成 BZIP2 后全仓 126 passed / 0 failed）：
+        # App 侧解压用 ZIPFoundation（`ios/Contracts/Package.swift` 钉 0.9.0..<1.0.0），
+        # 它只实现 store 与 deflate ⇒ 换成 BZIP2 / LZMA 会在**手机上**解不开，而生产者半边
+        # 与已提交 fixture **两边都还是绿的** —— 正是本切片要堵的那个「两边绿、缝里烂」机制。
+        # ⚪ `compress_type` 是个**声明常量**（8 = deflate），不是压缩后的字节 ⇒ 跨机器稳定，
+        #    不犯「比字节导致跨机假红」那类错（见本片计划 §前置事实 F3）。
+        with zipfile.ZipFile(zip_path) as _zf:
+            got_method = _zf.getinfo(members[0]).compress_type
+        assert got_method == zipfile.ZIP_DEFLATED, (
+            f"压缩方法必须是 deflate（{zipfile.ZIP_DEFLATED}），实测 {got_method}")
         # 产物代际（⛔ 写字面量 2，不 import SCHEMA_VERSION：import 会让断言自我实现）
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
@@ -906,6 +916,13 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert set(c) == {"members", "user_version", "schema", "meta", "klines"}, (
         f"漂移闸的比较面被改窄/改宽了：{sorted(c)}")
 
+    # members / user_version：本条规则对**每个**键都适用，不能只贯彻三个（最终评审 Important 3）
+    assert isinstance(c["members"], list) and all(isinstance(m, str) for m in c["members"]), (
+        f"members 必须是成员名清单，⛔ 不得退化成计数 —— 退化后 `.db`→`.sqlite` 这类改名"
+        f"就没人看着了（实测 {c['members']!r}）")
+    assert isinstance(c["user_version"], int), (
+        f"user_version 必须是取回的那个整数值本身（实测 {type(c['user_version']).__name__}）")
+
     # klines：必须是【逐行 × 逐列】的完整表，⛔ 不得退化成计数或摘要
     assert isinstance(c["klines"], list) and len(c["klines"]) == 47, (
         f"klines 必须逐行比（期望 47 行的 list，实测 {type(c['klines']).__name__}）")
@@ -921,7 +938,8 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert "end_global_index" in schema_sql, (
         "schema 必须包含 DDL 原文（`sqlite_master.sql`）——只比表名的话，改列型/加列都不会红")
     assert not any(name.startswith("sqlite_") for _, name, _ in c["schema"]), (
-        "sqlite_ 开头的内部表不得进比较面（sqlite_sequence 随 AUTOINCREMENT 变动，会造假红）")
+        "sqlite_ 开头的内部表不得进比较面 —— 它们的 DDL 文本是 **sqlite 版本相关**的实现细节，"
+        "跨机器会造假红（⚠️ 理由**不是**「sqlite_sequence 会变」：本 fixture 里它恒为 klines/47）")
 ```
 
 - [ ] **Step 2: 跑，确认绿**
@@ -977,10 +995,10 @@ git commit -m "test(trainingset): 漂移闸——现场重建与已提交 fixtur
 | # | 变异（改哪一处） | 期望红的**具体用例** |
 |---|---|---|
 | **P1** | `GTS` 的 `assign_global_indices` 里 `upper = period_end(_open, period)` 改回旧式「下一根 open − 1」（末根退化为轴末） | `test_fixture_matches_hand_written_expectations[fresh]` 报 **`15m`** 不符；`[committed]` **不红**（它读的是已提交文件）；`test_committed_fixture_matches_current_generator` **红**（`klines` 字段漂移） |
-| **P2** | `GTS` 的 `period_end` 把 `_CLOSE_LABELLED` 判断反过来（日内走开盘侧、日线及以上走收盘式） | 同上用例报 **`daily`** 或 **`monthly`** 不符 ⇒ 兑现 spec §4.1 正向对照 ①（健康输入被放行不是假的） |
+| **P2** | `GTS` 的 `period_end` 把 `_CLOSE_LABELLED` 判断反过来（日内走开盘侧、日线及以上走收盘式）。⚠️ **按字面完全反过来是跑不通的**：`3m`/`15m`/`60m` 会落进 `period_end` 的 `else` 撞 `raise ValueError`，得到的是报错而不是干净的断言红。实测取的是可跑的那一半 —— 把 `_CLOSE_LABELLED` 扩成六个周期（即「日线及以上也走收盘式」） | 同上用例报 **`daily`** 或 **`monthly`** 不符 ⇒ 兑现 spec §4.1 正向对照 ①（健康输入被放行不是假的） |
 | **P3** | `GTS` 的 `period_end` 里 `weekly` 分支改成 `last = d`（当天） | 同上用例报 **`weekly`** 不符（`[0, 5]` → `[0, 0]`） |
 | **P4** | `GTS` 的 `assemble_from_windows` 里 `f"{fname}.db"` 改成 `f"{fname}.sqlite"`（spec 变异 **B64**） | ⭐ **必须分两条记**：`test_committed_fixture_matches_current_generator` **红**（`members` 漂移）；而 `test_fixture_matches_hand_written_expectations[fresh]` 里那条「后缀 ∈ {`.sqlite`,`.db`}」**不红** —— spec B64 明写这两条对该行的敏感度不同，混记就等于虚报判别力 |
-| **P5** | `GTS` 的 `SCHEMA_VERSION` 改 `3` **且** `_TRAINING_SET_DDL` 里 `PRAGMA user_version = 2` 改 `3`，**不重生 fixture**（spec 变异 **B53**） | `test_fixture_matches_hand_written_expectations[fresh]` 红（`user_version != 2`）**且** `test_committed_fixture_matches_current_generator` 红（`user_version` + `schema` 漂移）。⚪ 既有套件**不会**红：实测全仓没有任何测试断言 `SCHEMA_VERSION == 2` 字面量（`test_generate_training_sets.py:173` 断的是 `PRAGMA user_version == SCHEMA_VERSION`，两边一起改就仍相等）⇒ 观测量干净 |
+| **P5** | `GTS` 的 `SCHEMA_VERSION` 改 `3` **且** `_TRAINING_SET_DDL` 里 `PRAGMA user_version = 2` 改 `3`，**不重生 fixture**（spec 变异 **B53**） | `test_fixture_matches_hand_written_expectations[fresh]` 红（`user_version != 2`）**且** `test_committed_fixture_matches_current_generator` 红（**只有 `user_version` 漂移**：⚠️ `PRAGMA user_version` **不存在于 `sqlite_master`**，所以 `schema` 不会跟着变 —— 本行原先预测「`user_version` + `schema`」是错的，实测见变异记录 P5）。⚪ 既有套件**不会**红：实测全仓没有任何测试断言 `SCHEMA_VERSION == 2` 字面量（`test_generate_training_sets.py:173` 断的是 `PRAGMA user_version == SCHEMA_VERSION`，两边一起改就仍相等）⇒ 观测量干净 |
 | **P6** | `FIX` 的 `build_windows` 改成不走 `select_period_window`（weekly 直接把 `RAW_DATETIMES["weekly"]` 三根全塞进去） | `test_build_windows_goes_through_production_select_period_window` 红、`test_windows_carry_the_three_required_features` 红（03-30 那根没被删）**且** `…[fresh]` 报 `weekly` 不符 |
 | **P6b** | 同上但**手工丢掉最后一根**（`RAW_DATETIMES["weekly"][:-1]`）⇒ 输出与今天**逐根相同** | ⭐ **只有** `test_build_windows_goes_through_production_select_period_window` 红，其余三条**全绿** —— 这正是加那条 spy 守卫的理由。控制者 2026-09-04 亲手跑过：`1 failed, 3 passed` |
 | **P7** | `TCF` 的 `_logical_content` 只留 `{"members": …}` 一项（把闸门写窄） | `test_drift_gate_compares_row_content_not_just_the_member_list` 红；并**在此变异体上再叠加 P1**，确认 `test_committed_fixture_matches_current_generator` 这时**不红** ⇒ 证明「比每张表全部行」这一项确有判别力 |
@@ -1025,12 +1043,12 @@ Expected：`git status --short` 无输出 + 全套回到 `1130 passed / 0 failed
 创建 `docs/acceptance/2026-09-05-trainingset-p2-acceptance.md`，结构与 P1 那份（`docs/acceptance/2026-09-03-trainingset-p1-acceptance.md`）一致：每条一个**动作**（可复制的整行命令）、一个**期望**（看什么内容，⛔ 不是看「成功」字样）、一个**通过/不通过判定**。至少覆盖：
 
 1. 后端全套跑通且零 skip；
-2. 新用例 8 条全过；
+2. 新用例 **9 条**全过（8 个函数、其中一个带两组参数 ⇒ 收集到 9 项）；
 3. 仓库里那份 fixture 存在，且用 `unzip -l` 看到**恰好 1 个成员**、名字以 `.db` 结尾；
 4. 再生脚本跑两遍，第二遍打印「内容与原先逐字节相同」，且 `git status` 对该 zip 无输出；
 5. `ios/` 一行未改（`git diff --name-only origin/main...HEAD -- ios/ | wc -l` 得 `0`）；
 6. `backend/generate_training_sets.py` 一行未改（同款命令得 `0`）；
-7. 一节「**本片交付后仍不成立的事**」，逐条写清 §「已知残留」里的 R1–R4。
+7. 一节「**本片交付后仍不成立的事**」，把本计划 §「已知残留」的每一条都写进去（⛔ **不要按编号交叉引用** —— 两份文档的编号顺序不同，最终评审已实测到错位。验收清单里的编号是**它自己**的，以那份为准；本节只保证内容不漏）。
 
 ⛔ 禁用词见 `.claude/workflow-rules.json`，写完必须扫一遍确认 0 命中。
 

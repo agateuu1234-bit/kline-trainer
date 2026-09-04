@@ -37,6 +37,8 @@ cd "<repo>" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" /tmp
 | **P7** | 把漂移闸比较面里的 `user_version` 拿掉，并叠加 P1 | 自测红 | 🔴 自测（`['klines','members','meta','schema']`）<br>🔴 `…[fresh]` · 🔴 漂移闸 | 空 |
 | **P7b** | ⭐⭐ 把比较面里的 **`klines` 整个拿掉**（这才是能让闸门瞎掉的那一刀），并叠加 P1 | 漂移闸应当**变瞎** | 🔴 自测（`['members','meta','schema','user_version']`）<br>🟢 **漂移闸 PASSED —— 闸门真的瞎了**<br>🔴 `…[fresh]` | 空 |
 | **P8** | 期望值改成运行时现算的**共享 oracle**，并叠加 P1（spec 变异 **B18** 的反面示范） | 证明这种写法必须被禁止 | 🟢 **`…[fresh]` PASSED —— 生产者与校验者一起错、一起绿**<br>🔴 `…[committed]`（`weekly [0,5] != [0,23]`）<br>🔴 漂移闸 | 空 |
+| **P9** | `zip_and_hash` 的压缩方法 `ZIP_DEFLATED` → `ZIP_BZIP2`（最终评审 **Important 1** 修复后的观测量） | 新加的压缩方法断言应当红 | 🔴 `…[fresh]`：`压缩方法必须是 deflate（8），实测 12`<br>合计 **1 failed, 8 passed** | 空 |
+| **P10** | 漂移闸把 `members` 退化成**计数**（键名不变），并叠加成员名后缀 `.db`→`.sqlite`（最终评审 **Important 3** 修复后的观测量） | 自测应当红、漂移闸应当**瞎掉** | 🔴 自测：`members 必须是成员名清单，⛔ 不得退化成计数（实测 1）`<br>🟢 **漂移闸 PASSED —— 它真的瞎了**<br>合计 **1 failed, 8 passed** | 空 |
 
 ---
 
@@ -46,7 +48,9 @@ cd "<repo>" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" /tmp
 
 spec 变异 B64 明写这两条对 `assemble_from_windows` 那行 `f"{fname}.db"` 的敏感度**不同**，必须分开记。实测正是如此：改后缀 ⇒ **只有** 漂移闸红（`members` 字段），后缀断言一动不动（它对 `.sqlite` 同样放行，这是 spec 定的）。
 
-⇒ 若哪天有人以为「后缀断言就够了」而删掉漂移闸，`.db` → `.sqlite` 这类改动会**静默通过**。
+⇒ 若哪天有人以为「后缀断言就够了」而删掉漂移闸，`.db` → `.sqlite` 这类改动在**本文件范围内**会静默通过。
+
+⚠️ **口径更正**（最终评审 Minor 1）：本驱动器只跑了 `test_trainingset_contract_fixture.py` 这一个文件。评审员把同一变异放到全仓跑，实测**另有 3 条既有用例也会红**（`test_generate_training_sets.py:667`、`test_b2_reconnect_integration.py:280` / `:313`）。⇒ 原话「会静默通过」若不加限定就是**过度主张**，此处改为「在本文件范围内」。这个既有兜底是好事，但它在本文件里看不见，且任何一次对那三条用例的重构都可能让它消失。
 
 ### 2. P6b 证明了那条 spy 守卫**不可替代**
 
@@ -62,6 +66,15 @@ spec 变异 B64 明写这两条对 `assemble_from_windows` 那行 `f"{fname}.db"
   ⇒ ⭐ **已提交的那份 fixture 是打破「一起绿」的那个第三方**。这条实测把 spec §4.1「必须提交进仓库」从一条规定变成了一条**有证据的**规定。
 
 ---
+
+## 最终评审（整支分支，opus）带来的补充
+
+最终评审独立重算了六条向量（与提交的字面量全等）、逐条审了本记录中的 **P1 与 P8** 两行（从零重算，连失败信息的字面文本都对上了），并确认**其余各行没有 P7 那种没对准判据的毛病**。它另挖出两条本记录当时照不到的：
+
+1. **压缩方法没有任何判据钉着**（Important 1）。它在副本上把 `ZIP_DEFLATED` 改成 `ZIP_BZIP2`，实测**全仓 126 passed / 0 failed** —— 而 App 侧的解压库（`ios/Contracts/Package.swift` 钉 ZIPFoundation `0.9.0..<1.0.0`）**只实现 store 与 deflate** ⇒ 这种改动会在**手机上**解不开，而生产者半边与已提交 fixture 两边**都还是绿的**。这正是本切片要堵的那个机制，居然从缝里漏了出去。⇒ 已补断言，观测量见上表 **P9**。
+2. **那条自测把自己定的规则只贯彻了 5 个键里的 3 个**（Important 3）—— `members` 与 `user_version` 仍然只按名字查。把 `members` 退化成计数，键名一个没少，`.db`→`.sqlite` 这类改名就没人看着了。⇒ 已补断言，观测量见上表 **P10**。
+
+⇒ 两条都属于同一族：**规则写下来了，但没贯彻到它自己声称覆盖的每一处**。
 
 ## 一处我自己的失误，如实记下
 
