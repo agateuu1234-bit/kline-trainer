@@ -862,8 +862,9 @@ def _logical_content(zip_path) -> dict:
             "schema": conn.execute(
                 "SELECT type, name, sql FROM sqlite_master "
                 r"WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name").fetchall(),
-            "meta": conn.execute(
-                "SELECT stock_code, stock_name, start_datetime, end_datetime FROM meta").fetchall(),
+            # ⭐ 与 klines 一样用 `SELECT *`：显式列清单会让**日后新增的列**从此永远不进比较面
+            # —— 加列那一次由 schema 抓到，之后那一列的取值漂移就再没人看着了（评审 Task4-I1）。
+            "meta": conn.execute("SELECT * FROM meta").fetchall(),
             "klines": conn.execute("SELECT * FROM klines ORDER BY id").fetchall(),
         }
 
@@ -891,14 +892,36 @@ def test_committed_fixture_matches_current_generator(tmp_path):
 
 
 def test_drift_gate_compares_row_content_not_just_the_member_list():
-    """自测：漂移闸的比较面必须**真的包含每张表的全部行**（否则它只是个文件名检查）。
+    """自测：漂移闸的比较面必须**真的逐行逐列**地包含每张表（否则它只是个文件名检查）。
 
     ⚠️ 这条防的是「闸门写窄了」——只比成员清单的话，改公式（`end_global_index` 全变）
     也不会红，而那正是本切片存在的理由。
+
+    ⛔ **只断言键名在不在是不够的**（评审 Task4-I2 实证）：把
+       `"klines": SELECT * … .fetchall()` 换成 `"klines": SELECT count(*) … .fetchone()[0]`，
+       **键名一个没少**、闸门却退化成一个行数检查 —— 而逐根改错的 `end_global_index`
+       恰恰只有逐行比才抓得住。⇒ 本条必须断言每个键的**取值形状**，不只是它的名字。
     """
-    keys = set(_logical_content(FIXTURE_ZIP))
-    assert keys == {"members", "user_version", "schema", "meta", "klines"}, (
-        f"漂移闸的比较面被改窄/改宽了：{sorted(keys)}")
+    c = _logical_content(FIXTURE_ZIP)
+    assert set(c) == {"members", "user_version", "schema", "meta", "klines"}, (
+        f"漂移闸的比较面被改窄/改宽了：{sorted(c)}")
+
+    # klines：必须是【逐行 × 逐列】的完整表，⛔ 不得退化成计数或摘要
+    assert isinstance(c["klines"], list) and len(c["klines"]) == 47, (
+        f"klines 必须逐行比（期望 47 行的 list，实测 {type(c['klines']).__name__}）")
+    assert all(isinstance(r, tuple) and len(r) == 18 for r in c["klines"]), (
+        "klines 每行必须是完整的 18 列元组 —— 少一列，那一列的漂移就永远抓不到")
+
+    # meta：同样必须是完整行
+    assert isinstance(c["meta"], list) and len(c["meta"]) == 1 and len(c["meta"][0]) == 4, (
+        f"meta 必须逐行逐列比（期望 1 行 × 4 列，实测 {c['meta']!r}）")
+
+    # schema：必须比 DDL **原文**，否则列的增删改无人看着
+    schema_sql = "\n".join(sql for *_, sql in c["schema"] if sql)
+    assert "end_global_index" in schema_sql, (
+        "schema 必须包含 DDL 原文（`sqlite_master.sql`）——只比表名的话，改列型/加列都不会红")
+    assert not any(name.startswith("sqlite_") for _, name, _ in c["schema"]), (
+        "sqlite_ 开头的内部表不得进比较面（sqlite_sequence 随 AUTOINCREMENT 变动，会造假红）")
 ```
 
 - [ ] **Step 2: 跑，确认绿**
