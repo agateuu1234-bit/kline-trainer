@@ -325,7 +325,11 @@ def test_start_datetime_is_midweek_wednesday():
 
 
 def test_windows_carry_the_three_required_features():
-    """spec §4.1 note 2 的三类特征必须**真的在窗口里**（而不是只写在注释里）。"""
+    """spec §4.1 note 2 的**特征②③**必须真的在窗口里（而不是只写在注释里）。
+
+    ⚪ 特征①（≥2 根落在 `end_global_index = 0`）在**窗口层面看不出来** —— 它是赋索引之后
+       才成立的性质，由 Task 2 的 `monthly` 期望值 `[0, 0, 17, 23]` 断言。
+    """
     w = build_windows()
 
     # 特征③：2026-03-30 那根周线在原始数据里有、在窗口里没有 ⇒ 被生产切窗删掉了
@@ -345,7 +349,38 @@ def test_windows_carry_the_three_required_features():
     # 各周期窗口根数（特征①的具体期望值在下一条用例里断言）
     assert {p: len(w[p]) for p in PERIODS} == {
         "monthly": 4, "weekly": 2, "daily": 5, "60m": 4, "15m": 8, "3m": 24}
+
+
+def test_build_windows_goes_through_production_select_period_window(monkeypatch):
+    """⛔ 窗口必须由**生产**切窗函数切出来，不得手工挑根。
+
+    判据 = monkeypatch 掉 `_trainingset_contract_fixture` 里绑定的那个名字后，
+    `build_windows()` 必须对**每个周期各调用一次**。
+    若哪天有人把 `build_windows` 改成「自己挑几根塞进去」（**哪怕挑出来的结果与今天逐根相同**），
+    spy 不会被调用 ⇒ 本测试红 —— 而上面那条只比较窗口内容的用例**抓不住这种改法**。
+    ⭐ 本仓已有同款守卫：`test_generate_training_sets.py::test_week_end_date_is_module_level_and_shared`。
+    ⚠️ 必须 patch **本 fixture 模块里绑定的那个名字**（`from ... import select_period_window`
+       是模块级绑定）；patch `generate_training_sets` 那边的名字对本调用点无效，会得到一条恒绿的空测试。
+    """
+    import tests._trainingset_contract_fixture as fx
+
+    calls: list[str] = []
+    real = fx.select_period_window
+
+    def spy(bars, start_datetime, before_cap, after_end, period, month_boundaries=None):
+        calls.append(period)
+        return real(bars, start_datetime, before_cap, after_end, period, month_boundaries)
+
+    monkeypatch.setattr(fx, "select_period_window", spy)
+    fx.build_windows()
+    assert sorted(calls) == sorted(PERIODS), (
+        f"build_windows 没有对每个周期各调一次生产切窗函数（实测 {calls}）"
+        f"—— 说明它绕过了 select_period_window，特征③就成了手工摆出来的假象")
 ```
+
+⭐ **这条守卫是任务级评审挖出来的**（原计划没有，2026-09-04 修复轮 1 补入）：只比较窗口**内容**的话，
+「绕过 `select_period_window`、手工丢掉 03-30 那根」会产出与今天**逐根相同**的结果 ⇒ 上面那条用例照样绿，
+「产物必须由生产代码产出」这条契约就只剩注释在管。控制者亲手跑过该变异实证：变异下**本条红、上面那条绿**。
 
 - [ ] **Step 3: 跑，确认全绿**
 
@@ -354,7 +389,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_trainingset_contract_fixture.py -v
 ```
 
-Expected: **3 passed**（`test_fixture_identity_constants_are_pinned` / `test_start_datetime_is_midweek_wednesday` / `test_windows_carry_the_three_required_features`）
+Expected: **4 passed**（`test_fixture_identity_constants_are_pinned` / `test_start_datetime_is_midweek_wednesday` / `test_windows_carry_the_three_required_features` / `test_build_windows_goes_through_production_select_period_window`）
 
 ⚠️ 本仓 worktree 里**没有 `.venv`**，Python 解释器在主仓根：`/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3`（裸 `python3` 会 `ModuleNotFoundError: No module named 'pandas'`）。
 
@@ -365,7 +400,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/ -q 2>&1 | tail -5
 ```
 
-Expected: `1124 passed`（`origin/main` 实测基线 **1121**，本 Task 加 3 条），**0 failed / 0 skipped**。
+Expected: `1125 passed`（`origin/main` 实测基线 **1121**，本 Task 加 4 条），**0 failed / 0 skipped**。
 
 - [ ] **Step 5: Commit**
 
@@ -515,7 +550,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_trainingset_contract_fixture.py -v
 ```
 
-Expected: **4 passed**（新增 `test_fixture_matches_hand_written_expectations[fresh]`）
+Expected: **5 passed**（新增 `test_fixture_matches_hand_written_expectations[fresh]`）
 
 - [ ] **Step 4: 当场自测判别力（不进变异记录，只为确认这条断言不是恒真）**
 
@@ -755,7 +790,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_trainingset_contract_fixture.py -v
 ```
 
-Expected: **6 passed**（新增 `test_committed_fixture_file_exists` 与 `…[committed]`）
+Expected: **7 passed**（新增 `test_committed_fixture_file_exists` 与 `…[committed]`）
 
 - [ ] **Step 7: 确认再生是幂等的（同机同 sqlite 下）**
 
@@ -854,7 +889,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_trainingset_contract_fixture.py -v
 ```
 
-Expected: **8 passed**
+Expected: **9 passed**
 
 - [ ] **Step 3: 跑全套 + 冷缓存**
 
@@ -864,7 +899,7 @@ find tests -name __pycache__ -type d -exec rm -rf {} + ; \
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/ -q 2>&1 | tail -5
 ```
 
-Expected: `1129 passed`（`origin/main` 实测基线 **1121** + 本片 8），**0 failed / 0 skipped**。
+Expected: `1130 passed`（`origin/main` 实测基线 **1121** + 本片 9），**0 failed / 0 skipped**。
 ⚠️ 若数字对不上，**先核实是不是别的 PR 已经改了基线**，不要直接改这里的数字了事。
 
 - [ ] **Step 4: Commit**
@@ -904,7 +939,8 @@ git commit -m "test(trainingset): 漂移闸——现场重建与已提交 fixtur
 | **P3** | `GTS` 的 `period_end` 里 `weekly` 分支改成 `last = d`（当天） | 同上用例报 **`weekly`** 不符（`[0, 5]` → `[0, 0]`） |
 | **P4** | `GTS` 的 `assemble_from_windows` 里 `f"{fname}.db"` 改成 `f"{fname}.sqlite"`（spec 变异 **B64**） | ⭐ **必须分两条记**：`test_committed_fixture_matches_current_generator` **红**（`members` 漂移）；而 `test_fixture_matches_hand_written_expectations[fresh]` 里那条「后缀 ∈ {`.sqlite`,`.db`}」**不红** —— spec B64 明写这两条对该行的敏感度不同，混记就等于虚报判别力 |
 | **P5** | `GTS` 的 `SCHEMA_VERSION` 改 `3` **且** `_TRAINING_SET_DDL` 里 `PRAGMA user_version = 2` 改 `3`，**不重生 fixture**（spec 变异 **B53**） | `test_fixture_matches_hand_written_expectations[fresh]` 红（`user_version != 2`）**且** `test_committed_fixture_matches_current_generator` 红（`user_version` + `schema` 漂移）。⚪ 既有套件**不会**红：实测全仓没有任何测试断言 `SCHEMA_VERSION == 2` 字面量（`test_generate_training_sets.py:173` 断的是 `PRAGMA user_version == SCHEMA_VERSION`，两边一起改就仍相等）⇒ 观测量干净 |
-| **P6** | `FIX` 的 `build_windows` 改成不走 `select_period_window`（weekly 直接把 `RAW_DATETIMES["weekly"]` 三根全塞进去） | `test_windows_carry_the_three_required_features` 红（03-30 那根没被删）**且** `…[fresh]` 报 `weekly` 不符 ⇒ 证明特征③是**真被生产代码删的** |
+| **P6** | `FIX` 的 `build_windows` 改成不走 `select_period_window`（weekly 直接把 `RAW_DATETIMES["weekly"]` 三根全塞进去） | `test_build_windows_goes_through_production_select_period_window` 红、`test_windows_carry_the_three_required_features` 红（03-30 那根没被删）**且** `…[fresh]` 报 `weekly` 不符 |
+| **P6b** | 同上但**手工丢掉最后一根**（`RAW_DATETIMES["weekly"][:-1]`）⇒ 输出与今天**逐根相同** | ⭐ **只有** `test_build_windows_goes_through_production_select_period_window` 红，其余三条**全绿** —— 这正是加那条 spy 守卫的理由。控制者 2026-09-04 亲手跑过：`1 failed, 3 passed` |
 | **P7** | `TCF` 的 `_logical_content` 只留 `{"members": …}` 一项（把闸门写窄） | `test_drift_gate_compares_row_content_not_just_the_member_list` 红；并**在此变异体上再叠加 P1**，确认 `test_committed_fixture_matches_current_generator` 这时**不红** ⇒ 证明「比每张表全部行」这一项确有判别力 |
 | **P8**（⛔ 反面示范，记录为「这种写法必须被禁止」） | `TCF` 把 `EXPECTED_END_GLOBAL_INDEX` 改成运行时调 `assign_global_indices` 现算（共享 oracle），**再叠加 P1** | 两条断言**仍全绿** ⇒ 实证 spec 变异 **B18**：期望值一旦与被测代码共用公式，公式错了两边一起错。跑完必须**完整复原**成手写字面量 |
 
@@ -936,7 +972,7 @@ git status --short && \
 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/ -q 2>&1 | tail -3
 ```
 
-Expected：`git status --short` 无输出 + 全套回到 `1129 passed / 0 failed / 0 skipped`。
+Expected：`git status --short` 无输出 + 全套回到 `1130 passed / 0 failed / 0 skipped`。
 
 - [ ] **Step 2: 写变异记录**
 
@@ -1002,4 +1038,4 @@ git commit -m "docs(acceptance): P2 变异验证记录 + 非程序员验收清�
 **4. 已知的计划自身弱点（交给实施者留意）**
 
 - Task 1 / 2 的用例**写完就是绿的**（被测逻辑 P1 已落地）⇒ 它们的价值完全押在 Task 5 的变异上。若 Task 5 有任何一组跑不出预期的红，**不要改期望值让它红**，而要回来问「这条断言是不是根本没在测它」。
-- `1129 passed` 这个数字是**推算**（实测基线 1121 + 8），⛔ 属计划内嵌的「事实」类，必须实测；对不上时先查是不是别的 PR 动了基线。
+- `1130 passed` 这个数字是**推算**（实测基线 1121 + 9），⛔ 属计划内嵌的「事实」类，必须实测；对不上时先查是不是别的 PR 动了基线。
