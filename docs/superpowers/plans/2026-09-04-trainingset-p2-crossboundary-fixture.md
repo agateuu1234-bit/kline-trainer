@@ -117,8 +117,8 @@ grep -rn "training_set_schema_v1\|_TRAINING_SET_DDL" backend/ scripts/ .github/ 
 | `tests/contract-fixtures/training-set/999002.SZ_1774972800.zip` | 已提交的跨端共用 fixture 产物（二进制，实测 3090 字节） | **新建** |
 | `tests/contract-fixtures/training-set/README.md` | 这份 fixture 是什么、怎么再生、⛔ 什么时候**不该**再生、逻辑形态速查 | **新建** |
 | `tests/contract-fixtures/README.md` | 既有跨语言契约 fixture 说明 | **改**：加一节指向 `training-set/`（⛔ 只加一节，不动既有文字） |
-| `docs/acceptance/2026-09-04-trainingset-p2-acceptance.md` | 非程序员可执行验收清单（治理底线第 2 条，非可豁免） | **新建** |
-| `docs/acceptance/2026-09-04-trainingset-p2-mutation-log.md` | 变异验证逐条记录（红的是哪一条测试） | **新建** |
+| `docs/acceptance/2026-09-05-trainingset-p2-acceptance.md` | 非程序员可执行验收清单（治理底线第 2 条，非可豁免） | **新建** |
+| `docs/acceptance/2026-09-05-trainingset-p2-mutation-log.md` | 变异验证逐条记录（红的是哪一条测试） | **新建** |
 
 ⛔ **本片不改 `backend/generate_training_sets.py`、不改 `backend/sql/**`、不改 `.github/workflows/**`、不改 `ios/**`。**
 
@@ -956,8 +956,8 @@ git commit -m "test(trainingset): 漂移闸——现场重建与已提交 fixtur
 ## Task 5: 变异验证 + 非程序员验收清单
 
 **Files:**
-- Create: `docs/acceptance/2026-09-04-trainingset-p2-mutation-log.md`
-- Create: `docs/acceptance/2026-09-04-trainingset-p2-acceptance.md`
+- Create: `docs/acceptance/2026-09-05-trainingset-p2-mutation-log.md`
+- Create: `docs/acceptance/2026-09-05-trainingset-p2-acceptance.md`
 
 **为什么必须做**：`CLAUDE.md` 治理底线第 2 条（**非可豁免**）要求每个模块/阶段交付都带一份非程序员可执行的验收清单（动作 / 期望 / 通过判定；中文；禁用词见 `.claude/workflow-rules.json`）。变异记录则是本仓反复踩过的那条：「读代码发现不了恒真断言，变异验证是唯一能证伪『测试没在测它』的手段」。
 
@@ -1018,11 +1018,11 @@ Expected：`git status --short` 无输出 + 全套回到 `1130 passed / 0 failed
 
 - [ ] **Step 2: 写变异记录**
 
-创建 `docs/acceptance/2026-09-04-trainingset-p2-mutation-log.md`，逐组记录：变异内容、施加命令、**跑出来的原始输出片段**、红的**具体用例名**、复原后的 `git status` 与全套计数。⛔ 不得只写「已验证」。
+创建 `docs/acceptance/2026-09-05-trainingset-p2-mutation-log.md`，逐组记录：变异内容、施加命令、**跑出来的原始输出片段**、红的**具体用例名**、复原后的 `git status` 与全套计数。⛔ 不得只写「已验证」。
 
 - [ ] **Step 3: 写非程序员验收清单**
 
-创建 `docs/acceptance/2026-09-04-trainingset-p2-acceptance.md`，结构与 P1 那份（`docs/acceptance/2026-09-03-trainingset-p1-acceptance.md`）一致：每条一个**动作**（可复制的整行命令）、一个**期望**（看什么内容，⛔ 不是看「成功」字样）、一个**通过/不通过判定**。至少覆盖：
+创建 `docs/acceptance/2026-09-05-trainingset-p2-acceptance.md`，结构与 P1 那份（`docs/acceptance/2026-09-03-trainingset-p1-acceptance.md`）一致：每条一个**动作**（可复制的整行命令）、一个**期望**（看什么内容，⛔ 不是看「成功」字样）、一个**通过/不通过判定**。至少覆盖：
 
 1. 后端全套跑通且零 skip；
 2. 新用例 8 条全过；
@@ -1037,8 +1037,8 @@ Expected：`git status --short` 无输出 + 全套回到 `1130 passed / 0 failed
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/acceptance/2026-09-04-trainingset-p2-mutation-log.md \
-        docs/acceptance/2026-09-04-trainingset-p2-acceptance.md
+git add docs/acceptance/2026-09-05-trainingset-p2-mutation-log.md \
+        docs/acceptance/2026-09-05-trainingset-p2-acceptance.md
 git commit -m "docs(acceptance): P2 变异验证记录 + 非程序员验收清单"
 ```
 
