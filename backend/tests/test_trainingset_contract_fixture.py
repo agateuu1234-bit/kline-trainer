@@ -57,7 +57,11 @@ def test_start_datetime_is_midweek_wednesday():
 
 
 def test_windows_carry_the_three_required_features():
-    """spec §4.1 note 2 的三类特征必须**真的在窗口里**（而不是只写在注释里）。"""
+    """spec §4.1 note 2 的**特征②③**必须真的在窗口里（而不是只写在注释里）。
+
+    ⚪ 特征①（≥2 根落在 `end_global_index = 0`）在**窗口层面看不出来** —— 它是赋索引之后
+       才成立的性质，由 Task 2 的 `monthly` 期望值 `[0, 0, 17, 23]` 断言。
+    """
     w = build_windows()
 
     # 特征③：2026-03-30 那根周线在原始数据里有、在窗口里没有 ⇒ 被生产切窗删掉了
@@ -77,3 +81,30 @@ def test_windows_carry_the_three_required_features():
     # 各周期窗口根数（特征①的具体期望值在下一条用例里断言）
     assert {p: len(w[p]) for p in PERIODS} == {
         "monthly": 4, "weekly": 2, "daily": 5, "60m": 4, "15m": 8, "3m": 24}
+
+
+def test_build_windows_goes_through_production_select_period_window(monkeypatch):
+    """⛔ 窗口必须由**生产**切窗函数切出来，不得手工挑根。
+
+    判据 = monkeypatch 掉 `_trainingset_contract_fixture` 里绑定的那个名字后，
+    `build_windows()` 必须对**每个周期各调用一次**。
+    若哪天有人把 `build_windows` 改成「自己挑几根塞进去」（**哪怕挑出来的结果与今天逐根相同**），
+    spy 不会被调用 ⇒ 本测试红 —— 而上面那条只比较窗口内容的用例**抓不住这种改法**。
+    ⭐ 本仓已有同款守卫：`test_generate_training_sets.py::test_week_end_date_is_module_level_and_shared`。
+    ⚠️ 必须 patch **本 fixture 模块里绑定的那个名字**（`from ... import select_period_window`
+       是模块级绑定）；patch `generate_training_sets` 那边的名字对本调用点无效，会得到一条恒绿的空测试。
+    """
+    import tests._trainingset_contract_fixture as fx
+
+    calls: list[str] = []
+    real = fx.select_period_window
+
+    def spy(bars, start_datetime, before_cap, after_end, period, month_boundaries=None):
+        calls.append(period)
+        return real(bars, start_datetime, before_cap, after_end, period, month_boundaries)
+
+    monkeypatch.setattr(fx, "select_period_window", spy)
+    fx.build_windows()
+    assert sorted(calls) == sorted(PERIODS), (
+        f"build_windows 没有对每个周期各调一次生产切窗函数（实测 {calls}）"
+        f"—— 说明它绕过了 select_period_window，特征③就成了手工摆出来的假象")
