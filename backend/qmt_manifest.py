@@ -1038,7 +1038,13 @@ class RunLedger:
 
     @property
     def lifecycle(self) -> dict:
-        return self._state().lifecycle
+        # ⚠️ **交出去的必须是副本**（独立评审 [high(c)]）：原本返回的是内部那个
+        # dict **本身**，调用方 `ledger.lifecycle["fetch_fatal_error"] = {...}`
+        # 一行就能改掉模块的内部状态、进而解除守卫的武装 —— 而本模块的立身之本
+        # 正是「调用方口头上报的东西不能当凭据」。
+        # ⚠️ 这与 R1 那条「`lifecycle_snapshot` 只拷了顶层」是**同一个教训的第二处**：
+        # 凡是把安全事实交出去的读取口，都要问「交出去的是副本还是本体」。
+        return copy.deepcopy(self._state().lifecycle)
 
     @property
     def skip_existing_verify(self) -> bool:
@@ -1054,7 +1060,8 @@ class RunLedger:
         """
         return self._state().start_needs_recheck
 
-    def _advance(self, digest: str, lifecycle: dict, payload: dict) -> None:
+    def _advance(self, digest: str, lifecycle: dict, payload: dict,
+                 hit_escape: bool = False) -> None:
         """把预期推进到刚写出去的那一份（**只许本模块调用**）。
 
         ⚠️⚠️ **本轮自己发布的 fatal 必须重新武装复校闸与进度冻结**
@@ -1077,13 +1084,27 @@ class RunLedger:
         #     `source_path_escape` 整个不生效：实测发布它之后 `commit_stock` 照样把
         #     files 4→6、cursor SH 1→2、累计字节 733 万→980 万。
         #   ② `_needs_staging_recheck` 只回答「**清除它要哪一道前提**」。
+        # ⚠️⚠️ **判据必须是「本轮撞没撞逃逸」，不是「记录变没变」**
+        # （独立评审 [high]，控制者本机复现三档）。原来写成
+        # `lifecycle != st.lifecycle and 有 fatal`，而决策表有**三种**方式产出
+        # 一份与旧记录相等的生命周期，每一种都让武装整个不触发：
+        #   (a) 分支①**保住更严的旧 fatal**（拒绝降级）—— 一个**发现源树被换过**
+        #       的运行，最后交出一份完全没有 fatal 的账本；
+        #   (b) 本轮**再次撞上磁盘上一模一样的那条逃逸**（没修好就重跑）——
+        #       现实中最常见的一种；对照实验：换条路径武装就正常触发，
+        #       ⇒ 说明判据问错了问题；
+        #   (c) `ledger.lifecycle` 曾是活引用，调用方一行赋值即可让 `changed` 为假。
+        # ⚠️ 反方向也错：分支③给**别人的** fatal 加一条 `max_bytes` 附注时，
+        #   记录变了且带 fatal ⇒ 被误判成「本轮自己发布了 fatal」，把已登记的
+        #   `passed` 清掉，还会印出一句假的「本次运行已经自己发布过…」。
+        # ⇒ 只有 `commit_final` 拿着一个 `escape` 结局时，这一轮才真的撞了逃逸；
+        #   `commit_stock` 永远产不出新 fatal（它把三个字段从磁盘原样带过去），
+        #   故它传 `hit_escape=False`。
         st = self._state()
-        published_fatal = lifecycle.get("fetch_fatal_error") is not None
-        changed = lifecycle != st.lifecycle
         st.existed = True
         st.digest = digest
         st.lifecycle = lifecycle
-        if changed and published_fatal:
+        if hit_escape:
             st.fatal_published = True
             st.start_progress = _progress_of(payload)
             if _needs_staging_recheck(lifecycle.get("stopped_reason"),
@@ -1239,6 +1260,21 @@ def _require_intrinsic_payload_ok(payload: dict, where: str) -> None:
                 f"export_log {_bytes_of(sel)} 字节，而 committed_bytes 是 "
                 f"{nb!r}（须为非负整数且不小于两者之和 {need}）——"
                 "缺了它，--max-bytes 这条硬上限就被无限期绕开。"
+            )
+
+    # ⚠️⚠️ **写侧必须挡住它自己会造出来的坏容器**（独立评审 [medium]）：
+    # 上一轮只给**转移守卫**（看 `previous`）加了容器类型检查，而写侧固有检查没加
+    # ⇒ **首次提交**就能把 `batches: {...}` 写上盘，此后每次提交（含崩溃恢复）
+    # 都被那条读侧检查拒掉 —— **那棵 staging 永久砖化，只能手改 JSON 救回来**。
+    # 这正是本模块自己 docstring 点名的失败形态（「引导态第一次提交就把…写了
+    # 进去…这棵 staging 当场卡死」），我加读侧那半时漏了写侧这半。
+    # ⚠️ 只在**键存在**时验类型：两者都是扩展字段，缺席合法。
+    for _k, _ty, _tn in (("batches", list, "列表"),
+                         ("inflight_rollbacks", dict, "对象")):
+        if _k in payload and not isinstance(payload[_k], _ty):
+            raise ManifestInvalidError(
+                f"{where} 的 {_k} 是 {payload[_k]!r}（不是{_tn}）——"
+                f"写出去之后每一次提交都会被转移守卫拒掉，这棵 staging 会当场卡死。"
             )
 
     lst = payload.get("failures")
@@ -2241,5 +2277,6 @@ def commit_final(stg_fd: int, manifest: dict, *, outcome: FinalOutcome,
         payload["source_verification_evidence"] = {"level": "partial", "passes": []}
     # 收尾提交**永远**没有正当理由回滚进度（崩溃恢复不走这个入口），故无声明可传。
     _require_no_progress_rollback(previous, payload, "收尾提交")
-    ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle, payload)
+    ledger._advance(_write_manifest(stg_fd, payload), new_lifecycle, payload,
+                    hit_escape=(outcome.kind == "escape"))
     return payload

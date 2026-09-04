@@ -3136,7 +3136,10 @@ def test_the_writer_refuses_a_payload_bigger_than_the_readers_limit(tmp_path, mo
         commit_stock(fd, _valid_manifest(), ledger=_expect(fd))       # 先写一份好的
         before = (d / MANIFEST_NAME).read_bytes()
         big = _valid_manifest()
-        big["batches"] = "x" * 8192                              # 未知顶层键，结构合法
+        # ⚠️ 填充键必须是**真正未知**的键：原本用 `batches`，而它是**已知**的
+        #    扩展字段（列表），会撞上写侧新加的容器类型检查（独立评审 [medium]）——
+        #    那样本条就在测别的判据了。换成一个模块不认识的键，判据不变。
+        big["未来某个巨大字段"] = "x" * 8192                     # 未知顶层键，结构合法
         with pytest.raises(ManifestInvalidError, match="过大"):
             commit_stock(fd, big, ledger=_expect(fd))
         assert (d / MANIFEST_NAME).read_bytes() == before        # 好账本逐字节未变
@@ -6253,5 +6256,160 @@ def test_a_fatal_published_this_run_also_freezes_progress_at_the_final_commit(tm
                 kind="staging_path_escape", relative_path="1分钟K线_前复权/y.csv",
                 component="1分钟K线_前复权", errno="ELOOP"))
         assert len(read_manifest(fd)["files"]) == len(cur["files"])
+    finally:
+        os.close(fd)
+
+
+# ── 独立评审（守卫层增量收口轮）──────────────────────────────────
+# ⚠️⚠️ 这一轮挖出的 high **正是控制者 5832 条状态机探索漏掉的那一类**：
+# 我的 `escape_stop` 永远用一条**不同的路径**，于是生命周期总在变、武装总会触发；
+# 「本轮再次撞上磁盘上一模一样的那条逃逸」这一整类操作**根本没进枚举空间**，
+# 而它恰恰是现实中最常见的一种（操作者没修好就重跑）。
+# ⇒ **「穷尽探索」的说服力完全取决于操作集选得对不对，而少一类操作不会以任何
+#    形式报错，只会安静地给你一个漂亮的 0。**
+
+
+def _same_fatal():
+    return {"kind": "staging_path_escape", "relative_path": "1分钟K线_前复权/x.csv",
+            "component": "1分钟K线_前复权", "errno": "ENOTDIR"}
+
+
+def _warned_with(fatal):
+    return _valid_manifest(fetch_fatal_error=dict(fatal),
+                           stopped_reason=fatal["kind"])
+
+
+def _live_payload(fd):
+    cur = read_manifest(fd)
+    return {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+
+
+def test_republishing_the_very_same_escape_still_arms_the_run(tmp_path):
+    """⭐⭐ [独立评审 high(b)] **没修好就重跑**：本轮再次撞上磁盘上那条
+    **一模一样**的逃逸 —— 记录逐字节相同 ⇒ `lifecycle != st.lifecycle` 为假
+    ⇒ 武装整个不触发。于是还能继续提交股票，还能在**同一轮**把 fatal 清光。
+
+    ⚠️ 对照实验（评审做的、控制者复核过）：把 `relative_path` 换成别的，
+    武装就正常触发、提交被拒 —— **说明武装与否只取决于「记录变没变」，
+    而不是「这一轮撞没撞逃逸」**，这正是判据问错了问题。
+
+    判别力：把武装判据换回 `lifecycle != st.lifecycle and 有 fatal`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger,
+                     outcome=escape_stop(**_same_fatal()))     # 同一条逃逸
+        with pytest.raises(ManifestInvalidError, match="自己发布|致命"):
+            commit_stock(fd, _with_more_stocks(_live_payload(fd)), ledger=ledger)
+        # ⚠️ 发布之后**补登记一次复校**：不补的话「上报 vs 登记」那条一致性检查
+        #    会先开火（武装时 recheck 被重置成 None），本档就钉不到「不许清」。
+        attest_staging_recheck(ledger, passed=True)
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, _live_payload(fd), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_refused_as_a_downgrade_still_arms_the_run(tmp_path):
+    """⭐⭐ [独立评审 high(a)] 决策表分支①**保住更严的旧 fatal**（拒绝降级）时，
+    返回的生命周期与旧的相等 ⇒ 武装同样不触发。
+
+    场景：盘上是 staging 逃逸；本轮复校通过、拉了股，然后**发现源树被换过**
+    （source 逃逸）。分支①正确地拒绝降级、保住 staging 那条 —— 但这一轮
+    **确实撞了逃逸**，却没有被武装，于是同轮再收尾一次就把 fatal 清光了：
+    一个**发现源树被换过**的运行，最后交出一份**完全没有 fatal** 的账本。
+
+    判别力：同上，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        assert read_manifest(fd)["stopped_reason"] == "staging_path_escape"  # 分支①
+        attest_staging_recheck(ledger, passed=True)      # 同上，让一致性检查过关
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, _live_payload(fd), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert "fetch_fatal_error" in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_the_ledgers_lifecycle_is_not_a_live_reference(tmp_path):
+    """⭐⭐ [独立评审 high(c)] `ledger.lifecycle` 返回的是**内部那个 dict 本身**，
+    调用方一行赋值就能改掉模块的内部状态。
+
+    ⚠️ 这与 R1 那条「`lifecycle_snapshot` 只拷了顶层」是**同一个教训的第二处**：
+    凡是「把安全事实交出去」的读取口，都要问「交出去的是副本还是本体」。
+
+    判别力：把属性改回 `return self._state().lifecycle`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        got = ledger.lifecycle
+        got["fetch_fatal_error"] = {"kind": "伪造"}
+        got["stopped_reason"] = "伪造"
+        assert ledger.lifecycle["stopped_reason"] == "staging_path_escape"
+        assert ledger.lifecycle["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("bad", [
+    pytest.param({"batches": {"n": 1}}, id="batches 是 dict"),
+    pytest.param({"batches": None}, id="batches 是 null"),
+    pytest.param({"inflight_rollbacks": ["x"]}, id="inflight 是 list"),
+    pytest.param({"inflight_rollbacks": 3}, id="inflight 是 int"),
+])
+def test_the_write_side_cannot_mint_a_container_the_read_side_will_refuse(tmp_path, bad):
+    """⭐⭐ [独立评审 medium] **我上一轮自己捅的「过紧」**：新加的容器类型检查
+    只查 `previous`，而写侧固有检查**没有**这两条 ⇒ **首次提交**就能把
+    `batches: {...}` 写上盘，此后每次提交（含崩溃恢复）都被拒 ——
+    **那棵 staging 永久砖化，只能手改 JSON 才能救回来。**
+
+    本机复现三种形态全部砖化。这正是本模块自己 docstring 里点名的失败形态
+    （「引导态第一次提交就把…写了进去…这棵 staging 当场卡死」），而我在
+    加读侧那半时没把写侧这半补上。
+
+    判别力：删掉写侧新加的容器检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ManifestInvalidError, match="batches|inflight_rollbacks"):
+            commit_stock(fd, _valid_manifest(**bad), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_a_max_bytes_annotation_does_not_pretend_the_run_published_a_fatal(tmp_path):
+    """⭐ [独立评审 low] 决策表分支③给**别人的** fatal 加一条 `max_bytes` 附注，
+    字典变了且带 fatal ⇒ 被误判成「本轮自己发布了 fatal」：
+    `fatal_published` 置位、已登记的 `passed` 被清成 `None`，
+    而随后的报错文案会说「本次运行已经**自己发布**过 fetch_fatal_error」—— 那是假的。
+
+    判别力：把武装判据换回「记录变了且带 fatal」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger, outcome=max_bytes_stop())
+        st = ledger._state()
+        assert st.fatal_published is False, "本轮并没有发布 fatal，只是加了附注"
+        assert st.recheck == "passed", "已登记的复校结论不该被附注清掉"
     finally:
         os.close(fd)
