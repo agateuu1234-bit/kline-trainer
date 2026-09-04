@@ -783,6 +783,16 @@ def test_committed_fixture_file_exists():
 @pytest.mark.parametrize("source", ["fresh", "committed"])
 ```
 
+并把该用例 docstring 里那句**已经过期**的话（`⚠️ Task 3 会把 source 的取值扩成 …—— 现在还没有已提交产物，先只跑现场重建这一路。`）替换成：
+
+```python
+    ⭐ **两路都要跑**：`fresh` = 现场重建的生成器输出，`committed` = 仓库里那份已提交 fixture。
+    手写期望值同时钉住这两者 ⇒ 三方（手写期望 / 已提交产物 / 当前生成器）中任何一方漂移都会红。
+    ⚠️ 若只跑 `fresh`，已提交那份产物就没有任何判据看着它，切片二会对着一份没人验过的产物开发。
+```
+
+⛔ **不改这句就会留下一份自相矛盾的文档**：`parametrize` 上写着 `["fresh", "committed"]`，紧邻两行下面的 docstring 却说「现在还没有已提交产物」。
+
 - [ ] **Step 6: 跑，确认绿**
 
 ```bash
