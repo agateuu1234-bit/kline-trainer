@@ -938,8 +938,9 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert "end_global_index" in schema_sql, (
         "schema 必须包含 DDL 原文（`sqlite_master.sql`）——只比表名的话，改列型/加列都不会红")
     assert not any(name.startswith("sqlite_") for _, name, _ in c["schema"]), (
-        "sqlite_ 开头的内部表不得进比较面 —— 它们的 DDL 文本是 **sqlite 版本相关**的实现细节，"
-        "跨机器会造假红（⚠️ 理由**不是**「sqlite_sequence 会变」：本 fixture 里它恒为 klines/47）")
+        "sqlite_ 开头的内部表不得进比较面 —— 它们是 **SQLite 自己的实现细节**，不属于我们的契约面；"
+        "纳入比较等于把这道闸绑到 SQLite 的内部实现上（⚠️ 理由**不是**「sqlite_sequence 的值会变」："
+        "本 fixture 里它恒为 klines/47）")
 ```
 
 - [ ] **Step 2: 跑，确认绿**
@@ -1069,6 +1070,10 @@ git commit -m "docs(acceptance): P2 变异验证记录 + 非程序员验收清�
 - **R3 — `backend pytest (full suite)` 不是必需检查**（[[project_trainingset_p1_implemented]] 残留 F5 至今未修）。⇒ 本片新加的这道漂移闸**今天全红也不阻止合并**。修法是把它加进 ruleset `15660830` 的必需检查清单，**属独立 PR**，且需要 user 在 GitHub 上动配置。
 - **R4 — 缝只闭合了一半**。本片只交付生产者半边；App 侧的「解压 → 打开 → 读取」链路一行未改，仍消费不了任何真实训练组（`DefaultZipExtractor.swift:26` 只认 `.sqlite` 成员，而产物内是 `.db`）。⇒ **归切片二**，必须用**这一份** fixture（⛔ 不是另造一份）。
 - **R5 — 库里那 3 个训练组仍是第 1 代**（P1 残留，未变）。这段窗口 `api` / `scheduler` / 生成器 CLI **必须保持停止**。
+- **R6 — 这份 fixture 照不到切窗器的另外两条路**（最终评审 Minor 7）：weekly 的**尾部**跨界过滤在本 fixture 上作用于空数据；`PERIOD_BEFORE_CAP` 的六个上限也全都远高于实际 before 根数（18/3/4/3/6/2）。⇒ **删掉这两处，本 fixture 一动不动**。这是有意的取舍（fixture 要小到期望值能手写），但**切片二与 P3 不得误以为它覆盖了整个切窗逻辑**。
+- **R7 — `.github/workflows/backend-tests.yml` 的注释现在是错的**（最终评审 Minor 8）：它逐条列举了「谁会读 `tests/contract-fixtures/`」，写的是两处，本片加了第三处。本片被明令禁止碰 workflows ⇒ **只能记下来，由下一个动 CI 的 PR 顺手改**。
+- **R8 — 再生脚本在极端时机会留 `.tmp` 残渣**（最终评审 Minor 10）：原子替换本身正确，但若进程恰好死在 `copyfile` 与 `os.replace` 之间，fixture 目录里会留下一个 `*.zip.tmp`。它会出现在 `git status` 里（不会被误提交），但无人自动清理。
+- ⚠️ **两份文档的残留编号刻意不互相引用**：本节是 R1–R8，验收清单里那份是**它自己**的 R1–R9，顺序不同。⛔ **不要按编号交叉引用**（最终评审 Minor 6 实测到过错位）。
 
 ---
 

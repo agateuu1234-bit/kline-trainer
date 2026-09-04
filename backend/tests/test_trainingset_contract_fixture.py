@@ -290,5 +290,6 @@ def test_drift_gate_compares_row_content_not_just_the_member_list():
     assert "end_global_index" in schema_sql, (
         "schema 必须包含 DDL 原文（`sqlite_master.sql`）——只比表名的话，改列型/加列都不会红")
     assert not any(name.startswith("sqlite_") for _, name, _ in c["schema"]), (
-        "sqlite_ 开头的内部表不得进比较面 —— 它们的 DDL 文本是 **sqlite 版本相关**的实现细节，"
-        "跨机器会造假红（⚠️ 理由**不是**「sqlite_sequence 会变」：本 fixture 里它恒为 klines/47）")
+        "sqlite_ 开头的内部表不得进比较面 —— 它们是 **SQLite 自己的实现细节**，不属于我们的契约面；"
+        "纳入比较等于把这道闸绑到 SQLite 的内部实现上（⚠️ 理由**不是**「sqlite_sequence 的值会变」："
+        "本 fixture 里它恒为 klines/47）")

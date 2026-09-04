@@ -50,7 +50,7 @@ spec 变异 B64 明写这两条对 `assemble_from_windows` 那行 `f"{fname}.db"
 
 ⇒ 若哪天有人以为「后缀断言就够了」而删掉漂移闸，`.db` → `.sqlite` 这类改动在**本文件范围内**会静默通过。
 
-⚠️ **口径更正**（最终评审 Minor 1）：本驱动器只跑了 `test_trainingset_contract_fixture.py` 这一个文件。评审员把同一变异放到全仓跑，实测**另有 3 条既有用例也会红**（`test_generate_training_sets.py:667`、`test_b2_reconnect_integration.py:280` / `:313`）。⇒ 原话「会静默通过」若不加限定就是**过度主张**，此处改为「在本文件范围内」。这个既有兜底是好事，但它在本文件里看不见，且任何一次对那三条用例的重构都可能让它消失。
+⚠️ **口径更正**（最终评审 Minor 1）：本驱动器只跑了 `test_trainingset_contract_fixture.py` 这一个文件。评审员把同一变异放到全仓跑，实测**另有 3 条既有用例也会红**（`test_generate_training_sets.py:667`、`test_b2_reconnect_integration.py:281` / `:312` —— 三处均已按 `def` 行核过）。⇒ 原话「会静默通过」若不加限定就是**过度主张**，此处改为「在本文件范围内」。这个既有兜底是好事，但它在本文件里看不见，且任何一次对那三条用例的重构都可能让它消失。
 
 ### 2. P6b 证明了那条 spy 守卫**不可替代**
 
