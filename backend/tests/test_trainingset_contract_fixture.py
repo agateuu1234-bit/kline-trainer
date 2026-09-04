@@ -200,3 +200,54 @@ def test_fixture_matches_hand_written_expectations(source, tmp_path):
             "SELECT stock_code, stock_name, start_datetime, end_datetime FROM meta").fetchall() == [
             ("999002.SZ", "跨端契约样例", 1774972800, 1775059199)]
         assert conn.execute("SELECT count(*) FROM klines").fetchone()[0] == 47   # 4+2+5+4+8+24
+
+
+# ── Task 4：漂移闸（spec §4.1 note 4；变异 B53 / B64）
+
+def _logical_content(zip_path) -> dict:
+    """训练组 zip 的**逻辑内容**（⛔ 不含任何随机器/时间变化的东西）。"""
+    with _open_zip_db(zip_path) as (members, conn):
+        return {
+            "members": list(members),
+            "user_version": conn.execute("PRAGMA user_version").fetchone()[0],
+            # DDL 也要比：spec §4.1 note 4 明写「生成器日后改了序列化 / DDL / 版本」都要被抓住
+            "schema": conn.execute(
+                "SELECT type, name, sql FROM sqlite_master "
+                r"WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name").fetchall(),
+            "meta": conn.execute(
+                "SELECT stock_code, stock_name, start_datetime, end_datetime FROM meta").fetchall(),
+            "klines": conn.execute("SELECT * FROM klines ORDER BY id").fetchall(),
+        }
+
+
+def test_committed_fixture_matches_current_generator(tmp_path):
+    """每次 CI 都把【当前生成器的输出】与【已提交 fixture】对齐（spec §4.1 note 4）。
+
+    ⛔ 比【逻辑内容】不比 zip 原始字节：SQLite 文件头 offset 96 存的是**写这个库的那个
+       sqlite 库的版本号**（本机实测 3053003 = 3.53.3）⇒ 换机器 / 升 sqlite 后字节与 CRC32
+       都会变，比字节必然假红。同理 ⛔ 不得断言 content_hash 字面量。
+    """
+    fresh = build_fixture(tmp_path)
+    got = _logical_content(fresh.path)
+    committed = _logical_content(FIXTURE_ZIP)
+    if got != committed:
+        drifted = [k for k in got if got[k] != committed[k]]
+        pytest.fail(
+            f"当前生成器的输出与已提交 fixture 不一致（差异字段：{drifted}）。\n"
+            f"这说明**生成器的行为变了**。\n"
+            f"⛔ 别急着跑再生脚本把它压绿 —— 先判断这是不是有意的改动：\n"
+            f"  · 有意 ⇒ 跑 `python3 backend/scripts/regen_trainingset_contract_fixture.py` "
+            f"重生 fixture，并按 tests/contract-fixtures/training-set/README.md "
+            f"把切片二的 App 侧读取链路一并重跑；\n"
+            f"  · 无意 ⇒ 这就是回归，该改的是生成器，不是 fixture。")
+
+
+def test_drift_gate_compares_row_content_not_just_the_member_list():
+    """自测：漂移闸的比较面必须**真的包含每张表的全部行**（否则它只是个文件名检查）。
+
+    ⚠️ 这条防的是「闸门写窄了」——只比成员清单的话，改公式（`end_global_index` 全变）
+    也不会红，而那正是本切片存在的理由。
+    """
+    keys = set(_logical_content(FIXTURE_ZIP))
+    assert keys == {"members", "user_version", "schema", "meta", "klines"}, (
+        f"漂移闸的比较面被改窄/改宽了：{sorted(keys)}")
