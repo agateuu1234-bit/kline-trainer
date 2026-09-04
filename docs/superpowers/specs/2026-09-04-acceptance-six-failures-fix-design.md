@@ -119,6 +119,11 @@ run "pytest: OpenAPI invariants (≥11, 0 failed)" \
    取 19 会在下次正常新增测试后再次面临同一问题的镜像形态。
 3. **必须先判 `$ec` 再判计数** —— 只判计数会漏掉「pytest 崩溃 / collection error / 0 个测试被收集」，
    那些情况下 `sed` 取不到数、比较式会因空串报错或误判。
+4. **不用管道** —— 原写法 `pytest … | tee … && grep …`，`&&` 判的是 `tee` 的退出码；
+   而 `run` 把命令交给一个**全新的 `bash -c`**，它**不继承**外层脚本的 `set -o pipefail`
+   （同仓 `hardening_6_framework.sh` L83/L85 正是为此显式写 `bash -o pipefail -c`）。
+   改为「重定向到文件 → 存 `ec` → `cat` 出来 → 判 `ec` 与计数」，既避开管道，又保留输出可见。
+
 **E2 判据的判别力已实测五档（scratchpad）：**
 
 | 档 | 输入 | 判定 | 说明 |
@@ -131,10 +136,6 @@ run "pytest: OpenAPI invariants (≥11, 0 failed)" \
 
 ⇒ **档 2 证明「≥下限」确实抓得住删测试；档 4/5 证明它不会被「没有 passed 行」蒙混过关。**
 
-4. **不用管道** —— 原写法 `pytest … | tee … && grep …`，`&&` 判的是 `tee` 的退出码；
-   而 `run` 把命令交给一个**全新的 `bash -c`**，它**不继承**外层脚本的 `set -o pipefail`
-   （同仓 `hardening_6_framework.sh` L83/L85 正是为此显式写 `bash -o pipefail -c`）。
-   改为「重定向到文件 → 存 `ec` → `cat` 出来 → 判 `ec` 与计数」，既避开管道，又保留输出可见。
 
 ### E3　病灶 C：`plan_1c` 的 `swift test` 加**平台门**（不是删除）
 
