@@ -155,7 +155,14 @@ def _open_zip_db(zip_path):
             conn.close()
 
 
-@pytest.mark.parametrize("source", ["fresh"])
+def test_committed_fixture_file_exists():
+    """⛔ 缺文件必须**红**，不得 skip —— 后端 CI 零容忍 skip，一条 skip 会被当成覆盖缺口。"""
+    assert FIXTURE_ZIP.is_file(), (
+        f"跨端契约 fixture 缺失：{FIXTURE_ZIP}\n"
+        f"用 `python3 backend/scripts/regen_trainingset_contract_fixture.py` 生成它。")
+
+
+@pytest.mark.parametrize("source", ["fresh", "committed"])
 def test_fixture_matches_hand_written_expectations(source, tmp_path):
     """逐周期索引向量必须等于**独立人工推算**的期望（spec §4.1 note 3）。
 
