@@ -624,6 +624,7 @@ git commit -m "test(trainingset): 生产者半边手写期望值断言（P2 Task
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -644,7 +645,15 @@ def main() -> int:
     FIXTURE_ZIP.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         gen = build_fixture(Path(td))
-        shutil.copyfile(gen.path, FIXTURE_ZIP)
+        # ⭐ **原子替换**：先落到同目录的临时名，再 `os.replace` 顶上去。
+        # `shutil.copyfile` 是「先截断再写」——中途崩/断电/写满盘会让**已提交的契约产物**
+        # 变成半截文件，而它正是三方共同钉住的那一件东西。同目录 ⇒ 同文件系统 ⇒ replace 原子。
+        staged = FIXTURE_ZIP.parent / (FIXTURE_ZIP.name + ".tmp")
+        try:
+            shutil.copyfile(gen.path, staged)
+            os.replace(staged, FIXTURE_ZIP)
+        finally:
+            staged.unlink(missing_ok=True)   # 复制失败时不留残渣
     new = FIXTURE_ZIP.read_bytes()
 
     with zipfile.ZipFile(FIXTURE_ZIP) as zf:
