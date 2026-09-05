@@ -111,9 +111,11 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正过时表述（见 §4.2） |
 | `scripts/governance/verify-required-checks.sh` | 订正头注释（把谓词描述成「Catalyst check 在位」） |
 | `scripts/governance/admin-configure-required-checks.sh` | 订正头注释 + **`GATE PASS` 那行用户可见输出**（现写「Catalyst + app-build」，应用后会少报实际验证范围） |
+| `.github/workflows/codeowners-config-check.yml` | **仅订正注释**（`:21` 那段安全论证以「backend-tests 不是必需检查」为前提，本次改动后变假）。**不改任何逻辑/触发器/job 名**。⚠️ Claude 对该目录硬 deny → 走 ceremony 由 user `cp` 落地 |
 | 本 spec + 后续 plan | 文档 |
 
-**不新增文件，不改任何 workflow。**
+**不新增文件。**唯一触及 `.github/workflows/` 的是上表最后一行，且**只改注释**——
+理由见 §4.4（原本写的「不改任何 workflow」会惩罚发现该矛盾的实施者）。
 
 ### ⚠️ 4.1 改动面比初版 spec 写的大（Kimi 评审 R1 指出，已复核）
 
@@ -145,6 +147,13 @@ R3 让我订正 pin 测试里两处注释，我照做了；R4 立刻指出**同�
 其中 `admin:71` 是 **`GATE PASS` 的用户可见输出**（不只是注释）—— 它会向管理员**少报**
 实际验证了哪些 context，比注释过时更严重。
 
+**家族①还有两处在改动面内的文件里**（Kimi R6 指出）：`test-admin-runbook.sh:18` 的函数名
+`both_contexts`、以及 `:64` 的注释「恰一条 Catalyst+15368」。该 helper 自身已从
+`--list-contexts` 动态读、**行为不受项数影响**，所以只有名字和注释过时。
+
+> ⚠️ **这暴露了「跑一遍、红哪个改哪个」这条处方的盲区**：函数名和注释过时**不会变红**。
+> 因此 plan 里必须**另立一步文本扫描**，与「跑测试」并列，不能指望测试发现它们。
+
 **家族②「把 pin 测试描述成三条判据」**：`test_backend_tests_workflow_runs_on_every_pr.py`
 的 docstring（`:19-20`）。
 
@@ -158,6 +167,20 @@ R3 让我订正 pin 测试里两处注释，我照做了；R4 立刻指出**同�
 > 部分内容的地方**。修复动作弄丢了上一轮的修复 —— 本仓 memory
 > `feedback_constraint_must_be_verified_against_real_mechanism` 说的「结构性改动后要重核
 > 原来成立的东西」，我又栽了一次。
+
+**家族③还有一处在 workflow 里**：`.github/workflows/codeowners-config-check.yml:21`
+——「判据永远执行不到，而它又不是必需检查，于是能合进去」。这同样是一段**安全论证**，
+而且它就写在一道**必需门**里。
+
+### 4.4 为什么破例改一个 workflow 文件
+
+初版写「不改任何 workflow」+ 验收 A1 写「PR 里不许有 workflow 文件」。Kimi R6 指出这
+构成一个**陷阱**：实施者若发现上面那处安全论证已变假并顺手订正，反而会被我的验收清单
+判「不通过」。
+
+权衡后**破例纳入，但只改注释**：一段变假的安全论证写在必需门里，风险高于多跑一次 ceremony；
+而且同一条标准我已在 pin 测试上执行了三次，不能选择性适用。**逻辑、触发器、job 名一律不动**
+（动了就会牵连 PR #180 那套判据）。代价是 user 要多跑一次 `cp`。
 
 ### 4.3 为什么验收 A1 不复述文件清单
 
@@ -281,7 +304,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| A1 | 把 PR 的改动文件列表与本文档 **§4 那张改动面表**逐行对照（**不要照下面这句话去数个数** —— 见 §4.3 说明为什么这里刻意不复述清单） | 两边一一对应，PR 里没有表外的文件；且**没有任何 `.github/workflows/` 下的文件**（本次不碰 CI 配置） | |
+| A1 | 把 PR 的改动文件列表与本文档 **§4 那张改动面表**逐行对照（**不要照下面这句话去数个数** —— 见 §4.3 说明为什么这里刻意不复述清单） | 两边一一对应，PR 里没有表外的文件。⚠️ 表里**有且只有一个** `.github/workflows/` 文件（`codeowners-config-check.yml`），打开它确认**只改了注释**——若它的 `on:`、job 名或任何 `run:` 步骤被动过，判**不通过**（理由见 §4.4） | |
 | A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
