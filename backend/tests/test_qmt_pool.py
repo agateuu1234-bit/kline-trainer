@@ -317,3 +317,38 @@ def test_the_frozen_universe_passes_the_read_side_validator():
     """
     m = _bootstrap_manifest(freeze_universe(_SAMPLE, seed="s1"))
     assert validate_manifest(m) is m          # 原样返回即通过
+
+
+from qmt_pool import DEFAULT_QUOTA, resolve_quota
+
+
+def test_the_default_quota_matches_the_spec():
+    assert resolve_quota() == {"SH": 120, "SZ": 160, "BJ": 120}
+
+
+def test_overriding_one_layer_leaves_the_others_at_the_default():
+    assert resolve_quota({"BJ": 40}) == {"SH": 120, "SZ": 160, "BJ": 40}
+
+
+def test_zero_is_a_legal_quota():
+    """把某层配额设为 0 = 「这一层一只都不拉」，是合法意图，不是错误。"""
+    assert resolve_quota({"BJ": 0})["BJ"] == 0
+
+
+def test_an_unknown_market_is_refused():
+    with pytest.raises(ValueError, match="未知市场"):
+        resolve_quota({"HK": 10})
+
+
+def test_a_non_integer_or_negative_quota_is_refused():
+    for bad in (-1, 1.5, "120", True, None):
+        with pytest.raises(ValueError, match="非负整数"):
+            resolve_quota({"SH": bad})
+
+
+def test_the_returned_mapping_is_a_copy_of_the_default():
+    """调用方改返回值不许污染下一次调用的默认值。"""
+    q = resolve_quota()
+    q["SH"] = 1
+    assert resolve_quota()["SH"] == 120
+    assert DEFAULT_QUOTA["SH"] == 120

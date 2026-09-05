@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from qmt_ingest import ExportLogEntry
 from qmt_manifest import MARKETS, STOCK_CODE_RE
@@ -155,3 +155,27 @@ def freeze_universe(codes: Iterable[str], *, seed: str) -> dict[str, list[str]]:
     for mk in MARKETS:
         random.Random(f"{seed}:{mk}").shuffle(layers[mk])
     return layers
+
+
+# §4.4 的默认配额。约 400 只 ≈ 1.7 GiB（2026-08-23 实测单股两文件均值约 4.6 MB）。
+# BJ 给 120 而不按地板（≥8）等比缩到约 32：BJ 的**成功率**才是稀缺资源，
+# 详见 spec §4.4 与 S3-F1。
+DEFAULT_QUOTA = {"SH": 120, "SZ": 160, "BJ": 120}
+
+
+def resolve_quota(overrides: "Mapping[str, int] | None" = None) -> dict[str, int]:
+    """§4.4 的默认配额 + `--quota SH=..,SZ=..,BJ=..` 覆盖（命令行接线在 S5）。
+
+    ⚠️ **配额是「累计目标」，不是「每批数量」**（S3-F3）：`quota[mk]` 表示这个
+    staging 在该层**总共**要尝试到 `universe[mk]` 的第几个。合成方式见 `fresh_slots`。
+
+    ⚠️ 返回**副本**：调用方改它不许污染下一次调用。
+    """
+    out = dict(DEFAULT_QUOTA)
+    for mk, value in dict(overrides or {}).items():
+        if mk not in MARKETS:
+            raise ValueError(f"--quota 出现未知市场 {mk!r}，只认 {list(MARKETS)}")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"--quota 的 {mk} 必须是非负整数，读到 {value!r}")
+        out[mk] = value
+    return out
