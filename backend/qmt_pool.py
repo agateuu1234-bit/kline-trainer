@@ -9,6 +9,9 @@ Spec: `2026-07-27-qmt-plan4b-fetch-design.md` §4.2 / §4.3 / §4.4。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from qmt_ingest import ExportLogEntry
 from qmt_normalize import QmtSchemaError, trading_date
 
 # §4.3 的两条月数下界。
@@ -43,3 +46,72 @@ def month_span(first_epoch: int, last_epoch: int) -> int:
     a = trading_date(first_epoch)
     b = trading_date(last_epoch)
     return (b.year - a.year) * 12 + (b.month - a.month) + 1
+
+
+@dataclass(frozen=True)
+class PrefilterStats:
+    """§4.3 的预筛统计 ——「关于数据源的第一份真实观测」，随 manifest 落盘。
+
+    四个 `rejected_*` 之间**互斥且穷尽**：每只被剔的股按 `prefilter` 的判定次序
+    恰好归因到一条上，`total == passed + 四条之和` 是不变量。
+    """
+    total: int
+    rejected_incomplete: int
+    rejected_status: int
+    rejected_daily_span: int
+    rejected_1m_span: int
+    passed: int
+
+    def as_manifest_field(self) -> dict:
+        """写进 manifest 的 `prefilter_stats`（**非必需**顶层键，不 bump 版本）。"""
+        return {"total": self.total,
+                "rejected_incomplete": self.rejected_incomplete,
+                "rejected_status": self.rejected_status,
+                "rejected_daily_span": self.rejected_daily_span,
+                "rejected_1m_span": self.rejected_1m_span,
+                "passed": self.passed}
+
+
+def prefilter(entries: dict[tuple[str, str], ExportLogEntry]
+              ) -> tuple[list[str], PrefilterStats]:
+    """§4.3 的三条判据（外加一条「两个周期缺一不可」）。
+
+    返回 `(codes, stats)`，`codes` **按字典序升序**。
+
+    ⚠️ **判定次序是判据的一部分**：`status != "ok"` 的行没有有效时间戳
+    （真实导出里 `301583.SZ` 的 `first_time`/`last_time` 都是空的，`qmt_ingest`
+    保留条目并置 `None`），先算月跨度会当场炸。**先看 status，再碰时间戳** ——
+    这正是 `qmt_ingest` 自己在真实数据上栽过的那一跤。
+
+    ⚠️ **升序返回不是可有可无的整洁**：下游 `freeze_universe` 对它做 seeded 打乱，
+    而打乱结果依赖入参**顺序**；dict 的迭代顺序就是 `export_log.csv` 的行序。
+    不排序的话，「同 seed → 同一个宇宙」会悄悄依赖 QMT 导出时的行序。
+
+    ⚠️ **三条判据都是保守下界，不替代真门**：真门照样在 pilot 里跑。实测在当前
+    这份导出上只筛掉 8.4%（S3-F2），实现者不得据此假定宇宙会被大幅缩小。
+    """
+    by_code: dict[str, dict[str, ExportLogEntry]] = {}
+    for (code, period), ent in entries.items():
+        by_code.setdefault(code, {})[period] = ent
+
+    passed: list[str] = []
+    n_incomplete = n_status = n_daily = n_1m = 0
+
+    for code in sorted(by_code):
+        per = by_code[code]
+        e_1m, e_daily = per.get("1m"), per.get("daily")
+        if e_1m is None or e_daily is None:
+            n_incomplete += 1
+        elif e_1m.status != "ok" or e_daily.status != "ok":
+            n_status += 1
+        elif month_span(e_daily.first_time, e_daily.last_time) < MIN_DAILY_MONTHS:
+            n_daily += 1
+        elif month_span(e_1m.first_time, e_1m.last_time) < MIN_1M_MONTHS:
+            n_1m += 1
+        else:
+            passed.append(code)
+
+    return passed, PrefilterStats(
+        total=len(by_code), rejected_incomplete=n_incomplete,
+        rejected_status=n_status, rejected_daily_span=n_daily,
+        rejected_1m_span=n_1m, passed=len(passed))
