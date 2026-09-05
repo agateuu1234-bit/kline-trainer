@@ -108,7 +108,9 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | `tests/scripts/governance/test-verify-required-checks.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/test-admin-runbook.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/fixtures/*.json` | 代表「已合规」的 fixture 需含新 context（**哪几个由实跑决定，不靠猜**） |
-| `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正两处已过时的注释（`:23`、`:116` 以「不是必需检查」为前提，本改动后变成事实错误） |
+| `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正过时表述（见 §4.2） |
+| `scripts/governance/verify-required-checks.sh` | 订正头注释（把谓词描述成「Catalyst check 在位」） |
+| `scripts/governance/admin-configure-required-checks.sh` | 订正头注释 + **`GATE PASS` 那行用户可见输出**（现写「Catalyst + app-build」，应用后会少报实际验证范围） |
 | 本 spec + 后续 plan | 文档 |
 
 **不新增文件，不改任何 workflow。**
@@ -131,6 +133,28 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 `fixtures/` 目录下共 **18** 个文件（`ls | wc -l` 实测），远多于评审点名的两个。因此本 spec
 **不预先列出**要改哪几个 —— 那是按印象猜。正确做法写进 plan：**跑一遍 `run-all.sh`，
 红哪个改哪个**，改完再跑一遍确认 ALL GREEN。
+
+### 4.2 过时表述必须**按家族穷尽**，不是按手头的文件改（Kimi R3+R4 连提两轮）
+
+R3 让我订正 pin 测试里两处注释，我照做了；R4 立刻指出**同一条规矩我没在别处执行**。
+于是本轮改为全仓扫这个家族，实测命中比评审点名的还多：
+
+**家族①「把 canonical 清单描述成两项」——共 6 处、3 个文件**：
+`build-protection-put-payload.py:4,31`、`verify-required-checks.sh:5,9`、
+`admin-configure-required-checks.sh:2,71`。
+其中 `admin:71` 是 **`GATE PASS` 的用户可见输出**（不只是注释）—— 它会向管理员**少报**
+实际验证了哪些 context，比注释过时更严重。
+
+**家族②「把 pin 测试描述成三条判据」**：`test_backend_tests_workflow_runs_on_every_pr.py`
+的 docstring（`:19-20`）。
+
+> ⚠️ **扫描方法本身也踩了一下**：我第一遍 `grep "三条判据"` **漏掉了这一处**，因为原文里
+> 「三条」和「判据」被**换行拆开**了。教训 = 一致性扫描要考虑「同一说法的不同书写形态」
+> （换行、空格、全半角），不能只搜一个连写的词。
+
+**刻意不改**：`docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md`
+里也有「三条判据」，但那是 **PR #180 交付当时的历史记录**，描述的是那次交付的状态，
+不是现行契约。改它等于篡改历史档案。此处明写为**有意排除**，免得下一轮评审再提一次。
 
 > ⚠️ **本节两处数字曾经写错**（Kimi R2 指出，均复核属实）：曾写「19 个 fixture（已枚举）」
 > —— 实际 18 个，我数的是两个 bash 文件里**被引用的名字去重**，不是目录里的文件数；
