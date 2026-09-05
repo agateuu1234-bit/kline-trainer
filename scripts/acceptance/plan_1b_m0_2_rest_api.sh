@@ -30,9 +30,12 @@ run "file: test_openapi.py exists" test -s backend/tests/test_openapi.py
 run "file: openapi-smoke.yml exists" test -s .github/workflows/openapi-smoke.yml
 
 # ---- 契约测试 ----
-# 必须确切 11 passed；若将来 test 数变化说明 spec drift，label 必须同步更新
-run "pytest: 11 OpenAPI invariants" \
-    bash -c "cd backend && python3 -m pytest tests/test_openapi.py -q | tee /tmp/plan1b-pytest.out && grep -q '^11 passed' /tmp/plan1b-pytest.out"
+# 下限断言（≥11）而非等值：新增不变量测试是健康行为，不是 drift；
+# 真正危险的是有人【删掉】不变量测试，「≥下限」恰好只抓后者。
+# 不用管道：run 把命令交给全新的 bash -c，它不继承外层 set -o pipefail，
+# 管道会让退出码取自 tee（恒 0），吞掉 pytest 自己的失败。
+run "pytest: OpenAPI invariants (>=11, 0 failed)" \
+    bash -c "cd backend && python3 -m pytest tests/test_openapi.py -q > /tmp/plan1b-pytest.out 2>&1; ec=\$?; cat /tmp/plan1b-pytest.out; [ \$ec -eq 0 ] && [ \"\$(sed -n 's/^\\([0-9]\\{1,\\}\\) passed.*/\\1/p' /tmp/plan1b-pytest.out)\" -ge 11 ]"
 
 # ---- CI workflow YAML 合法 ----
 run "yaml: openapi-smoke.yml parse" \
