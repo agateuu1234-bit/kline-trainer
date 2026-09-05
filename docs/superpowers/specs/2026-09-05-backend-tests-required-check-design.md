@@ -103,13 +103,21 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 
 | 用例 | 为什么破 |
 |---|---|
-| verify 的 "assert happy → 0" | fixture `ruleset-with-check.json` 只含 Catalyst + app-build → 报「缺 required check」→ rc=1 |
+| verify 的 "assert happy → 0" | fixture `ruleset-with-check.json` **不含 backend context**（它含 `swift-contracts-smoke` + Catalyst + app-build 三条）→ 报「缺 required check」→ rc=1 |
 | admin-runbook #2「apply no-op（已合规）」 | fixture 缺新 context ⇒ builder 会补 ⇒ 不再 no-op ⇒「无 PUT」断言破 |
 | #5、#6a | 同因（N3 fixture 缺新 context → post-assert 败） |
 
-**目录下共 19 个 fixture**（已枚举），远多于评审点名的两个。因此本 spec **不预先列出**
-要改哪几个 —— 那是按印象猜。正确做法写进 plan：**跑一遍 `run-all.sh`，红哪个改哪个**，
-改完再跑一遍确认 ALL GREEN。
+`fixtures/` 目录下共 **18** 个文件（`ls | wc -l` 实测），远多于评审点名的两个。因此本 spec
+**不预先列出**要改哪几个 —— 那是按印象猜。正确做法写进 plan：**跑一遍 `run-all.sh`，
+红哪个改哪个**，改完再跑一遍确认 ALL GREEN。
+
+> ⚠️ **本节两处数字曾经写错**（Kimi R2 指出，均复核属实）：曾写「19 个 fixture（已枚举）」
+> —— 实际 18 个，我数的是两个 bash 文件里**被引用的名字去重**，不是目录里的文件数；
+> 又曾写该 fixture「只含 Catalyst + app-build」—— 实际三条，而**我自己前一条命令的输出
+> 就打印了那三条**，我却照抄了上一轮评审的措辞。
+> 记在这里是因为评审的元批评成立：**这份文档通篇拿「已核实」当凭据，而错恰好出在可以
+> 静态核验的地方**。据此已把 spec 里其余可核断言重新核了一遍（ruleset 6 条必需 context、
+> 三个工作流均无 `pull_request` 过滤键、检查名逐字），**结果全部成立**。
 
 ## 5. 验证策略
 
@@ -117,12 +125,23 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 
 ### 5.1 基线（初版写错了，已订正）
 
-**真基线 = `bash tests/scripts/governance/run-all.sh` → `ALL GREEN`，63 条断言全过**
-（已在 `ea818f2` 实测）。
+**判绿的唯一口径 = `bash tests/scripts/governance/run-all.sh` 的最后一行是 `ALL GREEN`
+且全文无 `FAIL:` 行。**
 
-初版 spec 写的「15 passed」是**只跑了 pytest 那一个文件**的结果 —— 只覆盖三套里的一套。
-这是个典型的「基线量少了」：拿它当基线，另外两套的红根本不会被发现。**判绿必须用
-`run-all.sh` 这个入口**，不能用我顺手敲的那条 pytest 命令。
+实测组成（`ea818f2`，供对账用；数字随仓库演进会变，**以实际输出为准，不要拿这里的数字当判据**）：
+
+| 来源 | 执行量 |
+|---|---|
+| `test_build_payload.py`（pytest） | `15 passed` |
+| 两个 bash 套件 | `63` 行 `PASS`、`0` 行 `FAIL` |
+| **合计** | **78** |
+
+这一节被订正过两次，都是**同一种错**——量少了：
+- 初版写「15 passed」= 只跑了三套里的一套；
+- 第二版写「63 条断言」= 只数了两个 bash 套件的 `PASS` 行，把 pytest 的 15 条漏在计数外
+  （Kimi R2 指出，复核属实：我那条 `grep -cE '^(PASS|FAIL)'` 天然数不到 pytest 的点号输出）。
+
+**教训**：别在文档里写手工推出来的数字。判绿读 `ALL GREEN` 这一行，对账用上表、且注明测量时的 SHA。
 
 ### 5.2 变异验证（必做，全部亲跑）
 每条都要**先看它红、且红在预期的那一条判据上**。归因要单独核 —— 结论对不代表归因对。
@@ -193,7 +212,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| A1 | 看 PR 的改动文件列表 | 只有 2 个代码文件 + 2 份文档；**没有**任何 `.github/workflows/` 下的文件 | |
+| A1 | 看 PR 的改动文件列表 | 含这些：1 个 builder 脚本、3 个测试文件（1 个 `.py` + 2 个 `.sh`）、若干 `fixtures/*.json`、2 份文档。**关键是：没有任何 `.github/workflows/` 下的文件**（本次不碰 CI 配置） | |
 | A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
