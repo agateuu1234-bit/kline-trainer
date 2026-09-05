@@ -201,3 +201,111 @@ def test_stats_travel_as_a_non_required_manifest_key():
                      "rejected_daily_span": 0, "rejected_1m_span": 0, "passed": 1}
     assert "prefilter_stats" not in qmt_manifest.REQUIRED_KEYS
     assert qmt_manifest.MANIFEST_VERSION == 1
+
+
+from qmt_manifest import MARKETS, validate_manifest
+from qmt_pool import freeze_universe
+
+
+def _bootstrap_manifest(universe: dict) -> dict:
+    """「刚冻结完宇宙、一只股都还没拷」—— S4 会写出的第一份 manifest。
+
+    形状逐字对着 `qmt_manifest` 的读侧枚举造：`partial` 级的存根必须是
+    `passes: []`（O4-F2：首次 fetch 崩在半路时磁盘上就是这个样子）。
+    """
+    elog = "e" * 64
+    return {
+        "manifest_version": 1,
+        "seed": "s-2026-09-05",
+        "source_snapshot": {"export_log_sha256": elog, "universe": universe},
+        "source_mount": {"fstype": "smbfs",
+                         "device": "//agate@192.168.5.151/QMT_Export",
+                         "source_root_relative": "front_ratio_cn_stocks_ab_bj"},
+        "pool_order": {mk: [] for mk in MARKETS},
+        "cursor": {mk: 0 for mk in MARKETS},
+        "files": [],
+        "staged_export_log": {"relative_path": "export_log.csv",
+                              "bytes": 2399554, "sha256": elog},
+        "source_verification": "partial",
+        "source_verification_evidence": {"level": "partial", "passes": []},
+    }
+
+
+_SAMPLE = ["600000.SH", "600004.SH", "600006.SH", "600008.SH",
+           "000001.SZ", "000002.SZ", "000004.SZ",
+           "430047.BJ", "430090.BJ"]
+
+
+def test_codes_are_split_into_three_layers_by_suffix():
+    uni = freeze_universe(_SAMPLE, seed="s1")
+    assert set(uni) == set(MARKETS)
+    assert sorted(uni["SH"]) == ["600000.SH", "600004.SH", "600006.SH", "600008.SH"]
+    assert sorted(uni["SZ"]) == ["000001.SZ", "000002.SZ", "000004.SZ"]
+    assert sorted(uni["BJ"]) == ["430047.BJ", "430090.BJ"]
+
+
+def test_the_same_seed_and_the_same_stocks_give_a_byte_identical_universe():
+    assert freeze_universe(_SAMPLE, seed="s1") == freeze_universe(_SAMPLE, seed="s1")
+
+
+def test_a_different_seed_gives_a_different_order():
+    a, b = freeze_universe(_SAMPLE, seed="s1"), freeze_universe(_SAMPLE, seed="s2")
+    assert a != b
+    assert {mk: sorted(a[mk]) for mk in MARKETS} == {mk: sorted(b[mk]) for mk in MARKETS}
+
+
+def test_the_universe_does_not_depend_on_the_input_order():
+    """`random.shuffle` 的输出取决于入参顺序，而入参来自 dict 的迭代顺序。"""
+    assert (freeze_universe(_SAMPLE, seed="s1")
+            == freeze_universe(list(reversed(_SAMPLE)), seed="s1")
+            == freeze_universe(set(_SAMPLE), seed="s1"))
+
+
+def test_changing_one_layer_does_not_disturb_the_others():
+    """spec §4.4：各层用各自的种子，「改动某层配额不会扰动其他层的顺序」。
+
+    逐层增量补拉的正确性完全建立在「其他层顺序不变」上 —— 共用一个 rng 的话，
+    SH 层多一只股就会把 SZ/BJ 的整个顺序推移，而 `cursor` 还指着老位置。
+    """
+    base = freeze_universe(_SAMPLE, seed="s1")
+    more = freeze_universe(_SAMPLE + ["000005.SZ"], seed="s1")
+    assert more["SH"] == base["SH"]
+    assert more["BJ"] == base["BJ"]
+    assert more["SZ"] != base["SZ"]          # 这一层本来就该变
+
+
+def test_an_empty_layer_is_legal():
+    uni = freeze_universe(["600000.SH"], seed="s1")
+    assert uni["SZ"] == [] and uni["BJ"] == []
+
+
+def test_a_malformed_code_is_refused():
+    """冻结名单是补拉游标的**唯一锚点**，坏码必须当场拒。
+
+    `qmt_ingest._norm_code` 对认不出的标识值是原样 `strip()` 返回的，
+    一份被污染的 export_log 能把 `"foo"` 送到这里。放过去的话，
+    整棵 staging 要到读侧校验才被判死 —— 离病因十万八千里。
+    """
+    for bad in ("foo", "600000.XX", "600000.SH\n", "", "../etc/passwd"):
+        with pytest.raises(QmtSchemaError, match="不合法的股票代码"):
+            freeze_universe(["600000.SH", bad], seed="s1")
+
+
+def test_a_duplicated_code_is_refused():
+    """名单里重复 ⇒ 两个 `universe_idx` 指向同一只股，锚点语义当场崩。
+
+    ⚠️ 读侧 `_validate_source_snapshot` **不查层内唯一性**（只查每个元素
+    是合法代码且后缀相符）。故这道门只能立在写侧。
+    """
+    with pytest.raises(QmtSchemaError, match="重复"):
+        freeze_universe(["600000.SH", "600000.SH"], seed="s1")
+
+
+def test_the_frozen_universe_passes_the_read_side_validator():
+    """跨模块契约钉：S3 产出的宇宙必须被 S2a 的读侧校验接受。
+
+    「写侧形状与读侧要求不配对」在本仓已经栽过三次（S2-F3 / R94-F2 / O4-F13），
+    每次都是「本工具诚实产出的 manifest 被本工具自己判非法」。
+    """
+    m = _bootstrap_manifest(freeze_universe(_SAMPLE, seed="s1"))
+    assert validate_manifest(m) is m          # 原样返回即通过

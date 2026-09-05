@@ -9,9 +9,12 @@ Spec: `2026-07-27-qmt-plan4b-fetch-design.md` §4.2 / §4.3 / §4.4。
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
+from typing import Iterable
 
 from qmt_ingest import ExportLogEntry
+from qmt_manifest import MARKETS, STOCK_CODE_RE
 from qmt_normalize import QmtSchemaError, trading_date
 
 # §4.3 的两条月数下界。
@@ -115,3 +118,40 @@ def prefilter(entries: dict[tuple[str, str], ExportLogEntry]
         total=len(by_code), rejected_incomplete=n_incomplete,
         rejected_status=n_status, rejected_daily_span=n_daily,
         rejected_1m_span=n_1m, passed=len(passed))
+
+
+def freeze_universe(codes: Iterable[str], *, seed: str) -> dict[str, list[str]]:
+    """§4.4：按 code 后缀分三层，各层内**独立** seeded 打乱，产出冻结名单。
+
+    ⚠️ **各层用各自的种子** `f"{seed}:{market}"`：spec 明写「改动某层配额不会扰动
+    其他层的顺序」。共用一个 rng 的话，SH 层多一只股就会把 SZ/BJ 的整个顺序推移，
+    而逐层增量补拉的正确性完全建立在「其他层顺序不变」上 —— `cursor[SZ]` 还指着
+    老位置，指向的却已是另一只股。
+
+    ⚠️ **自己再排一次序**：`random.shuffle` 的输出取决于入参顺序，而入参往往来自
+    dict 的迭代顺序（= `export_log.csv` 的行序）。不排序的话，「同 seed → 同一个
+    宇宙」会悄悄依赖 QMT 导出时的行序。
+
+    ⚠️ **坏码与重复当场拒**：这份名单是补拉游标的唯一锚点。放过去的话，整棵
+    staging 要到读侧校验才被判死，而那时已经离病因十万八千里；重复更狠 ——
+    读侧 `_validate_source_snapshot` **不查层内唯一性**，两个下标指向同一只股
+    会一路活到 `pool_order` 的锚点校验处才爆。
+    """
+    layers: dict[str, list[str]] = {mk: [] for mk in MARKETS}
+    seen: set[str] = set()
+    for code in sorted(codes):
+        if not isinstance(code, str) or STOCK_CODE_RE.match(code) is None:
+            raise QmtSchemaError(
+                f"freeze_universe 收到不合法的股票代码 {code!r}——"
+                "`export_log` 的标识列可能被污染（`qmt_ingest._norm_code` 对认不出的"
+                "值是原样返回的）。冻结名单是补拉游标的唯一锚点，坏码不许进。")
+        if code in seen:
+            raise QmtSchemaError(
+                f"freeze_universe 收到重复的股票代码 {code!r}——"
+                "同一只股占两个 universe_idx 会让锚点语义当场失效。")
+        seen.add(code)
+        layers[code.rsplit(".", 1)[1]].append(code)
+
+    for mk in MARKETS:
+        random.Random(f"{seed}:{mk}").shuffle(layers[mk])
+    return layers
