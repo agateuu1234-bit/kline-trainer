@@ -261,17 +261,25 @@ def test_the_universe_does_not_depend_on_the_input_order():
             == freeze_universe(set(_SAMPLE), seed="s1"))
 
 
-def test_changing_one_layer_does_not_disturb_the_others():
-    """spec §4.4：各层用各自的种子，「改动某层配额不会扰动其他层的顺序」。
+def test_each_layer_is_shuffled_with_its_own_seed():
+    """每层顺序 == `shuffle(该层排序后的成员, Random(f"{seed}:{market}"))` —— 逐字钉死。
 
-    逐层增量补拉的正确性完全建立在「其他层顺序不变」上 —— 共用一个 rng 的话，
-    SH 层多一只股就会把 SZ/BJ 的整个顺序推移，而 `cursor` 还指着老位置。
+    ⚠️ **不要用「改一层、看另一层动没动」去间接推断**：那条判据不可靠（2026-09-06
+    修复轮 1 订正，原判据是 `test_changing_one_layer_does_not_disturb_the_others`）。
+    实测 `shuffle` 洗 6 个和洗 7 个元素**消耗的随机数次数相同**（都是 7 次
+    `getrandbits`），于是共用 rng 时洗完第一层状态没变、后面的层纹丝不动；
+    再加上 `MARKETS` 里排第一的那层结构上必然不受影响 —— 两个独立的失效来源。
+
+    本条改为直接断言契约公式。S4 的逐层增量补拉完全建立在
+    「同 seed 同成员 → 同顺序，且与其他层无关」之上，这就是那条契约。
     """
-    base = freeze_universe(_SAMPLE, seed="s1")
-    more = freeze_universe(_SAMPLE + ["000005.SZ"], seed="s1")
-    assert more["SH"] == base["SH"]
-    assert more["BJ"] == base["BJ"]
-    assert more["SZ"] != base["SZ"]          # 这一层本来就该变
+    import random as _r
+
+    uni = freeze_universe(_SAMPLE, seed="s1")
+    for mk in MARKETS:
+        expected = sorted(c for c in _SAMPLE if c.endswith("." + mk))
+        _r.Random(f"s1:{mk}").shuffle(expected)
+        assert uni[mk] == expected, f"{mk} 层的顺序与 f'seed:市场' 的契约不符"
 
 
 def test_an_empty_layer_is_legal():
