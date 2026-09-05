@@ -82,17 +82,34 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 ### 3.2.1 因此这个名字必须被钉住（Kimi R3 指出，复核属实）
 
 本次改动把这个 job 名从「一个显示字符串」**升级成了死锁向量**，而全仓**没有任何测试
-断言它** —— 它目前只出现在注释里（已 grep 确认）。现有的
+断言它**（已 grep 确认：`.py` 文件里的命中全部是注释/docstring）。
+
+> 措辞订正（Kimi R7）：初版写「只出现在注释里」**字面不成立** —— 它当然也作为
+> `backend-tests.yml:27` 的 `name:` **配置值**出现，并出现在若干 docs 正文里。
+> 承重结论（**没有任何测试断言它**）不受影响；但这份文档通篇以「已核实」为凭据，
+> 措辞就得经得起照字面复核。
+
+现有的
 `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` 三条判据只钉触发器，
 不碰 job 名。
 
-故本次**必须**给该文件加第四条判据：**workflow 里那个 job 的 `name` 必须是 canonical
-清单 `REQUIRED_CONTEXTS` 里的一项**（从 builder 动态读，不在测试里另抄一份字符串 ——
-抄一份就等于制造第二个真相）。
+故本次**必须**给该文件加第四条判据。判据必须写成**两条相等断言**（都从 builder 动态读，
+不在测试里另抄字符串 —— 抄一份就等于制造第二个真相）：
 
-两个方向都被这条挡住：
-- 改 job 名而不改清单 → 红；
-- 改清单而不改 job 名 → 红。
+1. `backend-tests.yml` 里那个 job 的 `name` **等于** `BACKEND_TESTS_CONTEXT`；
+2. `BACKEND_TESTS_CONTEXT` **在** `REQUIRED_CONTEXTS` 里。
+
+> ⚠️ **不能写成「job 名是 `REQUIRED_CONTEXTS` 里的一项」**（成员关系）。初版就是这么写的，
+> Kimi R7 指出它有绕过、复核属实：清单里有**多条** context，谁把后端 job 改名成**清单里的
+> 另一条**（例如重构时复制粘贴成 Catalyst 那个名字），成员关系判据**仍然绿**，而必需检查
+> `backend pytest (full suite)` 永远等不到结果 → **全仓 PR 死锁**，正是这条判据要防的灾难。
+> 本仓 memory `feedback_guard_existence_vs_direction_and_identity_map` 记的就是这个形态：
+> **守卫只钉「名字在不在」，挡不住两侧互换**。判据必须表达「谁配谁」，不是「在不在集合里」。
+
+这样三个方向才都被挡住：
+- 改 job 名（改成任何别的字符串，**含清单里的另一条**）→ 断言 1 红；
+- 把 backend 从清单里删掉 → 断言 2 红；
+- 改清单里 backend 那一项的字面值而不同步改 job 名 → 断言 1 红。
 
 **为什么这条特别值钱**：该文件正是 PR #180 接进 `codeowners-config-check` 那道
 **必需门**的文件（那一步就是 `pytest <该文件>`）。所以这条判据由一道必需检查执行 ⇒
@@ -198,9 +215,17 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 > 「三条」和「判据」被**换行拆开**了。教训 = 一致性扫描要考虑「同一说法的不同书写形态」
 > （换行、空格、全半角），不能只搜一个连写的词。
 
-**刻意不改**：`docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md`
-里也有「三条判据」，但那是 **PR #180 交付当时的历史记录**，描述的是那次交付的状态，
-不是现行契约。改它等于篡改历史档案。此处明写为**有意排除**，免得下一轮评审再提一次。
+**刻意不改（逐条给理由，避免「两头都没占」）**：
+
+| 文件 | 为什么不改 |
+|---|---|
+| `docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md`（「三条判据」） | PR #180 **交付当时的历史记录**，描述那次交付的状态、不是现行契约。改它等于篡改档案 |
+| `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md`（`:6` 写 canonical = Catalyst + app-build，§4 贴了只含两条 context 的预期输出） | 它是**顺位 2 那次交付的 evidence 记录**（标题即「post-merge admin runbook + evidence 模板」，正文写「本次是真实 mutation」），同属历史档案 |
+| `docs/superpowers/plans|specs/2026-06-*`、`docs/acceptance/**` 内的同类表述 | 同上，全是历史交付记录 |
+
+> ⚠️ 但第二行那份 runbook 有个**现实风险**（Kimi R7 指出）：它长得像一份**可照着做的操作手册**，
+> 而 §7 第 2 步正是让 user 去应用。若 user 翻它对照「预期输出」，会看到与改动后现实不符的
+> 「两条 context」。故 §7 已加一句醒目提示：**以本 spec 为准，别照那份旧 runbook 的预期数字核对**。
 
 > ⚠️ **本节两处数字曾经写错**（Kimi R2 指出，均复核属实）：曾写「19 个 fixture（已枚举）」
 > —— 实际 18 个，我数的是两个 bash 文件里**被引用的名字去重**，不是目录里的文件数；
@@ -244,6 +269,8 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 | M3 | 删掉 `APP_BUILD_CONTEXT`（既有项） | 红 —— 证明测试不是只盯新项 |
 | M4 | 常量顺序调换 | 记录是红是绿。**若绿**，说明判据不约束顺序 —— 那就明写「顺序无语义」，别假装它被测了 |
 | M6 | 把 `backend-tests.yml` 里那个 job 的 `name` 改掉一个字符 | 新加的第四条判据必须**红**（§3.2.1）。这条变异模拟的正是「全仓 PR 卡死」那个场景 |
+| **M7** | 把那个 job 的 `name` 改成 **`REQUIRED_CONTEXTS` 里的另一条**（如 Catalyst 那个名字） | 必须**红**。这一条专打「成员关系判据」那个绕过（见 §3.2.1 的 ⚠️）——**此档若变绿，说明判据被写回成员关系了** |
+| M8 | 把 `BACKEND_TESTS_CONTEXT` 从 `REQUIRED_CONTEXTS` 里删掉、但保留常量定义 | 必须**红**（断言 2） |
 | **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
 
 **⚠️ 额外的归因要求（Kimi R1 指出，属实）**：`test-admin-runbook.sh` 里 #6b/#6c/#6d/#6e
@@ -292,7 +319,10 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 ## 7. 交付次序（不可颠倒）
 
 1. PR 合并；
-2. user 在真实终端跑应用脚本（**先看 §5.3/§5.4 的干跑 diff**）；
+2. user 在真实终端跑应用脚本（**先看 §5.3/§5.4 的干跑 diff**）。
+   ⚠️ **别去照 `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md` 核对预期输出** ——
+   那是顺位 2 那次交付的历史 evidence，里面的 canonical 清单和预期数字都是**两条 context** 时代的，
+   与本次改动后的现实不符（理由见 §4.2 的「刻意不改」表）；
 3. user 复核 GitHub 上必需检查列表已含两项新条目。
 
 **先合并再应用**：反过来会让本 PR 自己立刻受新规则约束 —— 虽然它会绿，但没必要给自己
