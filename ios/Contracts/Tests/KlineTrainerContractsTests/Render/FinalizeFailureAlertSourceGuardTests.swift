@@ -255,14 +255,24 @@ struct FinalizeFailureAlertSourceGuardTests {
         #expect(branch.contains("关闭 App"), "必须给出真实出路")
     }
 
-    @Test("⭐⭐反向对照：文件被淘汰那一支**必须保留**原建议（那时存储是好的，放弃真能成功）")
-    func trainingSetMissingBranchKeepsDiscardAdvice() throws {
-        // ⚠️ 这条是防我改过头的（本仓踩过：收紧一条判据，把邻居那条本来成立的理由也误伤了）。
-        // `.trainingSetMissing` 的触发条件是**缓存淘汰**，那时存储是正常的 ⇒ `clearPending()` 会成功
-        // ⇒ 「放弃本局」是一条**真出路**，删掉它反而让用户少一个选择。
+    @Test("⭐⭐⭐文件被淘汰那一支**同样**不得把「放弃本局」说成出路（我上一稿在这里论证错了）")
+    func trainingSetMissingBranchAlsoMustNotOfferDiscard() throws {
+        // ⚠️ 上一稿我写了一条方向相反的守卫，理由是「`.trainingSetMissing` 的成因是缓存淘汰，
+        //    那时存储是好的 ⇒ 放弃真能成功」。**这个论证只看了路的一半。**
+        //
+        //    自查（2026-09-06）推翻它：能走到「结算入账失败」这个弹窗，前提是 `finalize()` 抛错，
+        //    而 `finalize` 的核心是 `finalization.finalizeSession(...)`——注释逐字写着
+        //    「单事务（insertRecord + clearPending 原子）」，**必须写库**。
+        //    ⇒ 进到本弹窗时，写库能力**已经失败过一次**。
+        //    而 `pendingCheckpointStatus` 走到 `.trainingSetMissing` 只要求**读**成功
+        //    （`loadPending()` OK）+ 训练组文件不在 —— 读得动、写不动，正是磁盘满的典型形态。
+        //    ⇒ 这一支的「放弃本局」（同样走 `clearPending()`）**必然也失败**，那句建议是假话。
+        //
+        // ⛔ 那条方向相反的守卫等于在保护这句假话 —— 已删。防改过头的职责改由
+        //    `cannotPreserveCopyDistinguishesReasons`（三支文案不得雷同）承担。
         let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
-        #expect(branch.contains("可在上一个提示里选择「放弃本局」"),
-                "⛔ 这一支的建议是成立的，不许跟着一起删")
+        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
+                "⛔ 进到本弹窗时写库已经失败过，这一支的「放弃本局」同样会失败")
     }
 
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
@@ -385,8 +395,19 @@ struct FinalizeFailureAlertSourceGuardTests {
         let rest = code[hit.upperBound...]
         let endQuote = try #require(rest.firstIndex(of: "\""), "找不到该文案的收尾引号（锚点失效）")
         let missingBranchCopy = String(rest[..<endQuote])
-        #expect(!missingBranchCopy.contains(sq("清理设备存储空间")),
-                "⛔ 对『文件已被清理』那一支，建议清理存储空间是无效建议")
+        // ⚠️ **判据随前提订正**（2026-09-06）：上一稿在这里禁止本支出现「清理设备存储空间」，
+        //    理由是「文件已删，腾空间也回不来」。那个理由只针对**找回文件**这一个目的成立。
+        //    自查发现前提变了：能走到本弹窗说明写库已失败过，而**重试入账要写库** ⇒ 清理存储
+        //    在这一支有了第二个、真实有效的用途。⛔ 沿用旧禁令会逼出一句对用户没用的空话。
+        //    新判据：可以提清理存储，但**必须说清目的是重试入账**，绝不能暗示文件能回来。
+        if missingBranchCopy.contains("清理设备存储空间") {
+            #expect(missingBranchCopy.contains("重试入账"),
+                    "⛔ 这一支提清理存储时必须说明是为了重试入账 —— 否则会被读成『腾空间就能找回文件』")
+        }
+        for lie in ["恢复训练组", "找回", "重新下载后即可继续"] {
+            #expect(!missingBranchCopy.contains(lie),
+                    "⛔ 不得暗示清理存储能让被删掉的训练组数据文件回来")
+        }
         // ④ 同理：存档读不出来时，清存储也解决不了
         let hit4 = try #require(code.range(of: sq("存档读取失败")))
         let rest4 = code[hit4.upperBound...]
