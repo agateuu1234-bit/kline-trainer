@@ -208,6 +208,63 @@ struct FinalizeFailureAlertSourceGuardTests {
         }
     }
 
+    /// 取 `cannotPreserveCopy` 里某一支 `case` 的返回文案。
+    /// 从 `case .X:` 起到下一个 `case ` 之前 —— 三支各自独立断言，防「改了一支殃及另一支」。
+    private func copyBranch(_ text: String, caseName: String) throws -> String {
+        let body = try #require(text.range(of: sq("private var cannotPreserveCopy: String {")),
+                                "锚点失效：找不到 cannotPreserveCopy")
+        let rest = text[body.upperBound...]
+        let start = try #require(rest.range(of: sq("case .\(caseName)")),
+                                 "锚点失效：找不到 case .\(caseName)")
+        // ⛔ 只取该 case 返回的**那一个字符串字面量**，不能「取到下一个 case 为止」——
+        //    最后一支后面没有下一个 case，会一路吃到文件末尾，断言就会被文件别处的字样蒙混。
+        let after = rest[start.upperBound...]
+        let open = try #require(after.range(of: "return\""), "锚点失效：case .\(caseName) 之后找不到 return 字面量")
+        var body2 = after[open.upperBound...]
+        var out = ""
+        while let ch = body2.first {
+            body2 = body2.dropFirst()
+            if ch == "\\" { if let esc = body2.first { out.append(ch); out.append(esc); body2 = body2.dropFirst() }; continue }
+            if ch == "\"" { break }
+            out.append(ch)
+        }
+        return out
+    }
+
+    @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，必然也失败）")
+    func noneBranchMustNotOfferDiscardAsAWayOut() throws {
+        // 真机验收（2026-09-05）暴露：8c 情形下三个按钮构成闭环 —— 重试失败、退出被拦、
+        // 放弃同样失败（`discardSession` 走 `pendingRepo.clearPending()`，**必须写库**）。
+        // 而文案却让用户「去上一个提示里选择放弃本局」⇒ 把人支去做一件必然失败的事。
+        let branch = try copyBranch(try code(tv), caseName: "none")
+        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
+                "⛔ 存储坏掉时「放弃本局」必然失败，这是把用户支去白忙一场")
+        // ⚠️ 这里比对的是**字面量内部**的文案，而扫描器刻意保留字面量里的空白
+        //    ⇒ 断言一律用原文，⛔ 不能套 sq()（它会把「关闭 App」压成「关闭App」而永远不匹配）。
+        #expect(branch.contains("关闭 App"),
+                "必须给出真实出路：关掉 App 重开（首页按钮看 hasPending，此时它是空的 ⇒ 人能出来）")
+        #expect(branch.contains("这一局会丢失"),
+                "出路的代价必须一并说清 —— 否则又是一句半真话")
+    }
+
+    @Test("⭐存档读不出来那一支：同样不得对「放弃本局」打包票")
+    func unreadableBranchMustNotPromiseDiscard() throws {
+        let branch = try copyBranch(try code(tv), caseName: "unreadable")
+        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
+                "⛔ 存档层出问题时清槽也可能失败，不该说得像一定能成")
+        #expect(branch.contains("关闭 App"), "必须给出真实出路")
+    }
+
+    @Test("⭐⭐反向对照：文件被淘汰那一支**必须保留**原建议（那时存储是好的，放弃真能成功）")
+    func trainingSetMissingBranchKeepsDiscardAdvice() throws {
+        // ⚠️ 这条是防我改过头的（本仓踩过：收紧一条判据，把邻居那条本来成立的理由也误伤了）。
+        // `.trainingSetMissing` 的触发条件是**缓存淘汰**，那时存储是正常的 ⇒ `clearPending()` 会成功
+        // ⇒ 「放弃本局」是一条**真出路**，删掉它反而让用户少一个选择。
+        let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
+        #expect(branch.contains("可在上一个提示里选择「放弃本局」"),
+                "⛔ 这一支的建议是成立的，不许跟着一起删")
+    }
+
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
     func anchorAndButtonCount() throws {
         let code = try code(tv)
