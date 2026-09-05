@@ -158,9 +158,28 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 R3 让我订正 pin 测试里两处注释，我照做了；R4 立刻指出**同一条规矩我没在别处执行**。
 于是本轮改为全仓扫这个家族，实测命中比评审点名的还多：
 
-**家族①「把 canonical 清单描述成两项」——共 6 处、3 个文件**：
-`build-protection-put-payload.py:4,31`、`verify-required-checks.sh:5,9`、
-`admin-configure-required-checks.sh:2,71`。
+**家族①「把 canonical 清单描述成两项 / 把谓词描述成只管 Catalyst」**
+
+> ⚠️ **这份清单不再手抄。权威口径 = 下面这条命令的输出，逐条定性**：
+> ```
+> grep -rn "Catalyst" scripts/governance/
+> ```
+> 我已经**三次**手抄这类枚举、三次抄漏（R4 漏 2 处、R6 漏 2 处、R8 漏 1 处）。手抄的清单
+> 是第二份真相，必然漂移 —— 同 §4.3 的道理。实施时**跑这条命令**，对每条命中做定性，
+> 不要照下表的行号去改（行号会随本次改动本身移位）。
+
+在 `0ec2e22` 上跑该命令得 **8 条命中**，定性如下：
+
+| 命中 | 定性 |
+|---|---|
+| `build-protection-put-payload.py:19`（`CATALYST_CONTEXT = "…"`） | ✅ **常量定义本身，合法，不动** |
+| `build-protection-put-payload.py:4,31` | ❌ 过时（docstring 写「Catalyst + app-build」） |
+| `verify-required-checks.sh:5,9` | ❌ 过时（把谓词描述成「Catalyst check 在位」） |
+| `admin-configure-required-checks.sh:2` | ❌ 过时（头注释） |
+| `admin-configure-required-checks.sh:71` | ❌ 过时，且是 **`GATE PASS` 用户可见输出** |
+| `admin-configure-required-checks.sh:114` | ❌ 过时（「非仅 Catalyst 谓词」；R8 补 —— 我前一版漏了它） |
+
+即 **7 处待改、1 处合法**。
 其中 `admin:71` 是 **`GATE PASS` 的用户可见输出**（不只是注释）—— 它会向管理员**少报**
 实际验证了哪些 context，比注释过时更严重。
 
