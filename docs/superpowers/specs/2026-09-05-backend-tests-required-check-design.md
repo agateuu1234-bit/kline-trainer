@@ -111,6 +111,30 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 - 把 backend 从清单里删掉 → 断言 2 红；
 - 改清单里 backend 那一项的字面值而不同步改 job 名 → 断言 1 红。
 
+#### 3.2.1.1 「协同三改」为什么不构成可落地缺陷（Kimi R9 提出，**部分不接受**）
+
+R9 提出一条组合路径：一个 PR **同时**把 job 名改成 X、把 `BACKEND_TESTS_CONTEXT` 改成 X、
+并同步改掉 `test_build_payload.py` 里的硬编码期望。两条断言都动态读常量 ⇒ **都绿**；
+治理测试又无 CI ⇒ 也不会红。R9 据此判 medium。
+
+**接受的部分（措辞）**：本文档原写「改名的 PR **合并前就被拦住**」，暗示是**测试变红**拦的。
+在协同三改这一路径上**不是** —— 拦它的是另一套机制，用户看到的现象也不同（PR 卡住 ≠ 检查变红）。
+措辞已在此处修正。
+
+**不接受的部分（严重度）**：该路径**不可落地**，因为它是 fail-closed 的：
+ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，**没有任何 job 产出那个 context** ⇒
+该必需检查停在「Expected — waiting for status」⇒ **这个 PR 自己合不了**（非 admin）。
+
+> 这不是我的推断 —— 机制有仓库内的书面依据：
+> `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md:13` 明写
+> 「该 required check 永久停在『Expected — waiting for status』→ 非 admin 无法 merge」。
+> **有意思的是，这正是 R9 自己在同一轮 F3 里引用的那条机制** —— F3 用它论证「在途 PR 会被卡死」，
+> 那条机制同样把 F1 的攻击者自己卡死。两条 finding 互为印证与反证。
+> 另：R8 对同族路径（同时改 job 名 + 常量）的结论也是「fail-closed，不构成可落地缺陷」。
+
+**残留**：admin 拥有 always-bypass（见 §6 F-6 引述的 PR #180 F6），可强推过去。那属于
+「所有者刻意绕过自己的 CI 策略」，与本判据要防的**意外**不是一类，不在本次范围。
+
 **为什么这条特别值钱**：该文件正是 PR #180 接进 `codeowners-config-check` 那道
 **必需门**的文件（那一步就是 `pytest <该文件>`）。所以这条判据由一道必需检查执行 ⇒
 改名的 PR **合并前就被拦住**，而不是合进去之后全仓卡死。它也顺带把 F-C（治理测试无 CI）
@@ -292,12 +316,23 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 | M8 | 把 `BACKEND_TESTS_CONTEXT` 从 `REQUIRED_CONTEXTS` 里删掉、但保留常量定义 | 必须**红**（断言 2） |
 | **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
 
-**⚠️ 额外的归因要求（Kimi R1 指出，属实）**：`test-admin-runbook.sh` 里 #6b/#6c/#6d/#6e
-这几个用例**本来就期望 rc=1**。它们的 fixture 缺新 context 之后，会因为「缺 context」
-而继续 rc=1 —— 看起来是绿的，但**红的理由已经不是它们各自声称的那个**（保护流失 /
-多出 bypass / param 削弱 / 未知状态）。这正好踩中本 spec §5.2 开头那句「结论对不代表
-归因对」。故：**这四个用例改完 fixture 后必须逐个确认它仍因自己那条理由失败**，
-不能只看 rc。
+**⚠️ 额外的归因要求 —— 但范围比我原先写的窄（Kimi R1 提出，R9 订正，均复核属实）**
+
+`test-admin-runbook.sh` 的 #6b/#6c/#6d/#6e **本来就期望 rc=1**，我原先写「这四个都会因为
+缺 context 而换掉失败理由」。**错了**。`preservation_ok` 的检查是**有顺序**的
+（`admin-configure-required-checks.sh:98-109`）：标量 → 非 rsc 规则 → rsc policy 字段 →
+**checks 子集** → bypass 精确相等。据此逐条核：
+
+| 用例 | 它自己的理由命中在哪一步 | 缺 backend context 会不会换理由 |
+|---|---|---|
+| #6c（缺 deletion 规则） | 非 rsc 规则（**早于** checks） | ❌ 不会 |
+| #6e（policy 字段翻转） | rsc policy（**早于** checks） | ❌ 不会 |
+| #6b（缺 Catalyst） | checks 子集 —— **正是它声称的理由** | ❌ 不会 |
+| **#6d（多出 bypass actor）** | bypass（**晚于** checks） | ✅ **会** —— 缺 context 在 checks 那步就先挂了 |
+
+⇒ **只有 #6d 需要盯归因**。处方（逐个确认失败理由）保留，因为它无害且能兜住我判断错的情况。
+
+> 又一次栽在同一处：**我在专门讲「结论对不代表归因对」的段落里，自己写错了归因**。
 
 ### 5.3 真环境干跑（比读代码可靠）
 builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此：取**真实的** ruleset JSON
@@ -337,6 +372,17 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 
 ## 7. 交付次序（不可颠倒）
 
+0. **【应用前的硬前提，别跳】处理在途 PR**（Kimi R9 指出，复核属实）：
+   新增一条必需检查后，**任何分支上跑不出该检查的在途 PR 会被永久卡住** ——
+   它会停在「Expected — waiting for status」，非 admin 无法合并。
+   - 对 `backend pytest (full suite)`：分支需含 PR #180（`06373ef`，取消 paths 过滤器那次）之后的 main；
+   - 对 `iOS app build-for-running on macos-15`：分支需含 2026-06 上线 `app-build.yml` 之后的 main。
+   **动作**：应用前先 `gh pr list` 看有无开着的 PR；有就先让它们 rebase 到最新 main（或先合、或先关）。
+   解卡办法（万一忘了）：给那个 PR 推一个空提交重跑 CI；admin bypass 也能临时解，但不作正常路径。
+   > 依据：`docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md:13-20`。
+   > ⚠️ 这条前提**只记在那份旧 runbook 里**，而 §7 第 2 步又叫你别去看它 —— 所以特意抄到这里。
+   > 抄的是**前提**，不是那份文档里过时的预期数字。
+
 1. PR 合并；
 2. user 在真实终端跑应用脚本（**先看 §5.3/§5.4 的干跑 diff**）。
    ⚠️ **别去照 `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md` 核对预期输出** ——
@@ -360,6 +406,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 | A5 | 看我给出的干跑 diff | 只新增两条 context；`enforcement`、绕过名单、其它四条 context 一个字都没变 | |
 | A6 | 应用之后再看网页上的必需检查列表 | 从 6 项变成 8 项，新增的正是后端测试和 iOS 构建 | |
 | A7 | 应用之后随便开一个新 PR（或看已开的） | 检查列表里 `backend pytest (full suite)` 标着「Required」 | |
+| A0 | **应用之前**跑 `gh pr list`，看还有没有开着的 PR | 要么没有；要么每个都已 rebase 到含 `06373ef` 之后的 main。**否则先别应用** —— 应用后它们会永久卡在「Expected — waiting for status」（见 §7 第 0 步） | |
 | A7b | 应用之后，看脚本打印的 artifact 目录，确认里面**真的有** `rollback-payload.json` 这个文件 | 文件存在且非空 —— 它是唯一可用的回滚凭据（见 §9；**该路径未实跑演练过**） | |
 | A7c | 临时把 `.github/workflows/backend-tests.yml` 里 `name: backend pytest (full suite)` 改掉一个字母，从仓库根跑 `python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | 必须**变红**（这条守的是「改名 → 全仓 PR 卡死」）。改回原名后重新全绿 | |
 | A8 | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | 合并按钮**变灰、点不了**，提示必需检查未通过。确认后关掉该 PR、不要合 | |
