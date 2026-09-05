@@ -79,6 +79,26 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 已与 `gh pr checks` 的实际输出比对一致（PR #180 上）。**逐字**很重要：名字差一个字符，
 必需检查就永远等不到结果，全仓 PR 死锁。
 
+### 3.2.1 因此这个名字必须被钉住（Kimi R3 指出，复核属实）
+
+本次改动把这个 job 名从「一个显示字符串」**升级成了死锁向量**，而全仓**没有任何测试
+断言它** —— 它目前只出现在注释里（已 grep 确认）。现有的
+`backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` 三条判据只钉触发器，
+不碰 job 名。
+
+故本次**必须**给该文件加第四条判据：**workflow 里那个 job 的 `name` 必须是 canonical
+清单 `REQUIRED_CONTEXTS` 里的一项**（从 builder 动态读，不在测试里另抄一份字符串 ——
+抄一份就等于制造第二个真相）。
+
+两个方向都被这条挡住：
+- 改 job 名而不改清单 → 红；
+- 改清单而不改 job 名 → 红。
+
+**为什么这条特别值钱**：该文件正是 PR #180 接进 `codeowners-config-check` 那道
+**必需门**的文件（那一步就是 `pytest <该文件>`）。所以这条判据由一道必需检查执行 ⇒
+改名的 PR **合并前就被拦住**，而不是合进去之后全仓卡死。它也顺带把 F-C（治理测试无 CI）
+在这一个常量上补掉了一角。
+
 ## 4. 改动面
 
 | 文件 | 改什么 |
@@ -88,6 +108,7 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | `tests/scripts/governance/test-verify-required-checks.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/test-admin-runbook.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/fixtures/*.json` | 代表「已合规」的 fixture 需含新 context（**哪几个由实跑决定，不靠猜**） |
+| `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正两处已过时的注释（`:23`、`:116` 以「不是必需检查」为前提，本改动后变成事实错误） |
 | 本 spec + 后续 plan | 文档 |
 
 **不新增文件，不改任何 workflow。**
@@ -105,7 +126,7 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 |---|---|
 | verify 的 "assert happy → 0" | fixture `ruleset-with-check.json` **不含 backend context**（它含 `swift-contracts-smoke` + Catalyst + app-build 三条）→ 报「缺 required check」→ rc=1 |
 | admin-runbook #2「apply no-op（已合规）」 | fixture 缺新 context ⇒ builder 会补 ⇒ 不再 no-op ⇒「无 PUT」断言破 |
-| #5、#6a | 同因（N3 fixture 缺新 context → post-assert 败） |
+| #5、#6a | 同因，但**失败点比我原先写的更早**（Kimi R3 指出，复核属实）：re-read 状态缺新 context ⇒ `admin-configure-required-checks.sh:107` 的 `checks(desired) <= checks(actual)` 为假 ⇒ 走「保护流失/人工介入」rc=1，**根本到不了 post-assert**。结论对、归因错 —— 而这份 spec 通篇在强调「结论对不代表归因对」，自己的破法分析先犯了一次 |
 
 `fixtures/` 目录下共 **18** 个文件（`ls | wc -l` 实测），远多于评审点名的两个。因此本 spec
 **不预先列出**要改哪几个 —— 那是按印象猜。正确做法写进 plan：**跑一遍 `run-all.sh`，
@@ -152,6 +173,7 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | M2 | 从 `REQUIRED_CONTEXTS` 里删掉新加的那项 | 红 |
 | M3 | 删掉 `APP_BUILD_CONTEXT`（既有项） | 红 —— 证明测试不是只盯新项 |
 | M4 | 常量顺序调换 | 记录是红是绿。**若绿**，说明判据不约束顺序 —— 那就明写「顺序无语义」，别假装它被测了 |
+| M6 | 把 `backend-tests.yml` 里那个 job 的 `name` 改掉一个字符 | 新加的第四条判据必须**红**（§3.2.1）。这条变异模拟的正是「全仓 PR 卡死」那个场景 |
 | **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
 
 **⚠️ 额外的归因要求（Kimi R1 指出，属实）**：`test-admin-runbook.sh` 里 #6b/#6c/#6d/#6e
@@ -212,7 +234,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| A1 | 看 PR 的改动文件列表 | 含这些：1 个 builder 脚本、3 个测试文件（1 个 `.py` + 2 个 `.sh`）、若干 `fixtures/*.json`、2 份文档。**关键是：没有任何 `.github/workflows/` 下的文件**（本次不碰 CI 配置） | |
+| A1 | 看 PR 的改动文件列表 | 含这些：1 个 builder 脚本、**4** 个测试文件（2 个 `.py` + 2 个 `.sh`）、若干 `fixtures/*.json`、2 份文档。**关键是：没有任何 `.github/workflows/` 下的文件**（本次不碰 CI 配置） | |
 | A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
@@ -220,6 +242,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 | A6 | 应用之后再看网页上的必需检查列表 | 从 6 项变成 8 项，新增的正是后端测试和 iOS 构建 | |
 | A7 | 应用之后随便开一个新 PR（或看已开的） | 检查列表里 `backend pytest (full suite)` 标着「Required」 | |
 | A7b | 应用之后，看脚本打印的 artifact 目录，确认里面**真的有** `rollback-payload.json` 这个文件 | 文件存在且非空 —— 它是唯一可用的回滚凭据（见 §9；**该路径未实跑演练过**） | |
+| A7c | 临时把 `.github/workflows/backend-tests.yml` 里 `name: backend pytest (full suite)` 改掉一个字母，从仓库根跑 `python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | 必须**变红**（这条守的是「改名 → 全仓 PR 卡死」）。改回原名后重新全绿 | |
 | A8 | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | 合并按钮**变灰、点不了**，提示必需检查未通过。确认后关掉该 PR、不要合 | |
 
 A8 是这次改动的**唯一真凭据**：前面几条都只证明「配置改了」，只有它证明「真的拦得住」。
