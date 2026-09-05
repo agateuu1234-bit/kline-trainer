@@ -23,13 +23,15 @@ __all__ = [
     # 异常
     "PathDisciplineError", "PathEscapeError", "DirectoryExistsError",
     "LockUnavailableError", "LockDisciplineError", "MarkerInvalidError",
+    "NotARegularFileError",
     "BoundaryError",
     # 路径规则
     "normalize_abs_path", "split_components", "split_relative_components",
     # 逐段无跟随
-    "open_root", "open_under", "parent_fd_under",
+    "open_root", "open_under", "parent_fd_under", "open_regular_probe",
     # 耐久提交
-    "fsync_dir", "full_fsync",
+    "fsync_dir", "full_fsync", "atomic_write_json", "atomic_write_bytes",
+    "encode_json",
     # 锁
     "acquire_lock", "probe_unclaimed_dir", "assert_lock_still_held",
     # 归属
@@ -50,6 +52,30 @@ _MARKER_MAX_BYTES = 64 * 1024
 
 class PathDisciplineError(ValueError):
     """路径字符串本身不合规：相对/绝对方向不对、或含 `.` / `..` / 空分量。"""
+
+
+class NotARegularFileError(OSError):
+    """目标**存在、但打不开成文件**（unix socket 等）。
+
+    ⚠️ **`O_NONBLOCK` 只解决了 FIFO 阻塞，解决不了这一类**（Opus 对抗性评审
+    [medium]，本机复现）：socket 上 `open(2)` **直接失败**（macOS `ENOTSUP`=102，
+    别处 `EOPNOTSUPP`/`ENXIO`），于是**根本走不到**调用方那句 `S_ISREG` ——
+    本函数的四个调用点（取锁 ×2 / 读归属标记 / 读账本）全部抛**裸 `OSError`**，
+    而它们各自 fail-closed 的恢复指引一个字都印不出来。
+    「守卫自己被它该抓的那种损坏弄坏了」在本仓是第三次。
+
+    ⚠️ **判据不枚举 errno**（各平台不同、还会变，本仓栽过「按概念搜词」的亏）：
+    打不开就回头 `lstat` 问文件系统「那到底是个什么东西」，不是普通文件即归此类。
+
+    ⚠️ 继承 `OSError`，故**既有的 `except OSError` 一个字都不用改**；
+    `FileNotFoundError` / `IsADirectoryError` 原样上抛（调用点各自有分支），
+    `PathEscapeError` 不是 `OSError` 的子类，不会被这条捕获吞掉。
+    """
+
+    def __init__(self, name: str, st: os.stat_result):
+        super().__init__(f"{name!r} 存在但不是普通文件（无法作为文件打开）")
+        self.name_probed = name
+        self.st = st
 
 
 class PathEscapeError(Exception):
@@ -431,7 +457,19 @@ def _open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600
     （本仓纪律：凡断言某个系统调用有某种性质，都必须对着 man page 逐条核实）。
     三个打开点（取锁、探测、读标记）统一走本函数，避免「同一条纪律只落在其中一处」。
     """
-    fd = open_under(dir_fd, name, flags=flags | os.O_NONBLOCK, mode=mode)
+    try:
+        fd = open_under(dir_fd, name, flags=flags | os.O_NONBLOCK, mode=mode)
+    except (FileNotFoundError, IsADirectoryError):
+        raise                       # 调用点各自有分支，语义一个字不动
+    except OSError as e:
+        # 打不开 ≠ 打不开的原因我们猜得到 —— 回头 lstat 问它到底是什么。
+        try:
+            probed = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            raise                   # 连 lstat 都做不到 → 原样上抛
+        if not stat.S_ISREG(probed.st_mode):
+            raise NotARegularFileError(name, probed) from e
+        raise
     try:
         st = os.fstat(fd)
         if stat.S_ISREG(st.st_mode):
@@ -636,7 +674,19 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         os.close(lock_fd)
 
 
-def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
+def encode_json(payload: dict) -> bytes:
+    """本模块落盘 JSON 的**唯一**编码入口。
+
+    ⚠️ 存在的理由是**消除序列化漂移**（codex R5 [medium]）：调用方若要先按最终
+    编码量一次字节数、再交给写入函数，两处各自 `json.dumps` 一次就有漂移的可能
+    （`ensure_ascii` 一改，中文周期目录名的长度差好几倍），**量到的就不是落盘的**。
+    量与写都走本函数，或者干脆量完把**那批字节**交给 `atomic_write_bytes`。
+    """
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _atomic_write_bytes(dir_fd: int, name: str, data: bytes, *,
+                        full_sync: bool = False) -> None:
     """原子写一份 JSON：`lstat` 守卫 → 唯一名 `O_EXCL` 临时文件 → `fsync(文件)`
     → `os.replace` → `fsync(目录)`。**本模块唯一的文件写入路径。**
 
@@ -649,6 +699,17 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
 
     临时名带 pid 与随机后缀，故崩溃留下的旧临时文件不会被静默复用；
     失败路径把它 unlink 掉。
+
+    `full_sync=True` 时**文件内容**改用 `full_fsync()`（macOS 上即
+    `fcntl(fd, F_FULLFSYNC)`）——**manifest 提交专用**（O4-F11 定案：断电在威胁
+    模型之内，而本平台的 `fsync(2)` man page 明写它既不保证断电耐久、也不保证
+    跨设备写序）。**默认 `False`**：归属标记等其余落地点保留 `fsync`，行为不变
+    （全都升级会让 400 股量级付出不必要的代价）。
+    **`full_sync=True` 时，`os.replace` 之后的目录项也走 `full_fsync`**：
+    `man 2 fcntl` 原文写明 `F_FULLFSYNC`「arg is ignored」且「drains the entire
+    queue of the device and acts as a barrier」——它是**设备级**屏障，与该 fd 指向
+    文件还是目录无关。只给临时文件下屏障、改名却只 `fsync`，等于把「原子」做足了
+    而「耐久」漏在最后一步（codex R1 [high]）。默认路径仍走 `fsync_dir`。
     """
     try:
         st = os.lstat(name, dir_fd=dir_fd)
@@ -670,8 +731,11 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
     )
     try:
         try:
-            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-            os.fsync(fd)
+            _write_all(fd, data)
+            if full_sync:
+                full_fsync(fd)
+            else:
+                os.fsync(fd)
         finally:
             os.close(fd)
         # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
@@ -682,7 +746,63 @@ def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
         except FileNotFoundError:
             pass
         raise
-    fsync_dir(dir_fd)
+    if full_sync:
+        # ⚠️ **改名本身也要过屏障**（codex R1 [high]）：`full_fsync` 只施加在临时
+        # 文件上、而 `os.replace` 发生在它**之后**，于是一次断电可能丢掉那次改名
+        # ——manifest 停在旧版本或干脆不存在，而按股 CSV 已是新状态，
+        # 按股事务与崩溃恢复的地基同时塌掉。
+        #
+        # 依据是**本机 `man 2 fcntl` 原文**（非推测，也不是「对目录 fd 的外推」）：
+        # 「… asks the drive to flush all buffered data to the permanent storage
+        #  device (**arg is ignored**). As this **drains the entire queue of the
+        #  device and acts as a barrier**, data that had been fsync'd on the same
+        #  device before is **guaranteed to be persisted** when this call returns.
+        #  … currently implemented on HFS, MS-DOS (FAT), UDF and **APFS**.」
+        # ⇒ 它是**设备级**屏障，`arg` 被忽略，与该 fd 指向文件还是目录无关；
+        #   本机 staging 所在卷实测为 APFS。
+        # `full_fsync` 在没有 F_FULLFSYNC 的平台退回 `os.fsync`，与 `fsync_dir`
+        # 等价，故 Linux 上行为一个字节不变。
+        full_fsync(dir_fd)
+    else:
+        fsync_dir(dir_fd)
+
+
+def _atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+                       full_sync: bool = False) -> None:
+    """原子写一份 JSON（语义见 `_atomic_write_bytes`）。"""
+    _atomic_write_bytes(dir_fd, name, encode_json(payload), full_sync=full_sync)
+
+
+def atomic_write_bytes(dir_fd: int, name: str, data: bytes, *,
+                       full_sync: bool = False) -> None:
+    """公开入口：原子写**调用方已经序列化好的那批字节**。
+
+    manifest 提交走它——先 `encode_json` 得到字节、校验长度、再把**同一批字节**
+    交出去，量的与写的必然是一回事。
+    """
+    _atomic_write_bytes(dir_fd, name, data, full_sync=full_sync)
+
+
+def atomic_write_json(dir_fd: int, name: str, payload: dict, *,
+                      full_sync: bool = False) -> None:
+    """公开入口，语义与 `_atomic_write_json` 逐字相同。
+
+    manifest 提交走它并传 `full_sync=True`（O4-F11）；模块内部（归属标记、锁持有者
+    记录）继续走私有名与默认刷盘。
+    """
+    _atomic_write_json(dir_fd, name, payload, full_sync=full_sync)
+
+
+def open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600):
+    """公开入口，语义与 `_open_regular_probe` 逐字相同：返回 `(fd, st)`。
+
+    **凡是本工具要打开的、可能被篡改的路径都必须经它**——`open(O_RDONLY)` 打开
+    FIFO 会一直阻塞等写入方，于是「打开在先、查类型在后」的写法会让一个被篡改的
+    目录把工具**永久挂起**，而不是 fail-closed。调用方拿到 `st` 后自行按各自语义
+    `S_ISREG` 拒掉。S1 已有三个打开点（取锁、探测、读标记）走它，
+    `qmt_manifest.read_manifest` 是第四个。
+    """
+    return _open_regular_probe(dir_fd, name, flags=flags, mode=mode)
 
 
 def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:

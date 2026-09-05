@@ -1457,3 +1457,261 @@ def test_split_relative_components_rejects_escapes(bad):
     """七个坏档**已实测**（2026-08-24 在 `_split_rel` 上真跑过）全部被拒。"""
     with pytest.raises(PathDisciplineError):
         split_relative_components(bad)
+
+
+# ─────────────────────────────────────────────────────────────
+# S2b Task 15 Step 0：把 manifest 落盘要用的两个原语从私有转公开
+#
+# 这半边小改原本排在 S2a 的 Task 1，但它在 S2a 里**零使用者**（落盘在 S2b），
+# 故随第一个真使用者一起落地。
+# ─────────────────────────────────────────────────────────────
+import stat as stat_module
+from qmt_fsroot import (atomic_write_bytes, atomic_write_json, encode_json,
+                        open_regular_probe)
+
+
+def _fcntl_cmd_spy(monkeypatch) -> list:
+    """记录本次经过 `fcntl.fcntl` 的所有 cmd（用于证明走没走 F_FULLFSYNC）。"""
+    calls = []
+    real = fcntl.fcntl
+    monkeypatch.setattr(
+        fcntl, "fcntl",
+        lambda fd, cmd, *a: (calls.append(cmd), real(fd, cmd, *a))[1],
+    )
+    return calls
+
+
+def test_atomic_write_json_with_full_sync_uses_F_FULLFSYNC(tmp_path: Path, monkeypatch):
+    """`full_sync=True` 时文件内容必须走 `F_FULLFSYNC`（O4-F11：断电在威胁模型之内）。
+
+    判别力：把 `full_sync` 分支去掉（恒走 `os.fsync`），本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上本条**无判别力**（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+        # ⚠️ **只断言「出现过 F_FULLFSYNC」分不开两道屏障**（Opus 评审 [low]）：
+        # 改名之后那道目录屏障自己就能满足它 —— 实测把**文件内容**这半退回
+        # 普通 `os.fsync`，全量 1301 条一条都不红，而本档的标题与 docstring
+        # 恰恰声称自己钉的就是文件内容这半。
+        # `full_sync=True` 时两处都走 `full_fsync` ⇒ macOS 上 `os.fsync`
+        # 应当**一次都不被调用**；退回普通 fsync 就会出现一次。
+        assert fsynced == [], (
+            f"full_sync=True 时不该有任何普通 os.fsync，实际 {len(fsynced)} 次"
+            "——文件内容那半很可能退回了 os.fsync")
+    else:
+        assert fsynced          # Linux：fsync 就是该平台最强的那个原语
+
+
+def test_atomic_write_json_without_full_sync_does_not_use_F_FULLFSYNC(
+        tmp_path: Path, monkeypatch):
+    """默认 `full_sync=False` **不得**走 `F_FULLFSYNC`。
+
+    没有这一条，「默认不改行为」那句话就是空的——把默认值翻成 True 也一样绿。
+    ⚠️ Linux 上两条路都是 `os.fsync`，该平台上本条无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_atomic_write_json_full_sync_survives_a_platform_without_F_FULLFSYNC(
+        tmp_path: Path, monkeypatch):
+    """CI 跑 ubuntu-latest，那里 `fcntl` 根本没有这个常量——不得抛 `AttributeError`。
+
+    本档在**任何平台**上都真跑（藏掉常量），不是 skip：本仓 CI 把任何 skip 判失败。
+    """
+    monkeypatch.delattr(fcntl, "F_FULLFSYNC", raising=False)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+    assert json.loads((tmp_path / "m.json").read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_write_owner_marker_still_does_not_use_F_FULLFSYNC(tmp_path: Path, monkeypatch):
+    """⭐ 回归钉：归属标记等其余落地点保留 `fsync`，行为一个字节都不变。
+
+    O4-F11 只把 **manifest 提交**与顺序屏障两处升级为 `F_FULLFSYNC`
+    （每股 1~2 次，400 股量级可接受）；全都升级会让量级付出不必要的代价。
+    没有这一条钉着，`_atomic_write_json` 的默认值被翻成 True 不会有任何测试红。
+    ⚠️ Linux 上无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "staging_dir": str(tmp_path)})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_open_regular_probe_refuses_a_fifo_without_blocking(tmp_path: Path):
+    """⭐ 公开 `open_regular_probe` 的**全部理由**：`open(O_RDONLY)` 打开 FIFO 会
+    **一直阻塞等写入方**——一个被篡改的 staging 于是让工具**永久挂起**，
+    而不是 fail-closed 报错。带 `O_NONBLOCK` 打开、再由调用方按 `S_ISREG` 拒掉。
+
+    S1 的 docstring 已明写「三个打开点（取锁、探测、读标记）统一走本函数，
+    避免『同一条纪律只落在其中一处』」；`read_manifest` 是**第四个**打开点。
+
+    判别力：把 `O_NONBLOCK` 去掉，本条会**挂死**（pytest 超时/需人工中断），
+    而不是变红——这正是「比崩溃更糟」的那种失败形态。
+    """
+    os.mkfifo(str(tmp_path / "as_fifo"))
+    root = open_root(str(tmp_path))
+    try:
+        fd, st = open_regular_probe(root, "as_fifo", flags=os.O_RDONLY)
+        try:
+            assert not stat_module.S_ISREG(st.st_mode)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
+
+
+def test_open_regular_probe_clears_nonblock_on_a_regular_file(tmp_path: Path):
+    """普通文件必须把 `O_NONBLOCK` 清掉再交出去——否则后续 `os.read` 的语义变了。"""
+    (tmp_path / "f.json").write_text("{}", encoding="utf-8")
+    root = open_root(str(tmp_path))
+    try:
+        fd, st = open_regular_probe(root, "f.json", flags=os.O_RDONLY)
+        try:
+            assert stat_module.S_ISREG(st.st_mode)
+            assert not (fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
+
+
+# ─────────────────────────────────────────────────────────────
+# codex R1 [high] #3：manifest 的**改名**在断电模型下不耐久
+#
+# `full_fsync` 只施加在临时文件上，`os.replace` 之后却只有普通 `fsync(目录)`。
+# 本模块自己写着「macOS 的 fsync 既不保证断电耐久、也不保证跨设备写序」，
+# 于是一次断电可能丢掉那次改名：manifest 停在旧版本或干脆不存在，而按股 CSV
+# 已是新状态——按股事务与崩溃恢复的地基同时塌掉。
+#
+# 处置依据是**本机 man 2 fcntl 原文**（非推测）：
+#   「Does the same thing as fsync(2) then asks the drive to flush all buffered
+#    data to the permanent storage device (**arg is ignored**). As this **drains
+#    the entire queue of the device and acts as a barrier**, data that had been
+#    fsync'd on the same device before is **guaranteed to be persisted** when
+#    this call returns. … currently implemented on HFS, MS-DOS (FAT), UDF and
+#    **APFS**.」
+# ⇒ 它是**设备级屏障**、与 fd 是文件还是目录无关；本机 staging 所在卷实测为 APFS。
+# ─────────────────────────────────────────────────────────────
+
+
+def test_atomic_write_json_full_sync_barriers_after_the_rename(tmp_path: Path, monkeypatch):
+    """⭐⭐ 判据不是「调用了几次」，而是**改名之后还有没有那道屏障**。
+
+    只数次数的断言挡不住「两次屏障都下在 replace 之前」这种实现。
+    这里按**时序**记事件，断言序列里 `replace` 之后仍有一次 `F_FULLFSYNC`。
+
+    判别力：把 replace 之后那次改回 `fsync_dir`，本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 退回 `os.fsync`，故该平台按 `os.fsync` 记同一条时序。
+    """
+    events = []
+    real_fcntl = fcntl.fcntl
+    real_fsync = os.fsync
+    real_replace = os.replace
+    has_ff = hasattr(fcntl, "F_FULLFSYNC")
+
+    def spy_fcntl(fd, cmd, *a):
+        if has_ff and cmd == fcntl.F_FULLFSYNC:
+            events.append("barrier")
+        return real_fcntl(fd, cmd, *a)
+
+    def spy_fsync(fd):
+        if not has_ff:                       # Linux：fsync 就是该平台最强的原语
+            events.append("barrier")
+        else:
+            events.append("fsync")
+        return real_fsync(fd)
+
+    def spy_replace(*a, **kw):
+        events.append("replace")
+        return real_replace(*a, **kw)
+
+    monkeypatch.setattr(fcntl, "fcntl", spy_fcntl)
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1}, full_sync=True)
+    finally:
+        os.close(root)
+
+    assert "replace" in events, events
+    # ⚠️ **两侧都要断言**（Opus 评审 [low]）：只查一侧时，另一侧那道屏障
+    # 自己就能让断言成立，于是被查的那半其实没人守。
+    before = events[:events.index("replace")]
+    assert "barrier" in before, (
+        f"os.replace 之前没有任何设备级屏障，事件时序={events}——"
+        "文件内容在断电后可能丢失")
+    after = events[events.index("replace") + 1:]
+    assert "barrier" in after, (
+        f"os.replace 之后没有任何设备级屏障，事件时序={events}——"
+        "改名本身在断电后可能丢失")
+
+
+def test_atomic_write_json_without_full_sync_has_no_barrier_after_rename(
+        tmp_path: Path, monkeypatch):
+    """反向档：默认路径（归属标记等）**不得**因为本次修改而升级刷盘代价。
+
+    ⚠️ Linux 上无判别力（两条路都是 os.fsync），如实登记。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    root = open_root(str(tmp_path))
+    try:
+        atomic_write_json(root, "m.json", {"a": 1})
+    finally:
+        os.close(root)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC not in calls
+
+
+def test_atomic_write_bytes_publishes_exactly_the_given_bytes(tmp_path: Path):
+    """⭐ 把「序列化」与「落盘」拆开的理由（codex R5 [medium]）：
+
+    调用方需要**先按最终编码序列化、校验字节数、再把那批字节交出去**。
+    如果调用方自己 dumps 一次量长度、写入时再 dumps 一次，两次编码之间存在
+    **漂移**的可能（参数一改就不一致），量到的长度就不是真正落盘的长度。
+    """
+    root = open_root(str(tmp_path))
+    payload = '{"周期": "1分钟K线"}'.encode("utf-8")
+    try:
+        atomic_write_bytes(root, "m.json", payload, full_sync=True)
+    finally:
+        os.close(root)
+    assert (tmp_path / "m.json").read_bytes() == payload
+
+
+def test_atomic_write_json_and_write_bytes_agree_on_the_encoding(tmp_path: Path):
+    """两条路必须产出**逐字节相同**的文件——否则「量的」和「写的」不是一回事。"""
+    root = open_root(str(tmp_path))
+    obj = {"周期": "1分钟K线_前复权", "n": 1}
+    try:
+        atomic_write_json(root, "a.json", obj)
+        atomic_write_bytes(root, "b.json", encode_json(obj))
+    finally:
+        os.close(root)
+    assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()

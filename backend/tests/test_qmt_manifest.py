@@ -321,6 +321,11 @@ def _valid_manifest(**overrides) -> dict:
         "staged_export_log": {"relative_path": "export_log.csv",
                               "bytes": 2399554, "sha256": elog_sha},
         "source_verification": "full",
+        # ⚠️ 2026-09-01 补：spec 的写侧枚举里有「累计字节」，而本夹具一直没有它
+        # —— 于是「有 files 就必须带合法 committed_bytes」这条判据（R15 high C）
+        # 在夹具上根本触发不了。**测试样本要照生产真实格式造。**
+        # 值 = 4 条 files × 1234567 + staged_export_log 2399554。
+        "committed_bytes": 4 * 1234567 + 2399554,
         "operator_attestation": {"no_export_window": True,
                                  "recorded_at": "2026-08-24T12:00:00+08:00"},
     }
@@ -341,6 +346,22 @@ def _valid_manifest(**overrides) -> dict:
             ],
             "passes_agree": True,
         }
+    return m
+
+
+
+def _min_bytes(m):
+    """这份账本**至少**该有的累计字节：已记录文件之和 + staged export_log。
+
+    ⚠️ 写侧要求 `committed_bytes ≥ sum(files[].bytes)`（R15 high C）——
+    夹具此前随手写个小数字，**本来就不真实**（本仓栽过「照想象造样本」）。
+    """
+    return sum(f["bytes"] for f in m["files"]) + m["staged_export_log"]["bytes"]
+
+
+def _fix_bytes(m, extra=0):
+    """把 `committed_bytes` 补到合法下限（可再加 extra）。"""
+    m["committed_bytes"] = _min_bytes(m) + extra
     return m
 
 
@@ -1050,8 +1071,16 @@ def test_escape_reasons_pass_with_a_well_formed_fatal_error(reason):
     """正向放行档：带上合规的四字段就必须通过。
 
     没有这一条，一个「凡带 stopped_reason 就拒」的实现也能让上一条绿。
+
+    ⚠️ 2026-08-30 订正：原本三档都固定用 `_fatal()`（kind 恒为
+    `staging_path_escape`），于是 `source_path_escape` 那一档其实是一份
+    **reason 与 kind 不配对**的 manifest —— 它当时能过，正说明读侧漏了
+    那条配对判据（codex R2 [high]）。现在 escape 两档各自带同名 kind；
+    `staging_recheck_failed` 仍固定用默认 kind，因为它正是 spec 明写的
+    **唯一**一种合法解耦（O4-F3），这一档同时充当那条解耦的正向放行档。
     """
-    m = _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal())
+    kind = reason if reason in FATAL_KINDS else "staging_path_escape"
+    m = _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal(kind=kind))
     assert validate_manifest(m) == m
 
 
@@ -1068,12 +1097,18 @@ def test_fetch_fatal_error_needs_exactly_four_fields():
 
 
 def test_fatal_kind_must_be_in_the_kind_enum():
+    """⚠️ 2026-08-30 订正 stopped_reason：原本用 `staging_path_escape`，
+    而新增的「escape 类 reason 必须等于 kind」配对判据会**抢先**把这些坏 kind
+    接住 → 本档对 kind 枚举本身**零判别力**（机械 sweep 实测：把枚举判据变空后
+    本档仍绿）。改用 `staging_recheck_failed` —— 那是配对判据**够不着**的
+    唯一一种合法 reason（O4-F3 的解耦档），于是只剩枚举判据能拒它。
+    """
     for bad in ("staging_recheck_failed", "max_bytes", "whatever", ""):
         f = _fatal()
         f["kind"] = bad
         with pytest.raises(ManifestInvalidError):
             validate_manifest(_valid_manifest(
-                stopped_reason="staging_path_escape", fetch_fatal_error=f))
+                stopped_reason="staging_recheck_failed", fetch_fatal_error=f))
 
 
 def test_fatal_errno_must_be_eloop_or_enotdir():
@@ -1601,8 +1636,10 @@ def test_no_field_of_any_json_type_can_escape_as_a_raw_exception():
     """
     bases = [
         _valid_manifest(),
+        # ⚠️ kind 必须与 reason 相等，否则这个 base 自身即非法，
+        # 新增的配对判据会**掩盖整条扫描**（上游判据掩盖下游档的老形态）。
         _valid_manifest(stopped_reason="source_path_escape",
-                        fetch_fatal_error=_fatal()),
+                        fetch_fatal_error=_fatal(kind="source_path_escape")),
     ]
     for base in bases:
         _recompute_evidence(base)
@@ -1634,3 +1671,4745 @@ def test_no_field_of_any_json_type_can_escape_as_a_raw_exception():
     assert not escapes, (
         "以下字段的坏值逃出了 fail-closed，抛的是原始异常而不是 "
         "ManifestInvalidError：\n  " + "\n  ".join(escapes))
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 15：read_manifest —— 逐段无跟随读回并校验
+# ═════════════════════════════════════════════════════════════
+import fcntl
+import os
+import stat as _stat
+import json as _json_rw
+
+from qmt_fsroot import atomic_write_json, open_root, PathEscapeError
+from qmt_manifest import read_manifest, lifecycle_snapshot, MANIFEST_NAME
+
+
+def _staging(tmp_path, manifest=None, *, raw=None):
+    """造一个 staging 目录并返回 `(path, stg_fd)`。调用方负责 `os.close`。"""
+    d = tmp_path / "staging"
+    d.mkdir()
+    if raw is not None:
+        (d / MANIFEST_NAME).write_text(raw, encoding="utf-8")
+    elif manifest is not None:
+        (d / MANIFEST_NAME).write_text(
+            _json_rw.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    return d, open_root(str(d))
+
+
+def test_read_manifest_round_trips_a_valid_one(tmp_path):
+    """正向放行档。
+
+    ⚠️ 每一族「全是拒了」的档都必须配一条正向放行档，否则一个**恒抛**的
+    实现会让整族看起来都在工作（本仓栽过）。
+    """
+    m = _valid_manifest()
+    _d, fd = _staging(tmp_path, m)
+    try:
+        assert read_manifest(fd) == m
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_returns_none_when_absent(tmp_path):
+    """⭐ 引导态：manifest 不存在 ≠ manifest 坏了。
+
+    判别力：把「不存在」也抛成 ManifestInvalidError，本条必红——而那会让
+    「崩在归属标记落盘与首份 manifest 之间」这一档无法与畸形区分，
+    一棵本可继续初始化的 staging 变成人工才能清理的状态（R60-F3）。
+    """
+    _d, fd = _staging(tmp_path)
+    try:
+        assert read_manifest(fd) is None
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_truncated_json(tmp_path):
+    """⭐ 截断的 manifest 往往仍是合法 JSON 的**前缀片段**。
+
+    静默消费它 = 把 manifest 损坏伪装成「候选就这么多」（R1-F4）。
+    """
+    good = _json_rw.dumps(_valid_manifest(), ensure_ascii=False)
+    _d, fd = _staging(tmp_path, raw=good[: len(good) // 2])
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_empty_file(tmp_path):
+    _d, fd = _staging(tmp_path, raw="")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_a_json_array(tmp_path):
+    """合法 JSON 但不是对象。"""
+    _d, fd = _staging(tmp_path, raw="[1,2,3]")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_rejects_oversized_file(tmp_path, monkeypatch):
+    """⭐ 不可信输入的大小上限（本片新增，非 spec 条款）：manifest 决定整棵
+    staging 可不可信，读到 EOF 为止意味着一个被植入的几 GB 文件能把进程 OOM 掉，
+    而不是得到一个干净的拒绝。与 S1 给归属标记设 `_MARKER_MAX_BYTES` 同源。
+
+    判别力：删掉上限检查，本条必红。
+    ⚠️ **本条区分不了「读中计数」与「只查 st_size 早拒」两种实现**（如实登记）：
+    静态大文件两条路都拦得住。实现取**读中计数**——与 S1 逐字同规格，理由见
+    `read_manifest` 的 docstring（`st_size` 是打开那一刻的快照，文件可以边读边长）。
+    """
+    import qmt_manifest as qm
+    monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 100)
+    _d, fd = _staging(tmp_path, _valid_manifest())      # 远超 100 字节
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "过大" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_refuses_a_fifo_manifest_without_hanging(tmp_path):
+    """⭐⭐ manifest 被换成 FIFO —— 必须**当场拒绝**，绝不能挂起。
+
+    `open(O_RDONLY)` 打开 FIFO 会**一直阻塞等写入方**。本机实测（S2b Step 0
+    M-S0-c）：去掉 `O_NONBLOCK` 后本条不是变红，而是 15 秒被闹钟杀掉、
+    日志 0 字节——**工具永久挂起且不打印任何提示**，比崩溃更糟。
+    这是「凡是本工具要打开的、可能被篡改的路径都必须经 open_regular_probe」
+    的第四个执行点（S1 已有取锁 / 探测 / 读标记三个）。
+
+    判别力：把 `open_regular_probe` 换回裸 `open_under(flags=O_RDONLY)`，
+    本条**挂死**（而不是变红）。
+    """
+    d = tmp_path / "staging"
+    d.mkdir()
+    os.mkfifo(str(d / MANIFEST_NAME))
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "普通文件" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_refuses_a_directory_manifest(tmp_path):
+    """⭐ manifest 被换成**目录** —— 必须得到干净的 ManifestInvalidError。
+
+    本机实测：目录能被 `O_RDONLY|O_NOFOLLOW` 成功打开（`st_size=64`），
+    随后 `os.read` 抛原始 `IsADirectoryError`——一份自称 fail-closed 的读侧
+    校验于是带着原始 traceback 崩掉，`ManifestInvalidError` 那句恢复指引
+    一个字都印不出来。**守卫自己被它该抓的那种损坏弄坏了**（S2-F9 同族，
+    只是这次坏的不是 JSON 值的类型，而是磁盘对象的类型）。
+
+    判别力：删掉 `S_ISREG` 检查，本条必红（抛 IsADirectoryError 而非本模块异常）。
+    """
+    d = tmp_path / "staging"
+    d.mkdir()
+    (d / MANIFEST_NAME).mkdir()
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(ManifestInvalidError) as ei:
+            read_manifest(fd)
+        assert "普通文件" in str(ei.value)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_lets_path_escape_bubble_up(tmp_path):
+    """⭐ manifest 被换成指向 staging 之外的符号链接 → `open_under` 逐段
+    `O_NOFOLLOW` 撞 ELOOP → **PathEscapeError 原样上浮**，不被降级成
+    「manifest 畸形」。
+
+    判别力：把 open_under 的异常 catch 成 ManifestInvalidError，本条必红——
+    而那会把一次**信任边界破坏**报成「账本坏了」，恢复指引整个走错
+    （R94-F2 同族）。处置（stopped_reason: staging_path_escape + rc≠0）由 S4/S5 负责。
+    """
+    outside = tmp_path / "outside.json"
+    outside.write_text(_json_rw.dumps(_valid_manifest(), ensure_ascii=False),
+                       encoding="utf-8")
+    d = tmp_path / "staging"
+    d.mkdir()
+    (d / MANIFEST_NAME).symlink_to(outside)
+    fd = open_root(str(d))
+    try:
+        with pytest.raises(PathEscapeError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_read_manifest_propagates_version_error_not_invalid(tmp_path):
+    """版本三档必须原样穿过 read_manifest（两族异常不许在这一层被抹平）。"""
+    _d, fd = _staging(tmp_path, _valid_manifest(manifest_version=99))
+    try:
+        with pytest.raises(ManifestVersionError) as ei:
+            read_manifest(fd)
+        assert ei.value.kind == "newer"
+    finally:
+        os.close(fd)
+
+
+def test_lifecycle_snapshot_captures_only_the_three_keys():
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal(),
+                        stopped_reason_secondary="max_bytes")
+    snap = lifecycle_snapshot(m)
+    assert set(snap) == {"stopped_reason", "fetch_fatal_error",
+                         "stopped_reason_secondary"}
+
+
+def test_lifecycle_snapshot_of_a_clean_manifest_is_empty():
+    assert lifecycle_snapshot(_valid_manifest()) == {}
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 16：commit_stock —— per-stock 提交够不到生命周期三字段
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import commit_stock, attest_staging_recheck
+
+
+def _fcntl_cmd_spy(monkeypatch) -> list:
+    """记录本次经过 `fcntl.fcntl` 的所有 cmd（用于证明走没走 F_FULLFSYNC）。"""
+    calls = []
+    real = fcntl.fcntl
+    monkeypatch.setattr(
+        fcntl, "fcntl",
+        lambda fd, cmd, *a: (calls.append(cmd), real(fd, cmd, *a))[1],
+    )
+    return calls
+
+
+
+def _expect(fd):
+    """测试便利：就地取一份反映**当前**磁盘状态的运行凭据。
+
+    ⚠️ 只用于**不针对凭据比对本身**的档；针对它的档要显式在正确的时刻
+    `begin_run(fd)` 取凭据，否则本帮手会让那些档恒真。
+    """
+    return begin_run(fd)
+
+
+def _rechecked(fd):
+    """账本带着「必须做全量复校才能清」记录时的**正常起跑序列**：
+    `begin_run` → 跑完整棵 staging 的全量复校 → 登记结论 → 才允许提交。
+
+    ⚠️ 用它替换 `_expect(fd)` 的那几档，测的**仍是原来那件事**（生命周期三字段
+    够不够得到），只是把起跑序列补成 spec P2-F3 要求的样子（codex R16 [high]）。
+    """
+    ledger = begin_run(fd)
+    attest_staging_recheck(ledger, passed=True)
+    return ledger
+
+
+def test_commit_stock_writes_a_readable_manifest(tmp_path):
+    """正向放行档：写出去的必须读得回来。"""
+    m = _valid_manifest()
+    _d, fd = _staging(tmp_path)
+    try:
+        written = commit_stock(fd, m, ledger=_expect(fd))
+        # ⚠️ 比对**返回的那份**而不是入参：per-stock 提交会把 source_verification
+        # 写死成 partial（spec §4.5:785，O4-F2），故与入参本就不同。
+        assert read_manifest(fd) == written
+        assert written["source_verification"] == "partial"
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_cannot_change_lifecycle_fields(tmp_path):
+    """⭐⭐ 核心不变量：即使调用方**故意**改了内存里的三个字段，
+    磁盘上写出去的仍是 lifecycle 快照里的值。
+
+    判别力：把实现写成 `atomic_write_json(fd, NAME, manifest)`（直接写入参），
+    本条必红。这就是 spec §9-3s 说的「使规则可机械检验」——不是靠实施者记得别改。
+    """
+    prev = {"stopped_reason": "staging_path_escape",
+            "fetch_fatal_error": _fatal()}
+    poisoned = _valid_manifest(**prev)
+
+    # 调用方「不小心」把 fatal 洗掉了
+    del poisoned["fetch_fatal_error"]
+    poisoned["stopped_reason"] = "max_bytes"
+
+    _d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(**prev))       # 磁盘上是上一次留下的真相
+        commit_stock(fd, poisoned, ledger=_rechecked(fd))
+        on_disk = read_manifest(fd)
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+        assert on_disk["fetch_fatal_error"] == _fatal()
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_cannot_invent_lifecycle_fields(tmp_path):
+    """反向档：一份**干净的** manifest，调用方硬塞一个 stopped_reason 进去 ——
+    磁盘上必须仍然干净。
+
+    没有这一条，「只在 lifecycle 有值时覆盖」的实现也能让上一条绿。
+    **「剥」与「塞」是两个动作，各配一档，缺一会互相掩盖。**
+    """
+    poisoned = _valid_manifest(stopped_reason="max_bytes")
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, poisoned, ledger=_expect(fd))       # 启动时磁盘上是干净的
+        assert "stopped_reason" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_preserves_unknown_top_level_keys(tmp_path):
+    """S3/S4 的 failures / batches 等经 per-stock 提交流转，不得被剥掉（O4-F10）。"""
+    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}])
+    m["committed_bytes"] = _min_bytes(m) + 123
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, m, ledger=_expect(fd))
+        on_disk = read_manifest(fd)
+        assert on_disk["failures"] == [{"stock_code": "600004.SH", "attempts": 1}]
+        assert on_disk["committed_bytes"] == _min_bytes(m) + 123
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_uses_full_fsync(tmp_path, monkeypatch):
+    """manifest 提交按 O4-F11 定案走 F_FULLFSYNC（断电在威胁模型之内）。
+
+    判别力：把 `full_sync=True` 去掉，本条在 macOS 上必红。
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上无判别力（如实登记）。
+    **按平台分支，绝不 skip**——本仓 CI 把任何 skip 判失败。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    _d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
+    finally:
+        os.close(fd)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+    else:
+        assert fsynced
+
+
+def test_commit_stock_is_atomic_leaving_no_tmp_files(tmp_path):
+    """走 tmp → replace，落地后目录里不得有残留临时文件。"""
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
+    finally:
+        os.close(fd)
+    assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 17：收尾生命周期决策表（纯函数）
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import (
+    FinalOutcome, clean_finish, max_bytes_stop, escape_stop,
+    resolve_final_lifecycle, SkipVerifyWithEscapeError,
+)
+
+
+def _prev(fatal=None, reason=None, secondary=None):
+    m = _valid_manifest()
+    if reason is not None:
+        m["stopped_reason"] = reason
+    if fatal is not None:
+        m["fetch_fatal_error"] = fatal
+    if secondary is not None:
+        m["stopped_reason_secondary"] = secondary
+    return m
+
+
+# ── 上次没有 fatal ────────────────────────────────────────────
+def test_clean_finish_on_a_clean_manifest_clears_stopped_reason():
+    assert resolve_final_lifecycle(_prev(), clean_finish()) == {}
+
+
+def test_max_bytes_on_a_clean_manifest_records_max_bytes():
+    assert resolve_final_lifecycle(_prev(), max_bytes_stop()) == {
+        "stopped_reason": "max_bytes"}
+
+
+def test_clean_finish_drops_a_stale_max_bytes_reason():
+    """上次是干净的容量停止，这次跑完了 → 那条 stopped_reason 该消失。"""
+    assert resolve_final_lifecycle(_prev(reason="max_bytes"), clean_finish()) == {}
+
+
+# ── 本次撞 escape ─────────────────────────────────────────────
+def test_escape_stop_overwrites_everything():
+    """本次又撞 escape → 写入本次的四字段并清掉 secondary。
+
+    ⚠️ 2026-08-30 订正方向：原本测的是 `staging → source`，而那恰恰是
+    **唯一不许覆盖**的方向（codex R3 [high]：清除 staging 逃逸另需全量复校，
+    用只需一道前提的 source 逃逸覆盖它 = 把那道门取消）。原样保留这条断言
+    等于把一个被证明有洞的行为焊死成回归钉。
+    改用 `source → staging`（升级方向，新状态更严），
+    「覆盖」这件事照样被钉住；不许覆盖的那个方向由
+    `test_a_source_escape_never_replaces_an_unresolved_staging_escape` 承担。
+    """
+    out = escape_stop(kind="staging_path_escape",
+                      relative_path="1分钟K线_前复权/x.csv",
+                      component="1分钟K线_前复权", errno="ENOTDIR")
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape",
+              secondary="max_bytes"), out)
+    assert got == {
+        "stopped_reason": "staging_path_escape",
+        "fetch_fatal_error": {"kind": "staging_path_escape",
+                              "relative_path": "1分钟K线_前复权/x.csv",
+                              "component": "1分钟K线_前复权", "errno": "ENOTDIR"},
+    }
+    assert "stopped_reason_secondary" not in got
+
+
+# ── ⭐⭐ max_bytes 绝不洗白 escape（O4-F1）────────────────────
+def test_max_bytes_never_launders_a_retained_escape():
+    """⭐⭐ 本片最危险的一档：Run1 撞 escape，Run2 触顶。
+
+    若把 stopped_reason 改写成 max_bytes，pilot 读到就放行，那 56 只从未被
+    复校过的股照常消费——一次被证明破坏的信任边界被一次容量停止洗白成
+    合法凭据。
+
+    判别力：把实现写成「max_bytes 一律覆盖 stopped_reason」，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"), max_bytes_stop())
+    assert got["stopped_reason"] == "staging_path_escape"      # 未被覆盖
+    assert got["fetch_fatal_error"] == _fatal()                # 原样保留
+    assert got["stopped_reason_secondary"] == "max_bytes"      # 只作诊断附注
+
+
+# ── ⭐ 清除的谓词是「证明干净」而非「本次没撞」（O2-F7）───────
+def test_clean_finish_without_revisiting_the_fatal_path_keeps_the_fatal():
+    """⭐ 反例场景：上次 staging_path_escape 记了 56 只股，操作者重建目录，
+    本次新股走**新建目录**全部成功、收尾复校只对**源**重算——
+    从不回读那 56 只股。「本次没撞 escape」成立，但什么都没被证明干净。
+
+    判别力：把清除条件写成「本次没撞 escape」，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=False))
+    assert got["fetch_fatal_error"] == _fatal()
+    assert got["stopped_reason"] == "staging_path_escape"
+
+
+def test_source_escape_clears_after_revisiting_that_path():
+    """source_path_escape 只要前提①（重走过那条路径）——
+    前提②（staging 全量复校）是 staging_path_escape **另加**的。"""
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+        clean_finish(revisited_fatal_path=True))
+    assert got == {}
+
+
+def test_staging_escape_clears_only_after_a_passing_full_recheck():
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="passed"))
+    assert got == {}
+
+
+def test_staging_escape_with_failing_recheck_keeps_fatal_and_renames_reason():
+    """⭐ P2-F3：此前完全未定义 → 不可解 staging。
+    保留 fatal、覆盖 stopped_reason 为 staging_recheck_failed。
+
+    ⭐ 这一档也是 `kind` 与 `stopped_reason` **必须解耦**的唯一理由（O4-F3）：
+    kind 仍是 staging_path_escape，reason 已换成 recheck_failed。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(), reason="staging_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert got["fetch_fatal_error"] == _fatal()
+    assert got["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    assert got["stopped_reason"] == "staging_recheck_failed"
+
+
+def test_a_failing_staging_recheck_blocks_clearing_even_for_a_source_escape():
+    """⭐ 计划原文照抄会留一个洞（spec 对这一格没写）：上次是 source_path_escape、
+    本次重走过那条路径，但操作者跑的 staging 全量复校**失败了** ——
+    计划的分支次序（先判 kind 再判复校结果）会走到 `return {}`，
+    **把 fatal 清掉、且把复校失败这个信号一起丢掉**，
+    于是一棵已被证明与账本对不上的 staging 拿到干净标签。
+
+    改法是把「复校失败」提到 kind 判断**之前**：复校失败一律不清除。
+    双向都问过：①它只增加拒绝，畸形溜不过去；②被它拦下的唯一新情形就是
+    「staging 复校失败却要清 fatal」，那不是合法状态。
+
+    判别力：把这两句挪回 kind 判断之后，本条必红。
+    """
+    got = resolve_final_lifecycle(
+        _prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+        clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert got["fetch_fatal_error"]["kind"] == "source_path_escape"
+    assert got["stopped_reason"] == "staging_recheck_failed"
+
+
+def test_skipping_the_recheck_on_a_staging_escape_manifest_is_refused():
+    """⭐ P2-F3：--skip-existing-verify 与「manifest 带 escape 记录」互斥。
+
+    不拒的话：第 1 次带 flag 跑清掉 fatal、标 partial（看似安全），
+    第 2 次不带 flag 跑时收尾复校**只重算源、从不回读 staging** →
+    **一棵被证明动过、且从未被复校过的 staging 拿到了出货级 full 标签**。
+
+    判别力：把这一档实现成「当作 passed 清除」或「当作没重走过保留」，
+    本条必红——前者是那条出货级假凭据，后者会让 fatal 永远清不掉。
+    """
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(
+            _prev(fatal=_fatal(), reason="staging_path_escape"),
+            clean_finish(revisited_fatal_path=True, staging_recheck=None))
+
+
+# ── 输入自相矛盾时不许产出非法 manifest ──────────────────────
+def test_resolve_refuses_a_manifest_with_a_fatal_but_no_stopped_reason():
+    """⭐ 写侧/读侧配对家族的第 N 次：读侧明写「有 fetch_fatal_error 却没有
+    stopped_reason」非法。计划原文用 `if prev_reason is not None:` 兜着，
+    于是这种自相矛盾的输入会**安静地产出一份读侧判非法的 manifest**
+    ——一个合规的写者写出自己读不回来的账本。
+
+    改为当场拒绝：真实路径上 prev 来自 read_manifest（已保证配对成立），
+    故这一条不会误杀任何合法状态；而那两个 `is not None` 分支本身
+    **没有任何测试钉得住**（S1：一道钉不住的守卫是负债不是资产）。
+
+    判别力：把这条守卫删掉，本条必红。
+    """
+    for outcome in (clean_finish(), max_bytes_stop(),
+                    clean_finish(revisited_fatal_path=True, staging_recheck="passed")):
+        with pytest.raises(ManifestInvalidError, match="stopped_reason"):
+            resolve_final_lifecycle({"fetch_fatal_error": _fatal()}, outcome)
+
+
+# ── 构造期就排除非法组合 ──────────────────────────────────────
+def test_escape_stop_rejects_a_kind_outside_the_enum():
+    for bad in ("staging_recheck_failed", "max_bytes", ""):
+        with pytest.raises(ValueError):
+            escape_stop(kind=bad, relative_path="x", component="c", errno="ELOOP")
+
+
+def test_escape_stop_rejects_an_errno_outside_the_enum():
+    with pytest.raises(ValueError):
+        escape_stop(kind="staging_path_escape", relative_path="x",
+                    component="c", errno="EACCES")
+
+
+def test_escape_stop_rejects_non_string_path_fields():
+    """⭐ 「非法组合在构造期就被排除」这句话必须对**类型**也成立。
+
+    只查 `not relative_path` 时，`relative_path=123` 一路通过构造、通过决策表，
+    直到 `commit_final` 把它写上磁盘，才在**下一次读**时被判非法 ——
+    又一次「一个合规的写者产出的 manifest 被读者判非法」。
+
+    判别力：把 isinstance 检查删掉，本条必红。
+    """
+    for bad in (123, None, ["x"], {"a": 1}, True):
+        with pytest.raises(ValueError):
+            escape_stop(kind="staging_path_escape", relative_path=bad,
+                        component="c", errno="ELOOP")
+        with pytest.raises(ValueError):
+            escape_stop(kind="staging_path_escape", relative_path="x",
+                        component=bad, errno="ELOOP")
+
+
+def test_clean_finish_rejects_an_unknown_recheck_verdict():
+    for bad in ("ok", "PASSED", True):
+        with pytest.raises(ValueError):
+            clean_finish(revisited_fatal_path=True, staging_recheck=bad)
+
+
+def test_final_outcome_rejects_a_kind_outside_the_three():
+    """⭐ `FinalOutcome` 是公开的 dataclass，可以被直接构造。
+
+    不校验 kind 的话，`FinalOutcome(kind="whatever")` 会一路落到「上次没 fatal
+    → 返回 {}」那一支，被**静默当成干净跑完**——安静的那种错。
+
+    判别力：删掉 __post_init__ 的校验，本条必红。
+    """
+    for bad in ("whatever", "", "Clean", None):
+        with pytest.raises(ValueError):
+            FinalOutcome(kind=bad)
+    for good in ("clean", "max_bytes"):
+        assert FinalOutcome(kind=good).kind == good
+
+
+def test_max_bytes_stop_takes_no_clearing_preconditions():
+    """⭐ 计划原文给 `max_bytes_stop` 也开了 revisited_fatal_path /
+    staging_recheck 两个参数，而决策表对 max_bytes 这一支**根本不看它们**
+    （O4-F1：容量停止一律不清除）。可传而被静默忽略 = 安静的错。
+
+    正确做法是让它**不可表达**：这两个参数从签名里去掉。
+
+    判别力：把参数加回去，本条必红。
+    """
+    with pytest.raises(TypeError):
+        max_bytes_stop(revisited_fatal_path=True)
+    with pytest.raises(TypeError):
+        max_bytes_stop(staging_recheck="passed")
+
+
+def test_every_resolved_state_passes_the_read_side_validator():
+    """⭐⭐ 写侧/读侧配对钉：决策表吐出的**每一种**状态，塞回 manifest 后
+    都必须能过读侧校验。
+
+    这是 R94-F2 / O4-F13 / S2-F3 / S2-F4 那个家族（写侧形状与读侧要求不配对）
+    的**机械防线**：任何一支的输出若读侧不认，一个合规的写者就会产出被自己
+    判非法的 manifest。
+    """
+    cases = [
+        (_prev(), clean_finish()),
+        (_prev(), max_bytes_stop()),
+        (_prev(reason="max_bytes"), clean_finish()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"), max_bytes_stop()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"),
+         max_bytes_stop()),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=False)),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="passed")),
+        (_prev(fatal=_fatal(), reason="staging_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="failed")),
+        (_prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+         clean_finish(revisited_fatal_path=True)),
+        (_prev(fatal=_fatal(kind="source_path_escape"), reason="source_path_escape"),
+         clean_finish(revisited_fatal_path=True, staging_recheck="failed")),
+        (_prev(), escape_stop(kind="staging_path_escape", relative_path="a/b.csv",
+                              component="a", errno="ELOOP")),
+        (_prev(fatal=_fatal(), reason="staging_path_escape", secondary="max_bytes"),
+         escape_stop(kind="source_path_escape", relative_path="a/b.csv",
+                     component="a", errno="ENOTDIR")),
+    ]
+    for prev, outcome in cases:
+        new_lc = resolve_final_lifecycle(prev, outcome)
+        merged = {k: v for k, v in prev.items() if k not in LIFECYCLE_KEYS}
+        merged.update(new_lc)
+        assert validate_manifest(merged) is merged
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b Task 18：commit_final —— 唯一能动生命周期字段的落盘入口
+# ═════════════════════════════════════════════════════════════
+from qmt_manifest import RecoveryScope, RunLedger, begin_run, commit_final
+
+
+def test_commit_final_writes_a_readable_manifest(tmp_path):
+    """正向放行档。"""
+    _d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        written = commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
+        assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_clears_the_fatal_when_proven_clean(tmp_path):
+    """⭐ 与 commit_stock 的权限差：收尾提交**能**清除。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        # ⚠️ 凭据取自**磁盘**（R5 high B），故必须先把这份账本真正落盘；
+        # 只放在内存里的话本档会因为「决策表看不到 fatal」而恒真。
+        _seed_disk(fd, m)
+        startup = begin_run(fd)
+        commit_final(fd, _valid_manifest(),
+                     ledger=startup, outcome=clean_finish(revisited_fatal_path=True))
+        on_disk = read_manifest(fd)
+        assert "fetch_fatal_error" not in on_disk
+        assert "stopped_reason" not in on_disk
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_keeps_the_fatal_when_not_proven(tmp_path):
+    m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, m)
+        startup = begin_run(fd)
+        commit_final(fd, _valid_manifest(),
+                     ledger=startup, outcome=clean_finish(revisited_fatal_path=False))
+        on_disk = read_manifest(fd)
+        assert on_disk["fetch_fatal_error"] == _fatal()
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_ignores_lifecycle_fields_already_in_the_passed_manifest(tmp_path):
+    """⭐ 与 commit_stock 同源的结构性保证：写出去的三个字段**只能**来自决策表，
+    绝不来自调用方内存里那份 manifest 的直接赋值。
+
+    这里内存里带着 escape、本次是容量触顶——磁盘上应当出现的是「保留 escape +
+    另记 secondary」，因为决策表看的是 manifest 里**上一次**的 fatal。
+
+    判别力：把实现写成 `payload = dict(manifest)` 而不先剥 LIFECYCLE_KEYS，
+    `stopped_reason_secondary` 那条断言仍会绿（决策表塞得回去），但把它改成
+    「内存里预先带一个假的 secondary」就能分辨——故本档预置一个假 secondary。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(),
+                        stopped_reason="staging_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, m)
+        startup = begin_run(fd)
+        attest_staging_recheck(startup, passed=True)         # 本轮复校跑过且通过
+        polluted = _valid_manifest()
+        polluted["stopped_reason_secondary"] = "max_bytes"   # 内存里预置的陈旧附注
+        commit_final(fd, polluted, ledger=startup, outcome=clean_finish(revisited_fatal_path=True,
+                                                        staging_recheck="passed"))
+        on_disk = read_manifest(fd)
+        assert "fetch_fatal_error" not in on_disk
+        assert "stopped_reason" not in on_disk
+        # ⭐ 决策表这一支返回 {}，故内存里那条陈旧的 secondary 必须被剥掉
+        assert "stopped_reason_secondary" not in on_disk
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_uses_full_fsync(tmp_path, monkeypatch):
+    """manifest 提交按 O4-F11 定案走 F_FULLFSYNC。
+
+    ⚠️ Linux 上 `full_fsync` 本就退回 `os.fsync`，该平台上无判别力（如实登记）。
+    """
+    calls = _fcntl_cmd_spy(monkeypatch)
+    fsynced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+    _d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
+    finally:
+        os.close(fd)
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        assert fcntl.F_FULLFSYNC in calls
+    else:
+        assert fsynced
+
+
+def test_commit_final_refuses_skip_verify_with_escape_and_writes_nothing(tmp_path):
+    """⭐ P2-F3 的落盘侧：拒绝时**一个字节都不写**。
+
+    判别力：把 resolve 的调用放在写入之后，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(), stopped_reason="staging_path_escape")
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, m)
+        startup = begin_run(fd)
+        before = (d / MANIFEST_NAME).read_bytes()
+        with pytest.raises(SkipVerifyWithEscapeError):
+            commit_final(fd, _valid_manifest(),
+                         ledger=startup, outcome=clean_finish(revisited_fatal_path=True))
+        # 拒绝时一个字节都不写：磁盘上那份必须逐字节未变
+        assert (d / MANIFEST_NAME).read_bytes() == before
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
+    finally:
+        os.close(fd)
+
+
+def test_full_round_trip_stock_commits_then_final(tmp_path):
+    """⭐⭐ 端到端不变量：一次带着 escape 记录的运行里，
+    **任意多次 per-stock 提交都动不了 fatal，只有收尾那一次能**。
+    """
+    start = _valid_manifest(fetch_fatal_error=_fatal(),
+                            stopped_reason="staging_path_escape")
+    _d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, start)                    # 上一次运行留下的账本
+        startup = begin_run(fd)                  # ⚠️ 整轮共用同一份凭据
+        attest_staging_recheck(startup, passed=True)   # 复校先于任何提交（P2-F3）
+        for _ in range(3):                       # 三次 per-stock 提交
+            commit_stock(fd, start, ledger=startup)
+            assert read_manifest(fd)["fetch_fatal_error"] == _fatal()
+        commit_final(fd, start, ledger=startup,
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="passed"))
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# S2b 收口：机械化全量 sweep 挖出的「无任何测试隔离守护」的四条判据
+#
+# sweep 做法：把模块里每个 `_require*` 调用的第一个实参改成恒真值，各跑一遍。
+# 84 个判据里 12 条变异后仍绿，逐条核归因后分四类：
+#   ① 邻居兜底（6 条）——非法值撞不过下游那条更强的判据，登记不修：
+#      L262/L449 sha 格式（两处必须相等）、L330 层内 idx 唯一（code 唯一 + 交叉核对）、
+#      L395/L397 files 的 code/period（文件名解析一致性）、L623 存根 sha 格式（须等于重算值）
+#   ② 等价变异（1 条）——L324「后缀与层一致」与交叉核对结构上重叠，S2a 已登记（M19）
+#   ③ 已写明的恒真断言（1 条）——L644 两趟聚合相等，S2a 变异证实，保留作防御性冗余
+#   ④ **真的没人守（4 条）**——结构上造得出专属档，按纪律就该补，即下面四条
+#
+# ⚠️ 为什么 984 组合那条整族扫描探不到它们：它只断言「若抛异常则必须是本模块的族」，
+# **不断言「必须抛」**。守卫被变空之后不抛任何异常，那条扫描照样绿。
+# 且它做的是「替换值」，从不做「删键」——L263 那种缺键的形态它够不着。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_source_snapshot_without_universe_is_rejected_not_a_raw_keyerror():
+    """L263：缺 `source_snapshot.universe` 必须是 ManifestInvalidError。
+
+    判别力：把那条 `_require("universe" in snap, …)` 变空，本条必红——
+    且红的形态是**原始 KeyError**，恢复指引一个字都印不出来（S2-F9 同族）。
+    """
+    m = _valid_manifest()
+    del m["source_snapshot"]["universe"]
+    with pytest.raises(ManifestInvalidError, match="universe"):
+        validate_manifest(m)
+
+
+def test_fatal_relative_path_must_not_be_empty():
+    """L507：`fetch_fatal_error.relative_path` 为空串必须被拒。
+
+    空串是「写侧只落了一半」的典型形态——四字段都在、值却是空的，
+    恢复指引会印出「路径 ''」这种什么都没说的东西。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    m["fetch_fatal_error"]["relative_path"] = ""
+    with pytest.raises(ManifestInvalidError, match="relative_path"):
+        validate_manifest(m)
+
+
+def test_fatal_component_must_not_be_empty():
+    """L508：`fetch_fatal_error.component` 为空串必须被拒。
+
+    `component` 是「哪一段被换掉了」——空串等于没记，
+    而它正是操作者唯一能据以定位现场的字段。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    m["fetch_fatal_error"]["component"] = ""
+    with pytest.raises(ManifestInvalidError, match="component"):
+        validate_manifest(m)
+
+
+def test_evidence_pass_completed_at_must_not_be_empty():
+    """L627：`passes[].completed_at` 为空串必须被拒。
+
+    R16-F1 造这份存根的全部理由是证明那两趟**真的跑过**；
+    没有时间戳的一趟，「跑过」这件事就没有任何可核对的痕迹。
+    判别力：把那条 `_require_nonempty_str` 变空，本条必红。
+    """
+    m = _valid_manifest()
+    m["source_verification_evidence"]["passes"][0]["completed_at"] = ""
+    with pytest.raises(ManifestInvalidError, match="completed_at"):
+        validate_manifest(m)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R1 的三条 high（本机端到端复现后修复）
+#
+# 共同形态：**结构性保证被「可变的嵌套状态」与「没被校验的字段」绕过**。
+# 这是「按字段穷尽而非按判据句穷尽」的又一次——我校验了想到的那几个字段
+# （kind / staging_recheck / relative_path / component），漏了 revisited_fatal_path；
+# 我拷贝了顶层的三个键，漏了它们**里面**那一层。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_lifecycle_snapshot_does_not_alias_the_manifests_nested_fatal(tmp_path):
+    """⭐⭐ [high #1] 快照只拷了顶层映射，`fetch_fatal_error` 仍是**同一个**可变 dict。
+
+    端到端复现（本机真跑）：取完快照后改 `manifest["fetch_fatal_error"]["kind"]`，
+    per-stock 提交把改过的值**写进了磁盘**——Task 16 那条「调用方即使污染了内存里
+    的 manifest 也写不进磁盘」的核心不变量被绕过。
+
+    后果链不止于此：`kind` 从 `staging_path_escape` 被改成 `source_path_escape`
+    之后仍能过读侧校验，而 source escape 的清除**只要前提①**（不需要 staging 全量
+    复校）→ 下一次收尾提交就能把它清掉。**一棵被证明动过的树被洗成干净凭据。**
+
+    判别力：把 `lifecycle_snapshot` 改回浅拷贝，本条必红。
+    """
+    m = _valid_manifest(stopped_reason="staging_path_escape",
+                        fetch_fatal_error=_fatal())
+    snap = lifecycle_snapshot(m)
+    assert snap["fetch_fatal_error"] is not m["fetch_fatal_error"]
+
+    m["fetch_fatal_error"]["kind"] = "source_path_escape"      # 取完快照后再污染
+    _d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(stopped_reason="staging_path_escape",
+                                       fetch_fatal_error=_fatal()))
+        commit_stock(fd, m, ledger=_rechecked(fd))
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_resolve_final_lifecycle_does_not_alias_the_input_fatal():
+    """[high #1 同族] 决策表保留 fatal 时不得把**输入那个对象**递出去。
+
+    否则调用方改一下输入，已经算好的「新状态」跟着变——纯函数的结论
+    在被写盘之前就可能被改掉。
+
+    判别力：把两处 `deepcopy(prev_fatal)` 改回 `prev_fatal`，本条必红。
+    """
+    prev = _prev(fatal=_fatal(), reason="staging_path_escape")
+    for outcome in (max_bytes_stop(), clean_finish(revisited_fatal_path=False),
+                    clean_finish(revisited_fatal_path=True, staging_recheck="failed")):
+        got = resolve_final_lifecycle(prev, outcome)
+        assert got["fetch_fatal_error"] is not prev["fetch_fatal_error"]
+        assert got["fetch_fatal_error"] == _fatal()
+
+
+def test_revisited_fatal_path_must_be_a_real_bool():
+    """⭐⭐ [high #2] `revisited_fatal_path` 从来没被校验过类型。
+
+    本机复现：`clean_finish(revisited_fatal_path="false")` 被接受，
+    而非空字符串是**真值** → 决策表当成「重走过那条路径」→
+    **无凭无据就把 source escape 的 fatal 清掉了**。
+    命令行/配置里传进来的 `"false"` 是这条路上最自然的形态。
+
+    判别力：删掉 bool 校验，本条必红。
+    """
+    for bad in ("false", "true", "", 0, 1, None, [], {}):
+        with pytest.raises(ValueError, match="revisited_fatal_path"):
+            clean_finish(revisited_fatal_path=bad)
+    for good in (True, False):
+        assert clean_finish(revisited_fatal_path=good).revisited_fatal_path is good
+
+
+def test_escape_evidence_cannot_be_mutated_after_construction():
+    """⭐ [high #2 同族] `escape` 是个可变 dict 塞进 frozen dataclass ——
+    构造期校验形同虚设：构造完再改一下就绕过去了（本机复现改成了 `bogus`）。
+
+    判别力：把 MappingProxyType 换回裸 dict，本条必红。
+    """
+    e = escape_stop(kind="staging_path_escape", relative_path="a/b.csv",
+                    component="a", errno="ELOOP")
+    with pytest.raises(TypeError):
+        e.escape["kind"] = "bogus"
+    assert e.escape["kind"] == "staging_path_escape"
+
+
+def test_final_outcome_enforces_the_kind_escape_pairing():
+    """⭐ [high #2 同族] 跨字段不变量必须在 `__post_init__` 里兑现，
+    否则**直接构造**这条路上全部校验都不存在。
+
+    - `kind="escape"` 却没带证据 → 决策表里只剩一句 `assert`（`python -O` 下会被剥掉）；
+    - `kind="clean"` 却带着证据 → 那份证据被**静默忽略**。
+
+    判别力：删掉这两条配对校验，本条必红。
+    """
+    with pytest.raises(ValueError, match="escape"):
+        FinalOutcome(kind="escape")
+    with pytest.raises(ValueError, match="escape"):
+        FinalOutcome(kind="clean", escape={"kind": "staging_path_escape",
+                                           "relative_path": "a", "component": "a",
+                                           "errno": "ELOOP"})
+
+
+def test_final_outcome_validates_escape_evidence_on_direct_construction():
+    """⭐ [high #2 同族] 校验必须落在 `__post_init__`，不能只落在 `escape_stop`。
+
+    「守卫立在工厂而对象可以绕过工厂构造 = 守卫不存在」——本仓已栽过同形态
+    （守卫立在调用方而 open() 发生在被调方）。
+
+    判别力：把校验搬回 escape_stop、只留工厂那一份，本条必红。
+    """
+    ok = {"kind": "staging_path_escape", "relative_path": "a/b.csv",
+          "component": "a", "errno": "ELOOP"}
+    for key, bad in [("kind", "max_bytes"), ("errno", "EACCES"),
+                     ("relative_path", ""), ("component", 123),
+                     ("relative_path", None)]:
+        broken = dict(ok, **{key: bad})
+        with pytest.raises(ValueError):
+            FinalOutcome(kind="escape", escape=broken)
+    with pytest.raises(ValueError):
+        FinalOutcome(kind="escape", escape=dict(ok, extra=1))     # 多余字段
+    assert FinalOutcome(kind="escape", escape=ok).escape["kind"] == "staging_path_escape"
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R2 的两条 high（本机复现后修复），外加按判据穷尽挖出的同族两条
+#
+# 家族 A：**读侧接受了写侧根本产不出的生命周期组合**（S2-F7 那个方向：
+#         畸形被放行 · 安静）。修法是把「写侧能产出哪些组合」列全，
+#         读侧照单收口。
+# 家族 B：**提交入口能写出一份自己读不回来的账本**（R94-F2/O4-F13/S2-F3/
+#         S2-F4/S2-F5 那个家族的第六次，只是这次跨的是「写入口与读入口」）。
+#         修法是落盘前先过一遍读侧校验——让坏状态不可表达，而不是靠调用方小心。
+# ═════════════════════════════════════════════════════════════
+
+
+def _pair(reason, kind):
+    return _valid_manifest(stopped_reason=reason, fetch_fatal_error=_fatal(kind=kind))
+
+
+def test_reader_rejects_an_escape_reason_that_disagrees_with_the_fatal_kind():
+    """⭐⭐ [R2 high #1] `stopped_reason="staging_path_escape"` 配
+    `fetch_fatal_error.kind="source_path_escape"` 此前**被放行**。
+
+    后果（本机复现）：决策表只看 `kind`，于是这份账本走
+    `clean_finish(revisited_fatal_path=True, staging_recheck=None)` 时
+    **绕过了 staging 全量复校**（那是 P2-F3 无条件要求的）直接 `return {}`，
+    把粘性的 fatal 证据删掉 —— 一棵被证明动过的树拿到干净标签。
+    改一个字段的 6 个字符就能做到，而「有人动过 staging」正是本模块的威胁模型。
+
+    判别力：删掉这条配对判据，本条必红。
+    """
+    for reason, kind in [("staging_path_escape", "source_path_escape"),
+                         ("source_path_escape", "staging_path_escape")]:
+        with pytest.raises(ManifestInvalidError, match="fetch_fatal_error.kind"):
+            validate_manifest(_pair(reason, kind))
+
+
+def test_reader_still_accepts_the_one_legitimately_decoupled_pair():
+    """⭐ 方向②（合法状态不得被判死）：`staging_recheck_failed` 是 spec 明写的
+    **唯一**一种 `kind` 与 `stopped_reason` 解耦的状态（O4-F3）——
+    「保留 fatal + 换 stopped_reason」在「kind 恒等于 reason」下结构上不可表达。
+
+    两种 kind 都必须放行：复校失败这件事与「上次为什么出事」无关。
+    """
+    for kind in ("staging_path_escape", "source_path_escape"):
+        m = _pair("staging_recheck_failed", kind)
+        assert validate_manifest(m) is m
+
+
+def test_reader_rejects_a_fatal_paired_with_a_reason_that_does_not_require_it():
+    """⭐ 同族（按判据穷尽挖出，非评审报告的那一处）：
+    读侧只查了「reason 要求 fatal ⇒ fatal 在」，**反向没查**——
+    于是 `(stopped_reason="max_bytes", fetch_fatal_error=…)` 被放行，
+    而决策表任何一支都产不出它。
+
+    方向②：写侧带 fatal 时，reason 只可能是那三个之一
+    （分支①写 escape 值、复校失败那支写 staging_recheck_failed、
+    其余分支原样保留上一次的），故不误杀。
+
+    判别力：删掉这条，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="stopped_reason"):
+        validate_manifest(_valid_manifest(stopped_reason="max_bytes",
+                                          fetch_fatal_error=_fatal()))
+
+
+def test_reader_rejects_a_secondary_without_a_fatal():
+    """⭐ 同族第三条：`stopped_reason_secondary` 只在「上次有 fatal + 本次容量
+    触顶」那一支产生（O4-F1），没有 fatal 时它是无源之水。
+
+    判别力：删掉这条，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="stopped_reason_secondary"):
+        validate_manifest(_valid_manifest(stopped_reason_secondary="max_bytes"))
+
+
+def test_resolve_refuses_a_mismatched_escape_pair():
+    """⭐ [R2 high #1 的纵深] 决策表是**公开的纯函数**，可以不经 read_manifest
+    直接调用。读侧堵上之后它仍要自己 fail closed，而不是「把不匹配的当成
+    source escape 处理」——那正是被利用的那条路径。
+
+    判别力：删掉决策表里那句配对检查，本条必红。
+    """
+    with pytest.raises(ManifestInvalidError, match="fetch_fatal_error.kind"):
+        resolve_final_lifecycle(_pair("staging_path_escape", "source_path_escape"),
+                                clean_finish(revisited_fatal_path=True))
+
+
+def test_commit_stock_refuses_to_publish_a_manifest_its_own_reader_would_reject(tmp_path):
+    """⭐⭐ [R2 high #2] 提交入口此前**不校验**就落盘。
+
+    最初复现用的是 `lifecycle={"stopped_reason": "source_path_escape"}`（那时
+    per-stock 提交还收快照参数）：过了键白名单、写入**报告成功**，而下一次
+    `read_manifest` 判它非法 → **整棵 staging 读不回来**，而干成这件事的那次
+    调用返回的是成功。一次 per-stock 提交就能把已经拉了几百只股的 staging
+    变成砖头。那条走私通道后来被整个拆掉了（R6），此处改用**本身就残缺的
+    manifest** ——「组装到一半就调提交」在 S3/S4 里完全可能。
+
+    判别力：把 `_write_manifest` 里的 `validate_manifest` 删掉，本条必红。
+    """
+    broken = _valid_manifest()
+    del broken["cursor"]
+    _d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ManifestInvalidError, match="cursor"):
+            commit_stock(fd, broken, ledger=_expect(fd))
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_refuses_to_publish_a_manifest_its_own_reader_would_reject(tmp_path):
+    """同上，另一个入口。决策表的输出恒合法（已有配对钉），故这里用一份
+    本身就残缺的入参 manifest —— S3/S4 组装到一半就调提交是完全可能的。
+    """
+    broken = _valid_manifest()
+    del broken["seed"]
+    _d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="seed"):
+            commit_final(fd, broken, ledger=startup, outcome=clean_finish())
+    finally:
+        os.close(fd)
+
+
+def test_a_refused_commit_leaves_the_previous_manifest_byte_identical(tmp_path):
+    """⭐⭐ 「拒绝」必须是**一个字节都不写**，而不是「写坏了再报错」。
+
+    校验必须排在 `atomic_write_json` **之前**：排在之后的话，上一份好账本
+    已经被 `os.replace` 换掉了，报不报错都救不回来。
+
+    判别力：把 `validate_manifest` 挪到 `atomic_write_json` 之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))
+        before = (d / MANIFEST_NAME).read_bytes()
+        broken = _valid_manifest()
+        del broken["cursor"]
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, broken, ledger=_expect(fd))
+        assert (d / MANIFEST_NAME).read_bytes() == before
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]   # 无临时残留
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R3 [high]：一次**后来的**逃逸会把未解除的粘性信任证据覆盖掉
+#
+# spec 原文写「本次又撞了 escape → 覆盖上一次的」，而 O4-F1 同时又说
+# `fetch_fatal_error` 是**粘性的信任状态**。两句话在「staging → source」
+# 这个次序上直接冲突：staging 逃逸要清除得过**两道**前提（另加全量复校，
+# P2-F3），source 逃逸只要一道。用后者覆盖前者，等于把那道门取消了。
+#
+# 本机三次运行端到端复现：Run1 撞 staging → Run2 撞 source（staging 证据没了）
+# → Run3 干净跑完、重走过源路径、**没做 staging 全量复校** → fatal 被清除。
+# 一棵从未证明恢复过的 staging 拿到干净账本。
+#
+# 判据升级为「**新状态必须至少和旧状态一样严**才允许覆盖」，
+# 严格性 = 「清除它是否需要 staging 全量复校」。
+# ═════════════════════════════════════════════════════════════
+
+
+def _commit_cycle(m, outcome):
+    """模拟一次收尾提交（纯内存）：剥掉三键、塞回决策表输出、并过一遍读侧。"""
+    new = resolve_final_lifecycle(m, outcome)
+    out = {k: v for k, v in m.items() if k not in LIFECYCLE_KEYS}
+    out.update(new)
+    return validate_manifest(out)
+
+
+def _staging_escape(path="1分钟K线_前复权/a.csv", comp="1分钟K线_前复权"):
+    return escape_stop(kind="staging_path_escape", relative_path=path,
+                       component=comp, errno="ELOOP")
+
+
+def _source_escape(path="日K线_前复权/b.csv", comp="日K线_前复权"):
+    return escape_stop(kind="source_path_escape", relative_path=path,
+                       component=comp, errno="ENOTDIR")
+
+
+def test_a_source_escape_never_replaces_an_unresolved_staging_escape():
+    """⭐⭐ [R3 high] 降级不许：`source_path_escape` 不得覆盖尚未解除的
+    `staging_path_escape`。
+
+    判别力：把这条守卫删掉，本条必红。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    assert m["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    assert m["stopped_reason"] == "staging_path_escape"
+
+
+def test_a_source_escape_never_replaces_an_unresolved_staging_recheck_failure():
+    """⭐ 同族变体（控制者按判据穷尽挖出，评审只报了上一条）：
+    `staging_recheck_failed` 也是「必须做过全量复校才能清」的状态，
+    而它的 `fetch_fatal_error.kind` 可以是 `source_path_escape`（O4-F3 解耦）。
+
+    只按 `kind` 判「严不严」会漏掉它：一次 source 逃逸就能把
+    「上次复校没通过」这个结论抹掉。判据必须同时看 `stopped_reason`。
+
+    判别力：把守卫里那半条 `prev_reason == "staging_recheck_failed"` 删掉，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True, staging_recheck="failed"))
+    assert m["stopped_reason"] == "staging_recheck_failed"
+    m = _commit_cycle(m, _source_escape())
+    assert m["stopped_reason"] == "staging_recheck_failed"      # 未被覆盖
+
+
+def test_the_staging_then_source_then_clean_chain_cannot_launder():
+    """⭐⭐ [R3 high] 完整的三次运行洗白链必须走不通。
+
+    修好后第三次运行会当场撞上 P2-F3：「这棵 staging 带着 escape 记录，
+    而你跳过了既有文件复校，两者互斥」——正是它该给出的那句话。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_the_same_chain_clears_after_a_passing_staging_recheck():
+    """方向②：真做了全量复校就必须能清掉，否则这棵 staging 永远解不开。"""
+    m = _commit_cycle(_valid_manifest(), _staging_escape())
+    m = _commit_cycle(m, _source_escape())
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason" not in m
+
+
+def test_a_staging_escape_may_replace_a_source_escape():
+    """方向②：**升级**方向必须放行 —— 新状态更严，覆盖是安全的。"""
+    m = _commit_cycle(_valid_manifest(), _source_escape())
+    m = _commit_cycle(m, _staging_escape())
+    assert m["fetch_fatal_error"]["kind"] == "staging_path_escape"
+
+
+def test_a_staging_escape_may_replace_another_staging_escape_on_a_different_path():
+    """方向②：同类覆盖必须放行。
+
+    只留最新那条路径**不构成信息损失**：清除 `staging_path_escape` 的前提②是
+    对 manifest 里**所有已记录的 staging 文件**做存在性 + sha256 全量复校
+    ——它是**路径无关**的，先前那条路径的损坏一样会被它抓到。
+    """
+    m = _commit_cycle(_valid_manifest(), _staging_escape("a/x.csv", "a"))
+    m = _commit_cycle(m, _staging_escape("b/y.csv", "b"))
+    assert m["fetch_fatal_error"]["relative_path"] == "b/y.csv"
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+
+
+def test_a_source_escape_may_replace_another_source_escape():
+    """方向②：同类覆盖放行（新状态与旧状态一样严）。
+
+    没有这一条，一个「source 逃逸永远不许覆盖任何东西」的过严实现也能让
+    上面那批档全绿，而它会让 manifest 一直指向**第一次**出事的那条路径。
+    """
+    m = _commit_cycle(_valid_manifest(), _source_escape("a/x.csv", "a"))
+    m = _commit_cycle(m, _source_escape("b/y.csv", "b"))
+    assert m["fetch_fatal_error"]["relative_path"] == "b/y.csv"
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R4 [high]：清除闸仍按 `kind` 判「严不严」，漏掉 staging_recheck_failed
+#
+# ⚠️ **这是我自己的修复动作留下的洞**（本仓已栽过多次的形态：
+#    「结构性改动后要重核原来成立的东西」）：
+#    R3 那轮我为「哪些状态必须做过 staging 全量复校才能清」抽出了
+#    `_needs_staging_recheck`，把它用在了**覆盖闸**上，却忘了**清除闸**
+#    ——而清除闸正是它本来要服务的地方。
+#    同一件事判两次、改了一处忘了另一处 ⇒ 修完必须留**机械守卫**。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_failed_staging_recheck_cannot_be_cleared_without_a_passing_one():
+    """⭐⭐ [R4 high] 两次运行：source 逃逸 → 复校失败 → 干净跑完（未复校）。
+
+    第一步产出的 `(stopped_reason="staging_recheck_failed", kind="source_path_escape")`
+    **是本代码自己产出的合法状态**（O4-F3 解耦 + 本片 D5 把「复校失败」提到
+    kind 判断之前）。而清除闸只看 `kind`，于是第二次运行不做任何 staging 复校
+    就把「上次复校没通过」和 fatal **一起抹掉** ——
+    一棵已被证明与账本对不上的 staging 拿到干净账本。
+
+    判别力：把清除闸换回 `prev_fatal["kind"] == "staging_path_escape"`，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="failed"))
+    assert m["stopped_reason"] == "staging_recheck_failed"
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_a_failed_staging_recheck_clears_after_a_passing_one():
+    """方向②：真做了全量复校并通过，就必须解得开——否则这棵 staging 死锁。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="failed"))
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=True,
+                                      staging_recheck="passed"))
+    assert "fetch_fatal_error" not in m
+    assert "stopped_reason" not in m
+
+
+def test_only_one_place_decides_whether_a_staging_recheck_is_required():
+    """⭐ 机械守卫：「这个状态要不要 staging 全量复校」**只许在一处判定**。
+
+    R4 那条 high 的根因就是同一件事判在两处、改了一处忘了另一处。
+    本守卫用 AST 找出所有与字面量 `"staging_path_escape"` 的比较，
+    断言它们只出现在 `_needs_staging_recheck` 里。
+
+    ⚠️ 用 AST 而不是 grep：**注释与 docstring 里出现这个字面量是正常的**
+    （承重注释要引用它），文本扫描会被自己的注释打红，而绕过方式是删注释
+    ——那正是本仓立过的「源码守卫读哪份文本是判据的一部分」。
+
+    ⚠️ **防空转**：同时断言至少找到 1 处。若 AST 遍历哪天被改坏、一处都找不到，
+    这条守卫会「零违规」通过而实际什么都没查。
+    """
+    import ast as _ast
+    import inspect
+    import pathlib
+    import qmt_manifest as _qm
+
+    # 用 inspect 取被测模块**自己**的源文件路径，不靠相对层级拼——
+    # 拼错了这条守卫就变成「永远因为路径错而红」，与它要查的东西无关。
+    src = pathlib.Path(inspect.getsourcefile(_qm))
+    tree = _ast.parse(src.read_text(encoding="utf-8"))
+
+    # ⚠️ **两处都要扫，两个字面量都要认**（Opus 评审 [low]）：
+    #   ① 只看 `comparators` 时，`"staging_path_escape" == kind`（常量在**左边**）
+    #      与 `kind in ("staging_path_escape",)`（比较项是 Tuple 而非 Constant）
+    #      都能溜过去；
+    #   ② `_needs_staging_recheck` 是**按两个字面量**判定的（O4-F3 让
+    #      `staging_recheck_failed` 的 kind 可以是 source_path_escape），
+    #      只认第一个时，拿第二个字面量另判一处照样查不出来。
+    #   守卫本来就是为「同一件事判在两处、改了一处忘了另一处」而立的，
+    #   它自己漏掉一半判据就等于没立。
+    STRICT_LITERALS = {"staging_path_escape", "staging_recheck_failed"}
+
+    def _literals(node):
+        """一个比较节点里出现的字符串常量（含 Tuple/List/Set 容器里的）。"""
+        out = set()
+        for side in [node.left, *node.comparators]:
+            if isinstance(side, _ast.Constant):
+                out.add(side.value)
+            elif isinstance(side, (_ast.Tuple, _ast.List, _ast.Set)):
+                out |= {e.value for e in side.elts
+                        if isinstance(e, _ast.Constant)}
+        return out
+
+    found = []
+    for fn in _ast.walk(tree):
+        if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Compare) and _literals(node) & STRICT_LITERALS:
+                found.append(fn.name)
+
+    assert found, ("AST 遍历一处都没找到——守卫可能被改坏了，"
+                   "这次运行对本判据零判别力")
+    assert set(found) == {"_needs_staging_recheck"}, (
+        "「这个状态要不要 staging 全量复校」只许在 _needs_staging_recheck 里判定，"
+        f"但下列函数也在直接比 kind：{sorted(set(found) - {'_needs_staging_recheck'})}"
+        "——同一件事判在两处，改了一处忘了另一处正是 codex R4 那条 high 的根因")
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R5：三条，共同形态仍是「我修了一半」
+#   A 复校失败被前提①的早退挡住 —— D5/D16 两轮都动过这个分支的次序，
+#     却一直没把它提到**最前面**；
+#   B commit_final 的「上一次状态」取自调用方内存 —— R1 我给 commit_stock
+#     配了启动快照，却没管 commit_final，而**能清除证据的恰恰只有它**；
+#   C 写侧不查序列化后的字节数 —— S2-F13 我补了「结构合法」那一半，
+#     漏了「大小也在读侧接受范围内」那一半。
+# ═════════════════════════════════════════════════════════════
+
+
+def _seed_disk(fd, manifest):
+    """把一份 manifest 直接落到磁盘（模拟**上一次运行**留下的账本）。
+
+    ⚠️ 不能再借 `commit_stock` 来种：它现在**从磁盘读生命周期**，
+    磁盘是空的时候那三个字段根本写不进去——这正是它该有的性质。
+    """
+    atomic_write_json(fd, MANIFEST_NAME, manifest)
+    return read_manifest(fd)
+
+
+def test_a_failed_recheck_is_recorded_even_without_revisiting_the_fatal_path():
+    """⭐⭐ [R5 high A] 「本次全量复校失败」是**本次运行的事实**，
+    与「有没有重走过上次出事的那条路」无关。
+
+    前提①（重走过）管的是**能不能清除**，不该挡住**记录一个新的失败**。
+    照旧次序：`clean_finish(revisited_fatal_path=False, staging_recheck="failed")`
+    会走前提①的早退、原样保留旧的 source reason，**把「复校失败」这个事实丢掉**；
+    下一次运行重走过源路径、不做复校，就只看见一个 source 逃逸 → 全清。
+
+    判别力：把「复校失败」那一支挪回前提①早退**之后**，本条必红。
+    """
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    got = resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=False,
+                                                  staging_recheck="failed"))
+    assert got["stopped_reason"] == "staging_recheck_failed"
+    assert got["fetch_fatal_error"]["kind"] == "source_path_escape"
+
+
+def test_the_unrevisited_failed_recheck_chain_cannot_launder():
+    """⭐ [R5 high A] 两次运行的完整链条必须走不通。"""
+    m = _valid_manifest(fetch_fatal_error=_fatal(kind="source_path_escape"),
+                        stopped_reason="source_path_escape")
+    m = _commit_cycle(m, clean_finish(revisited_fatal_path=False,
+                                      staging_recheck="failed"))
+    with pytest.raises(SkipVerifyWithEscapeError):
+        resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True,
+                                                staging_recheck=None))
+
+
+def test_commit_final_takes_the_previous_lifecycle_from_disk_not_from_memory(tmp_path):
+    """⭐⭐ [R5 high B] `commit_final` 是**唯一能清除证据的入口**，
+    它凭据的「上一次状态」必须来自**磁盘**，不能来自调用方内存里那份 manifest。
+
+    本机复现：磁盘上有未解除的 staging 警报，而内存里那份「不小心」把三个键
+    弄没了 → 决策表看见「上次没有 fatal」→ 产出空生命周期 →
+    **发布了一份干净账本**。落盘前的读侧校验也抓不到，因为它结构上完全合法。
+
+    `commit_stock` 早就用启动快照挡住了同一件事（R1），而**能清除的恰恰只有
+    收尾提交**——我当时只修了一半。
+
+    判别力：把 `commit_final` 改回从入参 manifest 取上一次状态，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        startup = begin_run(fd)
+        polluted = _valid_manifest()          # 内存里三个键都没了
+        commit_final(fd, polluted, ledger=startup, outcome=clean_finish(revisited_fatal_path=False))
+        on_disk = read_manifest(fd)
+        assert on_disk["fetch_fatal_error"] == _fatal()
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_still_clears_when_the_persisted_state_says_it_may(tmp_path):
+    """方向②：凭据换成磁盘之后，**该清的仍要清得掉**，否则 staging 永远解不开。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        startup = begin_run(fd)
+        attest_staging_recheck(startup, passed=True)
+        commit_final(fd, _valid_manifest(), ledger=startup,
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="passed"))
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_works_in_the_bootstrap_state_with_no_manifest_on_disk(tmp_path):
+    """方向②：引导态（磁盘上还没有 manifest）必须照常工作 ——
+    `read_manifest` 返回 None 是**合法**的，不能被当成错误。"""
+    d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        written = commit_final(fd, _valid_manifest(), ledger=startup, outcome=clean_finish())
+        assert read_manifest(fd) == written
+        assert "stopped_reason" not in written
+    finally:
+        os.close(fd)
+
+
+def test_the_writer_refuses_a_payload_bigger_than_the_readers_limit(tmp_path, monkeypatch):
+    """⭐ [R5 medium C] 写侧此前只查「结构合法」，不查**序列化后的字节数**。
+
+    未知顶层键按 O4-F10 是**原样保留且无上限**的通道；一份结构完全合法、
+    序列化后 67,113,084 字节的账本（读侧上限 67,108,864）**写入报告成功**，
+    而下一次启动就以「过大」拒绝整棵 staging —— 已积累的数据全部不可用。
+
+    这是 S2-F13 的另一半：我补了「结构合法」，漏了「大小也在读侧接受范围内」。
+
+    判别力：删掉写侧的大小检查，本条必红。
+    """
+    import qmt_manifest as qm
+    monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", 4096)
+    d, fd = _staging(tmp_path)
+    try:
+        commit_stock(fd, _valid_manifest(), ledger=_expect(fd))       # 先写一份好的
+        before = (d / MANIFEST_NAME).read_bytes()
+        big = _valid_manifest()
+        # ⚠️ 填充键必须是**真正未知**的键：原本用 `batches`，而它是**已知**的
+        #    扩展字段（列表），会撞上写侧新加的容器类型检查（独立评审 [medium]）——
+        #    那样本条就在测别的判据了。换成一个模块不认识的键，判据不变。
+        big["未来某个巨大字段"] = "x" * 8192                     # 未知顶层键，结构合法
+        with pytest.raises(ManifestInvalidError, match="过大"):
+            commit_stock(fd, big, ledger=_expect(fd))
+        assert (d / MANIFEST_NAME).read_bytes() == before        # 好账本逐字节未变
+        assert sorted(p.name for p in d.iterdir()) == [MANIFEST_NAME]
+    finally:
+        os.close(fd)
+
+
+def test_the_write_side_limit_is_measured_on_the_bytes_actually_published(tmp_path, monkeypatch):
+    """⭐ 量的必须**就是**写的那批字节（codex R5 的「序列化漂移」）。
+
+    中文周期目录名在 `ensure_ascii=True` 下会膨胀成 `\\uXXXX`，长度差好几倍。
+    若「量长度」与「写文件」各自 dumps 一次，参数一旦不一致，量到的就不是
+    落盘的。本条把上限卡在**恰好等于真实落盘长度**上：多一个字节就必须被拒。
+
+    判别力：让写侧改用另一种编码去量（例如 ensure_ascii=True），本条必红。
+    """
+    import qmt_manifest as qm
+    m = _valid_manifest()
+    # ⚠️ 量的必须是**真正会落盘的那份**：per-stock 提交把 source_verification
+    # 写死成 partial，长度与入参不同。先跑一次拿到它，再据此设上限。
+    (tmp_path / "probe").mkdir()
+    _probe_d, _probe_fd = _staging(tmp_path / "probe")
+    try:
+        published = commit_stock(_probe_fd, m, ledger=_expect(_probe_fd))
+    finally:
+        os.close(_probe_fd)
+    exact = len(_json_rw.dumps(published, ensure_ascii=False).encode("utf-8"))
+    d, fd = _staging(tmp_path)
+    try:
+        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact)
+        commit_stock(fd, m, ledger=_expect(fd))                        # 恰好等于上限 → 放行
+        assert (d / MANIFEST_NAME).read_bytes() == \
+            _json_rw.dumps(published, ensure_ascii=False).encode("utf-8")
+    finally:
+        os.close(fd)
+    # ⚠️⚠️ **「少一个字节 → 拒」这一半必须换一棵空的 staging**（Kimi 评审 [low]，
+    #    控制者变异复核坐实）：留在同一棵目录上时，盘里已有那份**恰好 exact
+    #    字节**的账本，`begin_run` 一读就先被**读侧**上限拒掉，`commit_stock`
+    #    根本没被调用 —— 实测把写侧那段大小检查整个删掉，本档这一半仍然绿，
+    #    它钉的是读侧而不是写侧。
+    # ⚠️ `match` 也必须换成**写侧专属措辞**：两侧的报错都含「过大」，
+    #    拿它做断言等于让两条判据互相掩盖（S2-F49 / S2-F54 同族，第三次）。
+    (tmp_path / "fresh").mkdir()
+    d2, fd2 = _staging(tmp_path / "fresh")
+    try:
+        monkeypatch.setattr(qm, "_MANIFEST_MAX_BYTES", exact - 1)
+        with pytest.raises(ManifestInvalidError, match="拒绝发布"):
+            commit_stock(fd2, m, ledger=_expect(fd2))       # 引导态：读侧无从插手
+        assert not (d2 / MANIFEST_NAME).exists()            # 一个字节都没写出去
+    finally:
+        os.close(fd2)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R6：两条 high，外加控制者顺带核实的一条**已登记残留其实是活的洞**
+#
+# ⚠️ A 是 **R5 那个修复自己带出来的另一面**：把凭据从「内存」换成「磁盘」之后，
+#    「磁盘上没有账本」就成了新的洗白入口——运行中把账本删掉，
+#    收尾提交把它当成全新引导态，于是发布一份没有警报的干净账本。
+#    ⇒ 正解不是二选一，而是**两边都要**：磁盘是当前真相，启动快照是预期；
+#      两者不一致（含「预期有、磁盘没了」）一律 fail closed。
+#
+# ⚠️ C 是我在 R1 亲手登记为「已接受残留」的那条——本轮实测证明它是**活的**：
+#    per-stock 提交传一个伪造的空快照，就能把磁盘上的警报抹掉。
+#    ⇒ 结构性解法：**per-stock 提交根本不收快照参数**，三个字段一律从磁盘
+#      读出来原样写回去。「够不到」从此是无条件的，不再依赖调用方老实。
+#      —— 登记为「已接受残留」的东西，下一轮要重新问一次它还能不能被利用。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_begin_run_returns_the_startup_lifecycle_snapshot(tmp_path):
+    """启动闸返回生命周期启动快照，它是收尾提交的**预期**。"""
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(fetch_fatal_error=_fatal(),
+                            stopped_reason="staging_path_escape")
+        _seed_disk(fd, m)
+        assert begin_run(fd).lifecycle == {"fetch_fatal_error": _fatal(),
+                                           "stopped_reason": "staging_path_escape"}
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_on_a_bootstrap_staging_returns_an_empty_snapshot(tmp_path):
+    """引导态（磁盘上还没有账本）合法，返回空快照。"""
+    d, fd = _staging(tmp_path)
+    try:
+        assert begin_run(fd).lifecycle == {}
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_refuses_skip_existing_verify_against_an_unresolved_escape(tmp_path):
+    """⭐⭐ [R6 high B] P2-F3 明写这是**拒绝启动**，而此前它只在**收尾提交**
+    那条路径上求值 —— 一次带 flag 的运行可以先拷完文件、推进游标、写满池子，
+    到最后才被拒，**已提交的状态和已消耗的配额都收不回来**。
+
+    判别力：删掉启动闸里的这条检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        with pytest.raises(SkipVerifyWithEscapeError):
+            begin_run(fd, skip_existing_verify=True)
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_allows_skip_existing_verify_on_a_clean_staging(tmp_path):
+    """方向②：没有未解除证据时，这个 flag 完全合法，不得被误杀。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        assert begin_run(fd, skip_existing_verify=True).lifecycle == {}
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_also_refuses_skip_verify_after_a_failed_recheck(tmp_path):
+    """同族：`staging_recheck_failed` 同样必须做全量复校才能清 → 同样互斥。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(
+            fetch_fatal_error=_fatal(kind="source_path_escape"),
+            stopped_reason="staging_recheck_failed"))
+        with pytest.raises(SkipVerifyWithEscapeError):
+            begin_run(fd, skip_existing_verify=True)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_takes_no_lifecycle_parameter_at_all(tmp_path):
+    """⭐⭐ [R6 / R1 残留 C] 「per-stock 提交够不到那三个字段」从**有条件**
+    （靠调用方传对快照）变成**无条件**：那个参数根本不存在了。
+
+    判别力：把参数加回去，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(TypeError):
+            commit_stock(fd, _valid_manifest(), lifecycle={})    # noqa: 参数已不存在
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_preserves_the_on_disk_lifecycle_no_matter_what_memory_says(tmp_path):
+    """⭐⭐ [R6 / R1 残留 C] 本机复现过的洗白路径：per-stock 提交传一个伪造的
+    空快照，磁盘上的警报就被抹掉了。现在三个字段一律**从磁盘读、原样写回**，
+    调用方内存里是什么都无关。
+
+    判别力：把实现改回「用调用方给的快照」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        commit_stock(fd, _valid_manifest(), ledger=_rechecked(fd))        # 内存里干干净净
+        on_disk = read_manifest(fd)
+        assert on_disk["fetch_fatal_error"] == _fatal()
+        assert on_disk["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_refuses_when_an_expected_manifest_has_disappeared(tmp_path):
+    """⭐⭐ [R6 high A] 运行中账本被删/被改名 → `read_manifest` 返回 None。
+
+    把它当成「全新引导态」就等于：**内存里还带着未解除的警报，磁盘上的证据
+    却被删了，于是发布一份结构完全合法的干净账本**。本机复现过。
+
+    正解：磁盘是当前真相，启动快照是**预期**；预期非空而磁盘没了 = 有人在
+    本次运行期间动过账本 → fail closed。
+
+    判别力：删掉这条检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(fetch_fatal_error=_fatal(),
+                            stopped_reason="staging_path_escape")
+        _seed_disk(fd, m)
+        startup = begin_run(fd)
+        os.unlink(str(d / MANIFEST_NAME))              # 运行中有人把账本删了
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            commit_final(fd, m, outcome=clean_finish(),
+                         ledger=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_refuses_when_disk_lifecycle_drifted_from_the_startup_snapshot(tmp_path):
+    """⭐ 同族：磁盘上的生命周期与启动快照**不一致**（有人在运行期间改了账本）
+    同样 fail closed。这条顺带把「伪造启动快照」也堵死了——伪造的对不上磁盘。
+
+    判别力：删掉这条比对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        startup = begin_run(fd)                        # {}
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        with pytest.raises(ManifestInvalidError, match="不一致|漂移"):
+            commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                         ledger=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_still_works_on_a_genuine_bootstrap(tmp_path):
+    """方向②：真正的引导态（启动时就没有账本、快照为空）必须照常发布。"""
+    d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        assert startup.lifecycle == {} and startup.existed is False
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=startup)
+        assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者自查（R7 等配额期间，拿十条自问对**刚改过的新代码**跑一遍）
+#   ⑨「凭据从 A 换成 B ⇒ 问 B 缺席/被篡改时会怎样」——R6 只把它应用在
+#      commit_final 上，而 commit_stock 这一轮也刚改成从磁盘取，同样的洞照样在。
+#   ①「每个字段都校验了吗」——R1 那条 bool 教训没有应用到**新加的**参数上。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_commit_stock_refuses_when_an_expected_manifest_has_disappeared(tmp_path):
+    """⭐⭐ 与 `commit_final` 同一个洞，只是在另一个入口（控制者自查挖出）。
+
+    per-stock 提交这一轮刚改成「三个字段从磁盘读」——那么账本被删时 `previous`
+    是 `None`，它就会写出一份**没有警报**的账本。收尾提交的快照比对能在**最后**
+    兜住，但**运行若崩在收尾之前，下一次就从一份干净账本开始了**，
+    而崩溃恰恰是这套设计明写要扛的场景。
+
+    判别力：删掉这条检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        startup = begin_run(fd)
+        attest_staging_recheck(startup, passed=True)
+        os.unlink(str(d / MANIFEST_NAME))              # 运行中有人把账本删了
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            commit_stock(fd, _valid_manifest(), ledger=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_refuses_when_the_disk_lifecycle_drifted(tmp_path):
+    """⭐ 同族：磁盘上的生命周期与启动快照不一致 → 有人在运行期间动过账本。
+
+    这条同时把「伪造启动快照」堵死：伪造的对不上磁盘。
+    ⚠️ 注意 `startup_lifecycle` 在这里只当**预期**用来比对，**从不被写进 payload**
+    （写的永远是磁盘上那份），所以它不构成新的走私通道。
+
+    判别力：删掉这条比对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        startup = begin_run(fd)                        # {}
+        _seed_disk(fd, _valid_manifest(fetch_fatal_error=_fatal(),
+                                       stopped_reason="staging_path_escape"))
+        with pytest.raises(ManifestInvalidError, match="不一致|漂移"):
+            commit_stock(fd, _valid_manifest(), ledger=startup)
+    finally:
+        os.close(fd)
+
+
+def test_commit_stock_writes_the_first_manifest_in_a_genuine_bootstrap(tmp_path):
+    """方向②：真引导态（启动时就没有账本、快照为空）必须能写出首份 manifest。
+
+    没有这一条，一个「磁盘上没有账本就一律拒绝」的实现也能让上面两条绿，
+    而那会让**首份 manifest 永远写不出来**（R60-F3 明写引导态要能继续初始化）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        startup = begin_run(fd)
+        assert startup.lifecycle == {} and startup.existed is False
+        written = commit_stock(fd, _valid_manifest(), ledger=startup)
+        assert read_manifest(fd) == written
+    finally:
+        os.close(fd)
+
+
+def test_begin_run_requires_a_real_bool_for_skip_existing_verify(tmp_path):
+    """⭐ R1 那条教训（非空字符串是真值）没有应用到这个**新加的**参数上。
+
+    `skip_existing_verify="false"` 会被当成真 → 在一棵干净 staging 上凭空拒绝启动；
+    反过来说，任何非布尔值都意味着调用方对这个开关的理解与实现不一致，
+    而它守的是「拒绝启动」这条闸。构造期拒掉，别猜调用方的意思。
+
+    判别力：删掉这条 bool 校验，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        for bad in ("false", "true", "", 0, 1, None, []):
+            with pytest.raises(ValueError, match="skip_existing_verify"):
+                begin_run(fd, skip_existing_verify=bad)
+        assert begin_run(fd, skip_existing_verify=False).lifecycle == {}
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R7 [high]：`{}` 这个哨兵把两种截然不同的状态混成了一个
+#
+# `begin_run()` 对「磁盘上没有账本」和「账本在、但没有生命周期字段」都返回 `{}`，
+# 而 `_lifecycle_from_disk` 拿它的**真假值**去判断「后来账本不见了算不算合法引导态」。
+# 于是一棵**已经积累了 files / pool_order / cursor 的干净 staging**，账本被删掉之后
+# 两个提交入口都会拿调用方内存里那份（可能是过期的）把它**凭空重建**，
+# 已积累的进度被静默丢弃；换成另一份合法账本同样无人察觉。
+#
+# ⚠️ 与 R1 那条「manifest 不存在 ≠ manifest 坏了」是同一族错误的**反向**：
+#    那次我把两种状态**正确地分开了**，这次我又把两种状态**合并**成一个哨兵。
+#    判据：**凡用「空值/假值」当哨兵，先问它是不是把两种语义压在了一起。**
+#
+# 处置：`begin_run` 改为返回**不透明凭据** `RunLedger`，分别记「当时有没有账本」
+# 与「那份账本的字节指纹」；每次提交成功后**更新**这份预期。
+# ═════════════════════════════════════════════════════════════
+
+
+def _established(**kw):
+    """一份**已经积累了进度**的干净账本（有额外顶层键、没有生命周期字段）。"""
+    m = _valid_manifest(failures=[{"stock_code": "600004.SH", "attempts": 1}], **kw)
+    return _fix_bytes(m, extra=1234567)
+
+
+def test_begin_run_distinguishes_bootstrap_from_an_established_clean_ledger(tmp_path):
+    """⭐⭐ [R7 high] 两种状态必须可区分。
+
+    判别力：把凭据换回裸的生命周期 dict，两者都是 `{}`，本条必红。
+    """
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    d1, fd1 = _staging(tmp_path / "a")
+    d2, fd2 = _staging(tmp_path / "b")
+    try:
+        _seed_disk(fd2, _established())
+        boot = begin_run(fd1)          # 真引导态
+        est = begin_run(fd2)           # 已建成、但干净
+        assert boot.existed is False
+        assert est.existed is True
+        assert est.digest is not None
+    finally:
+        os.close(fd1); os.close(fd2)
+
+
+@pytest.mark.parametrize("commit", ["stock", "final"])
+def test_commit_refuses_when_an_established_clean_ledger_disappears(tmp_path, commit):
+    """⭐⭐ [R7 high] 已建成的**干净**账本被删 → 两个入口都必须拒。
+
+    此前只有「带 fatal 的账本被删」有档，干净那一档漏掉了——而账本正是
+    `files` / `pool_order` / `cursor` 的**唯一**真相，丢了就是丢进度。
+
+    判别力：把「有没有账本」这个位去掉、退回看生命周期真假值，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _established())
+        ledger = begin_run(fd)
+        os.unlink(str(d / MANIFEST_NAME))
+        stale = _valid_manifest()                      # 调用方手里那份是过期的
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            if commit == "stock":
+                commit_stock(fd, stale, ledger=ledger)
+            else:
+                commit_final(fd, stale, outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("commit", ["stock", "final"])
+def test_commit_refuses_when_the_ledger_was_replaced_by_another_valid_one(tmp_path, commit):
+    """⭐ [R7 high 同族] 账本被**换成另一份同样合法的干净账本** → 必须拒。
+
+    只比「生命周期字段」时两份都是空的、完全看不出来；比**字节指纹**才看得出。
+
+    判别力：删掉指纹比对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _established())
+        ledger = begin_run(fd)
+        _seed_disk(fd, _valid_manifest(seed="别人的-seed"))     # 被换掉
+        with pytest.raises(ManifestInvalidError, match="不一致|换|改"):
+            if commit == "stock":
+                commit_stock(fd, _valid_manifest(), ledger=ledger)
+            else:
+                commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_bootstrap_run_fails_closed_if_its_own_first_manifest_disappears(tmp_path):
+    """⭐⭐ [R7 high] 预期必须**每次提交后更新**：引导态第一次提交成功之后，
+    这棵 staging 就**不再是引导态**了；账本再消失就是有人动过。
+
+    判别力：不在提交后更新预期，本条必红（第二次提交会把它当成仍在引导态）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        commit_stock(fd, _established(), ledger=ledger)     # 首份账本
+        os.unlink(str(d / MANIFEST_NAME))
+        with pytest.raises(ManifestInvalidError, match="不见了|消失|删"):
+            commit_stock(fd, _valid_manifest(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_commit_refuses_when_a_manifest_appears_during_a_bootstrap_run(tmp_path):
+    """⭐ 反方向：本次运行开始时这里**没有**账本，提交时却出现了一份 ——
+    有别的进程在同一棵 staging 上跑。覆盖它等于把对方的进度盖掉。
+
+    判别力：删掉这条反向检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)                              # 引导态
+        _seed_disk(fd, _established())                      # 别人写了一份
+        with pytest.raises(ManifestInvalidError, match="出现|不一致"):
+            commit_stock(fd, _valid_manifest(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_many_commits_in_one_run_are_all_accepted(tmp_path):
+    """方向②：**同一次运行里连续多次提交必须全部通过** ——
+    每次写完都要把预期更新到刚写出去的那份，否则第二次就会被自己拒掉。
+
+    没有这一条，一个「提交后不更新预期」的实现会让整条按股流水线在第二只股上死掉。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        _base = _min_bytes(_valid_manifest())
+        for i in range(5):
+            commit_stock(fd, _valid_manifest(committed_bytes=_base + i), ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == _base + 4
+        # ⚠️ 收尾也必须带上已累计的量：调用方丢掉 committed_bytes 会被单调守卫
+        # 正确地判红（R10 high B）——现实里 S4 手里那份本来就该是累计的。
+        commit_final(fd, _valid_manifest(committed_bytes=_base + 4),
+                     outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者追查（R8 被配额掐断前，codex 留下的一条**未完成**的线索）
+#
+# 它的原话：「the ledger validates only the disk file, while both commit paths
+# rebuild all non-lifecycle state from caller memory. I'm testing whether a
+# stale-but-valid caller snapshot can roll back already committed progress」
+# —— 那是**进行时的计划**、不是结论（判决行是伪造的），但线索本身值得追。
+#
+# 本机复现坐实：调用方拿一份**过期副本**再提交一次，已提交的 files 从 6 条退回
+# 4 条、cursor 倒退、pool_order 缩水，而凭据检查**照过**——因为磁盘上那份确实是
+# 我们上次写的。凭据管的是「账本有没有被外人动过」，管不了「调用方自己交回来的
+# 内容是不是退步了」。
+#
+# ⚠️ **差点修过头**：第一反应是「条目只增不减」，而 spec §4.4:429 明写崩溃恢复
+#    发生在「读完并校验 manifest **之后**、任何拷贝**之前**」——也就是在 begin_run
+#    之后、运行之内；恢复第③档更是**合法地**删该股条目并回退 cursor。
+#    写死单调就会打死 spec 自己的恢复路径。
+# ⇒ 正解：让调用方**显式声明唯一正当理由**，其余一律拒。
+# ═════════════════════════════════════════════════════════════
+
+
+def _with_more_stocks(m):
+    """在一份 manifest 上「再拉一只股」：files +2、池 +1、cursor 前进。"""
+    m = copy.deepcopy(m)
+    m["files"] += [_file_rec("600004.SH", "浦发银行", "1m"),
+                   _file_rec("600004.SH", "浦发银行", "daily")]
+    m["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
+    m["cursor"]["SH"] = 2
+    if isinstance(m.get("committed_bytes"), int):
+        m["committed_bytes"] += 2 * 1234567        # 新增两条文件，累计量同步涨够
+    return _recompute_evidence(m)
+
+
+def _multi_bytes(m):
+    """给多股夹具把累计字节补到合法下限。"""
+    return _fix_bytes(m)
+
+
+def test_commit_stock_refuses_a_stale_snapshot_that_rolls_back_progress(tmp_path):
+    """⭐⭐ 调用方交回一份**过期副本** → 已提交的进度被回滚，而凭据检查照过。
+
+    本机复现：files 6→4、cursor SH 2→1、池 SH 2→1。账本是 files / pool_order /
+    cursor 的唯一真相，回滚它等于把已拷到盘上的股票从台账里抹掉——它们随后既
+    不在池里，又会被 pilot 当成 `untracked_target_file`。
+
+    判别力：删掉这条守卫，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        stale = _valid_manifest()
+        commit_stock(fd, stale, ledger=ledger)
+        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
+        assert len(read_manifest(fd)["files"]) == 6
+        with pytest.raises(ManifestInvalidError, match="回滚|倒退|退步"):
+            commit_stock(fd, stale, ledger=ledger)          # 又拿过期那份
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_also_refuses_a_progress_rollback(tmp_path):
+    """同族的另一个入口（第⑪问：评审报了 A 处，同族的 B 处呢）。
+
+    收尾提交同样从调用方内存重建全部非生命周期内容 —— 而收尾**永远**没有
+    正当理由回滚进度（崩溃恢复不走收尾提交）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        stale = _valid_manifest()
+        commit_stock(fd, _with_more_stocks(stale), ledger=ledger)
+        with pytest.raises(ManifestInvalidError, match="回滚|倒退|退步"):
+            commit_final(fd, stale, outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_normal_growth_and_no_change_are_both_accepted(tmp_path):
+    """方向②：只增不减、以及**完全不变**（配额触顶那一支不推进 cursor）都必须放行。
+
+    没有这一条，一个「payload 必须与磁盘严格相等」或「必须严格变大」的过严实现
+    也能让上面几条绿。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        m = _valid_manifest()
+        commit_stock(fd, m, ledger=ledger)
+        commit_stock(fd, m, ledger=ledger)                       # 完全不变
+        commit_stock(fd, _with_more_stocks(m), ledger=ledger)    # 只增
+        assert len(read_manifest(fd)["files"]) == 6
+    finally:
+        os.close(fd)
+
+
+def test_a_cursor_only_regression_is_refused(tmp_path):
+    """⭐ 隔离 `cursor` 倒退这一条判据。
+
+    ⚠️ 为什么必须单独造这一档：机械变异实测，「files 回滚」「pool 回滚」
+    「cursor 倒退」三条判据在**同一份过期副本**上会一起触发，最先命中的那条
+    把后两条挡住了 —— 于是删掉 `cursor` 那条**零红**。
+    只回退游标、不动 files/pool 的账本**仍然合法**，故这一档只有它够得着。
+
+    ⚠️ **`files` 与 `pool_order` 两条则造不出专属档（如实登记等价重叠）**：
+    账本自身的一致性规则（R21-F3：每个池条目恰配 1m + daily 两条文件记录）
+    把它们**结构上绑死**了——只缩其中一边会先被读侧校验拒掉，
+    根本走不到回滚守卫。**这是「结构上做不到」，不是「懒得写」。**
+
+    判别力：删掉 cursor 那条判据，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        m = _valid_manifest()
+        commit_stock(fd, m, ledger=ledger)
+        ahead = copy.deepcopy(m)
+        ahead["cursor"]["SH"] = 2                    # 游标前进（files/pool 不变，合法）
+        commit_stock(fd, ahead, ledger=ledger)
+        assert read_manifest(fd)["cursor"]["SH"] == 2
+        with pytest.raises(ManifestInvalidError, match="倒退"):
+            commit_stock(fd, m, ledger=ledger)       # 只有游标退回去
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R9：三条（2 high + 1 medium），最彻底的一轮（73 条查看命令）
+#
+# A 回滚守卫**只看我想到的那三样**（files 身份 / pool 身份 / cursor 方向），
+#   其余非生命周期字段全都能被一份过期副本改写 —— 第①问（按字段穷尽）
+#   应用到**守卫本身**，我又只列了想得到的那几个。
+# B `recovering_from_crash=True` 是**无限制**的旁路：spec 只允许删「那一只在途
+#   的股」并把该层 cursor 退到它的下标，而这个 API 收不到目标、也不校验增量。
+# C 语法合法的 JSON 仍可能抛**裸 ValueError**（超长整数撞 Python 的位数上限）。
+# ═════════════════════════════════════════════════════════════
+
+
+def _rich(**kw):
+    """一份带齐「计数 / 历史 / 遥测」的账本。"""
+    return _valid_manifest(committed_bytes=9_000_000,
+                           failures=[{"stock_code": "600006.SH", "attempts": 2}],
+                           batches=[{"n": 1}], inflight_rollbacks={"1": 2}, **kw)
+
+
+def _committed(fd, m):
+    """先提交一份，返回运行凭据。"""
+    ledger = begin_run(fd)
+    commit_stock(fd, m, ledger=ledger)
+    return ledger
+
+
+@pytest.mark.parametrize("label,mutate", [
+    # ⚠️ 值必须**停在固有下限之上**：写成 1 时 R16 新加的
+    #    「committed_bytes ≥ files 之和 + export_log」会**抢先**把它拒掉，
+    #    单调守卫删掉本档也照样绿（Opus 评审 [medium]，本机变异实测零红）。
+    #    退到**恰好等于**下限 ⇒ 只有单调守卫能拦它。
+    ("committed_bytes 被调小", lambda t: t.__setitem__("committed_bytes",
+                                                       _min_bytes(t))),
+    ("failures[].attempts 被清零", lambda t: t["failures"][0].__setitem__("attempts", 0)),
+    ("batches 历史被丢弃", lambda t: t.__setitem__("batches", [])),
+    ("inflight_rollbacks 遥测被丢弃", lambda t: t.__setitem__("inflight_rollbacks", {})),
+    ("已提交文件的 sha256 被改", lambda t: t["files"][0].__setitem__("sha256", "0" * 64)),
+    ("已提交文件的 bytes 被改", lambda t: t["files"][0].__setitem__("bytes", 1)),
+    ("冻结的 seed 被换", lambda t: t.__setitem__("seed", "别人的-seed")),
+    ("冻结的 universe 被换",
+     lambda t: t["source_snapshot"]["universe"].__setitem__("BJ", [])),
+    ("冻结的 source_mount 被换",
+     lambda t: t["source_mount"].__setitem__("device", "//别人/share")),
+])
+def test_a_stale_snapshot_cannot_rewrite_committed_state(tmp_path, label, mutate):
+    """⭐⭐ [R9 high A] 这 9 个字段此前**逐个实测全部能被改写**。
+
+    危害各不相同、但都实在：累计字节调小 → **绕开 `--max-bytes` 硬上限**；
+    重试次数清零 → **复活已耗尽的候选**；历史与遥测被丢弃 → 报告里的
+    `inflight_rollbacks` 归零，把本机故障史抹成「市场就这样」；
+    已提交文件的 bytes/sha256 被改 → **完整性基线被污染**，
+    pilot 的 `staging_intact` 从此校验的是一条假基线；
+    冻结的 seed / universe / source_mount 被换 → staging 与归属标记**永久对不上**。
+
+    判别力：删掉对应那条判据，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _rich()
+        ledger = _committed(fd, m)
+        tampered = copy.deepcopy(m)
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_legitimate_growth_of_counters_and_history_is_accepted(tmp_path):
+    """⭐ 方向②：这些字段**正常往前走**必须照常放行，否则整条流水线动不了。
+
+    没有这一条，一个「所有非生命周期字段都必须逐字不变」的过严实现也能让
+    上面 9 档全绿 —— 而那会让第二只股根本提交不了。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _rich()
+        ledger = _committed(fd, m)
+        grown = copy.deepcopy(m)
+        # ⚠️ 新增两条文件记录时，累计量必须**至少涨够它们的字节数**（R14 high B）。
+        _added = 2 * 1234567
+        grown["failures"][0]["attempts"] = 3                        # 重试次数增加
+        grown["failures"].append({"stock_code": "600008.SH", "attempts": 1})
+        grown["batches"].append({"n": 2})                           # 历史追加
+        grown["inflight_rollbacks"]["1"] = 3                        # 遥测增加
+        grown["inflight_rollbacks"]["2"] = 1
+        grown = _with_more_stocks(grown)      # 再拉一只股（内部已把累计量涨够）
+        commit_stock(fd, grown, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["committed_bytes"] == 9_000_000 + _added
+        assert len(on["files"]) == 6 and len(on["batches"]) == 2
+    finally:
+        os.close(fd)
+
+
+# ── B：崩溃恢复必须是**窄口**，不是旁路 ──────────────────────
+
+def _multi_stock():
+    m = _valid_manifest()
+    for code, name, idx in [("600004.SH", "浦发银行", 1), ("600006.SH", "工商银行", 2)]:
+        m["files"] += [_file_rec(code, name, "1m"), _file_rec(code, name, "daily")]
+        m["pool_order"]["SH"].append({"code": code, "universe_idx": idx})
+    m["cursor"] = {"SH": 3, "SZ": 1, "BJ": 0}
+    _fix_bytes(m)
+    return _recompute_evidence(m)
+
+
+def test_recovery_cannot_wipe_stocks_outside_its_scope(tmp_path):
+    """⭐⭐ [R9 high B] 声明「崩溃恢复」此前是**无限制**旁路。
+
+    本机复现：一次「恢复」把所有市场的所有股票全清了、cursor 全归零，
+    而 spec §4.4 恢复第③档只允许**删那一只在途的股**并把**该层** cursor
+    退到它的 `universe_idx`。后果：已提交的 CSV 全部变成无主文件，
+    整轮进度丢光，而账本结构上还是合法的。
+
+    判别力：把范围描述符换回布尔旁路，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _multi_stock())
+        wipe = _valid_manifest()
+        wipe["pool_order"] = {"SH": [], "SZ": [], "BJ": []}
+        wipe["files"] = []
+        wipe["cursor"] = {"SH": 0, "SZ": 0, "BJ": 0}
+        _recompute_evidence(wipe)
+        with pytest.raises(ManifestInvalidError, match="范围|超出|只允许"):
+            commit_stock(fd, wipe, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_removes_exactly_the_inflight_stock(tmp_path):
+    """⭐⭐ 方向②：spec 明写允许的那一次回退必须**跑得通**。
+
+    §4.4 恢复第③档：只删该股的 files / pool_order 条目，
+    并 `cursor[market] ← min(cursor, universe_idx)`。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        _recompute_evidence(rolled)
+        commit_stock(fd, rolled, ledger=ledger,
+                     recovery=RecoveryScope(stock_code="600004.SH",
+                                            market="SH", universe_idx=1))
+        on = read_manifest(fd)
+        assert {f["stock_code"] for f in on["files"]} == {"600000.SH", "000001.SZ",
+                                                          "600006.SH"}
+        assert on["cursor"]["SH"] == 1 and on["cursor"]["SZ"] == 1
+    finally:
+        os.close(fd)
+
+
+def test_recovery_still_enforces_every_unrelated_invariant(tmp_path):
+    """⭐ 恢复只放开「删那一只股」，**其余不变量照旧**（codex R9 原话）。
+
+    这里在一次合法范围的恢复里顺手把 seed 换掉 —— 必须仍被拒。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        rolled["seed"] = "别人的-seed"                      # 顺手夹带
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="seed"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_scope_rejects_malformed_descriptors():
+    """范围描述符本身在构造期就要挡住非法值（与本模块其它构造期校验同规格）。"""
+    ok = dict(stock_code="600004.SH", market="SH", universe_idx=1)
+    for k, bad in [("stock_code", "600004"), ("stock_code", 123),
+                   ("market", "XX"), ("market", None),
+                   ("universe_idx", -1), ("universe_idx", "1"),
+                   ("universe_idx", True)]:
+        with pytest.raises(ValueError):
+            RecoveryScope(**dict(ok, **{k: bad}))
+    with pytest.raises(ValueError, match="后缀|一致"):
+        RecoveryScope(stock_code="600004.SH", market="SZ", universe_idx=1)
+
+
+# ── C：解析器级异常 ──────────────────────────────────────────
+
+def test_an_oversized_integer_is_rejected_as_a_manifest_error(tmp_path):
+    """⭐ [R9 medium C] Python 3.11（CI 钉的版本）对超过 4300 位的整数
+    在 `int()` 转换时抛**裸 `ValueError`**，而不是 `JSONDecodeError`。
+
+    一份约 5 KB 的 manifest（远低于 64 MiB 上限）就能让读回口带着原始
+    traceback 崩掉，`ManifestInvalidError` 那句恢复指引一个字都印不出来
+    —— 与 S2-F9、S2-F10 是同一族：**守卫自己被它该抓的那种损坏弄坏了**。
+
+    判别力：把 `except` 改回只接 `JSONDecodeError`，本条必红。
+    """
+    _d, fd = _staging(tmp_path, raw='{"manifest_version": ' + "9" * 5000 + "}")
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_a_deeply_nested_json_is_rejected_as_a_manifest_error(tmp_path):
+    """同族：深嵌套 JSON 会撞递归上限抛 `RecursionError`（不是 ValueError）。"""
+    _d, fd = _staging(tmp_path, raw="[" * 20000 + "]" * 20000)
+    try:
+        with pytest.raises(ManifestInvalidError):
+            read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_cursor_may_only_go_to_the_declared_index(tmp_path):
+    """⭐ 隔离「恢复的 cursor 只许退到 `min(cursor, universe_idx)`」这一条判据。
+
+    这里删的股、删的池条目**都在声明范围内**（files / pool 两条判据都放行），
+    只有 cursor 退过了头 —— 于是只剩 cursor 那条够得着。
+
+    ⚠️ **`files` 那一侧的范围判据造不出专属档（如实登记）**：
+    要让它单独触发，就得让 pool 判据放行，而账本自身的一致性规则（R21-F3）
+    要求每个池条目恰配 1m + daily 两条文件记录 —— 少一边就先被读侧校验拒掉。
+    这与前面 `_require_no_progress_rollback` 那条登记是**同一个结构性绑定**。
+
+    判别力：把 cursor 的范围判据放宽成「声明了恢复就随便退」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 0          # 声明的是 idx=1，却退到了 0
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="游标"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_touch_another_markets_cursor(tmp_path):
+    """⭐ 同族：恢复声明的是 SH 层，就不许顺手把 SZ 层的 cursor 也退回去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        rolled = copy.deepcopy(full)
+        rolled["files"] = [f for f in rolled["files"] if f["stock_code"] != "600004.SH"]
+        rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
+                                      if e["code"] != "600004.SH"]
+        rolled["cursor"]["SH"] = 1
+        rolled["cursor"]["SZ"] = 0          # 顺手夹带别的层
+        _recompute_evidence(rolled)
+        with pytest.raises(ManifestInvalidError, match="SZ"):
+            commit_stock(fd, rolled, ledger=ledger,
+                         recovery=RecoveryScope(stock_code="600004.SH",
+                                                market="SH", universe_idx=1))
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R10：两条 high，**两条都是我 R9 那次修复自己引入的**
+#
+# A 我那条「attempts 只增不减」把 spec 自己的**重试成功**路径堵死了
+#   （§4.4:350 + O2-F14 原文：「重试成功即把该条目移出 failures 并计入 batches」）
+#   —— 又一次修过头，而且是方向②没测到的那一半：我为「增长」配了放行档，
+#   **没为「合法的移除」配**。
+# B 我那些守卫写成 `if isinstance(旧) and isinstance(新) …`，于是**类型不符或
+#   字段缺席时守卫被跳过**而不是拒绝 —— 「对坏输入要健壮」被我写成了
+#   「对坏输入就放行」。⚠️ 这是 S2-F9 那条纪律的**反向陷阱**。
+# ═════════════════════════════════════════════════════════════
+
+
+def _retry_succeeded(m):
+    """把 600004.SH 从 failures 里移出，并给它补上「成功」的证据。"""
+    t = copy.deepcopy(m)
+    t["files"] += [_file_rec("600004.SH", "浦发银行", "1m"),
+                   _file_rec("600004.SH", "浦发银行", "daily")]
+    t["pool_order"]["SH"].append({"code": "600004.SH", "universe_idx": 1})
+    t["cursor"]["SH"] = 2
+    t["failures"] = [f for f in t["failures"] if f["stock_code"] != "600004.SH"]
+    _fix_bytes(t)
+    return _recompute_evidence(t)
+
+
+def test_a_successfully_retried_stock_may_leave_the_failure_ledger(tmp_path):
+    """⭐⭐ [R10 high A] 方向②：spec 明写「**重试成功即把该条目移出 `failures`**」
+    （§4.4:350 与 O2-F14）。我那条「attempts 只增不减」把这条路堵死了 ——
+    于是一个只是**瞬时**失败过的候选**永远回不到池子里**，池子凭空缩水，
+    最终可能报出假的「池穷尽 / 达不到地板」，而那是要记到市场账上的结论。
+
+    判别力：把「移出必须自证成功」那一支删掉（退回一律拒），本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600004.SH",
+                                       "universe_idx": 1, "attempts": 1}])
+        ledger = _committed(fd, m)
+        commit_stock(fd, _retry_succeeded(m), ledger=ledger)
+        on = read_manifest(fd)
+        assert on["failures"] == []
+        assert any(e["code"] == "600004.SH" for e in on["pool_order"]["SH"])
+    finally:
+        os.close(fd)
+
+
+def test_a_failure_entry_may_not_vanish_without_proof_of_success(tmp_path):
+    """⭐ 与上一条配对：**只有自证成功**才准移出。
+
+    没有这一条，「移出一律放行」的实现也能让上一条绿 —— 而那正是
+    「重试次数被清零、候选被复活」那个洞换了个形状。
+    自证 = 该股在 `pool_order` 里有锚点条目、且 `files` 里恰好两条记录。
+
+    ⚠️ **「恰好两条记录」那半边造不出专属档（如实登记，本片第三次撞同一个耦合）**：
+    要单独触发它，就得构造「池里有该股、files 却不足两条」——而那本身就是一份
+    **非法账本**（R21-F3），落盘前的读侧校验会先把它拒掉，走不到这条判据。
+    与 `_require_no_progress_rollback` 里 files/pool 那两处登记同源。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600004.SH",
+                                       "universe_idx": 1, "attempts": 1}])
+        ledger = _committed(fd, m)
+        sneaky = copy.deepcopy(m)
+        sneaky["failures"] = []            # 凭空移出，没有任何成功证据
+        _recompute_evidence(sneaky)
+        with pytest.raises(ManifestInvalidError, match="failures"):
+            commit_stock(fd, sneaky, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("committed_bytes 换成字符串", lambda t: t.__setitem__("committed_bytes", "0")),
+    ("committed_bytes 换成 None", lambda t: t.__setitem__("committed_bytes", None)),
+    ("batches 换成等长但内容不同", lambda t: t.__setitem__("batches", [{"n": 999}])),
+    ("batches 换成非列表", lambda t: t.__setitem__("batches", "x")),
+    ("inflight_rollbacks 换成非字典", lambda t: t.__setitem__("inflight_rollbacks", [])),
+])
+def test_a_monotonic_field_may_not_be_erased_by_omission_or_wrong_type(
+        tmp_path, label, mutate):
+    """⭐⭐ [R10 high B] 守卫此前写成「两边类型都对才比」——于是**字段缺席或
+    类型不对时守卫被跳过**，改写照样落盘。而这些都是**扩展字段**，
+    读侧校验（`validate_manifest`）根本不要求它们存在，兜不住。
+
+    「对坏输入要健壮」（S2-F9）指的是**别崩**，**不是别拦**。
+    正确姿势：**上一份里有的单调字段，新的必须仍在、类型仍对、且满足转移规则**。
+
+    ⚠️ `batches` 还要求**旧列表是新列表的前缀**——只比长度的话，
+    一次等长改写就能把历史悄悄换掉（本机复现过）。
+
+    判别力：把对应那条改回「类型不符就跳过」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=9_000_000, batches=[{"n": 1}],
+                            inflight_rollbacks={"1": 2})
+        ledger = _committed(fd, m)
+        tampered = copy.deepcopy(m)
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_batches_may_grow_by_appending(tmp_path):
+    """方向②：`batches` 追加必须放行（前缀不变即可），否则历史永远记不下去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(batches=[{"n": 1}])
+        ledger = _committed(fd, m)
+        grown = copy.deepcopy(m)
+        grown["batches"].append({"n": 2})
+        _recompute_evidence(grown)
+        commit_stock(fd, grown, ledger=ledger)
+        assert read_manifest(fd)["batches"] == [{"n": 1}, {"n": 2}]
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R11：1 high + 1 medium
+#   A 恢复的两半（删条目 / 退游标）我是**各自独立**判的，而 spec §4.4 恢复第③档
+#     是**一次耦合的转移**。删了却不退 → 那只股永远不会被重拉、池子静默缩水。
+#   B §4.5:785（O4-F2）明写「per-stock 提交时这两个字段的取值**必须写死**：
+#     `source_verification: "partial"` + evidence `{"level":"partial","passes":[]}`」
+#     —— 我实现时**漏了这条**，调用方的 `full` 标签被原样写盘。
+# ═════════════════════════════════════════════════════════════
+
+
+def _scope(idx=1):
+    return RecoveryScope(stock_code="600004.SH", market="SH", universe_idx=idx)
+
+
+def _drop_stock(m, code="600004.SH"):
+    t = copy.deepcopy(m)
+    t["files"] = [f for f in t["files"] if f["stock_code"] != code]
+    for mk in ("SH", "SZ", "BJ"):
+        t["pool_order"][mk] = [e for e in t["pool_order"][mk] if e["code"] != code]
+    return t
+
+
+def test_recovery_removing_a_stock_must_also_rewind_the_cursor(tmp_path):
+    """⭐⭐ [R11 high A] 恢复是**一次耦合的转移**：删该股条目 **且**
+    `cursor[market] ← min(cursor, universe_idx)`（spec §4.4 恢复第③档）。
+
+    我把两半各自独立判了 → 「删了条目、游标原样停在后面」照样通过。
+    后果：那只股**永远不会被重新拉取**（游标已经走过它），池子静默缩水，
+    最终可能报出假的池穷尽 —— 正是恢复流程本来要消灭的那个状态。
+
+    判别力：把耦合检查删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)          # cursor 原样不动
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="游标|cursor"):
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_rewind_the_cursor_without_removing_the_stock(tmp_path):
+    """⭐ 反方向：只退游标、不删该股条目，也超出了恢复的确切范围。
+
+    判别力：把「未删除时不许退游标」那半删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        only_rewind = copy.deepcopy(full)
+        only_rewind["cursor"]["SH"] = 1        # 退了，但条目都还在
+        _recompute_evidence(only_rewind)
+        with pytest.raises(ManifestInvalidError, match="游标|cursor"):
+            commit_stock(fd, only_rewind, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_recovery_scope_must_be_anchored_in_the_frozen_universe(tmp_path):
+    """⭐ [R11 high A 同族] 声明的 `universe_idx` 必须在**冻结名单**里确实是这只股。
+
+    spec 对在途标记的形状校验就要求 `source_snapshot.universe[market][idx] == code`
+    ——恢复范围是同一件事，否则一个错的下标能让 cursor 退到任意位置。
+    ⚠️ 构造期查不了这个（`RecoveryScope` 手里没有 manifest），只能在提交时查。
+
+    判别力：删掉锚点核对，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)
+        bad["cursor"]["SH"] = 0
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="锚点|冻结|universe"):
+            # 冻结名单里 SH[0] 是 600000.SH，不是 600004.SH
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope(idx=0))
+    finally:
+        os.close(fd)
+
+
+def test_recovery_of_a_never_committed_stock_needs_no_removal(tmp_path):
+    """方向②：恢复第①档（manifest 里该股无记录，崩在提交之前）——
+    什么都不用删、`cursor` 也不推进，必须照常提交（它要记 inflight_rollbacks）。
+
+    没有这一条，一个「声明了恢复就**必须**删点什么」的过严实现也能让上面几条绿，
+    而那会让第①档根本提交不了。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(inflight_rollbacks={"1": 1})
+        ledger = _committed(fd, m)
+        again = copy.deepcopy(m)
+        again["inflight_rollbacks"]["1"] = 2      # 只是遥测 +1
+        _recompute_evidence(again)
+        commit_stock(fd, again, ledger=ledger, recovery=_scope())
+        assert read_manifest(fd)["inflight_rollbacks"]["1"] == 2
+    finally:
+        os.close(fd)
+
+
+# ── B：per-stock 提交的校验级别写死 partial ──────────────────
+
+def test_commit_stock_always_publishes_partial_verification(tmp_path):
+    """⭐⭐ [R11 medium B] spec §4.5:785（O4-F2）明写 per-stock 提交时
+    `source_verification` / `source_verification_evidence` **取值写死**：
+    `partial` + 空 passes。
+
+    不写死的后果（codex 的场景）：一棵干净 staging 用 `--skip-existing-verify`
+    起跑，一次「只失败、没新增文件」的提交把上一次的 `full` 存根**原样写回**
+    （它结构上仍然合法）；若进程随后崩在收尾之前，**磁盘上那份账本就一直
+    声称自己是 full 级**，而本次运行明确跳过了校验。
+
+    判别力：把这两行投影删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest()                       # 调用方那份写着 full + 两趟
+        assert m["source_verification"] == "full"
+        ledger = begin_run(fd)
+        commit_stock(fd, m, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["source_verification"] == "partial"
+        assert on["source_verification_evidence"] == {"level": "partial", "passes": []}
+    finally:
+        os.close(fd)
+
+
+def test_commit_final_still_publishes_the_real_verification_level(tmp_path):
+    """方向②：**收尾提交**才是定级的地方，不得被一并写死成 partial。
+
+    没有这一条，「两个入口都写死 partial」的实现也能让上一条绿 ——
+    而那会让 full / snapshot 级永远发布不出来，出货资格永远拿不到。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "full"
+        assert len(read_manifest(fd)["source_verification_evidence"]["passes"]) == 2
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# 控制者自查（R12 等配额期间，用第⑪问追 R11-B 的另一半）
+#
+# R11 报的是「**per-stock 提交**把调用方的 full 标签原样写盘」。同族的另一处：
+# **收尾提交**同样照发调用方给的级别，而 spec §4.5:342 明写
+# 「**一旦使用 `--skip-existing-verify`，manifest 与 pilot 报告都打上
+#   `source_verification: "partial"`**」——运行凭据里根本没记住这个开关。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_skip_verify_run_can_never_publish_a_full_label(tmp_path):
+    """⭐⭐ 用了 `--skip-existing-verify` 的运行，**收尾也不许发布 full/snapshot**。
+
+    spec §4.5:342 的原话：「宁可让报告自己承认它证不了什么，也不要让读者以为
+    它证过。」而此前收尾提交照发调用方给的 `full` —— 一次明确跳过了校验的运行
+    产出一份**自称完整校验过**的账本，下游据此判出货资格。
+
+    ⚠️ 与 R11-B 同族：那条管 per-stock 提交，这条管**收尾**提交
+    （第⑪问：评审报了 A 处，先问「同样的改动我还做在哪些地方」）。
+
+    判别力：把凭据里的 `skip_existing_verify` 位或收尾的投影删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd, skip_existing_verify=True)
+        assert ledger.skip_existing_verify is True
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "partial"
+        assert written["source_verification_evidence"] == {"level": "partial",
+                                                           "passes": []}
+        assert read_manifest(fd)["source_verification"] == "partial"
+    finally:
+        os.close(fd)
+
+
+def test_a_normal_run_still_publishes_the_earned_label(tmp_path):
+    """方向②：**没**用那个开关时，收尾必须能发布真实级别。
+
+    没有这一条，「收尾一律写死 partial」的实现也能让上一条绿 ——
+    而那会让 full / snapshot 永远发布不出来、出货资格永远拿不到。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        assert ledger.skip_existing_verify is False
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        written = commit_final(fd, _valid_manifest(), outcome=clean_finish(),
+                               ledger=ledger)
+        assert written["source_verification"] == "full"
+        assert len(written["source_verification_evidence"]["passes"]) == 2
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R12：两条 high
+#   A **运行凭据本身是可变的** —— 它记的是安全事实（跳没跳过校验、见没见过账本、
+#     那份账本的指纹），而调用方一行赋值就能抹掉；两个提交入口还**不核对**
+#     传进来的到底是不是真凭据（鸭子类型照收）。
+#     ⚠️ 与 R1 那条「escape 证据塞进 frozen dataclass 仍可变」同族——
+#        **凡承载安全事实的对象，先问「调用方改得动吗」**。
+#   B **`failures` 里放两条同名记录**就能绕开有界重试：转移守卫按 stock_code
+#     收进 dict（后者覆盖前者），而读侧根本不校验 `failures`。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_the_run_ledger_cannot_be_mutated_by_the_caller(tmp_path):
+    """⭐⭐ [R12 high A] 凭据的每个字段都是安全事实，必须改不动。
+
+    本机复现三档：
+    · 把 `skip_existing_verify` 改回 False → **跳过校验的运行又发布了 full**；
+    · 把 `existed` 改成 False → 被删掉的账本被当成引导态**凭空重建**；
+    · `digest` 同理（改成任意值即可让「被替换」检测失效）。
+
+    判别力：去掉 `frozen=True`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd, skip_existing_verify=True)
+        for field, value in [("skip_existing_verify", False), ("existed", True),
+                             ("digest", "0" * 64), ("lifecycle", {})]:
+            with pytest.raises(AttributeError):
+                setattr(ledger, field, value)
+    finally:
+        os.close(fd)
+
+
+def test_commit_entry_points_reject_a_counterfeit_ledger(tmp_path):
+    """⭐ [R12 high A 同族] 「凭据不可变」挡不住**另造一个**。
+
+    两个提交入口此前不核对类型，任何带着同名属性的对象都收 ——
+    一个 `existed=False` 的假凭据就能让「账本被删」重新变成「引导态」。
+
+    判别力：去掉 isinstance 核对，本条必红。
+    """
+    class Counterfeit:
+        existed = False
+        digest = None
+        lifecycle = {}
+        skip_existing_verify = False
+
+        def _advance(self, *a):
+            pass
+
+    d, fd = _staging(tmp_path)
+    try:
+        for call in (lambda: commit_stock(fd, _valid_manifest(), ledger=Counterfeit()),
+                     lambda: commit_final(fd, _valid_manifest(),
+                                          outcome=clean_finish(),
+                                          ledger=Counterfeit())):
+            with pytest.raises(ValueError, match="RunLedger"):
+                call()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("order", ["低在前", "高在前"])
+def test_duplicate_failure_records_are_refused(tmp_path, order):
+    """⭐⭐ [R12 high B] `failures` 里放两条同名记录就能绕开有界重试。
+
+    转移守卫按 `stock_code` 收进 dict（**后者覆盖前者**），而读侧根本不校验
+    `failures`（它是扩展字段）。于是 `[attempts 0, attempts 2]` 两条同名记录
+    既过守卫、又过读侧校验 —— 而补拉时「先重试 `attempts < 2` 的条目」会命中
+    **第一条**，**一个已经耗尽重试的候选被复活**，反复运行还可能原地打转。
+
+    两种次序都要拦：低在前时守卫看到的是高值（放行），高在前时看到的是低值
+    （虽然会被单调判据拦下，但拦下的理由是错的）。
+
+    判别力：删掉重复检测，「低在前」那一档必红。
+    """
+    lo = {"stock_code": "600006.SH", "universe_idx": 2, "attempts": 0}
+    hi = {"stock_code": "600006.SH", "universe_idx": 2, "attempts": 2}
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[dict(hi)])
+        ledger = _committed(fd, m)
+        dup = copy.deepcopy(m)
+        dup["failures"] = [lo, hi] if order == "低在前" else [hi, lo]
+        _recompute_evidence(dup)
+        with pytest.raises(ManifestInvalidError, match="重复|同名"):
+            commit_stock(fd, dup, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_distinct_failure_records_are_still_accepted(tmp_path):
+    """方向②：不同股票各一条必须照常放行，否则失败台账根本记不下去。"""
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": "600006.SH", "attempts": 1}])
+        ledger = _committed(fd, m)
+        more = copy.deepcopy(m)
+        more["failures"].append({"stock_code": "000002.SZ", "attempts": 1})
+        _recompute_evidence(more)
+        commit_stock(fd, more, ledger=ledger)
+        assert len(read_manifest(fd)["failures"]) == 2
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R13：两条 high —— **两条都是 R12 那次修复留下的边界**
+#   A 恢复豁免只看「条数 + 在不在池里」，于是**换掉两条记录的路径/字节数/指纹**
+#     仍是 (2, True)，既不触发「完全移除」也不需要退游标 —— 已提交股票被
+#     **重新绑定到不同的文件**，原文件变孤儿，下游从此信任被换过的基线。
+#   B `isinstance` 证明不了凭据**来自 begin_run** —— dataclass 的构造函数是公开的，
+#     照着字段值另造一个一模一样的实例即可。冻结挡住了「改」，没挡住「重造」。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_recovery_may_not_rebind_a_committed_stock_to_different_files(tmp_path):
+    """⭐⭐ [R13 high A] 恢复豁免必须**只在该股被完全移除时**生效。
+
+    本机复现：把 600004.SH 那两条记录的 `relative_path` / `bytes` / `sha256`
+    全换掉、条数仍是 2、池条目原样保留 → 豁免照样放行、也不用退游标。
+    后果：一只**已提交**的股票被重新绑定到**不同的（甚至不存在的）文件**，
+    原文件变成无主孤儿，而 pilot 的 `staging_intact` 从此校验的是**被换过的基线**。
+
+    判别力：把豁免的 `scoped_removed` 前置条件去掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        swap = copy.deepcopy(full)
+        for f in swap["files"]:
+            if f["stock_code"] == "600004.SH":
+                f["relative_path"] = f["relative_path"].replace("600004", "699999")
+                f["bytes"] = 1
+                f["sha256"] = "e" * 64
+        _recompute_evidence(swap)
+        with pytest.raises(ManifestInvalidError, match="回滚|范围"):
+            commit_stock(fd, swap, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+def test_a_forged_ledger_of_the_real_class_is_refused(tmp_path):
+    """⭐⭐ [R13 high B] 冻结挡住了「改」，没挡住「**重造**」。
+
+    本机复现两档：
+    · `RunLedger(real.existed, real.digest, real.lifecycle, False)` ——
+      把「跳过校验」那一位关掉 → 收尾又发布了 `full`；
+    · `RunLedger(False, None, {}, False)` —— 伪造成引导态 →
+      **被删掉的账本被凭空重建**。
+
+    ⇒ 凭据必须是**只有本模块造得出**的能力对象（构造期核对模块私有令牌）。
+
+    判别力：去掉构造期的令牌核对，本条必红。
+    """
+    # ⚠️ 2026-09-01 订正：R14 之后凭据已不是 dataclass，而是**不透明句柄**
+    # （安全事实存在模块内部的注册表里）。「另造一个」的形态也随之变了：
+    # 公开构造路径直接拒绝，`object.__new__` 造出来的不在注册表里。
+    with pytest.raises(ValueError, match="begin_run"):
+        RunLedger()
+    with pytest.raises(TypeError):
+        RunLedger(True, "0" * 64, {}, False)          # 连签名都对不上了
+
+
+def test_begin_run_still_produces_a_usable_ledger(tmp_path):
+    """方向②：`begin_run` 造出来的那个必须照常能用，否则整条流水线动不了。"""
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        assert isinstance(ledger, RunLedger)
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        commit_final(fd, _valid_manifest(), outcome=clean_finish(), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R14：三条 high
+#   A 令牌是 dataclass 的**初始化字段** → `dataclasses.replace` 连它一起复制；
+#     `object.__setattr__` 也照样改得动冻结实例。
+#     ⇒ 安全事实不能存在**调用方手里那个对象**上，只能存在模块内部。
+#   B 累计字节守卫只拦「减少」→ **加了文件却原地不动**照样通过，
+#     下一次运行从一个被低估的总数起步 → 突破 `--max-bytes` 硬上限。
+#   C **引导态（首次提交）整个跳过了只看 payload 的检查** ——
+#     `previous is None` 直接 return，连「同名 failures」都没查。
+# ═════════════════════════════════════════════════════════════
+
+
+def test_a_ledger_cannot_be_forged_by_reconstruction_or_setattr(tmp_path):
+    """⭐⭐ [R14 high A] 凭据必须是**不透明句柄**，安全事实存在模块内部。
+
+    本机复现两条绕法：
+    · `dataclasses.replace(real, skip_existing_verify=False)` —— 令牌被一起复制，
+      构造期核对照过 → 跳过校验的运行又发布了 `full`；
+    · `object.__setattr__(real, "existed", False)` —— 冻结实例照样改得动。
+
+    判别力：把安全事实搬回句柄自身的字段，本条必红。
+    """
+    import dataclasses as _dc
+    d, fd = _staging(tmp_path)
+    try:
+        real = begin_run(fd, skip_existing_verify=True)
+        with pytest.raises(TypeError):
+            _dc.replace(real, skip_existing_verify=False)     # 已不是 dataclass
+        with pytest.raises(AttributeError):
+            object.__setattr__(real, "existed", False)        # 没有可写的字段
+        with pytest.raises(ValueError, match="begin_run"):
+            RunLedger()                                       # 也造不出空的
+        assert real.skip_existing_verify is True              # 事实原样可读
+    finally:
+        os.close(fd)
+
+
+def test_a_handle_not_issued_by_begin_run_is_refused(tmp_path):
+    """⭐ 绕过注册表另造一个句柄（`object.__new__`）也必须被拒 ——
+    句柄只是钥匙，钥匙不在锁里登记过就不算数。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        stray = object.__new__(RunLedger)
+        with pytest.raises(ValueError, match="begin_run"):
+            commit_stock(fd, _valid_manifest(), ledger=stray)
+    finally:
+        os.close(fd)
+
+
+def test_committed_bytes_must_grow_with_newly_added_files(tmp_path):
+    """⭐⭐ [R14 high B] 守卫只拦「减少」，于是**加了文件却原地不动**照样通过。
+
+    本机复现：新增两条共 246 万字节的文件记录，而 `committed_bytes` 仍是 1000。
+    后果：下一次运行从一个**被低估的累计值**起步，
+    **突破 `--max-bytes` 这条硬上限**，最坏把仅约 30 GiB 的可用空间写满。
+
+    判据取「**至少涨够新增文件的字节数**」而非严格相等：
+    ⚠️ spec 未定「committed_bytes 计不计失败 `.part` 的字节」（5o 说 `--max-bytes`
+    是逐块扣减的流式上限），严格相等会把那种合法记账方式判死。已在 spec 登记。
+
+    判别力：把判据退回「只拦减少」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        # ⚠️ 必须留出**足够的余量**：不留时新增文件把固有下限抬到 _base 之上，
+        #    R16 那条下限会**抢先**拒掉，本档对增量判据零判别力
+        #    （Opus 评审 [medium]，本机变异实测：判据删掉后本档仍绿）。
+        m = _fix_bytes(_valid_manifest(), extra=5_000_000)
+        _base = m["committed_bytes"]
+        ledger = _committed(fd, m)
+        flat = _with_more_stocks(m)          # 加了两条文件记录
+        flat["committed_bytes"] = _base      # 累计值原地不动（仍在固有下限之上）
+        _recompute_evidence(flat)
+        assert flat["committed_bytes"] >= _min_bytes(flat), "本档必须绕过固有下限"
+        with pytest.raises(ManifestInvalidError, match="至少涨够"):
+            commit_stock(fd, flat, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_committed_bytes_may_grow_by_more_than_the_new_files(tmp_path):
+    """方向②：涨得**比新增文件更多**必须放行 —— 失败的 `.part` 也消耗了预算，
+    而 spec 未规定它计不计。过严会把一种合法记账判死。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _fix_bytes(_valid_manifest())
+        _base = m["committed_bytes"]
+        ledger = _committed(fd, m)
+        grown = _with_more_stocks(m)
+        added = sum(f["bytes"] for f in grown["files"]
+                    if f["stock_code"] == "600004.SH")
+        grown["committed_bytes"] = _base + added + 999_999    # 多算了失败的 .part
+        _recompute_evidence(grown)
+        commit_stock(fd, grown, ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == _base + added + 999_999
+    finally:
+        os.close(fd)
+
+
+def test_the_first_commit_still_refuses_duplicate_failures(tmp_path):
+    """⭐⭐ [R14 high C] 引导态（磁盘上还没有账本）**整个跳过了只看 payload 的检查**。
+
+    本机复现：**首次**提交就把 `[attempts 0, attempts 2]` 两条同名记录写了进去
+    —— 既复活一个已耗尽重试的候选，又让**下一次**提交因为「重复」被拒，
+    这棵 staging 当场卡死。
+
+    根因是把「只看 payload 的固有检查」与「新旧对比的转移检查」绑在了同一个
+    `if previous is None: return` 里。
+
+    判别力：把重复检测挪回早退之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        first = _valid_manifest(failures=[{"stock_code": "600006.SH", "attempts": 0},
+                                          {"stock_code": "600006.SH", "attempts": 2}])
+        with pytest.raises(ManifestInvalidError, match="重复|同名"):
+            commit_stock(fd, first, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ═════════════════════════════════════════════════════════════
+# codex R15：三条 high —— **层次终于变了**
+#   A 打的是**核心提交语义**（不是我加的守卫）：提交 = 用调用方那份整体覆盖，
+#     于是**省略**任何一个已持久化的顶层键就等于静默删掉它 —— O4-F10
+#     「未知顶层键原样保留」那条前向兼容通道被打破。
+#   B 是**一条 spec 要求我从来没实现**：P2-F3 明写「复校失败那一轮**不得推进
+#     cursor、不得新增 files/pool_order**」。
+#   C 才是守卫边界（S2-F29 那一族的又一次：字段缺席 → 判据永久不生效）。
+# ═════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("entry", ["stock", "final"])
+def test_a_commit_may_not_delete_a_persisted_top_level_key_by_omission(tmp_path, entry):
+    """⭐⭐ [R15 high A] **省略即删除**，而 O4-F10 要求未知顶层键原样保留。
+
+    那条通道正是 S3/S4 的 `failures` / `batches` / `inflight_rollbacks` / `quota`
+    赖以流转、且**不需要 bump manifest_version** 的理由；它一旦漏水，
+    「旧工具消费新版 manifest 后把不认识的字段丢掉 → 再用新工具打开时缺必需字段
+    → 一棵 400 只股的 staging 被一次『用错版本跑补拉』永久毁掉」就重新成立。
+
+    判别力：删掉「磁盘上有而 payload 没有的键原样带过来」那一步，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(committed_bytes=7_337_822, batches=[{"n": 1}],
+                            未来某个安全字段={"x": 1}, 预筛统计={"剔除": 469})
+        ledger = _committed(fd, m)
+        lean = copy.deepcopy(m)
+        del lean["预筛统计"]
+        del lean["未来某个安全字段"]
+        _recompute_evidence(lean)
+        if entry == "stock":
+            commit_stock(fd, lean, ledger=ledger)
+        else:
+            commit_final(fd, lean, outcome=clean_finish(), ledger=ledger)
+        on = read_manifest(fd)
+        assert on["预筛统计"] == {"剔除": 469}
+        assert on["未来某个安全字段"] == {"x": 1}
+    finally:
+        os.close(fd)
+
+
+def test_a_failed_recheck_run_may_not_have_advanced_progress(tmp_path):
+    """⭐⭐ [R15 high B] spec P2-F3 明写：复校失败那一轮
+    「**本次不得推进 `cursor`、不得新增 `files`/`pool_order` 条目**」——
+    否则每次重跑都继续消耗冻结宇宙与 `--max-bytes` 预算，却永远清不掉 fatal。
+
+    我此前只写了「保留 fatal + 换 stopped_reason」，**没有实现那半句**。
+    本机复现：复校失败的那一轮先提交了一只股，收尾照样接受。
+
+    ⚠️ **R16 更正**：原来的进攻路径是「先 `commit_stock` 拉一只股、再收尾」——
+    codex R16 [high A] 证明那条路**本身就该被更早地掐掉**（复校必须先于任何
+    per-stock 提交），现在它被新闸挡在前面了。本条改走**仍然够得到**的那一条：
+    收尾提交自己交回来的 payload 带着新增的 `files`/`pool_order`/`cursor`——
+    收尾那一次同样会落盘，所以这条判据仍是必需的，不是冗余。
+
+    判别力：删掉「与运行起点比对」那一步，本条必红。
+    """
+    warn = _valid_manifest(fetch_fatal_error=_fatal(),
+                           stopped_reason="staging_path_escape",
+                           committed_bytes=7_337_822)
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, warn)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)    # 本轮复校没过
+        grown = _with_more_stocks(warn)                 # 收尾却交回一份推进过的
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="failed"))
+    finally:
+        os.close(fd)
+
+
+def test_a_failed_recheck_run_that_stayed_put_is_accepted(tmp_path):
+    """方向②：没推进进度的那一轮必须能把「复校失败」记下去，
+    否则这棵 staging 连「我复校没过」都写不进账本。"""
+    warn = _valid_manifest(fetch_fatal_error=_fatal(),
+                           stopped_reason="staging_path_escape",
+                           committed_bytes=7_337_822)
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, warn)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        written = commit_final(fd, warn, ledger=ledger,
+                               outcome=clean_finish(revisited_fatal_path=True,
+                                                    staging_recheck="failed"))
+        assert written["stopped_reason"] == "staging_recheck_failed"
+        assert len(read_manifest(fd)["files"]) == 4
+    finally:
+        os.close(fd)
+
+
+def test_growth_without_any_committed_bytes_is_refused(tmp_path):
+    """⭐ [R15 high C] 账本里**一直不带** `committed_bytes` → 配额判据永久不生效。
+
+    本机复现：files 从 4 条涨到 6 条，而该字段始终缺席，守卫一次都没触发。
+    ⇒ 只要有 `files`，就必须带一个**非负整数**且**不小于已记录文件字节之和**。
+
+    ⚠️ **只在写侧强制**：把它加进读侧必需键会构成「新增必需字段」，
+    按 O2-F8 必须 bump `manifest_version` —— 那超出本片范围，已在 spec 登记。
+
+    判别力：删掉这条，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        naked = copy.deepcopy(_valid_manifest())
+        naked.pop("committed_bytes", None)
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+            commit_stock(fd, naked, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ⚠️ 这里原有一条 R15 的正向档 `test_a_manifest_with_no_files_needs_no_committed_bytes`
+# —— codex R16 [high C] 证明它**本身就是错的**：引导态账本 files 为空，
+# 但盘上**已经躺着一份 staged export_log**（spec:538 它在第一份 manifest
+# 之前落盘）。它被 `test_a_bootstrap_manifest_must_still_account_for_the_
+# export_log` 取代（见文件末尾 R16 段）。
+# ⚠️ 教训：写「方向②（合法状态不得被判死）」的正向档时，**也要按字段穷尽**
+#    ——我当时只看了 `files`，没问「这份账本里还有谁占着字节」。
+
+
+@pytest.mark.parametrize("field", ["committed_bytes", "batches", "inflight_rollbacks"])
+def test_omitting_a_persisted_extension_field_carries_it_forward(tmp_path, field):
+    """⭐ [R15 high A 的正向面] 「省略」不再是**擦除**，而是**原样带过来**。
+
+    ⚠️ 这三档原本挂在「单调字段不得被抹掉」那组参数里（R10 那轮）——
+    carry-forward 落地后它们**不再是攻击**：省略只会让磁盘上那份被原样保留。
+    真正还需要拦的是**换成错误类型**，那几档留在原处。
+    **每次改动之后要回头问「哪些既有档的语义变了」**，这就是一例。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(batches=[{"n": 1}], inflight_rollbacks={"1": 2})
+        _fix_bytes(m, extra=5_000_000)
+        ledger = _committed(fd, m)
+        lean = copy.deepcopy(m)
+        lean.pop(field)
+        _recompute_evidence(lean)
+        commit_stock(fd, lean, ledger=ledger)
+        assert read_manifest(fd)[field] == m[field]
+    finally:
+        os.close(fd)
+
+
+# ── codex R16 的三条 high ───────────────────────────────────────
+# 三条**全部**落在核心语义 / spec 漏实现，没有一条是守卫边界：
+#   A 复校闸的**收口点位置**错了（判在收尾，而进度早已落盘）；
+#   B `pool_order` 只比**集合**，spec:545 明写它是「按序追加」且是 pilot
+#     的**唯一消费顺序来源**；
+#   C 配额判据只算 `files`，漏掉 spec:532 明定的「唯一的非股级计账对象」。
+
+
+def _warned(**kw):
+    """一份带着「必须做全量复校才能清」记录的账本（上一次运行留下的）。"""
+    return _valid_manifest(fetch_fatal_error=_fatal(),
+                           stopped_reason="staging_path_escape", **kw)
+
+
+def test_a_run_that_owes_a_staging_recheck_cannot_commit_a_stock_first(tmp_path):
+    """⭐⭐ [R16 high A] P2-F3 的**收口点位置**错了。
+
+    本机复现：带 `staging_path_escape` 的账本起跑 → per-stock 提交**照常落盘**
+    （cursor 1→3、files 4→8）→ 直到收尾才抛。而抛异常**收不回**已经写进磁盘的
+    进度：下一次重跑从被推进过的 cursor 起步，继续消耗冻结宇宙与 `--max-bytes`
+    预算；更糟的是 P2-F3 为这一轮指定的 `stopped_reason: staging_recheck_failed`
+    **一次都没记上**（磁盘上仍是上一轮的 `staging_path_escape`）。
+    ⇒ 全量复校必须发生在**任何 per-stock 提交之前**。
+
+    判别力：删掉 `commit_stock` 里那道复校闸，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        before = read_manifest(fd)
+        with pytest.raises(ManifestInvalidError, match="复校"):
+            commit_stock(fd, _with_more_stocks(_warned()), ledger=ledger)
+        assert read_manifest(fd) == before        # 一个字节都没写
+    finally:
+        os.close(fd)
+
+
+def test_an_attested_failure_keeps_every_per_stock_commit_shut(tmp_path):
+    """⭐ 登记「复校没过」之后，per-stock 提交仍然一律拒绝。
+
+    判别力：把闸的判据写成「登记过就放行」（不看结论），本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        with pytest.raises(ManifestInvalidError, match="复校"):
+            commit_stock(fd, _with_more_stocks(_warned()), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_passing_recheck_reopens_per_stock_commits(tmp_path):
+    """⭐ **正向档（必须有）**：复校过了，这棵修好的 staging 必须能继续拉股。
+
+    没有这一档，一个**恒抛**的闸看起来处处在工作 —— 本仓最常踩的假绿家族。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_stock(fd, _with_more_stocks(_warned()), ledger=ledger)
+        assert len(read_manifest(fd)["files"]) == 6
+    finally:
+        os.close(fd)
+
+
+def test_a_clean_run_never_owes_an_attestation(tmp_path):
+    """⭐ **正向档**：账本上没有那类记录的运行，这道闸根本不该出现。
+
+    判别力：把闸写成「一律要求登记」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        commit_stock(fd, _valid_manifest(), ledger=ledger)
+        assert len(read_manifest(fd)["files"]) == 4
+    finally:
+        os.close(fd)
+
+
+def test_a_source_escape_alone_does_not_owe_a_staging_recheck(tmp_path):
+    """⭐ **正向档（判据边界）**：源树逃逸的清除只要前提①，
+    它**不该**被这道 staging 复校闸卡住（`_needs_staging_recheck` 的定义）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(
+            fetch_fatal_error=_fatal("source_path_escape"),
+            stopped_reason="source_path_escape"))
+        ledger = begin_run(fd)
+        commit_stock(fd, _with_more_stocks(_valid_manifest()), ledger=ledger)
+        assert len(read_manifest(fd)["files"]) == 6
+    finally:
+        os.close(fd)
+
+
+def test_the_recheck_verdict_cannot_be_flipped_once_attested(tmp_path):
+    """⭐ 复校在一次运行里只做一次；允许改口就等于给「洗白失败」开了门。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        attest_staging_recheck(ledger, passed=False)      # 重复登记同一结论：放行
+        with pytest.raises(ValueError, match="改口|已登记"):
+            attest_staging_recheck(ledger, passed=True)
+    finally:
+        os.close(fd)
+
+
+def test_attest_requires_a_real_bool_and_a_real_ledger(tmp_path):
+    """⭐ 与 `begin_run` / `revisited_fatal_path` 同一条纪律：
+    非空字符串是**真值**，`passed="false"` 会把一次失败的复校登记成通过。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = begin_run(fd)
+        for bad in ("false", 0, 1, None):
+            with pytest.raises(ValueError, match="布尔"):
+                attest_staging_recheck(ledger, passed=bad)
+        # 类型对、但不在注册表里（伪造句柄）
+        with pytest.raises(ValueError, match="RunLedger|注册表"):
+            attest_staging_recheck(object.__new__(RunLedger), passed=True)
+        # ⚠️ **类型不对**这一档才分得开两条判据：入口检查被关掉时，
+        # 后面的 `ledger._state()` 会抛 `AttributeError` 而不是 `ValueError`
+        # ——两条判据的文案都带 "RunLedger"，只用伪造句柄那一档会**互相掩盖**
+        # （变异实测：入口检查关掉后零红）。
+        for junk in ({"fake": 1}, None, "ledger"):
+            with pytest.raises(ValueError, match="RunLedger"):
+                attest_staging_recheck(junk, passed=True)
+    finally:
+        os.close(fd)
+
+
+def test_the_final_outcome_must_match_the_attested_verdict(tmp_path):
+    """⭐⭐ 登记的结论与收尾上报的结论**必须一致**。
+
+    不查这一条时：登记 `failed` 把 per-stock 提交挡住，收尾却上报
+    `passed` —— 一次**没通过**的复校照样把 fatal 清掉，本条闸白立。
+
+    判别力：删掉一致性检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _warned(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+    finally:
+        os.close(fd)
+
+
+def test_reporting_a_recheck_that_was_never_attested_is_refused(tmp_path):
+    """⭐ 反方向：没登记过却上报结论 —— 模块手里那份记录才是唯一真相。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _warned(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+    finally:
+        os.close(fd)
+
+
+def test_an_attested_pass_flows_through_to_clearing_the_fatal(tmp_path):
+    """⭐ **正向档**：登记 + 上报一致的那一轮，fatal 必须真的被清掉。"""
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        written = commit_final(fd, _warned(), ledger=ledger,
+                               outcome=clean_finish(revisited_fatal_path=True,
+                                                    staging_recheck="passed"))
+        assert "fetch_fatal_error" not in written
+        assert "stopped_reason" not in written
+    finally:
+        os.close(fd)
+
+
+# ── B：`pool_order` 是**有序**的（spec:545「按序追加」）────────────
+
+def test_committed_pool_entries_cannot_be_reordered(tmp_path):
+    """⭐⭐ [R16 high B] 守卫把 `pool_order` 压成**集合**，只查「有没有少」。
+
+    本机复现：已提交的 SH 池 `[600000, 600004, 600006]` 被**整个倒序**
+    写回去，成员一个没少 → 放行。而 spec:545 明写 pilot **只从 manifest 读
+    顺序**，`pool_order` 是它的唯一消费顺序来源 —— 顺序被改写等于换掉了
+    「先消费哪几只」，断点续跑的 `already_done` 与「池穷尽」判定双双失真，
+    而这一切不改变任何成员身份，**安静地**发生。
+
+    判别力：把顺序判据改回集合比较，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        flipped = copy.deepcopy(full)
+        flipped["pool_order"]["SH"] = list(reversed(flipped["pool_order"]["SH"]))
+        with pytest.raises(ManifestInvalidError, match="顺序|次序"):
+            commit_stock(fd, flipped, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_new_pool_entry_cannot_jump_ahead_of_committed_ones(tmp_path):
+    """⭐⭐ [R16 high B 同族] 新条目**插到已提交条目之前**同样是改写顺序。
+
+    「按序追加」= 上一份必须是新一份的**前缀**；只查「有没有少」时，
+    插队的条目让 pilot 先消费一只**本该排在后面**的股。
+
+    判别力：把前缀判据换成「集合只增不减」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        base = _valid_manifest()
+        ledger = _committed(fd, base)
+        jumped = copy.deepcopy(base)
+        jumped["files"] += [_file_rec("600004.SH", "浦发银行", "1m"),
+                            _file_rec("600004.SH", "浦发银行", "daily")]
+        jumped["pool_order"]["SH"].insert(0, {"code": "600004.SH",
+                                              "universe_idx": 1})
+        jumped["cursor"]["SH"] = 2
+        jumped["committed_bytes"] += 2 * 1234567
+        _recompute_evidence(jumped)
+        with pytest.raises(ManifestInvalidError, match="顺序|次序"):
+            commit_stock(fd, jumped, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_appending_to_the_pool_is_still_the_normal_path(tmp_path):
+    """⭐ **正向档**：正常的「按序追加」必须照常通过。"""
+    d, fd = _staging(tmp_path)
+    try:
+        base = _valid_manifest()
+        ledger = _committed(fd, base)
+        commit_stock(fd, _with_more_stocks(base), ledger=ledger)
+        assert [e["code"] for e in read_manifest(fd)["pool_order"]["SH"]] == \
+            ["600000.SH", "600004.SH"]
+    finally:
+        os.close(fd)
+
+
+def test_recovery_removal_keeps_everyone_elses_order(tmp_path):
+    """⭐ **正向档**：崩溃恢复把**中间**那只股删掉是合法的，
+    只要其余条目的相对次序原样保留。
+
+    判别力：把恢复档的前缀判据写成「必须与上一份完全相同」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()                 # SH: 600000 / 600004 / 600006
+        ledger = _committed(fd, full)
+        fixed = _drop_stock(full)             # 删中间那只 600004
+        fixed["cursor"]["SH"] = 1             # ← min(cursor, universe_idx)
+        _recompute_evidence(fixed)
+        commit_stock(fd, fixed, ledger=ledger, recovery=_scope())
+        assert [e["code"] for e in read_manifest(fd)["pool_order"]["SH"]] == \
+            ["600000.SH", "600006.SH"]
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_reorder_the_survivors(tmp_path):
+    """⭐ 恢复声明**只**授权删那一只；幸存条目的次序照旧不许动。
+
+    判别力：恢复那一支若跳过顺序判据，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        fixed = _drop_stock(full)
+        fixed["pool_order"]["SH"] = list(reversed(fixed["pool_order"]["SH"]))
+        fixed["cursor"]["SH"] = 1
+        _recompute_evidence(fixed)
+        with pytest.raises(ManifestInvalidError, match="顺序|次序"):
+            commit_stock(fd, fixed, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+# ── C：staged export_log 也计入配额（spec:532）────────────────────
+
+def test_the_staged_export_log_bytes_count_toward_the_quota(tmp_path):
+    """⭐⭐ [R16 high C] 配额判据只加 `files`，漏掉 spec:532 明定的
+    「**唯一的非股级计账对象**」staged `export_log.csv`。
+
+    本机复现：`committed_bytes` 恰好等于四条 files 之和、把 export_log 的
+    2399554 字节整个漏掉 → 放行。下一次运行从一个**被低估的总数**起步，
+    `--max-bytes` 这条硬上限被突破正好一份 export_log 的量。
+
+    判别力：把 export_log 那一项从下限里去掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest()
+        m["committed_bytes"] = sum(f["bytes"] for f in m["files"])   # 只算 files
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+            commit_stock(fd, m, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_bootstrap_manifest_must_still_account_for_the_export_log(tmp_path):
+    """⭐⭐ [R16 high C 的另一半] 引导态账本 **files 为空**，
+    而 export_log 在**第一份 manifest 之前**就已落盘（spec:538）。
+
+    ⚠️ 这一条推翻了我在 R15 那轮写下的正向档
+    `test_a_manifest_with_no_files_needs_no_committed_bytes` ——
+    我当时只想到「还没拷任何文件」，忘了盘上其实**已经躺着一份 export_log**。
+    判据挂在 `if files:` 上，于是整个引导态被跳过，而引导态正是它最该管的那档。
+
+    判别力：把触发条件写回 `if files:`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        empty = copy.deepcopy(_valid_manifest())
+        empty.pop("committed_bytes", None)
+        empty["files"] = []
+        empty["pool_order"] = {"SH": [], "SZ": [], "BJ": []}
+        empty["cursor"] = {"SH": 0, "SZ": 0, "BJ": 0}
+        _recompute_evidence(empty)
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="committed_bytes"):
+            commit_stock(fd, empty, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_a_bootstrap_manifest_that_accounts_for_it_is_accepted(tmp_path):
+    """⭐ **正向档**：引导态如实记上 export_log 的字节 → 照常通过。"""
+    d, fd = _staging(tmp_path)
+    try:
+        empty = copy.deepcopy(_valid_manifest())
+        empty["files"] = []
+        empty["pool_order"] = {"SH": [], "SZ": [], "BJ": []}
+        empty["cursor"] = {"SH": 0, "SZ": 0, "BJ": 0}
+        empty["committed_bytes"] = empty["staged_export_log"]["bytes"]
+        _recompute_evidence(empty)
+        ledger = begin_run(fd)
+        commit_stock(fd, empty, ledger=ledger)
+        assert read_manifest(fd)["committed_bytes"] == 2399554
+    finally:
+        os.close(fd)
+
+
+# ── Opus 对抗性评审（替代 codex 那一轮）的五条 ────────────────────
+# ⚠️ 其中 A 与 C **都是 R16 那次修复自己引入的**：一致性检查把两个工厂函数
+#    产出的合法结局全挡了；固有下限把两条老攻击档抬到了门槛以下。
+
+
+def test_a_max_bytes_stop_is_publishable_after_a_passing_recheck(tmp_path):
+    """⭐⭐ [Opus high] R16 的一致性检查把**唯一合法的恢复路径**堵死了。
+
+    场景（正是 spec O4-F1 说「几乎必然」的那一个）：Run1 撞 `staging_path_escape`
+    停在 56 只股；操作者修好目录树；Run2 做完 P2-F3 无条件要求的全量复校（通过）、
+    登记、继续拉股，然后触到 `--max-bytes`（累计字节含 Run1）。
+    此时 `max_bytes_stop()` 的 `staging_recheck` 恒为 `None`（工厂不收这个参数，
+    因为决策表这一支根本不看它），而凭据里登记的是 `"passed"` ——
+    R16 那条「上报必须等于登记」于是**拒绝发布**，报的还是
+    「这份账本已不可信，请换新 staging + 新 seed 重拉」：
+    **一棵几百只股的健康 staging 被劝报废**，而 O4-F1 特意要产出的
+    `stopped_reason_secondary: "max_bytes"` 诊断一个字都没写下去。
+
+    根因是**版本化不变量的漏检**：`max_bytes_stop()` 的注释说「决策表对这一支
+    根本不看它们」——对 `resolve_final_lifecycle` 成立，但 R16 给
+    `outcome.staging_recheck` **加了第二个消费者**，那句理由没被重核。
+
+    判别力：把 `commit_final` 的一致性检查退回「无条件相等」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        prev = _warned()
+        _seed_disk(fd, prev)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_stock(fd, _with_more_stocks(prev), ledger=ledger)
+        written = commit_final(fd, _with_more_stocks(prev), ledger=ledger,
+                               outcome=max_bytes_stop())
+        assert written["fetch_fatal_error"] == _fatal()          # 一律保留
+        assert written["stopped_reason"] == "staging_path_escape"
+        assert written["stopped_reason_secondary"] == "max_bytes"
+    finally:
+        os.close(fd)
+
+
+def test_a_new_escape_is_recordable_after_a_passing_recheck(tmp_path):
+    """⭐⭐ [Opus high 同族] `escape_stop()` 同样被堵死 —— 后果更重：
+    本次**新发生**的信任边界破坏根本记不进账本。
+
+    判别力：同上。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        prev = _warned()
+        _seed_disk(fd, prev)
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        written = commit_final(fd, prev, ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="日K线_前复权/z.csv",
+            component="日K线_前复权", errno="ELOOP"))
+        assert written["fetch_fatal_error"]["relative_path"] == "日K线_前复权/z.csv"
+        assert written["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_an_attested_failure_may_only_publish_the_named_outcome(tmp_path):
+    """⭐ 反方向：登记为**失败**的那一轮，只许发布 P2-F3 那个具名结局。
+
+    放开「非 clean 结局不查一致性」之后，若不加这条，`attest(False)` 之后
+    发一个 `max_bytes_stop()` 就会把「复校没过」这个结论整个丢掉
+    ——盘上只留下上一轮的 reason 加一条 max_bytes 附注。
+
+    判别力：删掉 `attested == "failed"` 那一支，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        with pytest.raises(ManifestInvalidError, match="失败|具名"):
+            commit_final(fd, _warned(), ledger=ledger, outcome=max_bytes_stop())
+    finally:
+        os.close(fd)
+
+
+def test_a_non_clean_outcome_may_not_carry_a_recheck_verdict():
+    """⭐ 「不可表达」必须落在 `__post_init__`，不能只落在工厂函数。
+
+    两个工厂不收这个参数，但 `FinalOutcome` 是公开的 dataclass，
+    直接构造 `FinalOutcome(kind="max_bytes", staging_recheck="passed")`
+    能造出一个**决策表永远不看、而 commit_final 会拿去比对**的取值。
+
+    判别力：把守卫挪回工厂函数，本条必红。
+    """
+    for kind, extra in [("max_bytes", {}),
+                        ("escape", {"escape": {"kind": "staging_path_escape",
+                                               "relative_path": "a/b.csv",
+                                               "component": "a", "errno": "ELOOP"}})]:
+        FinalOutcome(kind=kind, **extra)                        # 正向：不带就合法
+        for verdict in ("passed", "failed"):
+            with pytest.raises(ValueError, match="staging_recheck"):
+                FinalOutcome(kind=kind, staging_recheck=verdict, **extra)
+
+
+def test_attesting_a_recheck_the_run_does_not_owe_is_refused(tmp_path):
+    """⭐ [Opus medium] 账本上**没有**那类记录时，登记复校结论会被静默丢弃。
+
+    本机复现：干净账本 + `attest(passed=False)` → per-stock 提交**照样放行**
+    （闸只看起跑状态），收尾走决策表分支②（上次没有 fatal）返回 `{}` ——
+    「这棵树复校没过」这个结论**哪都没写**，而 4c 的 fail-closed 判据读到的
+    是一份完全干净的账本。
+
+    ⚠️ **为什么修法是「拒绝登记」而不是「把它记下来」**：pilot 的 fail-closed
+    判据是「`fetch_fatal_error` 存在」（O4-F1），`stopped_reason` 只是人读附注 ——
+    所以只写 reason 是**假安全**；要真生效就得**凭空造一个 fatal**
+    （造不出 kind / relative_path / component / errno 四字段）。
+    本入口只为 P2-F3 的前提②存在，账本上没有那类记录时它没有可写入的位置。
+    这一轮的失败由 S4/S5 在**运行级**（rc≠0 + 报告）表达 —— 与 S2-F14
+    已接受的那条残留同规格。已在 spec 登记。
+
+    判别力：删掉这道前置检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                  # 干净账本
+        ledger = begin_run(fd)
+        for verdict in (True, False):
+            with pytest.raises(ValueError, match="没有|不欠"):
+                attest_staging_recheck(ledger, passed=verdict)
+    finally:
+        os.close(fd)
+
+
+def test_skip_existing_verify_is_refused_for_a_source_escape_too(tmp_path):
+    """⭐ [Opus medium] 互斥判据**窄于 spec 原文**。
+
+    spec §4.5:484 原文：「`--skip-existing-verify` 与「manifest 带 **escape 记录**」
+    互斥——撞上即拒绝启动」，**没有限定 kind**。而实现只挡
+    `_needs_staging_recheck` 那两种（staging 侧），于是带 `source_path_escape`
+    的账本配上该 flag 能正常起跑，**并在同一轮把 fatal 清掉**
+    （清除 source escape 只要前提①）——而这一轮恰恰跳过了「已 staged 的文件
+    与源对不对得上」的校验，正是该 flag 跳过的那件事。本机端到端复现。
+
+    判别力：把判据退回 `_needs_staging_recheck`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(
+            fetch_fatal_error=_fatal("source_path_escape"),
+            stopped_reason="source_path_escape"))
+        with pytest.raises(SkipVerifyWithEscapeError, match="互斥|escape|复校"):
+            begin_run(fd, skip_existing_verify=True)
+    finally:
+        os.close(fd)
+
+
+def test_a_passing_recheck_must_still_be_reported_at_the_final_commit(tmp_path):
+    """⭐ 自查补档（控制者，非评审）：`attested == "passed"` 而收尾**不上报**。
+
+    放开非 clean 结局之后，`elif` 那一支只剩「clean 且取值不等」这一种情形，
+    而上面两条新正向档（max_bytes / escape）都不经过它 —— 若有人把判据窄化成
+    `outcome.staging_recheck is not None and ...`，**一次做过且通过的复校被
+    悄悄隐去**（fatal 于是不被清除，方向虽是 fail-closed，但账本与事实不符，
+    且操作者会以为「我明明复校过了怎么还锁着」）。
+
+    判别力：把 `elif` 的判据加上 `outcome.staging_recheck is not None`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _warned(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True))
+    finally:
+        os.close(fd)
+
+
+# ── Opus 对抗性评审 第 2 轮 ──────────────────────────────────────
+# 1 medium（收尾入口没有复校闸）+ 3 low（全是**测试判别力**：生产代码本身正确，
+# 但判据没有任何测试隔离地守着，将来被改坏不会红）。
+
+
+def test_a_run_that_owes_a_recheck_may_not_advance_progress_at_the_final_commit(tmp_path):
+    """⭐⭐ [Opus-2 medium] 复校闸只立在 **per-stock** 那个入口。
+
+    本机端到端复现（**同一份 payload、同一次运行**）：
+      `commit_stock` → 被拒 ✅ ；`commit_final` → **被接受** ❌
+      cursor 1→3、files 4→8、committed_bytes +490 万。
+    于是一棵**已被证明动过**的 staging，只要把进度全走收尾那个入口，就能一轮
+    一轮地把冻结宇宙与 `--max-bytes` 预算烧光 —— 正是 P2-F3 存在的理由。
+
+    ⚠️ 修法不是「也在收尾入口拒绝提交」，而是把闸从「入口」改成「**进度**」：
+    这一轮没证明 staging 干净 ⇒ 收尾 payload 的进度指纹必须与**运行起点**逐项
+    相同。这样既堵死烧预算，又不妨碍它把「我撞了新逃逸」这类证据记下来。
+    ⭐ 原来那条 `outcome.staging_recheck == "failed"` 的判据被它**完全涵盖**
+    （上报 failed ⇒ 登记 failed ⇒ 欠一次复校且未通过），故合并成一条。
+
+    判别力：把判据退回 `outcome.staging_recheck == "failed"`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        before = read_manifest(fd)
+        ledger = begin_run(fd)                   # **不登记任何复校结论**
+        grown = _with_more_stocks(_warned())
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=False))
+        assert read_manifest(fd) == before        # 一个字节都没写
+    finally:
+        os.close(fd)
+
+
+def test_a_run_that_owes_a_recheck_may_still_commit_without_advancing(tmp_path):
+    """⭐ **正向档**：没推进进度的那一轮必须能照常收尾（否则一棵欠复校的
+    staging 连「我看见 fatal 了、我停了」都记不下去，而 fatal 必须被保留）。
+
+    判别力：把闸写成「欠复校就一律拒绝收尾」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        written = commit_final(fd, _warned(), ledger=ledger,
+                               outcome=clean_finish(revisited_fatal_path=False))
+        assert written["fetch_fatal_error"] == _fatal()       # 保留
+        assert written["stopped_reason"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("label,advance", [
+    ("只推进 cursor", lambda m: m["cursor"].__setitem__("SH", 2)),
+    ("只涨 committed_bytes", lambda m: m.__setitem__(
+        "committed_bytes", m["committed_bytes"] + 1000)),
+])
+def test_the_progress_fingerprint_covers_every_component_it_names(tmp_path, label, advance):
+    """⭐ [Opus-2 low] 进度指纹的四个分量里，此前**只有 `files` 被钉住**。
+
+    原来那条 P2-F3 的档用 `_with_more_stocks` 一次性推进了 files + pool +
+    cursor + committed_bytes，**任何一个分量单独满足不等式就够了** ——
+    实测把 `cursor` 或 `committed_bytes` 从 `_progress_of` 的元组里删掉，
+    全量 1301 条**一条都不红**。而 `cursor` 恰恰是 spec P2-F3 点名的第一个，
+    `committed_bytes` 则写在本模块自己的报错文案里。
+    这正是本仓栽过的「两条判据互相掩盖 → 变异假阴性」那一族。
+
+    判别力：从 `_progress_of` 的元组里删掉对应分量，对应那一档必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        moved = copy.deepcopy(_warned())
+        advance(moved)
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, moved, ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="failed"))
+    finally:
+        os.close(fd)
+
+
+def test_the_ledger_tells_the_caller_whether_it_owes_a_staging_recheck(tmp_path):
+    """⭐ 调用方**问得到**「这一轮欠不欠一次全量复校」。
+
+    不暴露时 S4 只能自己重新推导 `_needs_staging_recheck` —— 正是
+    `test_only_one_place_decides_whether_a_staging_recheck_is_required`
+    立起来要禁止的「同一件事判在两处」。
+
+    判别力：把这个属性删掉或写死成 False，本条必红。
+    """
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    d1, fd1 = _staging(tmp_path / "a")
+    d2, fd2 = _staging(tmp_path / "b")
+    try:
+        _seed_disk(fd1, _valid_manifest())                     # 干净
+        _seed_disk(fd2, _warned())                             # 欠一次复校
+        assert begin_run(fd1).owes_staging_recheck is False
+        assert begin_run(fd2).owes_staging_recheck is True
+    finally:
+        os.close(fd1); os.close(fd2)
+
+
+def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
+    """(*) [Opus-2 low] `_STOCK_CODE_RE` 的 \\Z 此前**没有任何测试守着**。
+
+    模块里那条注释说「三个正则都改成 \\Z，按判据本身穷尽」并给了实测依据
+    （不加 re.MULTILINE 时 `$` 仍容忍**恰好一个尾随换行**），而三个里只有
+    `_SHA256_RE` 与 `_GMT_TOKEN_RE` 被钉住 —— 实测把它退回 `$`，全量一条都不红。
+
+    (!!) **本档第一版是假的，控制者变异实测抓出来的**：`RecoveryScope` 还有
+    第四条检查 `stock_code.endswith("." + market)`，尾随换行同样过不了它 ——
+    正则退回 `$` 时**邻居抢先抛**，而邻居的文案里也含 `stock_code`，
+    于是 `match="stock_code"` 照样匹配、本档照样绿。
+    **这正是同一轮评审刚教的那一族**（判据之间互相掩盖），我在修它时又踩了一次。
+    => 断言必须用**判据专属措辞**：正则那条报「形如 600000.SH」，
+    后缀那条报「后缀与 market 不一致」，两者可分辨。
+    (!) manifest 里那三个调用点**没有一个隔离得开**（后缀比对 / 冻结名单锚点 /
+    文件名解析对表都会抢先接住换行），故只有这条路钉得住它。
+
+    判别力：把 \\Z 退回 `$`，本条必红（已实测）。
+    """
+    RecoveryScope(stock_code="600004.SH", market="SH", universe_idx=1)   # 正向
+    # 恰好一个尾随换行 = `$` 与 \Z 的**唯一**分界
+    for bad in ("600004.SH\n", "600004.SH\n\n", "\n600004.SH"):
+        with pytest.raises(ValueError, match="形如"):
+            RecoveryScope(stock_code=bad, market="SH", universe_idx=1)
+
+
+# ── Opus 对抗性评审 第 3 轮 ──────────────────────────────────────
+# 1 medium（socket 型账本逃过「不是普通文件」那道闸）+ 3 low（判据没人守）。
+
+# `_progress_of` 是私有的纯函数 —— 端到端档造不出「只动一个分量」的隔离
+# （R21-F3 把 files 与 pool 结构性绑死），只能直接对它下断言。
+from qmt_manifest import _progress_of, _hashable, _require_no_progress_rollback
+
+
+def test_read_manifest_refuses_a_socket_manifest(tmp_path, monkeypatch):
+    """⭐⭐ [Opus-3 medium] 「先 open、后查 S_ISREG」对 **socket** 整个失效。
+
+    `O_NONBLOCK` 解决了 FIFO 阻塞，但 socket 上 `open(2)` **直接失败**
+    （macOS `ENOTSUP`=102，别处 `EOPNOTSUPP`/`ENXIO`）—— 于是**根本走不到**
+    那句 `S_ISREG`，四个入口（`read_manifest` / `begin_run` / 两个提交）
+    全部抛**裸 `OSError`**，而不是 fail-closed 的 `ManifestInvalidError` +
+    恢复指引。本机复现：FIFO 与目录都拿到干净拒绝，socket 抛
+    `OSError: [Errno 102] Operation not supported on socket`。
+    ⚠️ 而模块注释白纸黑字写着这条枚举是「FIFO / 目录 / 设备 / **socket**」——
+    **穷尽性主张必须按字面量逐条兑现**，我列了四项只兑现两项。
+
+    ⚠️ 定级：**不是洗白洞**（没有任何东西被放行），但 `read_manifest` 文档
+    声明的异常集合被突破，照文档写 `except` 的 S4/S5 接不住，操作者拿到的是
+    traceback 而不是「请换新 staging + 新 seed 重拉」。
+
+    判别力：把 `_open_regular_probe` 里那段「打不开就回头 lstat 问它是什么」
+    删掉，本条必红。
+    """
+    import socket as _socket
+    d, fd = _staging(tmp_path)
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    # ⚠️ `AF_UNIX` 的路径上限约 104 字节，pytest 的 tmp_path 本身就超了
+    # （实测 `OSError: AF_UNIX path too long`）——切进目录再用相对名绑定。
+    monkeypatch.chdir(d)
+    try:
+        sock.bind(MANIFEST_NAME)
+        for entry in (read_manifest, begin_run):
+            with pytest.raises(ManifestInvalidError, match="不是普通文件"):
+                entry(fd)
+    finally:
+        sock.close()
+        os.close(fd)
+
+
+def test_commit_final_does_not_let_the_caller_inject_a_lifecycle_field(tmp_path):
+    """⭐ [Opus-3 low] 收尾入口剥掉生命周期三键那一步**没人守**。
+
+    实测把 `basis = {k: v ... if k not in LIFECYCLE_KEYS}` 换成 `dict(manifest)`，
+    全量 1307 条一条都不红 —— 而它是真承重的：一棵**干净**的 staging 上，
+    调用方内存里塞一条伪造的 `fetch_fatal_error`，收尾就会把它**写上磁盘**
+    （`basis.update(on_disk)` 只挡得住「抹掉」方向，挡不住「注入」方向）。
+    方向是 fail-closed（凭空报警，不是洗白），故 low —— 但一棵健康的 staging
+    会被一条假警报永久锁死。
+    ⚠️ `commit_stock` 那一侧的同族档**是有的**，所以这是**测试集的不对称**，
+    不是代码的不对称。
+
+    判别力：把那句改成 `dict(manifest)`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 磁盘上干干净净
+        ledger = begin_run(fd)
+        forged = copy.deepcopy(_valid_manifest())
+        forged["stopped_reason"] = "staging_path_escape"  # 调用方内存里伪造的
+        forged["fetch_fatal_error"] = _fatal()
+        written = commit_final(fd, forged, ledger=ledger, outcome=clean_finish())
+        assert "fetch_fatal_error" not in written
+        assert "stopped_reason" not in written
+        assert "fetch_fatal_error" not in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("component,mutate", [
+    ("files", lambda m: m["files"].append(
+        _file_rec("600004.SH", "浦发银行", "1m"))),
+    ("pool_order", lambda m: m["pool_order"]["SH"].append(
+        {"code": "600004.SH", "universe_idx": 1})),
+    ("cursor", lambda m: m["cursor"].__setitem__("SH", 2)),
+    ("committed_bytes", lambda m: m.__setitem__(
+        "committed_bytes", m["committed_bytes"] + 1)),
+])
+def test_progress_fingerprint_reacts_to_each_component_alone(component, mutate):
+    """⭐ [Opus-3 low] 进度指纹的 `files` 与 `pool_order` 两个分量**互相掩盖**。
+
+    实测把其中**任意一个**从 `_progress_of` 的元组里删掉，全量 1307 条一条不红：
+    每个推进进度的档都是「加一只股」，files 与 pool 必然**同时**变化，于是
+    留下的那个分量自己就让不等式成立。而 P2-F3 的原文恰恰是
+    「不得新增 `files`/`pool_order`」。
+    ⚠️ 端到端档造不出隔离（R21-F3 把两者结构性绑死：每个池条目恰配两条 files），
+    故直接对**纯函数**下断言 —— 这是唯一能把四个分量各自钉住的写法。
+
+    判别力：从元组里删掉对应分量，对应那一档必红。
+    """
+    base = _valid_manifest()
+    moved = copy.deepcopy(base)
+    mutate(moved)
+    assert _progress_of(moved) != _progress_of(base), (
+        f"{component} 单独变化时进度指纹没有变 —— P2-F3 的「不得推进」"
+        f"对这个分量形同虚设")
+
+
+def test_a_forged_handles_property_access_is_refused_too(tmp_path):
+    """⭐ [Opus-3 low] `commit_stock` 的 docstring 说「真正的防线在句柄的
+    **属性访问**上（每次读取都查注册表）」，而唯一那条伪造句柄的档走的是
+    **入口**那道检查 —— 被它称为主防线的那一道**没有任何测试守着**
+    （实测关掉它，全量一条不红）。
+
+    判别力：把 `_state()` 里的注册表查找关掉，本条必红。
+    """
+    forged = object.__new__(RunLedger)
+    for attr in ("existed", "digest", "lifecycle", "skip_existing_verify",
+                 "owes_staging_recheck"):
+        with pytest.raises(ValueError, match="注册表|begin_run"):
+            getattr(forged, attr)
+
+
+def test_commit_stock_refuses_a_recovery_that_is_not_a_scope(tmp_path):
+    """⭐ [Opus-3 low] 「恢复声明必须是 RecoveryScope」这条检查没人守。
+
+    它是「这次回退是有意的、范围到此为止」的**唯一**声明；收一个鸭子类型
+    对象等于让调用方自己定义范围。
+
+    判别力：把那条 isinstance 检查关掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _multi_stock())
+        for junk in (True, {"stock_code": "600004.SH", "market": "SH",
+                            "universe_idx": 1}, "600004.SH"):
+            with pytest.raises(ValueError, match="RecoveryScope"):
+                commit_stock(fd, _multi_stock(), ledger=ledger, recovery=junk)
+    finally:
+        os.close(fd)
+
+
+def test_final_outcome_refuses_escape_evidence_that_is_not_a_mapping():
+    """⭐ [Opus-3 low] 「escape 证据必须是映射」这条检查没人守。
+
+    关掉它之后 `dict(escape)` 会对一个 list 抛原始 `ValueError`/`TypeError`，
+    构造期校验的报错指引整个走错。
+
+    判别力：把那条 isinstance 检查关掉，本条必红。
+    """
+    for junk in (["kind", "x"], "staging_path_escape", 42, None):
+        with pytest.raises(ValueError, match="映射|escape"):
+            FinalOutcome(kind="escape", escape=junk)
+
+
+# ── Kimi(K3) 对抗性评审 K1 ───────────────────────────────────────
+# 1 medium（不可哈希的 JSON 值让写侧新守卫抛裸 TypeError）+ 2 low。
+
+
+@pytest.mark.parametrize("bad", [["600004.SH"], {"a": 1}, 600004, None])
+def test_a_failures_stock_code_that_is_not_a_string_is_refused(tmp_path, bad):
+    """⭐⭐ [Kimi K1 medium] 守卫拿 JSON 里读来的值**当集合成员**，而
+    `failures` 是扩展字段、**读侧 `validate_manifest` 完全不碰它**
+    （本机实测：`stock_code` 是 list 的账本读侧照样放行），
+    且这些守卫都排在 `_write_manifest` 的读侧校验**之前** ——
+    于是一份 `stock_code: ["600004.SH"]` 的 payload 让守卫**自己**抛
+    `TypeError: unhashable type: 'list'`，调用方拿到 traceback 而不是
+    `ManifestInvalidError` 的恢复指引。
+    「**守卫自己被它该抓的那种损坏弄坏了**」在本仓是第四次（S2-F9 / S2-F27 同族）。
+
+    ⇒ 按本仓既有做法「**先验类型再比取值**」：`stock_code` 必须是字符串。
+
+    判别力：删掉那条类型检查，list / dict 两档必红（抛 TypeError 而非本类）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        m = _valid_manifest(failures=[{"stock_code": bad, "attempts": 1}])
+        with pytest.raises(ManifestInvalidError, match="stock_code"):
+            commit_stock(fd, m, ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_transfer_guards_survive_an_unhashable_failures_record_on_disk(tmp_path):
+    """⭐ 同族的**另一半**：坏记录**已经躺在磁盘上**（读侧从不校验 `failures`，
+    所以它进得去），而这次的 payload 自己是干净的。
+
+    此时 payload 侧的类型检查够不着它，`_attempts(previous)` 会拿它当字典键
+    → 裸 `TypeError`。守卫必须**总是**能算出一个键来，而不是崩掉。
+
+    ⚠️ 判据不是「跳过坏记录」而是「换一个稳定的键」——S2-F29 的教训是
+    「对坏输入健壮」不许写成「对坏输入放行」，单调/重名那几条判据仍须成立。
+
+    判别力：把 `_hashable` 换回直接取值，本条必红（TypeError）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rotten = _valid_manifest(failures=[{"stock_code": ["600004.SH"],
+                                            "attempts": 1}])
+        _seed_disk(fd, rotten)                      # 读侧放行 → 它进得去
+        ledger = begin_run(fd)
+        clean = _valid_manifest(failures=[{"stock_code": "600006.SH",
+                                           "attempts": 1}])
+        with pytest.raises(ManifestInvalidError):   # 而**不是** TypeError
+            commit_stock(fd, clean, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+def test_transfer_guards_survive_unhashable_file_records(tmp_path):
+    """⭐ 同族第三处：`_by_id` 用 `(stock_code, period, relative_path)` 做元组键，
+    元组里塞一个 list 同样不可哈希。
+
+    判别力：把 `_by_id` 里的 `_hashable` 去掉，本条必红（TypeError）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _valid_manifest())          # 先有一份 previous
+        broken = copy.deepcopy(_valid_manifest())
+        broken["files"][0]["stock_code"] = ["600000.SH"]
+        with pytest.raises(ManifestInvalidError):           # 而**不是** TypeError
+            commit_stock(fd, broken, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("files", [{"stock_code": ["x"], "period": "1m", "relative_path": "a.csv"}]),
+    ("pool_order", {"SH": [{"code": {"a": 1}, "universe_idx": 0}],
+                    "SZ": [], "BJ": []}),
+])
+def test_the_progress_fingerprint_survives_unhashable_input(field, value):
+    """⭐ 同族第四处：`_progress_of` 把这些值装进 `frozenset`。
+
+    它在收尾提交的进度闸里被调用，**排在读侧校验之前**，所以拿到的
+    完全可能是一份没被校验过的 payload。它必须**算得出**一个指纹，
+    而不是抛 `TypeError` 把整次提交炸掉。
+
+    判别力：把 `_progress_of` 里的 `_hashable` 去掉，本条必红。
+    """
+    m = copy.deepcopy(_valid_manifest())
+    m[field] = value
+    fp = _progress_of(m)                       # 不许抛
+    assert fp != _progress_of(_valid_manifest())
+
+
+@pytest.mark.parametrize("a,b,same", [
+    (["600004.SH"], ["600004.SH"], True),          # 相等的坏值 → 同一个键
+    (["600004.SH"], ["600006.SH"], False),         # 不同的坏值 → 不同的键
+    ({"a": 1, "b": 2}, {"b": 2, "a": 1}, True),    # 键序不同但相等 → 同一个键
+    ({"a": 1}, {"a": 2}, False),
+    ([{"x": [1]}], [{"x": [1]}], True),            # 嵌套
+    ([{"x": [1]}], [{"x": [2]}], False),
+    ("600000.SH", "600000.SH", True),              # 正常值不受影响
+    ("600000.SH", "600004.SH", False),
+])
+def test_hashable_preserves_equality_and_distinctness(a, b, same):
+    """⭐ `_hashable` 的注释claim「**相等**的坏值映到同一个键」——
+    而「**不同**的坏值必须映到**不同**的键」是同一句话的另一半，
+    控制者变异实测发现**没有任何测试守它**：把它退化成「所有坏值都返回同一个
+    常量」，全量 1324 条一条不红。
+
+    那一半失守的后果是**放行方向**：磁盘上两条 `stock_code` 不同的坏记录会被
+    `_attempts` 折叠成同一个键、后者覆盖前者 —— 单调判据对被覆盖的那条整个
+    不生效，而 S2-F29 的教训正是「对坏输入健壮」不许写成「对坏输入放行」。
+
+    判别力：把归一逻辑换成任何**丢信息**的写法（返回常量 / 只看类型），本条必红。
+    """
+    ka, kb = _hashable(a), _hashable(b)
+    hash(ka); hash(kb)                              # 必须真的可哈希
+    assert (ka == kb) is same
+
+
+def test_hashable_returns_hashable_values_untouched():
+    """⭐ 正常取值必须**原样返回**（同一个对象），否则
+    `_proved_success` 那类「拿键回去比对原值」的逻辑会静默失配。
+
+    判别力：改成无条件包一层，本条必红。
+    """
+    for value in ("600000.SH", 42, None, True, ("a", 1), frozenset({"x"})):
+        assert _hashable(value) is value
+
+
+def test_no_field_of_any_json_type_escapes_as_a_raw_exception_on_the_write_side():
+    """⭐⭐ **读侧那条整族扫描的写侧对偶**（控制者自查补，非评审要求）。
+
+    读侧那条只喂 `validate_manifest` —— **写侧守卫一个都没被它扫过**。
+    Kimi K1 那条 medium（不可哈希的值让守卫抛裸 `TypeError`）正是从这个缺口
+    漏出去的；而把同一套扫描对准写侧之后，**又当场挖出 7 类 34 个逃逸**，
+    全在 `_pool_ids` 一处：
+      · `.get(mk, [])` 的默认值只在键**缺席**时生效 ⇒ `pool_order.SH = null`
+        交出来的是那个 `None`，随后 `for e in None` 抛裸 TypeError（6 值 × 3 层）；
+      · 集合成员没过 `_hashable` ⇒ `code` 是 list/dict 时集合推导自己崩（16 个）。
+    两个 bug 都是我**已经在旁边那个帮手里修过**的 —— 同一件事判在两处、
+    只改对了一处，本片第三次。
+
+    ⚠️ **不直接跑 `commit_stock`**：它每次都要真落盘（`F_FULLFSYNC`），
+    ~3000 次组合会把整套测试拖慢一个量级。**入口确实接上了这些守卫**，
+    由那四条走真 `commit_stock` / `commit_final` 的点测钉住（分工写在这里，
+    免得将来有人以为本条覆盖了入口）。
+
+    ⚠️ **防空转**：断言探测数下限 —— `_leaf_paths` 哪天被改坏、只枚举出几个
+    位置时，这条会「零逃逸」通过而实际什么都没测。
+    """
+    allowed = (ManifestInvalidError, ManifestVersionError, PathEscapeError)
+    bases = [
+        _valid_manifest(),
+        _valid_manifest(stopped_reason="source_path_escape",
+                        fetch_fatal_error=_fatal(kind="source_path_escape")),
+    ]
+    for b in bases:
+        _recompute_evidence(b)
+    bad_values = {"list": [], "dict": {}, "null": None,
+                  "int": 0, "str": "x", "bool": True}
+    previous = _valid_manifest()
+
+    probed = 0
+    escapes = []
+    for base in bases:
+        for path in list(_leaf_paths(base)):
+            if not path:
+                continue
+            for name, value in bad_values.items():
+                victim = copy.deepcopy(base)
+                _set_at(victim, path, value)
+                for label, call in (
+                    ("引导态", lambda v: _require_no_progress_rollback(
+                        None, v, "写侧整族扫描")),
+                    ("有上一份", lambda v: _require_no_progress_rollback(
+                        copy.deepcopy(previous), v, "写侧整族扫描")),
+                    ("进度指纹", _progress_of),
+                ):
+                    probed += 1
+                    try:
+                        call(victim)
+                    except allowed:
+                        pass
+                    except Exception as exc:            # noqa: BLE001
+                        escapes.append(
+                            f"{label} / {'.'.join(map(str, path))} = {name}"
+                            f" → {type(exc).__name__}: {exc}")
+
+    assert probed >= 2500, (
+        f"只探测了 {probed} 次——`_leaf_paths` 可能被改坏了，本次运行对本判据"
+        "零判别力")
+    assert not escapes, (
+        f"{len(escapes)} 处以**原始异常**逃逸（守卫自己被它该抓的损坏弄坏了）：\n"
+        + "\n".join(escapes[:12]))
+
+
+# ── Opus 对抗性评审 第 4 轮 ─────────────────────────────────────
+# 2 medium + 3 low。⭐ medium ① 不需要任何篡改，用本模块自己的公开 API 就走得通。
+
+
+@pytest.mark.parametrize("first", [
+    pytest.param({}, id="attempts 整个缺席"),
+    pytest.param({"attempts": "2"}, id="attempts 是字符串"),
+    pytest.param({"attempts": None}, id="attempts 是 null"),
+])
+def test_a_failures_entry_cannot_vanish_even_when_its_attempts_was_never_a_number(
+        tmp_path, first):
+    """⭐⭐ [Opus-4 medium①] **单调守卫被「上一份的值必须已经是良型 int」整条关掉**。
+
+    R10 那次修的是**新值**（`nv is None or nv < v`），而**旧值**仍然是整条检查的
+    前置条件（`if v is None: continue`）—— 于是「凭空移出必须自证成功」这一条
+    也被一起跳过了。
+    ⚠️⚠️ **不需要任何篡改**：本模块**自己**就写得出没有 `attempts` 的 failures 记录
+    （读侧完全不碰 `failures`，写侧此前只校验 `stock_code` 的类型、没校验 `attempts`）。
+    本机端到端复现：第一次提交写进一条没有 `attempts` 的记录，第二次把它整个删掉
+    —— 那只股既不在 `pool_order` 里、也没有 `files` 记录（**毫无成功证据**），
+    却被凭空移出 ⇒ 下一次补拉会重新挑中它，正是 codex R10/R12 定为 high 的
+    「**复活一个已经耗尽重试的候选**」。
+
+    判别力：把「凭空移出」那一段挪回 `if v is None: continue` 之后，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rec = {"stock_code": "600004.SH", "universe_idx": 1, **first}
+        # ⚠️ 加了写侧类型校验之后，本模块**自己已经写不出**这种记录了；
+        #    但读侧仍不校验 `failures`，所以它可能来自旧版本或外部编辑 ——
+        #    转移守卫必须照样拦住「凭空移出」。（种进磁盘而不是走 commit_stock。）
+        _seed_disk(fd, _valid_manifest(failures=[rec]))
+        ledger = begin_run(fd)
+        with pytest.raises(ManifestInvalidError, match="移出|成功的证据"):
+            commit_stock(fd, _valid_manifest(failures=[]), ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("bad", [pytest.param("__absent__", id="整个缺席"),
+                                "2", -1, True, 1.5, [2]])
+def test_failures_attempts_must_be_a_non_negative_int_when_present(tmp_path, bad):
+    """⭐ 同族的**另一半：让它一开始就不可能是坏型**。
+
+    `stock_code` 上一轮已经加了类型校验，理由是「它是『哪只股失败过、还剩几次
+    重试』的唯一标识」——而 `attempts` 才是**真正携带重试次数**的那个字段，
+    当时漏了。⚠️ 这是「按字段穷尽而不是按判据句穷尽」的又一次。
+
+    ⚠️ 评审同时推翻了我不做读侧校验的理由：**「键存在时校验它的类型」既不是
+    新增必需字段、也不需要 bump `manifest_version`**（O2-F8 管的是前者）。
+    这条落在写侧固有检查里，正是同一个道理。
+
+    判别力：删掉这条类型检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rec = {"stock_code": "600004.SH", "universe_idx": 1}
+        if bad != "__absent__":
+            rec["attempts"] = bad
+        m = _valid_manifest(failures=[rec])
+        with pytest.raises(ManifestInvalidError, match="attempts"):
+            commit_stock(fd, m, ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("field,seed", [
+    ("committed_bytes", lambda m: m.__setitem__("committed_bytes", "9000000")),
+    ("inflight_rollbacks", lambda m: m.__setitem__("inflight_rollbacks", {"1": "2"})),
+])
+def test_a_corrupt_previous_monotonic_value_is_refused_not_skipped(tmp_path, field, seed):
+    """⭐ 同族第三处：**上一份**的单调计数是坏型时，守卫整条被跳过而不是拒绝。
+
+    「对坏输入要健壮」（S2-F9）指的是**别崩**，**不是别拦** —— 这句话就写在
+    这段代码自己的注释里，而它只落实到了新值那一半。
+
+    ⚠️⚠️ **断言必须用新判据的专属措辞「读到的上一份」**（控制者变异实测）：
+    只写 `match="inflight_rollbacks"` 时本条**零红** —— 关掉新判据后，
+    `_carry_forward_persisted_keys` 把坏值从磁盘带进 payload，于是**旧的那条
+    「新值必须良型」接住了它**，而两条消息里都含字段名。
+    同一族「判据互相掩盖」在本片是第四次，这次是我自己的断言太宽。
+
+    判别力：把新加的「上一份坏型即拒」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        rotten = _valid_manifest()
+        seed(rotten)
+        _seed_disk(fd, rotten)                 # 读侧不校验这两个扩展字段 ⇒ 它进得去
+        with pytest.raises(ManifestInvalidError, match="读到的上一份"):
+            commit_stock(fd, _valid_manifest(), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_published_this_run_re_arms_the_recheck_gate(tmp_path):
+    """⭐⭐ [Opus-4 medium②] 复校凭据只锚定**运行起点**，而 `commit_final`
+    **不是每轮只能调一次**。
+
+    本机复现：账本带旧逃逸 → 登记复校通过（针对**旧**那条路径）→ 收尾发布一条
+    **新路径**的 staging 逃逸 → **同一轮**再收尾一次，fatal 被清光。
+    那份凭据**早于**它要清掉的那条逃逸 —— 等于拿昨天的体检报告证明今天没病。
+
+    判别力：把 `_advance` 里「本轮自己发布的 fatal 要重新武装」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="新路径/x.csv",
+            component="新路径", errno="ELOOP"))
+        with pytest.raises(ManifestInvalidError, match="登记|一致"):
+            commit_final(fd, _valid_manifest(), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert read_manifest(fd)["fetch_fatal_error"]["relative_path"] == "新路径/x.csv"
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_published_this_run_freezes_progress(tmp_path):
+    """⭐⭐ [Opus-4 medium② 的另一面] 干净起步的运行发布了一条 escape 之后，
+    **进度冻结闸也没被武装**：`commit_stock` 照样推进 `files` / `cursor`。
+
+    本机复现：files 4→6、cursor SH 1→2，而盘上带着一条**未解除的**
+    `staging_path_escape`。spec:1035 / P2-F3 明写这样的一轮不得推进。
+
+    判别力：同上，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 干净起步
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="a/x.csv",
+            component="a", errno="ELOOP"))
+        before = read_manifest(fd)
+        with pytest.raises(ManifestInvalidError, match="复校|推进|进度"):
+            commit_stock(fd, _with_more_stocks(_valid_manifest()), ledger=ledger)
+        assert read_manifest(fd) == before
+    finally:
+        os.close(fd)
+
+
+def test_a_permission_error_is_not_mislabelled_as_a_tampered_staging(tmp_path, monkeypatch):
+    """⭐ [Opus-4 low] 一个**普通文件**打不开（权限/资源）时，绝不能被报成
+    「这棵 staging 已被动过，请换新 staging + 新 seed 重拉」。
+
+    ⚠️ **两个方向都要钉**：
+    ① 探测器的兜底**必须**先问「它到底是不是普通文件」——去掉那一问，一次
+       `EACCES` 就会让操作者把一棵几百只股的健康 staging 报废（评审实测该判据
+       无人守）；
+    ② 于是权限错误**如实**以 `OSError` 冒出来。它**不属于**
+       `ManifestInvalidError` 那族 —— 恢复动作是 `chmod`，不是重拉。
+       故 `read_manifest` 的 docstring 把它列进声明的异常集合，而不是硬翻译成
+       一句会误导人的指引。
+
+    ⚠️ 用 monkeypatch 而不是 `chmod 000`：CI 上可能以 root 跑，那样 chmod 拦不住
+    读取，本条会在 Linux 上无声失效（本仓「零跳过」，不能靠 skip 绕过）。
+
+    判别力：把探测器兜底里的 `S_ISREG` 判断删掉，本条必红。
+    """
+    import qmt_fsroot as _fs
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())                 # 盘上是**普通文件**
+        real = _fs.open_under
+
+        def deny(dir_fd, name, **kw):
+            if name == MANIFEST_NAME:
+                raise PermissionError(13, "Permission denied")
+            return real(dir_fd, name, **kw)
+
+        monkeypatch.setattr(_fs, "open_under", deny)
+        with pytest.raises(PermissionError):
+            read_manifest(fd)
+        with pytest.raises(PermissionError):
+            begin_run(fd)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_may_not_rebind_a_different_stocks_files(tmp_path):
+    """⭐ [Opus-4 low] 恢复豁免里的「**必须是那一只**」没人守。
+
+    实测删掉 `and key[0] == recovery.stock_code`，全量一条不红。而它真承重：
+    一次合法地移除在途股 R 的提交，可以**同时**把**另一只**已提交股 X 的两条
+    `files` 记录改绑到别的路径 —— 正是 codex R13 定为 high 的
+    「一只已提交的股票被重新绑定到不同的文件，pilot 的 `staging_intact`
+    从此校验的是被换过的基线」。
+    ⚠️ 既有那条 `..._may_not_rebind_a_committed_stock_to_different_files` 改绑的是
+    **恢复目标本身**，被 `scoped_removed` 保持 False 接住，**走不到这条豁免**。
+
+    判别力：删掉那半个条件，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _multi_stock()
+        ledger = _committed(fd, full)
+        bad = _drop_stock(full)                      # 合法：移除在途的 600004
+        bad["cursor"]["SH"] = 1                      # 合法：耦合的游标回退
+        for f in bad["files"]:                       # 非法：顺手改绑**另一只**股
+            if f["stock_code"] == "600000.SH":
+                f["relative_path"] = f["relative_path"].replace(".csv", "_换过.csv")
+        _recompute_evidence(bad)
+        with pytest.raises(ManifestInvalidError, match="回滚|范围"):
+            commit_stock(fd, bad, ledger=ledger, recovery=_scope())
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda m: m["staged_export_log"].__setitem__(
+        "relative_path", "别处/export_log.csv"), id="relative_path 被换"),
+    pytest.param(lambda m: m["staged_export_log"].__setitem__("bytes", 1),
+                 id="bytes 被调小"),
+])
+def test_the_staged_export_log_record_is_frozen(tmp_path, mutate):
+    """⭐ [Opus-4 low] `staged_export_log` 在 `_FROZEN_KEYS` 里的那一项没人守。
+
+    实测把它从冻结清单里删掉，全量一条不红 —— `sha256` 的漂移被冻结的
+    `source_snapshot` 掩盖了，但 `relative_path` 与 `bytes` **没有**：
+    把 `bytes` 调小会让 `--max-bytes` 的下限**少算**一整份 export_log。
+
+    判别力：从 `_FROZEN_KEYS` 里删掉 `staged_export_log`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        ledger = _committed(fd, _valid_manifest())
+        tampered = copy.deepcopy(_valid_manifest())
+        mutate(tampered)
+        _recompute_evidence(tampered)
+        with pytest.raises(ManifestInvalidError, match="冻结"):
+            commit_stock(fd, tampered, ledger=ledger)
+    finally:
+        os.close(fd)
+
+
+# ── Opus 对抗性评审 第 5 轮 ─────────────────────────────────────
+# 2 high + 1 medium + 2 low。⚠️⚠️ **两条 high 都是 Opus-4 那次「重新武装」
+# 修复自己捅出来的**：我把判据绑在 `_needs_staging_recheck` 上，而
+#   ① P2-F3 那个具名结局本身就满足它 ⇒ 发布它会把本轮自己的凭据清掉；
+#   ② `source_path_escape` 不满足它 ⇒ 对源侧逃逸整个不生效。
+# ⇒ 把两件事拆开：「整次致命 ⇒ 冻结 + 需要新凭据」对**任何** fatal 生效，
+#   `_needs_staging_recheck` 只回答「清除它要哪一道前提」。
+
+
+def test_publishing_the_named_failed_recheck_outcome_keeps_the_verdict_sticky(tmp_path):
+    """⭐⭐ [Opus-5 high①] 发布 P2-F3 **明令要发布**的那个结局，把本轮自己的
+    「复校失败」凭据清掉了 —— 于是「结论不许改口」那道闸凭空消失。
+
+    本机端到端复现（**全程公开 API、没有篡改也没有说谎**）：
+      `attest(False)` → `commit_final(staging_recheck="failed")`（盘上正确记下
+      `staging_recheck_failed` + 保留 fatal）→ **`attest(True)` 被接受** →
+      再收尾一次 → **fatal 与 stopped_reason 全被删掉**。
+    一棵**已被证明复校没通过**的 staging 就这样带着干净账本出货，
+    而 pilot 的 fail-closed 判据（`fetch_fatal_error` 存在，O4-F1）没了。
+
+    ⚠️ 既有那条 `test_the_recheck_verdict_cannot_be_flipped_once_attested`
+    之所以是绿的，只因为它把两次 `attest` **背靠背**放在一起、中间没有
+    `commit_final` —— 有意思的那个次序它的 setup 根本到不了。
+
+    判别力：把 `failed` 的粘性去掉（让 `_advance` 照常重置它），本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned())
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=False)
+        commit_final(fd, _warned(), ledger=ledger,
+                     outcome=clean_finish(revisited_fatal_path=True,
+                                          staging_recheck="failed"))
+        assert read_manifest(fd)["stopped_reason"] == "staging_recheck_failed"
+        with pytest.raises(ValueError, match="改口|已登记"):
+            attest_staging_recheck(ledger, passed=True)
+        assert "fetch_fatal_error" in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("kind", ["source_path_escape", "staging_path_escape"])
+def test_a_fatal_published_this_run_blocks_further_stock_commits(tmp_path, kind):
+    """⭐⭐ [Opus-5 high②(a)] 「整次 fetch 致命」对**两种** kind 都成立
+    （spec:1025 与 spec:1035 措辞一致：不记 failure / 不加 attempts / 不推进 cursor），
+    而重新武装此前绑在 `_needs_staging_recheck` 上 —— 它对源侧逃逸是 False。
+
+    本机复现（source 侧）：发布 `source_path_escape` 之后 `commit_stock` 照样
+    把 files 4→6、cursor SH 1→2、累计字节 733 万→980 万 —— 一棵**已被证明
+    分量被换过**的树继续烧冻结宇宙与 `--max-bytes` 预算。
+
+    判别力：把冻结判据换回 `_needs_staging_recheck`，source 那一档必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind=kind, relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        before = read_manifest(fd)
+        with pytest.raises(ManifestInvalidError, match="致命|复校"):
+            commit_stock(fd, _with_more_stocks(_valid_manifest()), ledger=ledger)
+        assert read_manifest(fd) == before
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("kind,fresh_attest", [
+    ("source_path_escape", False),      # 清它只要前提①
+    ("staging_path_escape", True),      # 清它另需前提②，故本轮补登记一次复校
+])
+def test_a_fatal_published_this_run_cannot_be_cleared_in_the_same_run(
+        tmp_path, kind, fresh_attest):
+    """⭐⭐ [Opus-5 high②(b)] **本轮自己发布的 fatal 不许在同一轮里清掉**。
+
+    任何清除前提（重走过那条路径 / 全量复校通过）**都必然早于**它 ——
+    拿昨天的体检报告证明今天没病。本机复现（source 侧，payload 与推进后的
+    磁盘状态一致，避免被回滚守卫以别的理由拒掉）：第二次收尾声称
+    `revisited_fatal_path=True`，fatal 与 stopped_reason 全被清光。
+
+    ⚠️ 这条判据**不看 kind**，所以它同时兜住了 high① 那条路。
+    ⚠️ **判据取「本轮发布过就不许清」而不是「凭据要晚于它」**：spec 把撞逃逸
+    定为**整次 fetch 致命**（rc≠0 就该结束），所以「发布 fatal 之后又干净收尾」
+    这条流程本来就不该存在 —— 与其去追凭据的先后，不如让它不可表达。
+    ⚠️⚠️ **断言必须用这条判据的专属措辞「自己发布」**（控制者变异实测）：
+    第一版写 `match="同一轮|本次运行"` 时**两档都假绿** —— 它撞上了既有
+    一致性检查的文案「而**本次运行**登记的是 None」。同一族第五次，
+    其中第三次是我自己的断言太宽（前两次是 `match="过大"` 与裸字段名）。
+
+    判别力：删掉「本轮发布过 fatal 就不许清」这条，两档都必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind=kind, relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        payload = {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+        if fresh_attest:
+            attest_staging_recheck(ledger, passed=True)     # 本轮补做的复校
+            outcome = clean_finish(revisited_fatal_path=True,
+                                   staging_recheck="passed")
+        else:
+            outcome = clean_finish(revisited_fatal_path=True)
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, payload, ledger=ledger, outcome=outcome)
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == kind
+    finally:
+        os.close(fd)
+
+
+def test_a_fatal_published_this_run_may_still_be_overwritten_by_a_stricter_one(tmp_path):
+    """⭐ **正向档**：本轮发布过 fatal 之后，**换成同级或更严的那一条**必须照常允许
+    （新的生命周期里仍然带着 fatal，不构成「清掉」）。
+
+    判别力：把判据写成「本轮发布过 fatal 就一律拒绝收尾」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        payload = {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+        w = commit_final(fd, payload, ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="1分钟K线_前复权/y.csv",
+            component="1分钟K线_前复权", errno="ELOOP"))
+        assert w["fetch_fatal_error"]["kind"] == "staging_path_escape"   # 升级成功
+    finally:
+        os.close(fd)
+
+
+def test_a_skip_verify_run_can_never_attest_a_full_recheck(tmp_path):
+    """⭐ [Opus-5 medium] `--skip-existing-verify` 的互斥**只在启动时判**。
+
+    干净起步的运行带着该 flag 合法启动，随后**自己发布**一条 staging 逃逸 →
+    此时它与「启动时就带着 escape 记录」完全等价，而模块什么都没复判：
+    `attest(passed=True)` 被接受，下一次收尾把 fatal 清掉。
+    而 `attest_staging_recheck` 存在的全部理由就是「调用方口头上报的东西不能
+    当凭据」—— 这恰恰是它**唯一能交叉核对却没核**的那个调用方声明。
+
+    判别力：删掉 attest 里的 skip-verify 检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd, skip_existing_verify=True)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="staging_path_escape", relative_path="a/x.csv",
+            component="a", errno="ELOOP"))
+        with pytest.raises(SkipVerifyWithEscapeError, match="互斥|跳过"):
+            attest_staging_recheck(ledger, passed=True)
+    finally:
+        os.close(fd)
+
+
+def test_resolve_refuses_a_reason_that_requires_a_fatal_without_one():
+    """⭐ [Opus-5 low] 决策表的纵深防御**只查了配对的一个方向**。
+
+    它 fail-close「有 fatal 却没 reason」，而 `_require_escape_pairing` 在
+    `fatal is None` 时直接返回 ⇒ 反方向（reason 属于 `REASONS_REQUIRING_FATAL`
+    却没有 fatal）掉进分支②被当成「上次没有 fatal」，返回 `{}`
+    —— **静默丢掉一个「已证明复校没通过」的结论**。
+    ⚠️ 走 `commit_final` 到不了这里（磁盘那份先过读侧），所以这纯粹是
+    docstring 自称提供的那层纵深防御没做全。
+
+    判别力：删掉新加的反方向检查，本条必红。
+    """
+    for reason in sorted(REASONS_REQUIRING_FATAL):
+        m = _valid_manifest(stopped_reason=reason)          # 没有 fetch_fatal_error
+        with pytest.raises(ManifestInvalidError, match="配对|没有 fetch_fatal_error"):
+            resolve_final_lifecycle(m, clean_finish(revisited_fatal_path=True))
+
+
+@pytest.mark.parametrize("field,rotten,payload", [
+    ("batches", {"batches": {"n": 1}}, {"batches": []}),
+    ("inflight_rollbacks", {"inflight_rollbacks": ["x"]}, {"inflight_rollbacks": {}}),
+])
+def test_a_wrong_typed_previous_container_is_refused_not_skipped(
+        tmp_path, field, rotten, payload):
+    """⭐ [Opus-5 low] 上一份的**容器类型**不对时，整条 append-only / 单调判据
+    被跳过 —— 正是同一次提交里刚给 `committed_bytes` 与**内层取值**改成「拒绝」
+    的那个形态（注释里自己写着「三处同族」），**容器这一层漏了**。
+
+    本机复现：盘上 `batches` 是 dict / `inflight_rollbacks` 是 list 时，
+    下一次提交把历史抹成空，无人拦。而这两个都是扩展字段、读侧写侧都不校验
+    ⇒ 本模块自己就可能把坏容器写上盘。
+
+    判别力：把新加的「容器类型不对即拒」删掉，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest(**rotten))
+        with pytest.raises(ManifestInvalidError, match="读到的上一份"):
+            commit_stock(fd, _valid_manifest(**payload), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_a_fatal_published_this_run_also_freezes_progress_at_the_final_commit(tmp_path):
+    """⭐ 发布 fatal 之后，**收尾入口**也不许推进进度（控制者变异自查补）。
+
+    `commit_stock` 已经被整个挡住了，但 `commit_final` **自己交回来的 payload
+    仍然会落盘** —— 一次「覆盖成更严的 fatal」的收尾（新生命周期里仍有 fatal，
+    所以「不许清」那条拦不住它）可以顺手把 `files` / `cursor` / 累计字节推上去，
+    继续烧冻结宇宙与 `--max-bytes` 预算。
+
+    判别力：把进度冻结条件里的 `or st.fatal_published` 去掉，本条必红
+    （变异实测：去掉后全量一条不红，此档就是补上的那一条）。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _valid_manifest())
+        ledger = begin_run(fd)
+        commit_final(fd, _valid_manifest(), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        cur = read_manifest(fd)
+        grown = _with_more_stocks(
+            {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS})
+        with pytest.raises(ManifestInvalidError, match="推进|进度"):
+            commit_final(fd, grown, ledger=ledger, outcome=escape_stop(
+                kind="staging_path_escape", relative_path="1分钟K线_前复权/y.csv",
+                component="1分钟K线_前复权", errno="ELOOP"))
+        assert len(read_manifest(fd)["files"]) == len(cur["files"])
+    finally:
+        os.close(fd)
+
+
+# ── 独立评审（守卫层增量收口轮）──────────────────────────────────
+# ⚠️⚠️ 这一轮挖出的 high **正是控制者 5832 条状态机探索漏掉的那一类**：
+# 我的 `escape_stop` 永远用一条**不同的路径**，于是生命周期总在变、武装总会触发；
+# 「本轮再次撞上磁盘上一模一样的那条逃逸」这一整类操作**根本没进枚举空间**，
+# 而它恰恰是现实中最常见的一种（操作者没修好就重跑）。
+# ⇒ **「穷尽探索」的说服力完全取决于操作集选得对不对，而少一类操作不会以任何
+#    形式报错，只会安静地给你一个漂亮的 0。**
+
+
+def _same_fatal():
+    return {"kind": "staging_path_escape", "relative_path": "1分钟K线_前复权/x.csv",
+            "component": "1分钟K线_前复权", "errno": "ENOTDIR"}
+
+
+def _warned_with(fatal):
+    return _valid_manifest(fetch_fatal_error=dict(fatal),
+                           stopped_reason=fatal["kind"])
+
+
+def _live_payload(fd):
+    cur = read_manifest(fd)
+    return {k: v for k, v in cur.items() if k not in LIFECYCLE_KEYS}
+
+
+def test_republishing_the_very_same_escape_still_arms_the_run(tmp_path):
+    """⭐⭐ [独立评审 high(b)] **没修好就重跑**：本轮再次撞上磁盘上那条
+    **一模一样**的逃逸 —— 记录逐字节相同 ⇒ `lifecycle != st.lifecycle` 为假
+    ⇒ 武装整个不触发。于是还能继续提交股票，还能在**同一轮**把 fatal 清光。
+
+    ⚠️ 对照实验（评审做的、控制者复核过）：把 `relative_path` 换成别的，
+    武装就正常触发、提交被拒 —— **说明武装与否只取决于「记录变没变」，
+    而不是「这一轮撞没撞逃逸」**，这正是判据问错了问题。
+
+    判别力：把武装判据换回 `lifecycle != st.lifecycle and 有 fatal`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger,
+                     outcome=escape_stop(**_same_fatal()))     # 同一条逃逸
+        with pytest.raises(ManifestInvalidError, match="自己发布|致命"):
+            commit_stock(fd, _with_more_stocks(_live_payload(fd)), ledger=ledger)
+        # ⚠️ 发布之后**补登记一次复校**：不补的话「上报 vs 登记」那条一致性检查
+        #    会先开火（武装时 recheck 被重置成 None），本档就钉不到「不许清」。
+        attest_staging_recheck(ledger, passed=True)
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, _live_payload(fd), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert read_manifest(fd)["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+def test_an_escape_refused_as_a_downgrade_still_arms_the_run(tmp_path):
+    """⭐⭐ [独立评审 high(a)] 决策表分支①**保住更严的旧 fatal**（拒绝降级）时，
+    返回的生命周期与旧的相等 ⇒ 武装同样不触发。
+
+    场景：盘上是 staging 逃逸；本轮复校通过、拉了股，然后**发现源树被换过**
+    （source 逃逸）。分支①正确地拒绝降级、保住 staging 那条 —— 但这一轮
+    **确实撞了逃逸**，却没有被武装，于是同轮再收尾一次就把 fatal 清光了：
+    一个**发现源树被换过**的运行，最后交出一份**完全没有 fatal** 的账本。
+
+    判别力：同上，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger, outcome=escape_stop(
+            kind="source_path_escape", relative_path="日K线_前复权/b.csv",
+            component="日K线_前复权", errno="ENOTDIR"))
+        assert read_manifest(fd)["stopped_reason"] == "staging_path_escape"  # 分支①
+        attest_staging_recheck(ledger, passed=True)      # 同上，让一致性检查过关
+        with pytest.raises(ManifestInvalidError, match="自己发布"):
+            commit_final(fd, _live_payload(fd), ledger=ledger,
+                         outcome=clean_finish(revisited_fatal_path=True,
+                                              staging_recheck="passed"))
+        assert "fetch_fatal_error" in read_manifest(fd)
+    finally:
+        os.close(fd)
+
+
+def test_the_ledgers_lifecycle_is_not_a_live_reference(tmp_path):
+    """⭐⭐ [独立评审 high(c)] `ledger.lifecycle` 返回的是**内部那个 dict 本身**，
+    调用方一行赋值就能改掉模块的内部状态。
+
+    ⚠️ 这与 R1 那条「`lifecycle_snapshot` 只拷了顶层」是**同一个教训的第二处**：
+    凡是「把安全事实交出去」的读取口，都要问「交出去的是副本还是本体」。
+
+    判别力：把属性改回 `return self._state().lifecycle`，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        got = ledger.lifecycle
+        got["fetch_fatal_error"] = {"kind": "伪造"}
+        got["stopped_reason"] = "伪造"
+        assert ledger.lifecycle["stopped_reason"] == "staging_path_escape"
+        assert ledger.lifecycle["fetch_fatal_error"]["kind"] == "staging_path_escape"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("bad", [
+    pytest.param({"batches": {"n": 1}}, id="batches 是 dict"),
+    pytest.param({"batches": None}, id="batches 是 null"),
+    pytest.param({"inflight_rollbacks": ["x"]}, id="inflight 是 list"),
+    pytest.param({"inflight_rollbacks": 3}, id="inflight 是 int"),
+])
+def test_the_write_side_cannot_mint_a_container_the_read_side_will_refuse(tmp_path, bad):
+    """⭐⭐ [独立评审 medium] **我上一轮自己捅的「过紧」**：新加的容器类型检查
+    只查 `previous`，而写侧固有检查**没有**这两条 ⇒ **首次提交**就能把
+    `batches: {...}` 写上盘，此后每次提交（含崩溃恢复）都被拒 ——
+    **那棵 staging 永久砖化，只能手改 JSON 才能救回来。**
+
+    本机复现三种形态全部砖化。这正是本模块自己 docstring 里点名的失败形态
+    （「引导态第一次提交就把…写了进去…这棵 staging 当场卡死」），而我在
+    加读侧那半时没把写侧这半补上。
+
+    判别力：删掉写侧新加的容器检查，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        with pytest.raises(ManifestInvalidError, match="batches|inflight_rollbacks"):
+            commit_stock(fd, _valid_manifest(**bad), ledger=begin_run(fd))
+    finally:
+        os.close(fd)
+
+
+def test_a_max_bytes_annotation_does_not_pretend_the_run_published_a_fatal(tmp_path):
+    """⭐ [独立评审 low] 决策表分支③给**别人的** fatal 加一条 `max_bytes` 附注，
+    字典变了且带 fatal ⇒ 被误判成「本轮自己发布了 fatal」：
+    `fatal_published` 置位、已登记的 `passed` 被清成 `None`，
+    而随后的报错文案会说「本次运行已经**自己发布**过 fetch_fatal_error」—— 那是假的。
+
+    判别力：把武装判据换回「记录变了且带 fatal」，本条必红。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        _seed_disk(fd, _warned_with(_same_fatal()))
+        ledger = begin_run(fd)
+        attest_staging_recheck(ledger, passed=True)
+        commit_final(fd, _live_payload(fd), ledger=ledger, outcome=max_bytes_stop())
+        st = ledger._state()
+        assert st.fatal_published is False, "本轮并没有发布 fatal，只是加了附注"
+        assert st.recheck == "passed", "已登记的复校结论不该被附注清掉"
+    finally:
+        os.close(fd)
