@@ -84,17 +84,45 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | 文件 | 改什么 |
 |---|---|
 | `scripts/governance/build-protection-put-payload.py` | 新增 `BACKEND_TESTS_CONTEXT` 常量；`REQUIRED_CONTEXTS` 追加它；订正文件头 docstring 里已过时的「Catalyst + app-build」表述 |
-| `tests/scripts/governance/test_build_payload.py` | 同步 canonical 期望。**必须逐条打开那 15 个测试判断哪些依赖该清单**，不能只改名字最像的那一个 |
+| `tests/scripts/governance/test_build_payload.py` | 同步 canonical 期望 |
+| `tests/scripts/governance/test-verify-required-checks.sh` | 同上（见下方 ⚠️） |
+| `tests/scripts/governance/test-admin-runbook.sh` | 同上（见下方 ⚠️） |
+| `tests/scripts/governance/fixtures/*.json` | 代表「已合规」的 fixture 需含新 context（**哪几个由实跑决定，不靠猜**） |
 | 本 spec + 后续 plan | 文档 |
 
 **不新增文件，不改任何 workflow。**
+
+### ⚠️ 4.1 改动面比初版 spec 写的大（Kimi 评审 R1 指出，已复核）
+
+初版只列了 pytest 那一个文件。实际入口是 `tests/scripts/governance/run-all.sh`，它跑
+**三套**：pytest + `test-verify-required-checks.sh` + `test-admin-runbook.sh`。而
+`verify-required-checks.sh` 的清单是从 builder 的 `--list-contexts` **动态派生**的，
+所以清单一加第三项，那些 fixture 只含两条 context 的用例**必然变红**。
+
+已复核的具体破法（用例编号均已核实存在）：
+
+| 用例 | 为什么破 |
+|---|---|
+| verify 的 "assert happy → 0" | fixture `ruleset-with-check.json` 只含 Catalyst + app-build → 报「缺 required check」→ rc=1 |
+| admin-runbook #2「apply no-op（已合规）」 | fixture 缺新 context ⇒ builder 会补 ⇒ 不再 no-op ⇒「无 PUT」断言破 |
+| #5、#6a | 同因（N3 fixture 缺新 context → post-assert 败） |
+
+**目录下共 19 个 fixture**（已枚举），远多于评审点名的两个。因此本 spec **不预先列出**
+要改哪几个 —— 那是按印象猜。正确做法写进 plan：**跑一遍 `run-all.sh`，红哪个改哪个**，
+改完再跑一遍确认 ALL GREEN。
 
 ## 5. 验证策略
 
 判绿一律读**执行量**，不读结论字样（本仓最常踩的假绿家族）。
 
-### 5.1 基线
-`tests/scripts/governance/` 当前 **15 passed**（已在 main `db49f60` 实测）。
+### 5.1 基线（初版写错了，已订正）
+
+**真基线 = `bash tests/scripts/governance/run-all.sh` → `ALL GREEN`，63 条断言全过**
+（已在 `ea818f2` 实测）。
+
+初版 spec 写的「15 passed」是**只跑了 pytest 那一个文件**的结果 —— 只覆盖三套里的一套。
+这是个典型的「基线量少了」：拿它当基线，另外两套的红根本不会被发现。**判绿必须用
+`run-all.sh` 这个入口**，不能用我顺手敲的那条 pytest 命令。
 
 ### 5.2 变异验证（必做，全部亲跑）
 每条都要**先看它红、且红在预期的那一条判据上**。归因要单独核 —— 结论对不代表归因对。
@@ -105,7 +133,14 @@ GitHub 的 check context = job 的显示名。`backend-tests.yml` 里 job id 为
 | M2 | 从 `REQUIRED_CONTEXTS` 里删掉新加的那项 | 红 |
 | M3 | 删掉 `APP_BUILD_CONTEXT`（既有项） | 红 —— 证明测试不是只盯新项 |
 | M4 | 常量顺序调换 | 记录是红是绿。**若绿**，说明判据不约束顺序 —— 那就明写「顺序无语义」，别假装它被测了 |
-| **M5** | **反向对照**：不做任何变异 | **必须全绿**。缺了这一档，一个恒红的测试看起来也像在工作 |
+| **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
+
+**⚠️ 额外的归因要求（Kimi R1 指出，属实）**：`test-admin-runbook.sh` 里 #6b/#6c/#6d/#6e
+这几个用例**本来就期望 rc=1**。它们的 fixture 缺新 context 之后，会因为「缺 context」
+而继续 rc=1 —— 看起来是绿的，但**红的理由已经不是它们各自声称的那个**（保护流失 /
+多出 bypass / param 削弱 / 未知状态）。这正好踩中本 spec §5.2 开头那句「结论对不代表
+归因对」。故：**这四个用例改完 fixture 后必须逐个确认它仍因自己那条理由失败**，
+不能只看 rc。
 
 ### 5.3 真环境干跑（比读代码可靠）
 builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此：取**真实的** ruleset JSON
@@ -159,12 +194,13 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | A1 | 看 PR 的改动文件列表 | 只有 2 个代码文件 + 2 份文档；**没有**任何 `.github/workflows/` 下的文件 | |
-| A2 | 在 worktree 里跑那套治理测试 | 全部通过，数量不少于 15 | |
+| A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
 | A5 | 看我给出的干跑 diff | 只新增两条 context；`enforcement`、绕过名单、其它四条 context 一个字都没变 | |
 | A6 | 应用之后再看网页上的必需检查列表 | 从 6 项变成 8 项，新增的正是后端测试和 iOS 构建 | |
 | A7 | 应用之后随便开一个新 PR（或看已开的） | 检查列表里 `backend pytest (full suite)` 标着「Required」 | |
+| A7b | 应用之后，看脚本打印的 artifact 目录，确认里面**真的有** `rollback-payload.json` 这个文件 | 文件存在且非空 —— 它是唯一可用的回滚凭据（见 §9；**该路径未实跑演练过**） | |
 | A8 | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | 合并按钮**变灰、点不了**，提示必需检查未通过。确认后关掉该 PR、不要合 | |
 
 A8 是这次改动的**唯一真凭据**：前面几条都只证明「配置改了」，只有它证明「真的拦得住」。
@@ -172,6 +208,29 @@ A8 是这次改动的**唯一真凭据**：前面几条都只证明「配置改�
 
 ## 9. 回滚
 
-应用脚本是幂等的：把 `REQUIRED_CONTEXTS` 改回两项、重跑应用即可。**但注意** GitHub 的
-Rulesets API 是整份 PUT —— 回滚同样要走 builder 生成的完整 payload，不要手工编辑网页，
-否则会引入新的「清单与现实脱节」。
+> ⚠️ **初版这一节写的方法是假的**（Kimi 评审 R1 指出，已逐行复核源码确认）。原文写
+> 「把 `REQUIRED_CONTEXTS` 改回两项、重跑应用即可」—— **那样什么都不会发生**，而且脚本
+> 还会报「已合规」，让人以为回滚成功了。这类「看起来成功、实际没做」是本仓最该防的形态，
+> 故完整保留原委。
+
+**为什么假**（两处源码，均已亲自读过）：
+
+1. `build-protection-put-payload.py:52-64` 的循环**只遍历 `REQUIRED_CONTEXTS`、只增不删** ——
+   对不在清单里的既有条目原样保留。所以清单改回两项后，live 上那条 backend **依然被复制进
+   payload**。
+2. `admin-configure-required-checks.sh:168` 有个 **no-op 短路**：
+   `diff -q payload.json rollback-payload.json` 一致就「skip PUT」。而第 1 点保证了两者一致 ⇒
+   **根本不发 PUT**，必需检查纹丝不动。
+
+**真正的回滚路径**：应用时脚本会用 `--normalize-only` 把**应用前的原状态**落盘为
+`<artifact 目录>/rollback-payload.json`（`admin-configure-required-checks.sh:157-158`）。
+回滚 = 把**那份文件**整份 PUT 回去。
+
+因此本次交付有一条硬要求：
+
+> **应用那一步必须保留 artifact 目录，并把 `rollback-payload.json` 的路径记录下来。**
+> 没有它就没有可用的回滚凭据 —— 只能手工在网页上改，而那会引入新的「清单与现实脱节」。
+
+**验收**：回滚路径**不做实跑演练**（那要求先真改一次 main 的保护设置再改回来，代价过高）。
+它作为**书面凭据**交付，并在 §8 的验收里要求 user 确认 artifact 目录与该文件真实存在 ——
+这一点必须诚实标注为「未实跑验证」，不能写成已验证。
