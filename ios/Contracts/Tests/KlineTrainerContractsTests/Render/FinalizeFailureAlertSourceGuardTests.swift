@@ -206,6 +206,16 @@ struct FinalizeFailureAlertSourceGuardTests {
             #expect(claimed == actual,
                     "验收清单声称 \(claimed) 条，\(file) 实际 \(actual) 条 —— 复核者会按文档对账")
         }
+
+        // ⚠️ 第三个会过期的数字：文档里写的 Catalyst 基线。它已经错过三轮（1890/1894/1896），
+        //    每次都是我加完守卫忘了回头改（Kimi R6-medium）。⇒ 同样机械绑定到基线文件本身。
+        let hit = try #require(doc.range(of: "跨轮累计 1864→"), "锚点失效：文档里找不到基线陈述")
+        let claimedBaseline = String(doc[hit.upperBound...].prefix { $0.isNumber })
+        let liveBaseline = try String(contentsOf: root
+            .appendingPathComponent(".github/scripts/catalyst-total-baseline.txt"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(claimedBaseline == liveBaseline,
+                "验收清单写基线 \(claimedBaseline)，而 catalyst-total-baseline.txt 是 \(liveBaseline)")
     }
 
     /// 取 `cannotPreserveCopy` 里某一支 `case` 返回的**那一个字符串字面量**（不含代码与注释）。
@@ -238,10 +248,16 @@ struct FinalizeFailureAlertSourceGuardTests {
     /// ⇒ 判据锚在**语境**而不是字面：把该支按「。；」切句，凡出现「放弃本局」的句子，
     ///    必须同时出现「失败」——那是警告；没有它就是在把放弃当出路推荐。
     private func discardMentionsAreAllWarnings(_ branch: String) -> Bool {
-        for sentence in branch.split(whereSeparator: { $0 == "。" || $0 == "；" }) {
-            if sentence.contains("放弃本局") && !sentence.contains("失败") { return false }
-        }
-        return true
+        // ⚠️ 上一稿判据是「同句里同时出现『放弃本局』和『失败』」，Kimi R6 证明它分不清
+        //    那个「失败」修饰的是谁：「若重试入账仍然失败，也可以选择『放弃本局』离开。」
+        //    —— 共现成立，而句子实际是在**推荐**放弃。
+        // ⇒ 收紧两处：①「放弃本局」在本支**至多出现一次**（多处提及无法逐一判性质）；
+        //             ②那一次必须落在**固定的警告短语**里，措辞不许自由发挥。
+        let occurrences = branch.components(separatedBy: "放弃本局").count - 1
+        guard occurrences <= 1 else { return false }
+        guard occurrences == 1 else { return true }          // 一次都不提，本来就没问题
+        return branch.contains("「放弃本局」同样会失败")
+            || branch.contains("「放弃本局」也可能失败")
     }
 
     @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，必然也失败）")
@@ -312,18 +328,23 @@ struct FinalizeFailureAlertSourceGuardTests {
         //    ⇒ 「……放弃本局，它一定能成功。若刚才是存储写满导致的，请先清理…」照样全绿
         //    （Kimi R2-medium 给出的绕过例子）。我在文档里声称「两个方向都钉死了」，其实没有
         //    —— 与上一轮刚被指出的「立了不变量却没人兑现」是同一个毛病。
-        for absolute in ["同样会失败", "必然会失败", "一定会失败", "肯定会失败",
-                         "一定能成功", "必然成功", "肯定能成功", "一定可以成功"] {
+        // ⚠️ 黑名单是**有限清单**，「必定会失败」这类新措辞仍能绕（Kimi R6 明确指出）。
+        //    ⛔ 别再往上堆词 —— 文本判据在这里已到极限。真正兜住「文案说的是不是实话」的
+        //    是验收清单 8f/8g/8h 三条**人工验收**；守卫只负责挡住已知的退化写法。
+        for absolute in ["同样会失败", "必然会失败", "一定会失败", "肯定会失败", "必定会失败",
+                         "一定能成功", "必然成功", "肯定能成功", "一定可以成功", "必定能成功"] {
             #expect(!branch.contains(absolute),
                     "⛔ 「\(absolute)」是全称断言 —— 此刻写库是好是坏，代码里没有任何东西能保证")
         }
 
-        // 正向：**提到「放弃本局」的那一句**里必须带条件，⛔ 不能靠另一句里的「若」蒙混。
-        if let hit = branch.range(of: "放弃本局") {
-            let rest = branch[hit.upperBound...]
-            let sentence = rest.prefix { $0 != "。" }
+        // 正向：提到「放弃本局」的**每一处**所在句都要带条件。
+        // ⚠️ 上一稿只查**第一处**（`if let hit = ...`），第二处起无条件提及完全不受检（Kimi R6）。
+        var scan = Substring(branch)
+        while let hit = scan.range(of: "放弃本局") {
+            let sentence = scan[hit.upperBound...].prefix { $0 != "。" && $0 != "；" }
             #expect(sentence.contains("如果") || sentence.contains("若"),
-                    "⛔ 提「放弃本局」的那一句必须自带条件限定，不能由别处的『若』代劳")
+                    "⛔ 提「放弃本局」的每一句都必须自带条件限定，不能由别处的『若』代劳")
+            scan = scan[hit.upperBound...]
         }
     }
 
