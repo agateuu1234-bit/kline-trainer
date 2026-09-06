@@ -232,14 +232,26 @@ struct FinalizeFailureAlertSourceGuardTests {
         return out
     }
 
+    /// 「提到『放弃本局』的**每一句**都必须带否定/警告语气」——共用判据。
+    /// ⛔ 不能靠「禁掉某一句原话」：换个措辞（「也可以回到结算弹窗选『放弃本局』试试」）就绕过了。
+    ///    本仓在这条判据上已经连栽五次，每次都是「补被点名的那一条」，形态一变又漏（Kimi R5-low）。
+    /// ⇒ 判据锚在**语境**而不是字面：把该支按「。；」切句，凡出现「放弃本局」的句子，
+    ///    必须同时出现「失败」——那是警告；没有它就是在把放弃当出路推荐。
+    private func discardMentionsAreAllWarnings(_ branch: String) -> Bool {
+        for sentence in branch.split(whereSeparator: { $0 == "。" || $0 == "；" }) {
+            if sentence.contains("放弃本局") && !sentence.contains("失败") { return false }
+        }
+        return true
+    }
+
     @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，必然也失败）")
     func noneBranchMustNotOfferDiscardAsAWayOut() throws {
         // 真机验收（2026-09-05）暴露：8c 情形下三个按钮构成闭环 —— 重试失败、退出被拦、
         // 放弃同样失败（`discardSession` 走 `pendingRepo.clearPending()`，**必须写库**）。
         // 而文案却让用户「去上一个提示里选择放弃本局」⇒ 把人支去做一件必然失败的事。
         let branch = try copyBranch(try code(tv), caseName: "none")
-        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
-                "⛔ 存储坏掉时「放弃本局」必然失败，这是把用户支去白忙一场")
+        #expect(discardMentionsAreAllWarnings(branch),
+                "⛔ 存储坏掉时「放弃本局」必然失败 —— 提到它的每一句都必须是警告，不得写成建议")
         // ⚠️ 这里比对的是**字面量内部**的文案，而扫描器刻意保留字面量里的空白
         //    ⇒ 断言一律用原文，⛔ 不能套 sq()（它会把「关闭 App」压成「关闭App」而永远不匹配）。
         #expect(branch.contains("关闭 App"),
@@ -265,8 +277,8 @@ struct FinalizeFailureAlertSourceGuardTests {
     @Test("⭐存档读不出来那一支：同样不得对「放弃本局」打包票")
     func unreadableBranchMustNotPromiseDiscard() throws {
         let branch = try copyBranch(try code(tv), caseName: "unreadable")
-        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
-                "⛔ 存档层出问题时清槽也可能失败，不该说得像一定能成")
+        #expect(discardMentionsAreAllWarnings(branch),
+                "⛔ 存档层出问题时清槽也可能失败 —— 提到它的每一句都必须是警告，不得写成建议")
         #expect(branch.contains("关闭 App"), "必须给出真实出路")
 
         // ⚠️ **横向对齐**（Kimi R4-low）：上一轮我给 `.none` 支补齐了正向必含断言，却没有
@@ -325,6 +337,20 @@ struct FinalizeFailureAlertSourceGuardTests {
         let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
         #expect(!branch.contains("关闭 App"),
                 "⛔ 这一支给「关闭 App」= 把用户引向一个点进去就失败的「继续训练」")
+    }
+
+    @Test("⭐「关掉 App 重开能出来」这条出路的行为测试必须还在（⛔ 删了/改名了要报警）")
+    func escapeHatchBehaviourTestsStillExist() throws {
+        // 文案对用户许诺「可以直接关闭 App 再重新打开」，兑现它的是 AppRouterTests 里那两条。
+        // ⚠️ 上一轮我在验收文档里写了「另有 2 条行为测试」，却没有任何机制绑定它
+        //    ⇒ 有人删掉或改名，文档说法就静默过期（Kimi R5-low）。
+        //    这里钉**函数名存在性**而不是条数：比数字更准，也不会因为同文件新增别的测试而失真。
+        let src = try code("Tests/KlineTrainerContractsTests/AppRouterTests.swift")
+        for fn in ["loadHome_unreadablePending_fallsBackToEmptyHomeSoUserCanEscape",
+                   "loadHome_readablePending_showsResume"] {
+            #expect(src.contains(fn),
+                    "⛔ \(fn) 不见了 —— 文案许诺的逃生路失去行为测试保护")
+        }
     }
 
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
