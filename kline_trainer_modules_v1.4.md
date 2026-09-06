@@ -143,7 +143,7 @@ v1.4 矩阵如下：
 |---|---|---|
 | `CONTRACT_VERSION`（顶层标识） | `"1.5"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0003_v1.3` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
-| 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
+| 训练组 SQLite `PRAGMA user_version` | `2` | 训练组 schema 结构变更**或字段语义变更导致新旧产物互不可读**；联动顶层（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地） |
 | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.3` | Codable 字段 / 枚举 case 变更；联动顶层 |
 | `P2 journal states` enum（v1.4 改版本） | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
@@ -1879,7 +1879,7 @@ final class DownloadAcceptanceRunner {
 ```swift
 protocol TrainingSetDBFactory {
     /// 打开训练组 sqlite 文件并校验 schema_version / 基本元数据
-    /// - expectedSchemaVersion: 预期 schema 版本（M0.1 TRAINING_SET_SCHEMA_VERSION = 1）
+    /// - expectedSchemaVersion: 预期 schema 版本（M0.1 TRAINING_SET_SCHEMA_VERSION = 2；⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地）
     /// - throws AppError.trainingSet(.versionMismatch) / .fileNotFound / .emptyData
     /// - 返回绑定到独立 DatabaseQueue 的 reader（每次调用产生新 reader 实例）
     func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader
@@ -2236,7 +2236,7 @@ struct HistoryActionSheet: View {
 - [ ] `backend/sql/schema.sql` 含 v1.2 `training_sets` 3 列 + `UNIQUE(stock_code, start_datetime)`
 - [ ] `backend/sql/training_set_schema_v1.sql` + 示例 zip（附 CRC32 验证脚本）
 - [ ] `ios/sql/app_schema_v1.sql` 含 `final_tick` 列
-- [ ] `TRAINING_SET_SCHEMA_VERSION = 1` 双方共享常量
+- [ ] `TRAINING_SET_SCHEMA_VERSION = 2` 双方共享常量（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地；过渡态的权威定义见 `CONTRACT_VERSION 1.14 / 1.15`）
 - [ ] 时区约定（Unix 秒 UTC，UI 转北京时间）
 - [ ] `settings` 表 key 列表**不含** `stamp_duty_enabled`
 
