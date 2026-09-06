@@ -154,14 +154,14 @@ ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，**没
 
 | 文件 | 改什么 |
 |---|---|
-| `scripts/governance/build-protection-put-payload.py` | 新增 `BACKEND_TESTS_CONTEXT` 常量；`REQUIRED_CONTEXTS` 追加它；订正文件头 docstring 里已过时的「Catalyst + app-build」表述 |
+| `scripts/governance/build-protection-put-payload.py` | 新增 `BACKEND_TESTS_CONTEXT` 常量；`REQUIRED_CONTEXTS` 追加它；**订正 §4.2 那条 grep 命令在本文件命中的全部过时表述**（实测 `:4` 文件头 + `:31` **函数** docstring —— 别只改文件头） |
 | `tests/scripts/governance/test_build_payload.py` | 同步 canonical 期望 |
 | `tests/scripts/governance/test-verify-required-checks.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/test-admin-runbook.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/fixtures/*.json` | 代表「已合规」的 fixture 需含新 context（**哪几个由实跑决定，不靠猜**） |
 | `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正过时表述（见 §4.2） |
 | `scripts/governance/verify-required-checks.sh` | 订正头注释（把谓词描述成「Catalyst check 在位」） |
-| `scripts/governance/admin-configure-required-checks.sh` | 订正头注释 + **`GATE PASS` 那行用户可见输出**（现写「Catalyst + app-build」，应用后会少报实际验证范围） |
+| `scripts/governance/admin-configure-required-checks.sh` | **订正 §4.2 那条 grep 命令在本文件命中的全部过时表述**（实测 `:2` 头注释、`:71` **`GATE PASS` 用户可见输出**、`:114` **函数内部注释** —— 三处，别只改前两处） |
 | `.github/workflows/codeowners-config-check.yml` | **仅订正注释**（`:21` 那段安全论证以「backend-tests 不是必需检查」为前提，本次改动后变假）。**不改任何逻辑/触发器/job 名**。⚠️ Claude 对该目录硬 deny → 走 ceremony 由 user `cp` 落地 |
 | 本 spec + 后续 plan | 文档 |
 
@@ -295,8 +295,18 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 
 ### 5.1 基线（初版写错了，已订正）
 
-**判绿的唯一口径 = `bash tests/scripts/governance/run-all.sh` 的最后一行是 `ALL GREEN`
-且全文无 `FAIL:` 行。**
+**判绿要跑​**两条​**命令，缺一不可**（Kimi R11 指出，复核属实 —— 初版只写了第一条）：
+
+```
+bash tests/scripts/governance/run-all.sh                                    # ① 治理三件套
+python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py   # ② 钉名判据（从仓库根跑）
+```
+
+- ① 判绿 = 最后一行 `ALL GREEN` 且全文无 `FAIL:` 行；② 判绿 = 无 failed。
+- ⚠️ **`run-all.sh` 不跑 ② 那个文件**（它只跑 `test_build_payload.py` + 两个 bash 套件）。
+  §3.2.1 新增的钉名判据**只在 ② 里体现** —— 只跑 ① 的话，M6/M7/M8 三条变异会显示
+  `ALL GREEN`，与变异表「必须红」直接打架，实施者可能误判判据失效、反过来去「修」一条
+  本来正确的判据。这正是本文档反复在防的形态。
 
 实测组成（`ea818f2`，供对账用；数字随仓库演进会变，**以实际输出为准，不要拿这里的数字当判据**）：
 
@@ -325,6 +335,8 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 | M6 | 把 `backend-tests.yml` 里那个 job 的 `name` 改掉一个字符 | 新加的第四条判据必须**红**（§3.2.1）。这条变异模拟的正是「全仓 PR 卡死」那个场景 |
 | **M7** | 把那个 job 的 `name` 改成 **`REQUIRED_CONTEXTS` 里的另一条**（如 Catalyst 那个名字） | 必须**红**。这一条专打「成员关系判据」那个绕过（见 §3.2.1 的 ⚠️）——**此档若变绿，说明判据被写回成员关系了** |
 | M8 | 把 `BACKEND_TESTS_CONTEXT` 从 `REQUIRED_CONTEXTS` 里删掉、但保留常量定义 | 必须**红**（断言 2） |
+> **每条变异用哪条命令看红**：M1–M5 看 ①；**M6 / M7 看 ②**；M8 两边都会红（① 因 fixture 期望、② 因断言 2）。
+
 | **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
 
 **⚠️ 额外的归因要求 —— 但范围比我原先写的窄（Kimi R1 提出，R9 订正，均复核属实）**
