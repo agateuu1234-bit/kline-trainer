@@ -208,8 +208,9 @@ struct FinalizeFailureAlertSourceGuardTests {
         }
     }
 
-    /// 取 `cannotPreserveCopy` 里某一支 `case` 的返回文案。
-    /// 从 `case .X:` 起到下一个 `case ` 之前 —— 三支各自独立断言，防「改了一支殃及另一支」。
+    /// 取 `cannotPreserveCopy` 里某一支 `case` 返回的**那一个字符串字面量**（不含代码与注释）。
+    /// ⛔ 不是「取到下一个 case 之前」：最后一支后面没有下一个 case，那样会一路吃到文件末尾
+    ///    （见下方实现里的 ⛔ 注释）。三支各自独立断言，防「改了一支殃及另一支」。
     private func copyBranch(_ text: String, caseName: String) throws -> String {
         let body = try #require(text.range(of: sq("private var cannotPreserveCopy: String {")),
                                 "锚点失效：找不到 cannotPreserveCopy")
@@ -266,10 +267,25 @@ struct FinalizeFailureAlertSourceGuardTests {
         //    会成功、放弃是**真出路**。断言它「同样会失败」= 把用户从走得通的路前吓退（Kimi R1-medium）。
         // ⇒ 正确姿态：**带条件地**提，两个方向都不许下全称断言。
         let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
-        #expect(!branch.contains("同样会失败。"),
-                "⛔ 不得断言放弃必然失败 —— 写库可能此刻已恢复")
-        #expect(branch.contains("如果") || branch.contains("若"),
-                "提到放弃/清理时必须带条件限定，⛔ 不得下全称断言")
+
+        // ⛔ 两个方向的绝对说法都不许。
+        // ⚠️ 上一稿只挡了「必然失败」这一边，且正向判据松到「全文任意位置含『若』即过」
+        //    ⇒ 「……放弃本局，它一定能成功。若刚才是存储写满导致的，请先清理…」照样全绿
+        //    （Kimi R2-medium 给出的绕过例子）。我在文档里声称「两个方向都钉死了」，其实没有
+        //    —— 与上一轮刚被指出的「立了不变量却没人兑现」是同一个毛病。
+        for absolute in ["同样会失败", "必然会失败", "一定会失败", "肯定会失败",
+                         "一定能成功", "必然成功", "肯定能成功", "一定可以成功"] {
+            #expect(!branch.contains(absolute),
+                    "⛔ 「\(absolute)」是全称断言 —— 此刻写库是好是坏，代码里没有任何东西能保证")
+        }
+
+        // 正向：**提到「放弃本局」的那一句**里必须带条件，⛔ 不能靠另一句里的「若」蒙混。
+        if let hit = branch.range(of: "放弃本局") {
+            let rest = branch[hit.upperBound...]
+            let sentence = rest.prefix { $0 != "。" }
+            #expect(sentence.contains("如果") || sentence.contains("若"),
+                    "⛔ 提「放弃本局」的那一句必须自带条件限定，不能由别处的『若』代劳")
+        }
     }
 
     @Test("⭐⭐文件被淘汰那一支：⛔ 不得给「关闭 App」的建议（存档还在，关掉重开会引到坏状态）")

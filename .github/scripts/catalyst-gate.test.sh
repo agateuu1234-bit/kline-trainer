@@ -517,7 +517,7 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   同步理由：不同步的话下一轮读到的仍是旧基线 1861，窗口下限锁死在 1861−30=1831，而当前真实
 #   总数已是 1864 ⇒ 从 1864 掉到 1831 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
-#   【Q13 结算弹窗诚实出口 PR（本轮）】total 1864→1890（+26）：本片新增 14 条源码守卫
+#   【Q13 结算弹窗诚实出口 PR #181】total 1864→1890（+26）：本片新增 14 条源码守卫
 #   （FinalizeFailureAlertSourceGuardTests）+ 12 条行为测试（FinalizeAlertSafeExitTests，
 #   含 DiscardFailureOriginTests 3 条），14+12=26 与增量精确对账。**零条 UIKit-gated 新增**
 #   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场、无缺失）。
@@ -528,8 +528,10 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 78 行 UIKit 结果行取自
 #   本轮真冷构建日志 原文，断行伪影 XCTestOutputBarrie 前缀保留作解析健壮性素材）。
 #   另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1（非假绿）。
-#   【Q13 文案补真实出路 PR（本轮）】total 1890→1894（+4）：新增 4 条源码守卫
-#   （「保不住」三支各自只推荐真能走通的出路 + 一条**反向对照**防改过头）。**零条 UIKit-gated 新增**
+#   【Q13 文案补真实出路 PR（本轮）】total 1890→1894（+4）：新增 4 条源码守卫 —— 「保不住」
+#   三支各自只推荐**在该情形下真能走通**的出路：前两支不得把「放弃本局」说成出路（它们的前提是
+#   写库持续失败中）、第三支两个方向的全称断言都不许（存在「写库刚恢复、只是文件没了」的路径）、
+#   第三支还不得给「关闭 App」建议（存档还在，关掉重开会引到打不开的局）。**零条 UIKit-gated 新增**
 #   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场）。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
