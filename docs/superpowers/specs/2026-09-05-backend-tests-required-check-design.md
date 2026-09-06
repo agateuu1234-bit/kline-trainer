@@ -326,6 +326,8 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py  
 ### 5.2 变异验证（必做，全部亲跑）
 每条都要**先看它红、且红在预期的那一条判据上**。归因要单独核 —— 结论对不代表归因对。
 
+> **每条变异用哪条命令看红**：M1–M5 看 ①；**M6 / M7 看 ②**；M8 两边都会红（① 因 fixture 期望、② 因断言 2）。
+
 | # | 变异 | 预期 |
 |---|---|---|
 | M1 | 常量拼写改错一个字符 | 红，且报出的是 context 不匹配 |
@@ -335,8 +337,6 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py  
 | M6 | 把 `backend-tests.yml` 里那个 job 的 `name` 改掉一个字符 | 新加的第四条判据必须**红**（§3.2.1）。这条变异模拟的正是「全仓 PR 卡死」那个场景 |
 | **M7** | 把那个 job 的 `name` 改成 **`REQUIRED_CONTEXTS` 里的另一条**（如 Catalyst 那个名字） | 必须**红**。这一条专打「成员关系判据」那个绕过（见 §3.2.1 的 ⚠️）——**此档若变绿，说明判据被写回成员关系了** |
 | M8 | 把 `BACKEND_TESTS_CONTEXT` 从 `REQUIRED_CONTEXTS` 里删掉、但保留常量定义 | 必须**红**（断言 2） |
-> **每条变异用哪条命令看红**：M1–M5 看 ①；**M6 / M7 看 ②**；M8 两边都会红（① 因 fixture 期望、② 因断言 2）。
-
 | **M5** | **反向对照**：不做任何变异 | **必须全绿**（`run-all.sh` → ALL GREEN）。缺了这一档，一个恒红的测试看起来也像在工作 |
 
 **⚠️ 额外的归因要求 —— 但范围比我原先写的窄（Kimi R1 提出，R9 订正，均复核属实）**

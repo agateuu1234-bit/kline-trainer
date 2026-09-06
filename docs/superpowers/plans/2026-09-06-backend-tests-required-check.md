@@ -88,11 +88,54 @@ python -m pytest tests/scripts/governance/test_build_payload.py -q
 
 预期：`15 passed`。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 变异 M1 / M3 / M4（spec §5.2 要求全部亲跑）**
+
+三条都打常量与清单本身，故都在本 Task 做。**复原一律用 `cp` 备份、不用 `git checkout`**
+（本仓 memory `feedback_git_checkout_destroys_uncommitted_work`：那会连同本 Task 尚未提交的
+正当改动一起冲掉，而且冲掉后不留任何痕迹）。
+
+```bash
+BK=/tmp/builder-m134.py
+cp scripts/governance/build-protection-put-payload.py "$BK"
+run() { find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null; \
+        python -m pytest tests/scripts/governance/test_build_payload.py -q 2>&1 | tail -2; }
+mut() { python3 -c "
+import pathlib,sys
+p=pathlib.Path('scripts/governance/build-protection-put-payload.py')
+t=p.read_text(encoding='utf-8'); old,new=sys.argv[1],sys.argv[2]
+assert t.count(old)==1, '锚点不唯一，拒绝变异'
+p.write_text(t.replace(old,new),encoding='utf-8')" "$1" "$2"; }
+
+echo '── M1 常量拼错一个字符 ──'
+mut 'BACKEND_TESTS_CONTEXT = "backend pytest (full suite)"' 'BACKEND_TESTS_CONTEXT = "backend pytest (full suit)"'
+run; cp "$BK" scripts/governance/build-protection-put-payload.py
+
+echo '── M3 删掉既有的 APP_BUILD_CONTEXT ──'
+mut 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]' 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, BACKEND_TESTS_CONTEXT]'
+run; cp "$BK" scripts/governance/build-protection-put-payload.py
+
+echo '── M4 顺序调换 ──'
+mut 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]' 'REQUIRED_CONTEXTS = [BACKEND_TESTS_CONTEXT, CATALYST_CONTEXT, APP_BUILD_CONTEXT]'
+run; cp "$BK" scripts/governance/build-protection-put-payload.py
+
+echo '── 复原核对（两个 md5 必须相同、git status 必须为空）──'
+md5 -q "$BK" scripts/governance/build-protection-put-payload.py
+git status --porcelain scripts/governance/build-protection-put-payload.py
+```
+
+预期：
+
+- **M1 必须红**（`test_required_contexts_constant` 与 `test_list_contexts_cli` 都报字符串不等）；
+- **M3 必须红** —— 这一档证明测试**不是只盯新加的那一项**；
+- **M4**：`test_build_payload.py` 的断言是**精确列表相等**，所以顺序变了应当**也红**。
+  ⚠️ 若实测为**绿**，说明判据不约束顺序 —— 那就在 spec §5.2 明写「顺序无语义」，
+  **不要假装它被测了**（spec §5.2 M4 行已预留这个处置）。
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add scripts/governance/build-protection-put-payload.py tests/scripts/governance/test_build_payload.py
-git commit -m "canonical 必需检查清单加入 backend pytest (full suite)"
+git commit -m "canonical 必需检查清单加入 backend pytest (full suite)；M1/M3/M4 变异已亲跑"
 ```
 
 ---
@@ -180,13 +223,22 @@ ATTR
 - ⚠️ **若仍 `rc=1`**：说明它是在更早的 `:107`「缺 context」挂的 —— **Step 3 漏给这个 fixture
   补 backend context 了**，回去补上再来。
 
-跑完删掉探针文件并复原那一行：
+⚠️ **临时改 `test-admin-runbook.sh` 之前先 `cp` 备份，复原也用 `cp`**：
 
 ```bash
+cp tests/scripts/governance/test-admin-runbook.sh /tmp/runbook-attr-backup.sh
+# …（临时把 #6d 那行的 MOCK_FIXTURE_N3 指向 _attr_probe.json，跑，看 rc）…
+cp /tmp/runbook-attr-backup.sh tests/scripts/governance/test-admin-runbook.sh
 rm -f tests/scripts/governance/fixtures/_attr_probe.json
-git checkout -- tests/scripts/governance/test-admin-runbook.sh   # 若临时改过
-git status --porcelain tests/scripts/governance/                 # 确认只剩预期的 fixture 改动
+md5 -q /tmp/runbook-attr-backup.sh tests/scripts/governance/test-admin-runbook.sh   # 两行必须相同
+git status --porcelain tests/scripts/governance/                                    # 只剩预期的 fixture 改动
 ```
+
+⛔ **绝对不要用 `git checkout -- <file>` 复原**：本 Task 头部把
+`test-admin-runbook.sh` 列为「可能 Modify」，而提交要到下一步才发生 —— `git checkout`
+会把本 Task 里**尚未提交的正当改动**一并冲掉，且**冲掉后不留任何痕迹**，随后那条
+`git status` 也看不出少了什么（本仓 memory `feedback_git_checkout_destroys_uncommitted_work`；
+初版 plan 就是这么写的，Kimi plan-R3 指出）。
 
 - [ ] **Step 6: 提交**
 
@@ -518,7 +570,7 @@ git commit -m "验收清单 A0-A8 + 真实 ruleset 干跑 diff 凭据"
 
 ## Self-Review
 
-**Spec 覆盖**：§3.1 连带效应 → Task 6 Step 2 核 diff；§3.2.1 钉名 → Task 4；§4 改动面 6 个文件 → Task 1/2/3/4/5 全覆盖；§4.2 三个家族 → Task 3（①）、Task 4 Step 5（②③）；§5.1 双命令口径 → Global Constraints + 每个 Task 的验证步；§5.2 变异 M1–M8 → Task 2 Step 5（#6d 归因）+ Task 4 Step 3/4；§5.3 干跑 → Task 6；§7 交付次序与第 0 步（在途 PR）→ 验收 A0（Task 6 Step 3）；§9 回滚凭据 → 验收 A7b。
+**Spec 覆盖**：§3.1 连带效应 → Task 6 Step 2 核 diff；§3.2.1 钉名 → Task 4；§4 改动面 6 个文件 → Task 1/2/3/4/5 全覆盖；§4.2 三个家族 → Task 3（①）、Task 4 Step 5（②③）；§5.1 双命令口径 → Global Constraints + 每个 Task 的验证步；§5.2 变异 M1–M8 → **M1/M3/M4 在 Task 1 Step 5；M2≡M8 与 M8 在 Task 4 Step 4；M5/M6/M7 在 Task 4 Step 3**（Task 2 Step 5 是 #6d 归因探针，**不属于**变异表，初版 Self-Review 把它算进覆盖是虚报，Kimi plan-R3 指出）；§5.3 干跑 → Task 6；§7 交付次序与第 0 步（在途 PR）→ 验收 A0（Task 6 Step 3）；§9 回滚凭据 → 验收 A7b。
 
 **占位符扫描**：无 TBD/TODO；每个代码步骤都有可直接执行的代码块；「哪几个 fixture」刻意留给实跑决定，但给了判断规则（只改「语义上应已合规」的）与不要动的反例。
 
