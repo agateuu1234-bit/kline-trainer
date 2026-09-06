@@ -309,7 +309,12 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 1. 在 `import yaml` 之后加一行 `import importlib.util`；
 2. 把文件里**已有的** `WORKFLOW` 定义块（当前 32-34 行，形如
    `WORKFLOW = (` / `    Path(__file__)...` / `)`）**整块替换**为下面代码块里
-   `_REPO_ROOT` / `WORKFLOW` / `_BUILDER` **那三行**（不是代码块开头的 import 行）。
+   `_REPO_ROOT` / `WORKFLOW` / `_BUILDER` **那三行**（不是代码块开头的 import 行）；
+3. 下面代码块里的 `def _builder():` **整个函数照抄进去**，位置放在那三行常量之后、
+   已有的 `def _on_section():` 之前。
+
+> ⚠️ 三段都要落地，别把 `_builder()` 当成「示例上下文」跳过（Kimi plan-R4 指出这处歧义）——
+> 跳过它的话，本 Task 末尾新增的两个测试都会 `NameError`。
 
 ⚠️ **是替换、不是新增**：该文件已有一份 `WORKFLOW` 定义，再加一份就是制造第二份真相
 （本 plan 通篇在防这个；Kimi plan-R1 指出）。
@@ -397,6 +402,9 @@ import test_backend_tests_workflow_runs_on_every_pr as g
 REAL = pathlib.Path(".github/workflows/backend-tests.yml")
 BASE = REAL.read_text(encoding="utf-8")
 NAME = "name: backend pytest (full suite)"
+# 锚点唯一性（与 Task 1 的 mut() 保持同样的防护；Kimi plan-R4 指出这里原先缺这道）：
+# 若该字符串在文件里不止一处，replace 会改到别处，M6/M7 的红/绿归因就失真了。
+assert BASE.count(NAME) == 1, f"锚点出现 {BASE.count(NAME)} 次，拒绝变异（预期恰 1 次）"
 
 CASES = {
     "M5 反向对照（不变异）":   BASE,
