@@ -232,29 +232,41 @@ print("探针 fixture 已生成:", tmp)
 ATTR
 ```
 
-然后把 `test-admin-runbook.sh` 里 #6d 那行的 `MOCK_FIXTURE_N3` 临时指向 `_attr_probe.json`
-跑一次，看退出码。
-
-- **预期：`rc=0`（成功）** —— 说明 #6d 之前的 rc=1 **确实是 bypass 那条判据判出来的**。
-- ⚠️ **若仍 `rc=1`**：说明它是在更早的 `:107`「缺 context」挂的 —— **Step 3 漏给这个 fixture
-  补 backend context 了**，回去补上再来。
-
-⚠️ **临时改 `test-admin-runbook.sh` 之前先 `cp` 备份，复原也用 `cp`**：
+然后**直接调用底层脚本**、读**它自己**的退出码 —— **不要**改测试文件、也**不要**整跑
+`test-admin-runbook.sh`：
 
 ```bash
-cp tests/scripts/governance/test-admin-runbook.sh /tmp/runbook-attr-backup.sh
-# …（临时把 #6d 那行的 MOCK_FIXTURE_N3 指向 _attr_probe.json，跑，看 rc）…
-cp /tmp/runbook-attr-backup.sh tests/scripts/governance/test-admin-runbook.sh
-rm -f tests/scripts/governance/fixtures/_attr_probe.json
-md5 -q /tmp/runbook-attr-backup.sh tests/scripts/governance/test-admin-runbook.sh   # 两行必须相同
-git status --porcelain tests/scripts/governance/                                    # 只剩预期的 fixture 改动
+G=tests/scripts/governance
+d=$(mktemp -d)
+GH_CMD="$G/mockgh.sh" \
+MOCK_FIXTURE="$G/fixtures/ruleset-without-check.json" \
+MOCK_FIXTURE_N3="$G/fixtures/_attr_probe.json" \
+MOCK_LOG="$d/calls.log" \
+  bash scripts/governance/admin-configure-required-checks.sh --apply --artifact-dir "$d" \
+  >/dev/null 2>&1
+echo "内层 rc=$?"
 ```
 
-⛔ **绝对不要用 `git checkout -- <file>` 复原**：本 Task 头部把
-`test-admin-runbook.sh` 列为「可能 Modify」，而提交要到下一步才发生 —— `git checkout`
-会把本 Task 里**尚未提交的正当改动**一并冲掉，且**冲掉后不留任何痕迹**，随后那条
-`git status` 也看不出少了什么（本仓 memory `feedback_git_checkout_destroys_uncommitted_work`；
-初版 plan 就是这么写的，Kimi plan-R3 指出）。
+（这几个环境变量与 `test-admin-runbook.sh:105-113` 的 #6d 那一档**完全一致**，只是把
+`MOCK_FIXTURE_N3` 换成探针 fixture。变量取值已实读该文件确认：`:4` `G=`、`:6` `R=`、
+`:7` `MOCK=`、`:35` `WITHOUT=`。）
+
+- **预期：`内层 rc=0`** —— 说明 #6d 平时那个 rc=1 **确实是 bypass 那条判据判出来的**。
+- ⚠️ **若仍 `内层 rc=1`**：说明它在更早的 `:107`「缺 context」就挂了 —— **Step 3 漏给
+  `ruleset-extra-bypass.json` 补 backend context 了**，回去补上再来。
+
+> ⛔ **千万别用「整跑 `test-admin-runbook.sh` 看退出码」来判读**（初版就是这么写的，
+> Kimi plan-R7 指出、复核属实）：#6d 那一档断言的是 `rc==1`，所以**探针成功（内层 rc=0）
+> 时该 check 反而 FAIL、`fail=1`、整个文件 `exit 1`** —— 整跑退出码恰好是 1，而初版把
+> rc=1 解读成「漏补 fixture、回去补」，**把执行者推向完全相反的结论**；初版声称的
+> 「预期 rc=0」在整跑口径下**永远观察不到**。这正是本文档反复在防的归因陷阱。
+
+跑完清理（全程**没碰任何被跟踪的文件**，所以不需要备份/复原那一套）：
+
+```bash
+rm -f tests/scripts/governance/fixtures/_attr_probe.json
+git status --porcelain tests/scripts/governance/    # 只剩 Step 3 那些预期的 fixture 改动
+```
 
 - [ ] **Step 6: 提交**
 
@@ -487,13 +499,17 @@ assert t.count(old) == 1, '锚点不唯一，拒绝变异'
 p.write_text(t.replace(old, 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT]'), encoding='utf-8')
 "
 find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
+# ② 侧：pin 测试的断言 2
 python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q 2>&1 | tail -3
+# ① 侧：spec 5.2 写明 M8「两边都会红」，① 侧也必须亲跑一次
+#（初版只跑了 ②，而 Self-Review 却声称全覆盖；Kimi plan-R7 指出）
+bash tests/scripts/governance/run-all.sh 2>&1 | grep -E "^FAIL|ALL GREEN" | head -3
 cp /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
 md5 -q /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
 git status --porcelain scripts/governance/build-protection-put-payload.py   # 必须为空
 ```
 
-预期：变异时 `test_backend_context_is_in_canonical_required_list` FAIL；复原后两个 md5 相同、`git status` 为空。
+预期：变异时 **② 侧** `test_backend_context_is_in_canonical_required_list` FAIL、**① 侧** `run-all.sh` 出现 `FAIL:`（`test_required_contexts_constant` 那条精确列表相等断言）；复原后两个 md5 相同、`git status` 为空 —— 这里要求为空是成立的，因为 builder 已在 Task 1 提交过。
 
 - [ ] **Step 5: 订正该文件里已过时的表述**
 
