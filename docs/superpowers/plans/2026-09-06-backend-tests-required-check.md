@@ -118,10 +118,18 @@ echo '── M4 顺序调换 ──'
 mut 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]' 'REQUIRED_CONTEXTS = [BACKEND_TESTS_CONTEXT, CATALYST_CONTEXT, APP_BUILD_CONTEXT]'
 run; cp "$BK" scripts/governance/build-protection-put-payload.py
 
-echo '── 复原核对（两个 md5 必须相同、git status 必须为空）──'
+echo '── 复原核对（判据 = 两个 md5 相同；git status 会显示 M，见下方说明）──'
 md5 -q "$BK" scripts/governance/build-protection-put-payload.py
 git status --porcelain scripts/governance/build-protection-put-payload.py
 ```
+
+⚠️ **这里的 `git status` 会显示 ` M`，那是 Step 3 的正当改动，不是变异残留** —— 本 Task 的
+提交在 Step 6，此刻还没提交。**判据只看 md5 那两行是否相同**。
+
+⛔ **不要为了让 `git status` 变空去跑 `git checkout --`** —— 那会把 Step 3 的改动一起冲掉。
+（初版 plan 在这里写了「必须为空」，与自身步骤顺序矛盾，且恰好把执行者推向那条禁令；
+Kimi plan-R5 指出。Task 4 Step 4 的同款检查则成立，因为那时 builder 已在 Task 1 提交。）
+
 
 预期：
 
@@ -304,7 +312,7 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 
 - [ ] **Step 1: 加载 builder 并写新判据**
 
-两处改动：
+三处改动：
 
 1. 在 `import yaml` 之后加一行 `import importlib.util`；
 2. 把文件里**已有的** `WORKFLOW` 定义块（当前 32-34 行，形如
@@ -504,8 +512,14 @@ python3 - <<'PY'
 import pathlib
 p = pathlib.Path(".github/workflows/codeowners-config-check.yml")
 t = p.read_text(encoding="utf-8")
-old = "      # 工作流一次都不启动 —— 判据永远执行不到，而它又不是必需检查，于是能合进去，\n"
-new = "      # 工作流一次都不启动 —— 判据永远执行不到。（注：canonical 清单已把 backend pytest\n      # 列为必需检查；**一旦管理员应用了该清单**，那种 PR 会改为卡在\n      # 「Expected — waiting for status」。但判据仍需放在本 workflow：一来应用是独立于本仓库的\n      # 手工动作、在它发生前上述前提不成立，二来「卡住」不等于「被判定为违规」，\n      # 也给不出可读的失败原因。）\n"
+old = ("      # 工作流一次都不启动 —— 判据永远执行不到，而它又不是必需检查，于是能合进去，\n"
+       "      # 把「只改 scripts/** 或 iOS 契约文件的 PR 不跑后端测试」这个盲区原样放回来\n")
+new = ("      # 工作流一次都不启动 —— 判据永远执行不到。canonical 清单已把 backend pytest 列为\n"
+       "      # 必需检查，于是分两种情形：**管理员应用该清单之后**，那种 PR 会卡在\n"
+       "      # 「Expected — waiting for status」而合不进去；**在应用之前**，它仍能合进去，\n"
+       "      # 把「只改 scripts/** 或 iOS 契约文件的 PR 不跑后端测试」这个盲区原样放回来。\n"
+       "      # 两种情形下判据都仍须放在本 workflow：「卡住」不等于「被判定为违规」，\n"
+       "      # 也给不出可读的失败原因。\n")
 assert t.count(old) == 1, "锚点不唯一/找不到，拒绝生成"
 pathlib.Path("/tmp/co2.yml").write_text(t.replace(old, new), encoding="utf-8")
 print("已生成 /tmp/co2.yml")
@@ -554,8 +568,18 @@ git commit -m "订正必需门里那段已翻转的安全论证（只改注释�
 gh api "repos/{owner}/{repo}/rulesets/15660830" > /tmp/ruleset-live.json
 python3 scripts/governance/build-protection-put-payload.py --ruleset-json /tmp/ruleset-live.json --out /tmp/payload-new.json
 python3 scripts/governance/build-protection-put-payload.py --normalize-only --ruleset-json /tmp/ruleset-live.json --out /tmp/payload-cur.json
-diff -u /tmp/payload-cur.json /tmp/payload-new.json
+
+# ⚠️ 必须先格式化再 diff：builder 的 serialize() 用 separators=(",",":") 且无缩进，
+# 产出是**单行紧凑 JSON** —— 直接 diff 会得到两条数 KB 的长行，人眼无法逐字段核，
+# 而 spec §5.3 说这是应用前唯一能看清后果的手段、验收 A5 还交给非程序员判定。
+# （初版 plan 漏了这一步，Kimi plan-R5 指出。）
+python3 -m json.tool --sort-keys /tmp/payload-cur.json > /tmp/payload-cur.pretty.json
+python3 -m json.tool --sort-keys /tmp/payload-new.json > /tmp/payload-new.pretty.json
+diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 ```
+
+预期：diff 是**逐行可读**的，且**只有新增行**（两条 context 各自的 `context` /
+`integration_id`），没有任何删除行或修改行。
 
 - [ ] **Step 2: 逐字段核 diff（spec §5.3）**
 
