@@ -40,7 +40,17 @@
 
 ## 2. 目标与非目标
 
-**目标**：让 `backend pytest (full suite)` 红时**无法合并**。
+**目标**：让 `backend pytest (full suite)` 红时**默认阻断合并** —— 从今天的「纯咨询信号、
+红了也照合」变成「GitHub 明示合并被阻断，要合必须显式绕过」。
+
+> ⚠️ **不能写成「无法合并」**（初版就是这么写的，Kimi R10 指出、已核实真实配置）：
+> 本仓 ruleset 的 `bypass_actors` 含 `{"actor_type":"RepositoryRole","actor_id":5,
+> "bypass_mode":"always"}`，而 user **就是** admin（`gh api repos/{owner}/{repo} --jq
+> '.permissions'` → `admin: true`）。**always-bypass 对包括必需检查在内的全部规则生效** ⇒
+> 对唯一会执行合并的那个人，红了**不是**「按钮点不动」，而是「GitHub 拦一下、可显式绕过」。
+>
+> 这与 PR #180 的 F6 是同一个威胁模型：**防的是意外，不是防所有者刻意为之**。价值仍然成立 ——
+> 今天是「红了毫无阻力地合进去」，改完是「必须明知故犯」。但把它说成「无法合并」就是虚报。
 
 **非目标**（每条都在 §6 记为残留，各自独立处理）：
 - 不修 G1 的「无人守」（**user 2026-09-05 明确选择推迟**）；
@@ -264,6 +274,7 @@ medium→low），说明方案没问题；但**集中度极高**、且有一条�
 |---|---|
 | `docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md`（「三条判据」） | PR #180 **交付当时的历史记录**，描述那次交付的状态、不是现行契约。改它等于篡改档案 |
 | `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md`（`:6` 写 canonical = Catalyst + app-build，§4 贴了只含两条 context 的预期输出） | 它是**顺位 2 那次交付的 evidence 记录**（标题即「post-merge admin runbook + evidence 模板」，正文写「本次是真实 mutation」），同属历史档案 |
+| `docs/governance/2026-06-10-pr2-pr-body.md`（`:23` 把 `--list-contexts` 应输出两条写成 checklist、`:30` 描述 apply 流程） | 同属顺位 2 那次交付的**历史 PR 描述草稿**；形态是 checklist、风险低于 runbook，但按「按家族穷尽」的标准也要占个位（Kimi R10 补） |
 | `docs/superpowers/plans|specs/2026-06-*`、`docs/acceptance/**` 内的同类表述 | 同上，全是历史交付记录 |
 
 > ⚠️ 但第二行那份 runbook 有个**现实风险**（Kimi R7 指出）：它长得像一份**可照着做的操作手册**，
@@ -409,7 +420,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 | A0 | **应用之前**跑 `gh pr list`，看还有没有开着的 PR | 要么没有；要么每个都已 rebase 到含 `06373ef` 之后的 main。**否则先别应用** —— 应用后它们会永久卡在「Expected — waiting for status」（见 §7 第 0 步） | |
 | A7b | 应用之后，看脚本打印的 artifact 目录，确认里面**真的有** `rollback-payload.json` 这个文件 | 文件存在且非空 —— 它是唯一可用的回滚凭据（见 §9；**该路径未实跑演练过**） | |
 | A7c | 临时把 `.github/workflows/backend-tests.yml` 里 `name: backend pytest (full suite)` 改掉一个字母，从仓库根跑 `python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | 必须**变红**（这条守的是「改名 → 全仓 PR 卡死」）。改回原名后重新全绿 | |
-| A8 | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | 合并按钮**变灰、点不了**，提示必需检查未通过。确认后关掉该 PR、不要合 | |
+| A8 | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | 检查列表里 `backend pytest (full suite)` 标着 **Required** 且是**红的**，且 GitHub 明示**合并被阻断**。⚠️ **按钮未必变灰** —— 你是管理员且 ruleset 给管理员开了 always-bypass，GitHub 多半仍让你点、但会提示你正在**绕过规则**。**看到「绕过」提示＝通过**（说明规则真的在拦），看不到任何阻断迹象才算不通过。确认后关掉该 PR、**不要合** | |
 
 A8 是这次改动的**唯一真凭据**：前面几条都只证明「配置改了」，只有它证明「真的拦得住」。
 不做 A8 就不能说这件事完成了。
