@@ -255,24 +255,33 @@ struct FinalizeFailureAlertSourceGuardTests {
         #expect(branch.contains("关闭 App"), "必须给出真实出路")
     }
 
-    @Test("⭐⭐⭐文件被淘汰那一支**同样**不得把「放弃本局」说成出路（我上一稿在这里论证错了）")
-    func trainingSetMissingBranchAlsoMustNotOfferDiscard() throws {
-        // ⚠️ 上一稿我写了一条方向相反的守卫，理由是「`.trainingSetMissing` 的成因是缓存淘汰，
-        //    那时存储是好的 ⇒ 放弃真能成功」。**这个论证只看了路的一半。**
-        //
-        //    自查（2026-09-06）推翻它：能走到「结算入账失败」这个弹窗，前提是 `finalize()` 抛错，
-        //    而 `finalize` 的核心是 `finalization.finalizeSession(...)`——注释逐字写着
-        //    「单事务（insertRecord + clearPending 原子）」，**必须写库**。
-        //    ⇒ 进到本弹窗时，写库能力**已经失败过一次**。
-        //    而 `pendingCheckpointStatus` 走到 `.trainingSetMissing` 只要求**读**成功
-        //    （`loadPending()` OK）+ 训练组文件不在 —— 读得动、写不动，正是磁盘满的典型形态。
-        //    ⇒ 这一支的「放弃本局」（同样走 `clearPending()`）**必然也失败**，那句建议是假话。
-        //
-        // ⛔ 那条方向相反的守卫等于在保护这句假话 —— 已删。防改过头的职责改由
-        //    `cannotPreserveCopyDistinguishesReasons`（三支文案不得雷同）承担。
+    @Test("⭐⭐⭐文件被淘汰那一支：⛔ 既不得打包票说放弃能成，也不得断言它必然失败")
+    func trainingSetMissingBranchMustNotMakeAbsoluteClaimsAboutDiscard() throws {
+        // 这一支被我改了两稿，两次都错在**只看了路的一半**：
+        //  · 初稿：「成因是缓存淘汰 ⇒ 存储是好的 ⇒ 放弃一定能成」——漏了「能进本弹窗说明写库失败过」；
+        //  · 二稿（矫枉过正）：「写库失败过 ⇒ 放弃同样会失败」——**时态错了**。
+        //    `exitPreservingProgress` 里 `saveProgress` **成功**也会继续查 status
+        //    （`savedCurrent = true` 那条路照样往下走），而 `.trainingSetMissing` 只要求**读**成功
+        //    + 文件不在 ⇒ 存在「写库刚刚成功、只是文件没了」的真实路径，此刻 `clearPending()`
+        //    会成功、放弃是**真出路**。断言它「同样会失败」= 把用户从走得通的路前吓退（Kimi R1-medium）。
+        // ⇒ 正确姿态：**带条件地**提，两个方向都不许下全称断言。
         let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
-        #expect(!branch.contains("可在上一个提示里选择「放弃本局」"),
-                "⛔ 进到本弹窗时写库已经失败过，这一支的「放弃本局」同样会失败")
+        #expect(!branch.contains("同样会失败。"),
+                "⛔ 不得断言放弃必然失败 —— 写库可能此刻已恢复")
+        #expect(branch.contains("如果") || branch.contains("若"),
+                "提到放弃/清理时必须带条件限定，⛔ 不得下全称断言")
+    }
+
+    @Test("⭐⭐文件被淘汰那一支：⛔ 不得给「关闭 App」的建议（存档还在，关掉重开会引到坏状态）")
+    func trainingSetMissingBranchMustNotSuggestClosingApp() throws {
+        // ⚠️ 这条不变量我先写进了源码注释和验收清单 8g，却**没有任何守卫兑现它**
+        //    （Kimi R1-medium 实测：全仓搜「关闭 App」只有另外两支的正向断言）。
+        //    本仓踩过同款：写「必须 X」之前先核实既有机制兑现得了 X 吗。
+        // 为什么这一支不能给：它的 pending 还在 ⇒ 关掉重开后首页是「继续训练」，
+        // 点进去会因训练组数据文件不在而失败 —— 把人引到一个打不开的局里。
+        let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
+        #expect(!branch.contains("关闭 App"),
+                "⛔ 这一支给「关闭 App」= 把用户引向一个点进去就失败的「继续训练」")
     }
 
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")

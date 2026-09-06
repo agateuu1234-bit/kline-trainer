@@ -528,17 +528,17 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 78 行 UIKit 结果行取自
 #   本轮真冷构建日志 原文，断行伪影 XCTestOutputBarrie 前缀保留作解析健壮性素材）。
 #   另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1（非假绿）。
-#   【Q13 文案补真实出路 PR（本轮）】total 1890→1893（+3）：新增 3 条源码守卫
+#   【Q13 文案补真实出路 PR（本轮）】total 1890→1894（+4）：新增 4 条源码守卫
 #   （「保不住」三支各自只推荐真能走通的出路 + 一条**反向对照**防改过头）。**零条 UIKit-gated 新增**
 #   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场）。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1893" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1893）→ GATE PASS 且回显 1893 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1894" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1894）→ GATE PASS 且回显 1894 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1893，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1894，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
