@@ -86,7 +86,8 @@ public struct TrainingView: View {
     // 压成一种就必然对另两种说假话。
     // ⚠️ 「清理存储空间」这条建议的性质**按目的而定**（2026-09-06 订正，见 cannotPreserveCopy）：
     //    对「找回被删掉的训练组文件」无效 —— 腾空间不会让它回来；
-    //    对「让入账写得进去」有效 —— 能看到这些提示就说明写库失败过，而重试入账要写库。
+    //    对「让入账写得进去」**可能**有效 —— ⚠️ 不是「看到提示就说明存储满了」：`.trainingSetMissing`
+    //    那支存在「写库刚刚成功、只是数据文件被淘汰」的路径（Kimi R15-low），所以文案里一律带「若」。
     //    ⛔ 本段曾写着「文件被清理 / 存档读不出来时，清理存储空间都是无效建议」，那是只按前一个
     //    目的下的结论；照旧文去改会把 `.trainingSetMissing` 支的新文案当违规改回去（Kimi R8-medium）。
     @State private var cannotPreserveReason: TrainingSessionCoordinator.CheckpointStatus = .none

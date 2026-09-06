@@ -418,6 +418,18 @@ struct FinalizeFailureAlertSourceGuardTests {
             let above = j >= 0 ? lines[j].trimmingCharacters(in: .whitespaces) : ""
             #expect(above.hasPrefix("@Test("),
                     "⛔ \(fn) 头上没有紧邻的 @Test（实为「\(above.prefix(40))」）—— 函数还在但已不在测试套件里")
+
+            // ⛔ 除名手段要**穷尽框架提供的那几种**，不能只想到自己先想到的两种（Kimi R15-medium）：
+            //    我处理了「删 @Test 行」和「#if false」，却漏了 swift-testing 里最惯用的
+            //    `.disabled()` —— 它仍以 `@Test(` 开头、函数名也在 ⇒ 上面两条判据全绿，
+            //    而测试实际不再执行；总数少 2 又落在闸门 ±30 容差内不报警。
+            // ⚠️ 判据只看 `@Test` 到 `func` 之间那几行：本仓测试文件里也有界面按钮的
+            //    `.disabled(!enabled)`，全文件扫会误伤。
+            let traitBlock = lines[max(0, j)..<idx].joined()
+            for kill in [".disabled(", ".enabled(if:"] {
+                #expect(!traitBlock.contains(kill),
+                        "⛔ \(fn) 被 \(kill)…) 停用了 —— 文案许诺的逃生路失去行为测试保护")
+            }
         }
         // ⚠️ 文本层的极限：把整个文件从 test target 移除、或改 scheme 排除它，本守卫都看不见。
         //    那一层由 Catalyst 总数基线（±30）与人工验收 8h 兜底。
