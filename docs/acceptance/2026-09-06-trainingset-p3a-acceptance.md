@@ -49,7 +49,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_frozen_contract_texts.py -v
 ```
 
-**期望看到**：5 行，每行都**含有** `PASSED`，最后一行是 `5 passed`。五条分别在管：
+**期望看到**：5 行，每行都**含有** `PASSED`，最后一行形如 `5 passed in <某个秒数>`。五条分别在管：
 
 | 序 | 这条在管什么 |
 |---|---|
@@ -61,7 +61,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 
 **通过判定**：
 
-- ✅ 通过 —— 5 行都含 `PASSED`，最后一行 `5 passed`。
+- ✅ 通过 —— 5 行都含 `PASSED`，最后一行以 `5 passed` 开头。
 - ❌ 不通过 —— 任何一行是 `FAILED`；或条数不是 5 条。
 
 ---
@@ -196,7 +196,18 @@ App 侧一行未改，缝只闭合了生产者半边。归**切片二**，且必
 
 ### R10 · 那条禁令检查**挡不住「把一句话拆成两行」**
 
-它按**单行**判断。有人把旧规则拆成跨两行的写法就能绕过去。这是有意的取舍（按段落匹配 markdown 表格与列表的复杂度远高于收益），已如实记进变异记录。
+它只钉「严格递增」**这四个字**、且只看**单行**。⇒ **凡是不含这四个字的改写都绕得过** —— 同义词（「必须唯一」「不得重复」「单调递增且不重复」）、英文（`strictly increasing`）、或把一句话拆成两行，全都不会被抓到（最终评审逐条试过，确实全绿）。
+
+这是有意的取舍：按段落匹配 markdown 表格与列表的复杂度远高于收益。
+⛔ **也不要图省事把判据放宽成只查「递增」** —— 实测那样会误伤 `kline_trainer_plan_v1.5.md:405` 那条**合法**的注释（`global_index INTEGER, -- 最小周期唯一，全局递增 0,1,2...`，讲的正是分钟线、本来就该严格递增）。
+
+### R11 · 「允许重复」这一改，让另外两条仍在生效的条款失去了前提
+
+`kline_trainer_plan_v1.5.md:602-603` 写着「高级别周期：只在 `end_global_index <= globalTickIndex` 时新增 1 根」「日线视情况 +0 或 +1」—— 这两句**只在编号唯一时才成立**。现在允许重复了，会出现好几根共用同一个刻度的情况。
+
+而且两份权威文件里**都没有规定「并列时谁在前」** —— 编号不再唯一之后，缺一个排序依据。母设计文档早就点过这件事。
+
+⚠️ 实际影响面不大（实测重复都挤在被截断到 0 的那一头），所以这一片**不重写**它，但**必须记下来**：归**切片二**。
 
 ---
 

@@ -62,9 +62,25 @@ kline_trainer_modules_v1.4.md:723:- **验收**：row count、时间连续性、t
 **F2 — 守卫作用域为何必须排除 `docs/superpowers/` 与 `ios/`。**
 
 ```bash
-grep -rln "严格递增" docs/superpowers/ | wc -l      # → 19（历史记述，含本 spec 与 P1 计划的逐字引用）
-grep -rn  "严格递增" ios/ | grep -v "/\.build/"     # → 8+ 处，主题全不相干（画线图标线宽、datetime 次序）
+grep -rln "严格递增" docs/superpowers/ | wc -l      # → 20（历史记述；含本 spec、P1 计划与本片自己的计划）
+grep -rn  "严格递增" ios/ | grep -v "/\.build/"     # ⛔ 不要加 head！见下
 ```
+
+⛔⛔ **订正（最终评审 Important 1）**：上一版这里写「`ios/` 下 8+ 处主题全不相干」，**是错的** —— 我当时给 grep 加了 `head` 而**输出被截断**（本仓有成文教训：一致性扫描的 grep 输出绝不截断）。不截断后实测 `ios/` 的命中**分两类**：
+
+- ⛔ **同一条规则，而且是生产代码**：`ios/Contracts/Sources/KlineTrainerPersistence/DefaultTrainingSetReader.swift:80` 的注释「校验 per-period endGlobalIndex 严格递增」，`:90-92` **就是执行它的那段代码**：
+
+  ```swift
+  if let prev = lastEnd[period], r.endGlobalIndex <= prev {
+      throw AppError.persistence(.dbCorrupted)
+  }
+  ```
+
+  ⇒ 它会**拒掉每一个第 2 代产物**（`monthly [0, 0, 17, 23]` 的 `0 <= 0` 当场抛错）。`:146` 还逐字引用 R03 原句作为依据。
+  ⭐ **这是给切片二的关键事实**：App 侧至少有**两道**独立的拦路石 —— 除已知的「只认 `.sqlite` 成员」外，还有这道运行时的严格递增校验。
+- ⚪ 其余（画线图标线宽、`datetime` 次序等）与本片不相干。
+
+⇒ 结论（守卫作用域排除 `ios/`）**不变**，但**理由必须写对**：不是「都不相干」，而是「其中那条相干的属于切片二的范围，本片明令不碰 App」。
 
 **F3 — 3b2 的三处版本引用现状。**
 

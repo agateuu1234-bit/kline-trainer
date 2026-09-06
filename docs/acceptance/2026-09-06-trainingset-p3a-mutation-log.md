@@ -23,7 +23,7 @@
 | **M6** | ⭐⭐ `modules:2239` 值**保持 `2`**、**只删过渡态标注** | 版本守卫红 | 🔴 同上，报「改了值但**没带过渡态标注**」 | 空 |
 | **M7** | `DownloadAcceptanceRunner.swift:14` 的常量 `1` → `2` | App 钉桩守卫红 | 🔴 `test_app_reader_is_still_pinned_to_generation_one`（前半） | 空 |
 | **M8** | `TrainingSessionCoordinator.swift:1360` 的**写死字面量** `1` → `2` | 同上 | 🔴 同一条用例（后半） | 空 |
-| **M9** | 冻结 DDL 的 `PRAGMA user_version` `2` → `1` | 后端生产侧守卫红 | 🔴 `test_backend_production_side_is_already_generation_two` | 空 |
+| **M9** | 冻结 DDL 的 `PRAGMA user_version` `2` → `1` | 后端生产侧守卫红 | 🔴 `test_backend_production_side_is_already_generation_two`。⚠️ **如实记**：既有的 schema 硬门 `backend/sql/tests/test_training_set_schema.sh` 也会红（它硬断言 `user_version = 2`）—— 本驱动器只跑了守卫那一个文件，看不到它 | 空 |
 | **M10** | ⭐⭐ **自排除是否把守卫弄瞎**：往 `backend/generate_training_sets.py` 末尾塞一行含「严格递增」+ `global_index` 且无放行词的注释 | 禁令守卫仍应红 | 🔴 `test_old_all_periods_strictly_increasing_wording_is_gone`，点名 `backend/generate_training_sets.py:845` ⇒ **自排除只排除了守卫自己，没有把作用域弄瞎** | 空 |
 
 ---

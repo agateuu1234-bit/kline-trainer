@@ -1282,7 +1282,7 @@ def generate_one_training_set(stock_code):
 
 1. **DecelerationAnimator 后台恢复**（已解决）：`sceneDidBecomeActive` 时 reset，dt > 1s 时直接 stop
 2. **PriceRange 与 BOLL/MA66 协调**（已解决）：calculate 包含指标极值，5% padding
-3. **后端 Index 预计算**：`3m` 的 global_index / end_global_index 等于行下标且严格递增；**其它周期** global_index 恒 NULL、end_global_index 逐根等于按 datetime 标注语义反算的值（**允许重复**）；后端 assert + 前端 DEBUG 校验（2026-09-06 P3a 改写，依据 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md` §2.1/§2.2；本文件无修订记录小节，就地括注）
+3. **后端 Index 预计算**：`3m` 的 global_index / end_global_index 等于行下标且严格递增；**其它周期** global_index 恒 NULL、end_global_index 逐根等于按 datetime 标注语义反算的值（**允许重复**；**轴前 K 线 clamp 到 0**）；后端 assert + 前端 DEBUG 校验（2026-09-06 P3a 改写，依据 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md` §2.1/§2.2；本文件无修订记录小节，就地括注）
 4. **A 股异常数据**：停牌/分红/数据缺失 → 依赖后端 pandas 清洗处理
 5. **CSV 数据量**：全市场 × 多周期，import_csv.py 需异步批处理
 6. **训练组 SQLite 完整性**（已解决）：完整验收状态机（CRC → GRDB → schema_version → 数据量）

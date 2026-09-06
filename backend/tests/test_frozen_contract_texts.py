@@ -17,12 +17,25 @@ PLAN15 = REPO_ROOT / "kline_trainer_plan_v1.5.md"
 
 # ── 守卫①作用域：**后端与治理文档**
 # ⛔ 不得扩成全仓：
-#   · `docs/superpowers/**` 下实测 19 个文件**逐字引用**旧表述（历史记述，含本片的 spec 与 P1 计划）
-#   · `ios/**` 下实测 8+ 处「严格递增」讲的是完全无关的事（画线图标线宽、datetime 次序）
+#   · `docs/superpowers/**` 下实测 **20 个文件**逐字引用旧表述（历史记述；含本片的 spec、P1 计划，
+#     以及本片自己的计划文档 —— 所以这个数只会随记述增加而变大，⛔ 不是判据）
+#   · `ios/**` 下的命中**分两类**（⚠️ 早先写「主题全不相干」是错的 —— 那次 grep 加了 `head` 被截断）：
+#     ⛔ **同一条规则、且是生产代码**：`DefaultTrainingSetReader.swift:80` 注释「校验 per-period
+#        endGlobalIndex 严格递增」、`:90-92` **就是执行它的那段代码**
+#        （`if let prev = lastEnd[period], r.endGlobalIndex <= prev { throw .dbCorrupted }`）
+#        —— 它会**拒掉每一个第 2 代产物**（`monthly [0,0,17,23]` 的 `0 <= 0` 当场抛错）；
+#        `:146` 还逐字引用了 R03 原句作为依据。⇒ **切片二要改的正是这里**。
+#     ⚪ 其余（画线图标线宽、datetime 次序等）与本片不相干。
 #   扩成全仓 ⇒ 守卫恒红，要它变绿只能删历史记述或改 App 源文件。
 # 切片二把作用域扩到 `ios/`（spec §8）。
 _SCOPE_FILES = [MODULES, PLAN15]
-_SCOPE_DIRS = [REPO_ROOT / "docs" / "governance", REPO_ROOT / "backend"]
+# ⭐ 作用域必须覆盖**所有会照这条规则写检查的地方**（最终评审 Important 2）：本片的立论就是
+#    「日后任何照旧规则写的检查，会把每个第 2 代产物判死」，而检查恰恰住在 `scripts/acceptance/`、
+#    `docs/runbooks/`（可执行 SQL 烟测）与 `.github/workflows/` 里 —— spec §3.3 也正是把这三类
+#    称作「可执行路径」。实测把它们纳入后**今天零违例**，所以这是纯粹的加固。
+_SCOPE_DIRS = [REPO_ROOT / "docs" / "governance", REPO_ROOT / "backend",
+               REPO_ROOT / "docs" / "runbooks", REPO_ROOT / "scripts",
+               REPO_ROOT / "tests", REPO_ROOT / ".github"]
 
 _OLD_WORDING = "严格递增"
 
@@ -38,7 +51,7 @@ def _scope_lines():
     files = list(_SCOPE_FILES)
     for d in _SCOPE_DIRS:
         files += [p for p in d.rglob("*")
-                  if p.is_file() and p.suffix in (".md", ".py", ".sql", ".sh")
+                  if p.is_file() and p.suffix in (".md", ".py", ".sql", ".sh", ".yml", ".yaml")
                   and "__pycache__" not in p.parts]
     for p in files:
         if p.resolve() == _SELF:
@@ -89,19 +102,29 @@ def test_rewritten_clauses_are_present_in_both_root_authorities():
 
 # ── 守卫②：分阶段版本守卫（spec §3.3 3c②，切片一断言）
 
-_TRANSITION_NOTE = "App 侧仍为 1"
+# ⛔ 按**整句**判，不按「App 侧仍为 1」这 6 个字的子串（最终评审 Important 5 实证：
+#    「旧说法『App 侧仍为 1』已作废，App 侧现已为 2」这种**反义句**同样含该子串、会被放行）。
+#    实测三处标注**逐字同一句**，所以整句匹配可行。
+_TRANSITION_NOTE = "⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地"
 
 
 def test_frozen_contract_version_refs_are_2_with_transition_note():
     """守卫②前半：冻结契约三处版本引用为 `2`，且**各自带过渡态标注**。
 
+    ⚠️ 它变红有两种含义（同下面那条 App 钉桩守卫）：要么有人把值或标注改回去了，
+       要么**切片二已落地**而本守卫没跟着收敛 —— 那时 spec §8 要求改成「三方同时为 2」、
+       并把过渡态标注一并撤掉。
     ⛔ **只断言值 = 2 是不够的**（spec 3b2 / 变异 B16）：那样冻结契约会声称「前后端共享 = 2」，
        而本守卫后半同时把「App 侧 = 1」认证为正确 —— 两条权威互相打脸，正是本片要消灭的形状。
     """
     lines = MODULES.read_text(encoding="utf-8").splitlines()
+    # ⛔ 必须**按形状锚定**：原式 `[=|]\s*`?2`?` 会被 `| 2026-10 起…` 这类**日期单元格**满足
+    # （最终评审 Minor 实证：把值改成 `3`、同行带个 2026 开头的日期，整条守卫照样绿）。
+    _VALUE_SHAPES = (r"\|\s*`2`\s*\|",                      # 矩阵值单元格
+                     r"TRAINING_SET_SCHEMA_VERSION\s*=\s*2\b")  # 常量写法
     targets = [l for l in lines
                if ("PRAGMA user_version" in l or "TRAINING_SET_SCHEMA_VERSION" in l)
-               and re.search(r"[=|]\s*`?2`?", l)]
+               and any(re.search(s, l) for s in _VALUE_SHAPES)]
     assert len(targets) == 3, (
         f"冻结契约里带版本数值的引用应恰好 3 处且都为 2，实测 {len(targets)} 处：\n"
         + "\n".join(t.strip()[:110] for t in targets))
@@ -122,7 +145,8 @@ def test_app_reader_is_still_pinned_to_generation_one():
     """
     runner = (REPO_ROOT / "ios/Contracts/Sources/KlineTrainerContracts"
               / "DownloadAcceptance/DownloadAcceptanceRunner.swift").read_text(encoding="utf-8")
-    assert "public let TRAINING_SET_SCHEMA_VERSION = 1" in runner, (
+    # ⛔ 用 `\b` 收尾：裸子串 `= 1` 会被 `= 12` 满足（最终评审 Minor）
+    assert re.search(r"public let TRAINING_SET_SCHEMA_VERSION = 1\b", runner), (
         "DownloadAcceptanceRunner 的 TRAINING_SET_SCHEMA_VERSION 不再是 1 —— "
         "切片一期间 App 读取端必须仍钉在第 1 代")
 
@@ -137,5 +161,5 @@ def test_backend_production_side_is_already_generation_two():
     ddl = (REPO_ROOT / "backend/sql/training_set_schema_v1.sql").read_text(encoding="utf-8")
     assert "PRAGMA user_version = 2;" in ddl
     gen = (REPO_ROOT / "backend/generate_training_sets.py").read_text(encoding="utf-8")
-    assert "SCHEMA_VERSION = 2" in gen
+    assert re.search(r"^SCHEMA_VERSION = 2\b", gen, re.M)
     assert "PRAGMA user_version = 2;" in gen

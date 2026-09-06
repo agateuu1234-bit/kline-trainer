@@ -2299,7 +2299,7 @@ struct HistoryActionSheet: View {
 |---|---|---|---|---|
 | R01 | DecelerationAnimator 后台恢复 | P2 | resetOnSceneActive + dt>1s 直接停；U2→E5→C2 责任链 | U2/E5/C2 |
 | R02 | PriceRange 与 BOLL/MA66 协调 | P2 | calculate 含指标极值 + 5% padding | C1 |
-| R03 | 后端 Index 预计算一致性 | P1 | `3m`：`global_index == end_global_index == 行下标`，严格递增；**其它周期**：`global_index` 恒 NULL，`end_global_index` 逐根等于按 §2.1 datetime 标注语义反算的值（**允许重复**，但重复由反算式决定而非任意）+ 前后端 assert（2026-09-06 P3a 改写，依据 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md` §2.1/§2.2；本文件无修订记录小节，就地括注） | B2/P3 |
+| R03 | 后端 Index 预计算一致性 | P1 | `3m`：`global_index == end_global_index == 行下标`，严格递增；**其它周期**：`global_index` 恒 NULL，`end_global_index` 逐根等于按 §2.1 datetime 标注语义反算的值（**允许重复**，但重复由反算式决定而非任意；**轴前 K 线 clamp 到 0**）+ 前后端 assert（2026-09-06 P3a 改写，依据 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md` §2.1/§2.2；本文件的「§14.2 修订逐项表」只收 v1.0→v1.4 的评审轮次、不收本片，故就地括注） | B2/P3 |
 | R04 | A 股异常数据 | P2 | 后端 pandas 清洗 | B1 |
 | R05 | CSV 数据量 | P2 | import_csv 异步批处理 | B1 |
 | R06 | 训练组 SQLite 完整性 | P1 | 完整验收状态机 | P2 |
