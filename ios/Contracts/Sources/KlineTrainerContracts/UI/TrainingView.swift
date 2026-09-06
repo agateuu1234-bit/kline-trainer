@@ -83,7 +83,12 @@ public struct TrainingView: View {
     // Q13（codex R2-high）：安全退出**什么都没保住**时的诚实提示（既没落盘、磁盘上也没有旧存档）。
     @State private var cannotPreserveOnExit = false
     // 「保不住」的成因决定说法与建议（Opus 对抗评审 + codex R5-medium）：三种成因的补救动作互不相同，
-    // 压成一种就必然对另两种说假话（文件被清理 / 存档读不出来时，「清理存储空间」都是无效建议）。
+    // 压成一种就必然对另两种说假话。
+    // ⚠️ 「清理存储空间」这条建议的性质**按目的而定**（2026-09-06 订正，见 cannotPreserveCopy）：
+    //    对「找回被删掉的训练组文件」无效 —— 腾空间不会让它回来；
+    //    对「让入账写得进去」有效 —— 能看到这些提示就说明写库失败过，而重试入账要写库。
+    //    ⛔ 本段曾写着「文件被清理 / 存档读不出来时，清理存储空间都是无效建议」，那是只按前一个
+    //    目的下的结论；照旧文去改会把 `.trainingSetMissing` 支的新文案当违规改回去（Kimi R8-medium）。
     @State private var cannotPreserveReason: TrainingSessionCoordinator.CheckpointStatus = .none
     // Q13（codex R2-medium）：弃局**没做成**时的诚实提示（清槽失败 → 会话仍在，绝不能假装已退出）。
     // ⛔ 承载**来源**而非 Bool（codex R6-high）：两个弹窗的「放弃」都会失败，丢掉来源就只能猜一个回。
