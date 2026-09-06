@@ -776,8 +776,11 @@ public struct TrainingView: View {
             // ⛔ 这一支**不得**把「放弃本局」写成出路（真机验收 2026-09-05 暴露）：
             //    `discardSession()` 走 `pendingRepo.clearPending()`，**必须写库** —— 存储正是坏的那一样东西
             //    ⇒ 三个按钮全部走不通，用户被困在一个没有出口的循环里。
-            //    真实出路是关掉 App 重开：首页按钮看 `hasPending`（HomeContent），而这一局一次都没存成功
-            //    ⇒ pending 为空 ⇒ 回到「开始训练」，人出得来（代价是这一局丢失，必须一并说清）。
+            //    真实出路是关掉 App 重开：内存里这一局随进程一起没了，人一定出得来（代价是这一局丢失，
+            //    必须一并说清）。⚠️ **别写死「回到开始训练」**（Kimi R16-low）：`.none` 还包含
+            //    「pending 在、但属于**别的**会话」这一子情形（Coordinator 的 sessionKey 比对），
+            //    那时首页按钮仍是「继续训练」（指向别的局）。文案只承诺「这一局会丢失」，那是两种
+            //    子情形下都成立的；⛔ 加固成「回到开始训练」就又是成因外推。
             //    ⚠️ 本支（`.none`）曾断言「写库持续失败中 ⇒ 放弃必然也失败」。**那也是成因外推**
             //    （Kimi R10-low）：`saveProgress` 会因 `loadedDrawingsLossy.reconciled` 检出重复/空 id
             //    而抛 `.dbCorrupted`（fail-closed，Coordinator:671）——那时存储健康、本局从未写成 pending

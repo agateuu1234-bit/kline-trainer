@@ -1,86 +1,86 @@
-✔ Test run with 1897 tests in 221 suites passed after 3.851 seconds.
+✔ Test run with 1897 tests in 221 suites passed after 3.782 seconds.
 
 Copy /tmp/claude-501/-Users-maziming/0c88df81-932a-4b6c-905a-d52a4eadbe6a/scratchpad/catalyst-derived.dpZMHs/Build/Products/Debug-maccatalyst/ZIPFoundation.swiftmodule/arm64-apple-ios-macabi.swiftmodule /tmp/claude-501/-Users-maziming/0c88df81-932a-4b6c-905a-d52a4eadbe6a/scratchpad/catalyst-derived.dpZMHs/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation.swiftmodule (in target 'ZIPFoundation' from project 'ZIPFoundation')
 
 SwiftCompile normal arm64 /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-undo/ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift (in target 'KlineTrainerContractsTests' from project 'KlineTrainerContracts')
 
-✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 3.504 seconds.
-✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 3.513 seconds.
-✔ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" passed after 3.513 seconds.
-✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 3.504 seconds.
-✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 1.086 seconds.
-✔ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" passed after 1.086 seconds.
-✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 1.086 seconds.
-✔ Test "D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true" passed after 3.513 seconds.
-✔ Test "D55 dispatch：selectedDrawingID == nil → 一条都不高亮" passed after 3.513 seconds.
-✔ Test "前置实测：ImageRenderer 能 flatten Canvas 图标（子树不塌成零尺寸）——Task4 几何断言的前提" passed after 3.489 seconds.
-✔ Test "像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）" passed after 3.479 seconds.
-✔ Test "像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）" passed after 3.479 seconds.
-✔ Test "像素级：粗细 1…5 的墨量**严格递增**（图标真的越来越粗，不是 5 根同宽线）" passed after 3.479 seconds.
-✔ Test "M12 的守门测试：画线态点一下 → 落线 + 自动选中，且**本帧** renderState.selectedDrawingID 已是新那条" passed after 3.470 seconds.
-✔ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" passed after 1.109 seconds.
-✔ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" passed after 1.109 seconds.
-✔ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" passed after 1.109 seconds.
-✔ Test "#2 D42：上面板画一条、下面板画一条 —— 两条都提交，period 各自绑所在面板当时的周期" passed after 3.496 seconds.
-✔ Test "#5 连续画线：同一面板连点三次 → 三条线；每次提交后会话与工具仍在" passed after 3.486 seconds.
-✔ Test "#3 D31 跨 Coordinator：上面板 pending + 下面板落锚 → 只丢 pending，工具/会话存活" passed after 3.496 seconds.
-✔ Test "#1 D39：反复 sync/updateUIView **不改写**工具（1b-i 的类型行 toggle 不会被撤销）" passed after 3.496 seconds.
-✔ Test "#1 D39：未开会话时 sync **不会**自动武装任何工具（re-arm 已删除）" passed after 3.496 seconds.
-✔ Test "codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活" passed after 3.496 seconds.
-✔ Test "未开会话时点图 = 不画线" passed after 3.496 seconds.
-✔ Test "1a-iv：惯性未停时点击 —— 锚落在**定住后**视口映射的那根 K 线上，且提交后图不再滑" passed after 3.496 seconds.
-✔ Test "D34 反向对照（防过度 fail-closed）：复盘的**画线态** tap 照常落线 —— 复盘画线是既有功能，不得回归" passed after 3.497 seconds.
-✔ Test "D34 trust-boundary：复盘的**选择态** tap 不选中（否则可改写已归档 record 里的原训练线）" passed after 3.496 seconds.
-✔ Test "D37：选择态未命中 → 清空选中、且不落锚（先命中建立选中，再点空白处）" passed after 3.486 seconds.
-✔ Test "D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）" passed after 3.496 seconds.
-✔ Test "D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings" passed after 3.503 seconds.
-✔ Test "D40 路由（行为级）：属于**另一个面板**的线不得在本面板被选中（belongsToPanel 过滤真的生效）" passed after 3.486 seconds.
-✔ Test "D41 跨面板：在另一个面板选中后，原面板刷新时高亮必须消失（不得两条同时高亮）" passed after 3.496 seconds.
-✔ Test "D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）" passed after 3.486 seconds.
-✔ Test "N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚" passed after 3.496 seconds.
-✔ Test "N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）" passed after 3.496 seconds.
-✔ Test "PR-4：rebuildRenderState 发布的是**这一帧渲染真用过**的视口（与 view.renderState.viewport 逐字相等）" passed after 3.497 seconds.
-✔ Test "PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false" passed after 3.500 seconds.
-✔ Test "codex R2-M2 fix：瞬态零尺寸 bounds → 该面板 mapper 失效，几何门 fail-closed，写入路由零改动" passed after 3.496 seconds.
-✔ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" passed after 0.502 seconds.
-✔ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" passed after 0.502 seconds.
-✔ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" passed after 0.502 seconds.
-✔ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" passed after 0.502 seconds.
-✔ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" passed after 0.502 seconds.
-✔ Test "D94 spike：defaultStyle 变化 → onChange 触发 → coordinator 真落盘一次" passed after 3.343 seconds.
-✔ Test "对照组：既有 drawingsRevision 触发同一路径（供判定 spike 手法本身是否可靠）" passed after 3.342 seconds.
-✔ Test "宽度 390pt：三个底栏等高（≤0.5pt 容差）" passed after 1.135 seconds.
-✔ Test "宽度 430pt：三个底栏等高（≤0.5pt 容差）" passed after 1.130 seconds.
-✔ Test "四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等" passed after 1.145 seconds.
-✔ Test "补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内" passed after 0.395 seconds.
-✔ Test "点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透" passed after 0.003 seconds.
-✔ Test "点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）" passed after 0.001 seconds.
-✔ Test "真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验" passed after 0.013 seconds.
-✔ Test "复盘负向（codex 计划-R4-medium）：复盘态（showsTradeButtons==false）即便 drawingModeActive，也**不装 overlay、不装盾**——复盘图表点不被吞" passed after 0.001 seconds.
+✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 3.538 seconds.
+✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 3.538 seconds.
+✔ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" passed after 3.538 seconds.
+✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 3.539 seconds.
+✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 1.149 seconds.
+✔ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" passed after 1.154 seconds.
+✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 1.149 seconds.
+✔ Test "D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true" passed after 3.538 seconds.
+✔ Test "D55 dispatch：selectedDrawingID == nil → 一条都不高亮" passed after 3.538 seconds.
+✔ Test "前置实测：ImageRenderer 能 flatten Canvas 图标（子树不塌成零尺寸）——Task4 几何断言的前提" passed after 3.449 seconds.
+✔ Test "像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）" passed after 3.449 seconds.
+✔ Test "像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）" passed after 3.449 seconds.
+✔ Test "像素级：粗细 1…5 的墨量**严格递增**（图标真的越来越粗，不是 5 根同宽线）" passed after 3.449 seconds.
+✔ Test "M12 的守门测试：画线态点一下 → 落线 + 自动选中，且**本帧** renderState.selectedDrawingID 已是新那条" passed after 3.522 seconds.
+✔ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" passed after 1.160 seconds.
+✔ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" passed after 1.160 seconds.
+✔ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" passed after 1.160 seconds.
+✔ Test "#2 D42：上面板画一条、下面板画一条 —— 两条都提交，period 各自绑所在面板当时的周期" passed after 3.477 seconds.
+✔ Test "#5 连续画线：同一面板连点三次 → 三条线；每次提交后会话与工具仍在" passed after 3.516 seconds.
+✔ Test "#3 D31 跨 Coordinator：上面板 pending + 下面板落锚 → 只丢 pending，工具/会话存活" passed after 3.517 seconds.
+✔ Test "#1 D39：反复 sync/updateUIView **不改写**工具（1b-i 的类型行 toggle 不会被撤销）" passed after 3.477 seconds.
+✔ Test "#1 D39：未开会话时 sync **不会**自动武装任何工具（re-arm 已删除）" passed after 3.516 seconds.
+✔ Test "codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活" passed after 3.477 seconds.
+✔ Test "未开会话时点图 = 不画线" passed after 3.516 seconds.
+✔ Test "1a-iv：惯性未停时点击 —— 锚落在**定住后**视口映射的那根 K 线上，且提交后图不再滑" passed after 3.516 seconds.
+✔ Test "D34 反向对照（防过度 fail-closed）：复盘的**画线态** tap 照常落线 —— 复盘画线是既有功能，不得回归" passed after 3.516 seconds.
+✔ Test "D34 trust-boundary：复盘的**选择态** tap 不选中（否则可改写已归档 record 里的原训练线）" passed after 3.478 seconds.
+✔ Test "D37：选择态未命中 → 清空选中、且不落锚（先命中建立选中，再点空白处）" passed after 3.477 seconds.
+✔ Test "D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）" passed after 3.477 seconds.
+✔ Test "D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings" passed after 3.515 seconds.
+✔ Test "D40 路由（行为级）：属于**另一个面板**的线不得在本面板被选中（belongsToPanel 过滤真的生效）" passed after 3.516 seconds.
+✔ Test "D41 跨面板：在另一个面板选中后，原面板刷新时高亮必须消失（不得两条同时高亮）" passed after 3.522 seconds.
+✔ Test "D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）" passed after 3.443 seconds.
+✔ Test "N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚" passed after 3.523 seconds.
+✔ Test "N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）" passed after 3.477 seconds.
+✔ Test "PR-4：rebuildRenderState 发布的是**这一帧渲染真用过**的视口（与 view.renderState.viewport 逐字相等）" passed after 3.477 seconds.
+✔ Test "PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false" passed after 3.576 seconds.
+✔ Test "codex R2-M2 fix：瞬态零尺寸 bounds → 该面板 mapper 失效，几何门 fail-closed，写入路由零改动" passed after 3.516 seconds.
+✔ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" passed after 0.946 seconds.
+✔ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" passed after 0.948 seconds.
+✔ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" passed after 0.949 seconds.
+✔ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" passed after 0.948 seconds.
+✔ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" passed after 0.946 seconds.
+✔ Test "D94 spike：defaultStyle 变化 → onChange 触发 → coordinator 真落盘一次" passed after 1.203 seconds.
+✔ Test "对照组：既有 drawingsRevision 触发同一路径（供判定 spike 手法本身是否可靠）" passed after 1.203 seconds.
+✔ Test "宽度 390pt：三个底栏等高（≤0.5pt 容差）" passed after 1.158 seconds.
+✔ Test "宽度 430pt：三个底栏等高（≤0.5pt 容差）" passed after 1.158 seconds.
+✔ Test "四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等" passed after 0.931 seconds.
+✔ Test "补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内" passed after 0.574 seconds.
+✔ Test "点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透" passed after 0.001 seconds.
+✔ Test "点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）" passed after 0.004 seconds.
+✔ Test "真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验" passed after 0.008 seconds.
+✔ Test "复盘负向（codex 计划-R4-medium）：复盘态（showsTradeButtons==false）即便 drawingModeActive，也**不装 overlay、不装盾**——复盘图表点不被吞" passed after 0.002 seconds.
 ✔ Test "回归复现（P1b-1a-iii HIGH，6a84fa5）：复盘态两面板若卡在 .pending，tap 被永久拒收；clearAllShields() 后同点能落线" passed after 0.001 seconds.
 ✔ Test "盾泛化真路径（trade-safety）：overlay 高到跨越上下两面板 → **两个**面板各自装盾，上面板不再裸奔" passed after 0.006 seconds.
 ✔ Test "收起态：无 overlay → 两面板都无盾（基础清盾，**不算**不过度屏蔽的证据）" passed after 0.001 seconds.
-✔ Test "不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线" passed after 0.006 seconds.
-✔ Test "上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线" passed after 0.006 seconds.
+✔ Test "不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线" passed after 0.007 seconds.
+✔ Test "上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线" passed after 0.007 seconds.
 ✔ Test "窗口期差分（codex 计划-R14-F1）：stylePanelVisible 且盾未收敛 → 本可落线的点被拒；收敛后同点落线" passed after 0.001 seconds.
-✔ Test "透明外边距不进**输入层**盾（codex 计划-R1-F2）：面板可见外接矩形**之外**的 8pt 空隙里点一下 → 正常落线，不是死条" passed after 0.006 seconds.
+✔ Test "透明外边距不进**输入层**盾（codex 计划-R1-F2）：面板可见外接矩形**之外**的 8pt 空隙里点一下 → 正常落线，不是死条" passed after 0.007 seconds.
 ✔ Test "上半区（镜像）盾（精确判据）：面板整块落在上面板内 → 上面板有盾贴顶边、下面板盾 == nil" passed after 0.007 seconds.
 ✔ Test "⇅ 切位置后旧盾精确清零：下半区 → 上半区，下面板盾必须 == nil，且旧盾位置能重新落线" passed after 0.012 seconds.
-✔ Test "codex R2-medium 回归：⇅ 切位置若测出**相同**样式面板几何，两面板必须仍能从 .pending 收敛，面板外的点仍可落线" passed after 0.006 seconds.
+✔ Test "codex R2-medium 回归：⇅ 切位置若测出**相同**样式面板几何，两面板必须仍能从 .pending 收敛，面板外的点仍可落线" passed after 0.007 seconds.
 ✔ Test "codex R2-medium 接线守卫：ChartPanelsContainer 挂了 .task(id: stylePanelPosition) 与 .task(id: stylePanelVisible) 双收敛触发器" passed after 0.003 seconds.
-✔ Test "KLineView 可实例化（spec L1179 final class）" passed after 1.024 seconds.
-XCTestOutputBarrie✔ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" passed after 1.023 seconds.
-✔ Test "L8c 契约: 生产渲染注册表里确实没有 .trend（L8 的另一半，必须在 Catalyst 上跑）" passed after 1.024 seconds.
-✔ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" passed after 0.253 seconds.
-✔ Test "forScheme(.light) 13 字段桥 = AppPalette.light" passed after 0.253 seconds.
-✔ Test "light/dark UIColor 真不同（防退化为单集）" passed after 0.253 seconds.
-✔ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" passed after 1.003 seconds.
-✔ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" passed after 1.003 seconds.
-✔ Test "默认 displayMode == .system" passed after 3.470 seconds.
-✔ Test "resolve(trait:) .system + dark trait → .dark" passed after 3.470 seconds.
-✔ Test "resolve(trait:) .light forced 忽略 dark trait" passed after 3.470 seconds.
-✔ Test "resolve(trait:) .dark forced 忽略 light trait" passed after 3.470 seconds.
-✔ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" passed after 3.470 seconds.
-✔ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" passed after 0.276 seconds.
+✔ Test "KLineView 可实例化（spec L1179 final class）" passed after 0.936 seconds.
+XCTestOutputBarrie✔ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" passed after 0.936 seconds.
+✔ Test "L8c 契约: 生产渲染注册表里确实没有 .trend（L8 的另一半，必须在 Catalyst 上跑）" passed after 0.936 seconds.
+✔ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" passed after 0.568 seconds.
+✔ Test "forScheme(.light) 13 字段桥 = AppPalette.light" passed after 0.568 seconds.
+✔ Test "light/dark UIColor 真不同（防退化为单集）" passed after 0.568 seconds.
+✔ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" passed after 0.916 seconds.
+✔ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" passed after 0.916 seconds.
+✔ Test "默认 displayMode == .system" passed after 3.518 seconds.
+✔ Test "resolve(trait:) .system + dark trait → .dark" passed after 3.518 seconds.
+✔ Test "resolve(trait:) .light forced 忽略 dark trait" passed after 3.518 seconds.
+✔ Test "resolve(trait:) .dark forced 忽略 light trait" passed after 3.518 seconds.
+✔ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" passed after 3.518 seconds.
+✔ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" passed after 0.878 seconds.
 
 ** TEST SUCCEEDED **
