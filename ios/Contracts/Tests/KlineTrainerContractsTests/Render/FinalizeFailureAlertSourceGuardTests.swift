@@ -251,6 +251,12 @@ struct FinalizeFailureAlertSourceGuardTests {
     ///    TrainingSessionCoordinator:1034），这里是第三次（Kimi R7-low）：
     ///    上一稿头注还写着已被废弃的「同句共现」规则，而那条规则 Kimi R6 已证明可绕过。
     /// ⚠️ 本判据是**文本层**的，有固有极限（见实现内的说明）；真正兜底的是验收清单 8f/8g/8h。
+    ///
+    /// ⛔⛔ **订正一个结论时，它的回声散在七处**（本 PR 逐轮被 Kimi 点出来才补齐，血泪清单）：
+    ///   ①生产文案本身 ②生产代码注释 ③守卫判据 ④守卫的 `@Test` 显示名
+    ///   ⑤断言的失败信息字符串 ⑥验收清单对应条目 ⑦文档正文说明
+    ///   —— ④⑤⑥ 最常被漏：改判据时眼睛只盯着代码，而测试名和失败信息**会在将来变红时
+    ///   直接教后人把洞改回去**。改完请按这七类各扫一遍，别只 grep 一个自己编的关键词。
     private func discardMentionsAreAllWarnings(_ branch: String) -> Bool {
         // ⚠️ 上一稿判据是「同句里同时出现『放弃本局』和『失败』」，Kimi R6 证明它分不清
         //    那个「失败」修饰的是谁：「若重试入账仍然失败，也可以选择『放弃本局』离开。」
@@ -264,14 +270,14 @@ struct FinalizeFailureAlertSourceGuardTests {
             || branch.contains("「放弃本局」也可能失败")
     }
 
-    @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，必然也失败）")
+    @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，多半也失败）")
     func noneBranchMustNotOfferDiscardAsAWayOut() throws {
         // 真机验收（2026-09-05）暴露：8c 情形下三个按钮构成闭环 —— 重试失败、退出被拦、
         // 放弃同样失败（`discardSession` 走 `pendingRepo.clearPending()`，**必须写库**）。
-        // 而文案却让用户「去上一个提示里选择放弃本局」⇒ 把人支去做一件必然失败的事。
+        // 而文案却让用户「去上一个提示里选择放弃本局」⇒ 把人支去做一件多半会白忙的事。
         let branch = try copyBranch(try code(tv), caseName: "none")
         #expect(discardMentionsAreAllWarnings(branch),
-                "⛔ 存储坏掉时「放弃本局」必然失败 —— 提到它的每一句都必须是警告，不得写成建议")
+                "⛔ 存储坏掉时「放弃本局」多半也失败 —— 提到它的每一句都必须是警告，不得写成建议")
         // ⚠️ 这里比对的是**字面量内部**的文案，而扫描器刻意保留字面量里的空白
         //    ⇒ 断言一律用原文，⛔ 不能套 sq()（它会把「关闭 App」压成「关闭App」而永远不匹配）。
         #expect(branch.contains("关闭 App"),
