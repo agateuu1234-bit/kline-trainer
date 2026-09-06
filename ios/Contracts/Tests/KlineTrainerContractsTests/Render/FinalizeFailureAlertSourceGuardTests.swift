@@ -356,14 +356,17 @@ struct FinalizeFailureAlertSourceGuardTests {
                     "⛔ 「\(absolute)」是全称断言 —— 此刻写库是好是坏，代码里没有任何东西能保证")
         }
 
-        // 正向：提到「放弃本局」的**每一处**所在句都要带条件。
-        // ⚠️ 上一稿只查**第一处**（`if let hit = ...`），第二处起无条件提及完全不受检（Kimi R6）。
-        var scan = Substring(branch)
-        while let hit = scan.range(of: "放弃本局") {
-            let sentence = scan[hit.upperBound...].prefix { $0 != "。" && $0 != "；" }
+        // 正向：提到「放弃本局」的**每一句**都要自带条件。
+        // ⚠️ 演进史（两次都因为扫描范围没对准判据本身）：
+        //   · 一稿只查**第一处**出现，第二处起完全不受检（Kimi R6）；
+        //   · 二稿改为逐处扫，但只取该处**之后**到句读为止 ⇒ 实际执行的是「条件必须写在提及
+        //     之后」这条文体偶然性，而**条件在前**的合法写法（「若存储此刻仍写不进去，
+        //     「放弃本局」也会失败」——正是本文件 `.none` 支采用的句式）会被误红（Kimi R13）。
+        // ⇒ 按句读切分整句，含「放弃本局」的句子整句都算，前后皆可。
+        for sentence in branch.split(whereSeparator: { $0 == "。" || $0 == "；" }) {
+            guard sentence.contains("放弃本局") else { continue }
             #expect(sentence.contains("如果") || sentence.contains("若"),
                     "⛔ 提「放弃本局」的每一句都必须自带条件限定，不能由别处的『若』代劳")
-            scan = scan[hit.upperBound...]
         }
     }
 
