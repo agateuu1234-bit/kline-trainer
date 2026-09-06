@@ -31,8 +31,11 @@ PLAN15 = REPO_ROOT / "kline_trainer_plan_v1.5.md"
 _SCOPE_FILES = [MODULES, PLAN15]
 # ⭐ 作用域必须覆盖**所有会照这条规则写检查的地方**（最终评审 Important 2）：本片的立论就是
 #    「日后任何照旧规则写的检查，会把每个第 2 代产物判死」，而检查恰恰住在 `scripts/acceptance/`、
-#    `docs/runbooks/`（可执行 SQL 烟测）与 `.github/workflows/` 里 —— spec §3.3 也正是把这三类
-#    称作「可执行路径」。实测把它们纳入后**今天零违例**，所以这是纯粹的加固。
+#    `docs/runbooks/`（可执行 SQL 烟测）与 `.github/workflows/` 里。
+#    ⚠️ **精确引用**（复评 Minor）：spec §3.3 自己枚举的「可执行路径」三类是
+#    `backend/**` / `docs/runbooks/**` / `.github/workflows/**`，**不含** `scripts/`。
+#    本守卫另外纳入 `scripts/` 与 `tests/` 是**基于自身理由**：spec 的 3d 项本身讲的就是
+#    `scripts/acceptance/` 里一条陈旧的期望值。实测纳入后**今天零违例** ⇒ 纯粹的加固。
 _SCOPE_DIRS = [REPO_ROOT / "docs" / "governance", REPO_ROOT / "backend",
                REPO_ROOT / "docs" / "runbooks", REPO_ROOT / "scripts",
                REPO_ROOT / "tests", REPO_ROOT / ".github"]
