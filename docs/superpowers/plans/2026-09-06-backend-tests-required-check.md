@@ -127,7 +127,23 @@ grep -n "^FAIL" /tmp/gov-after-task1.log
 {"context": "backend pytest (full suite)", "integration_id": 15368}
 ```
 
-⚠️ **只改「该 fixture 语义上应当已合规」的那些**。像 `ruleset-partial.json`（故意缺 Catalyst）、`ruleset-without-check.json`（故意没有）这类**故意不合规**的样本**不要动** —— 动了会把它们要测的场景抹掉。
+**判断规则（Kimi plan-R2 订正，初版写错了）**：
+
+> **每个 fixture 只应在「它要测的那一个维度」上不合规；其它维度必须合规。**
+
+初版写的是「故意不合规的样本一律不要动」—— **错**。按维度分：
+
+| fixture 要测什么 | 补不补 backend context |
+|---|---|
+| 代表「已合规」（如 `ruleset-with-check.json`、`ruleset-extra-valid.json`） | ✅ **补** |
+| 要测的正是「缺某个 context」（如 `ruleset-partial.json`、`ruleset-without-check.json`） | ❌ **不补** —— 补了就把它要测的场景抹掉 |
+| 要测的是**别的**维度、且该维度在检查顺序里**排在 checks 之后**（如 `ruleset-extra-bypass.json` 测多出 bypass） | ✅ **必须补**，理由见下 |
+
+⚠️ **`ruleset-extra-bypass.json` 是最容易漏的一个，而且漏了不会变红**：
+`admin-configure-required-checks.sh` 的检查顺序里 **checks 子集（`:107`）早于 bypass 精确相等（`:109`）**。
+不给它补 backend context，#6d 就会在 `:107` 因「缺 context」先挂 —— 退出码仍是 1、
+`run-all.sh` 仍然 `ALL GREEN`（该用例只断言 rc=1），但它**从此永远测不到 bypass 那条分支**。
+这是典型的**静默失去覆盖**，「跑一遍红哪个改哪个」发现不了。
 
 - [ ] **Step 4: 重跑直到全绿**
 
@@ -137,13 +153,40 @@ bash tests/scripts/governance/run-all.sh 2>&1 | tail -3
 
 预期：末行 `ALL GREEN`。
 
-- [ ] **Step 5: #6d 归因单独确认**（spec §5.2）
+- [ ] **Step 5: #6d 归因单独确认 —— 用「拿掉它要测的东西，应当转绿」来证明**
+
+rc 无法区分失败理由（都是 1），所以不能只看 rc。做法是**拿掉它声称要测的那个缺陷，
+看它是否转为成功**：
 
 ```bash
-bash tests/scripts/governance/test-admin-runbook.sh 2>&1 | grep -A2 "6d"
+python3 - <<'ATTR'
+import json, pathlib, shutil, subprocess, tempfile, os
+FIX = pathlib.Path("tests/scripts/governance/fixtures")
+src = FIX / "ruleset-extra-bypass.json"
+d = json.loads(src.read_text())
+# 拿掉「多出的 bypass actor」——只留 admin 那一条
+d["bypass_actors"] = [a for a in d.get("bypass_actors", [])
+                      if a.get("actor_type") == "RepositoryRole" and a.get("actor_id") == 5]
+tmp = FIX / "_attr_probe.json"
+tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
+print("探针 fixture 已生成:", tmp)
+ATTR
 ```
 
-预期：#6d 仍 PASS，且它失败的理由是**多出 bypass actor**（不是「缺 context」）。若不确定，临时把该 fixture 的 bypass 改回正常、确认该用例转为不再触发人工介入 —— 证明红的是 bypass 那条判据。
+然后把 `test-admin-runbook.sh` 里 #6d 那行的 `MOCK_FIXTURE_N3` 临时指向 `_attr_probe.json`
+跑一次，看退出码。
+
+- **预期：`rc=0`（成功）** —— 说明 #6d 之前的 rc=1 **确实是 bypass 那条判据判出来的**。
+- ⚠️ **若仍 `rc=1`**：说明它是在更早的 `:107`「缺 context」挂的 —— **Step 3 漏给这个 fixture
+  补 backend context 了**，回去补上再来。
+
+跑完删掉探针文件并复原那一行：
+
+```bash
+rm -f tests/scripts/governance/fixtures/_attr_probe.json
+git checkout -- tests/scripts/governance/test-admin-runbook.sh   # 若临时改过
+git status --porcelain tests/scripts/governance/                 # 确认只剩预期的 fixture 改动
+```
 
 - [ ] **Step 6: 提交**
 
@@ -209,8 +252,12 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 
 - [ ] **Step 1: 加载 builder 并写新判据**
 
-在 `import yaml` 之后加 `import importlib.util`；并把文件里**已有的** `WORKFLOW`
-定义块（当前 32-34 行那三行）**整块替换**掉 —— 下面代码块里的前三行就是替换后的样子。
+两处改动：
+
+1. 在 `import yaml` 之后加一行 `import importlib.util`；
+2. 把文件里**已有的** `WORKFLOW` 定义块（当前 32-34 行，形如
+   `WORKFLOW = (` / `    Path(__file__)...` / `)`）**整块替换**为下面代码块里
+   `_REPO_ROOT` / `WORKFLOW` / `_BUILDER` **那三行**（不是代码块开头的 import 行）。
 
 ⚠️ **是替换、不是新增**：该文件已有一份 `WORKFLOW` 定义，再加一份就是制造第二份真相
 （本 plan 通篇在防这个；Kimi plan-R1 指出）。
@@ -398,7 +445,7 @@ import pathlib
 p = pathlib.Path(".github/workflows/codeowners-config-check.yml")
 t = p.read_text(encoding="utf-8")
 old = "      # 工作流一次都不启动 —— 判据永远执行不到，而它又不是必需检查，于是能合进去，\n"
-new = "      # 工作流一次都不启动 —— 判据永远执行不到。（注：backend pytest 现已是必需检查，\n      # 那种 PR 会改为卡在「Expected — waiting for status」；但判据仍需放在本 workflow，\n      # 因为「卡住」不等于「被判定为违规」，也无法给出可读的失败原因。）\n"
+new = "      # 工作流一次都不启动 —— 判据永远执行不到。（注：canonical 清单已把 backend pytest\n      # 列为必需检查；**一旦管理员应用了该清单**，那种 PR 会改为卡在\n      # 「Expected — waiting for status」。但判据仍需放在本 workflow：一来应用是独立于本仓库的\n      # 手工动作、在它发生前上述前提不成立，二来「卡住」不等于「被判定为违规」，\n      # 也给不出可读的失败原因。）\n"
 assert t.count(old) == 1, "锚点不唯一/找不到，拒绝生成"
 pathlib.Path("/tmp/co2.yml").write_text(t.replace(old, new), encoding="utf-8")
 print("已生成 /tmp/co2.yml")

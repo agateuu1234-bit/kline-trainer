@@ -351,7 +351,7 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py  
 | #6c（缺 deletion 规则） | 非 rsc 规则（**早于** checks） | ❌ 不会 |
 | #6e（policy 字段翻转） | rsc policy（**早于** checks） | ❌ 不会 |
 | #6b（缺 Catalyst） | checks 子集 —— **正是它声称的理由** | ❌ 不会 |
-| **#6d（多出 bypass actor）** | bypass（**晚于** checks） | ✅ **会** —— 缺 context 在 checks 那步就先挂了 |
+| **#6d（多出 bypass actor）** | bypass（**晚于** checks） | ✅ **会** —— 缺 context 在 checks 那步就先挂了。⚠️ 而且**它不会变红**（该用例只断言 rc=1），等于**静默失去 bypass 分支的覆盖**。⇒ plan Task 2 Step 3 明确要求给 `ruleset-extra-bypass.json` **补上** backend context，补完归因就不会漂；Step 5 用「拿掉它要测的那个缺陷、应当转绿」来证明 |
 
 ⇒ **只有 #6d 需要盯归因**。处方（逐个确认失败理由）保留，因为它无害且能兜住我判断错的情况。
 
