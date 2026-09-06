@@ -260,7 +260,7 @@ struct FinalizeFailureAlertSourceGuardTests {
         let occurrences = branch.components(separatedBy: "放弃本局").count - 1
         guard occurrences <= 1 else { return false }
         guard occurrences == 1 else { return true }          // 一次都不提，本来就没问题
-        return branch.contains("「放弃本局」同样会失败")
+        return branch.contains("「放弃本局」也会失败")
             || branch.contains("「放弃本局」也可能失败")
     }
 
@@ -284,8 +284,13 @@ struct FinalizeFailureAlertSourceGuardTests {
         //      R1 → `.trainingSetMissing` 不给「关闭 App」；R2 → 两个方向都不许绝对断言；
         //      R3 → 8f① 的「必须明说放弃也会失败」。每次我只补被点名的那一条。
         //    这次把验收清单里**所有**对本支的要求逐条落成断言（8c 两项 + 8f 三项）：
+        // ⚠️ 「同样会失败」曾是这里的必含项，已改为带条件的「也会失败」（Kimi R10-low）：
+        //    `saveProgress` 还会因 `loadedDrawingsLossy.reconciled` 检出重复/空 id 而抛 `.dbCorrupted`
+        //    （fail-closed 设计路径，TrainingSessionCoordinator:671）——那时**存储完全健康**、
+        //    本局从未写成 pending ⇒ status 正是 `.none`，而 `clearPending()` 会成功。
+        //    ⇒ 我在这一支下了全称断言，与我自己在 `.trainingSetMissing` 支批判的「成因外推」同型。
         for required in [
-            "同样会失败",            // 8f①：别把人支去白忙（Kimi R3 点名缺失的那条）
+            "也会失败",              // 8f①：告知放弃可能白忙，但⛔不下全称断言
             "全部丢失",              // 8c：退出的后果必须说死
             "请先清理设备存储空间",   // 8c：给出可操作的补救
         ] {
