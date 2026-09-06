@@ -20,7 +20,11 @@
 - **钉名判据必须是「相等」不是「成员关系」**（spec §3.2.1）。写成成员关系会被「改成清单里的另一条」绕过。
 - **过时表述的权威口径 = `grep -rn "Catalyst" scripts/governance/` 的输出逐条定性**（spec §4.2）。**不要照 spec 里的行号改** —— 行号会被本次改动自己移位。
 - **改动面唯一真相 = spec §4 那张表**（spec §4.3）。
-- `.github/workflows/**` 对 Claude 硬 deny → 走 ceremony 由 user `cp`（spec §4.4）。
+- **`.github/workflows/**` 一律不由 Claude 写入**，改动走 ceremony 由 user `cp`（spec §4.4）。
+  ⚠️ 实测 `.claude/settings.json` 的 deny 只覆盖 `Edit`/`Write` 工具与 `Bash(* >> …)`，
+  **`sed -i` / `cp` 并不被拦** —— 但用它们写这些文件就是「用 Bash 绕 deny rule」，
+  本仓明令禁止。**变异验证也不例外**：不改真文件，改用「临时副本 + 把测试模块里的
+  `WORKFLOW` 指过去」（PR #180 已验证过的做法，见 Task 4 Step 3）。
 - 每次跑 Python 变异前**清 `__pycache__`**（本仓 memory：等长变异 + 同秒复原会命中陈旧字节码）。
 
 ---
@@ -205,7 +209,13 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 
 - [ ] **Step 1: 加载 builder 并写新判据**
 
-在该文件 `import yaml` 之后加：
+在 `import yaml` 之后加 `import importlib.util`；并把文件里**已有的** `WORKFLOW`
+定义块（当前 32-34 行那三行）**整块替换**掉 —— 下面代码块里的前三行就是替换后的样子。
+
+⚠️ **是替换、不是新增**：该文件已有一份 `WORKFLOW` 定义，再加一份就是制造第二份真相
+（本 plan 通篇在防这个；Kimi plan-R1 指出）。
+
+
 
 ```python
 import importlib.util
@@ -276,58 +286,91 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -
 > ⚠️ 这条判据钉的是**已经成立的不变量**，所以它一写出来就是绿的 —— 没有「功能缺失导致的红」可看。
 > 它的判别力只能靠**变异**来证明，见下一步。**不做下一步就等于没验证过**。
 
-- [ ] **Step 3: 变异验证 —— 必须亲眼看到红**
+- [ ] **Step 3: 变异验证 —— 必须亲眼看到红（全程不碰真文件）**
 
-```bash
-cp .github/workflows/backend-tests.yml /tmp/bt-backup.yml
-# M6：改掉一个字符
-sed -i '' 's/name: backend pytest (full suite)/name: backend pytest (full suit)/' .github/workflows/backend-tests.yml
-find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
-python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q 2>&1 | tail -3
+把下面这段写成 `/tmp/mut-pin.py` 再跑。它把**临时副本**喂给测试模块，真文件全程不动：
+
+```python
+import pathlib, sys, tempfile
+sys.path.insert(0, "backend/tests")
+import test_backend_tests_workflow_runs_on_every_pr as g
+
+REAL = pathlib.Path(".github/workflows/backend-tests.yml")
+BASE = REAL.read_text(encoding="utf-8")
+NAME = "name: backend pytest (full suite)"
+
+CASES = {
+    "M5 反向对照（不变异）":   BASE,
+    "M6 改掉一个字符":         BASE.replace(NAME, "name: backend pytest (full suit)"),
+    "M7 改成清单里的另一条":   BASE.replace(NAME, "name: Mac Catalyst build-for-testing on macos-15"),
+}
+for label, text in CASES.items():
+    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False, encoding="utf-8") as f:
+        f.write(text); tmp = pathlib.Path(f.name)
+    g.WORKFLOW = tmp
+    try:
+        g.test_job_name_equals_canonical_backend_context()
+        print("  绿  " + label)
+    except AssertionError as e:
+        print("  红  " + label + " -> " + str(e).splitlines()[0][:70])
+    finally:
+        tmp.unlink()
 ```
 
-预期：`test_job_name_equals_canonical_backend_context` FAIL。
-
 ```bash
-# M7：改成清单里的另一条（专打「成员关系」那个绕过）
-cp /tmp/bt-backup.yml .github/workflows/backend-tests.yml
-sed -i '' 's/name: backend pytest (full suite)/name: Mac Catalyst build-for-testing on macos-15/' .github/workflows/backend-tests.yml
 find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
-python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q 2>&1 | tail -3
+python3 /tmp/mut-pin.py
+git status --porcelain .github/workflows/backend-tests.yml    # 必须输出为空
 ```
 
-预期：**同样 FAIL**。⚠️ **此档若绿，说明判据被写成了成员关系，回到 Step 1 改成相等。**
+预期：M5 绿；**M6、M7 都红**。
 
-```bash
-# 复原并确认
-cp /tmp/bt-backup.yml .github/workflows/backend-tests.yml
-md5 -q /tmp/bt-backup.yml .github/workflows/backend-tests.yml   # 两行必须相同
-find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
-python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q
-```
-
-预期：`5 passed`（反向对照 M5）。
+- ⚠️ **M7 若绿，说明判据被写成了成员关系** —— 回 Step 1 改成相等。
+- ⚠️ 最后那条 `git status` **必须为空**，证明变异全程没碰真文件。
 
 - [ ] **Step 4: M8 变异（清单里删掉该项）**
 
+builder 不在 `.github/workflows/` 下，可直接改真文件，但仍走「备份 → 变异 → md5 复原」：
+
 ```bash
 cp scripts/governance/build-protection-put-payload.py /tmp/builder-backup.py
-sed -i '' 's/REQUIRED_CONTEXTS = \[CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT\]/REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT]/' scripts/governance/build-protection-put-payload.py
+python3 -c "
+import pathlib
+p = pathlib.Path('scripts/governance/build-protection-put-payload.py')
+t = p.read_text(encoding='utf-8')
+old = 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]'
+assert t.count(old) == 1, '锚点不唯一，拒绝变异'
+p.write_text(t.replace(old, 'REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT]'), encoding='utf-8')
+"
 find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
 python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q 2>&1 | tail -3
 cp /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
 md5 -q /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
+git status --porcelain scripts/governance/build-protection-put-payload.py   # 必须为空
 ```
 
-预期：变异时 `test_backend_context_is_in_canonical_required_list` FAIL；复原后两个 md5 相同。
+预期：变异时 `test_backend_context_is_in_canonical_required_list` FAIL；复原后两个 md5 相同、`git status` 为空。
 
 - [ ] **Step 5: 订正该文件里已过时的表述**
 
-`grep -n "必需检查\|三条" backend/tests/test_backend_tests_workflow_runs_on_every_pr.py`，把以下几处改对（spec §4.2 家族②③）：
+**权威口径是命令的输出，不是下面这张清单**（同 §4.2 的道理 —— 我在 spec 阶段因为手抄
+封闭清单连抄漏三次）：
+
+```bash
+grep -n "必需检查\|三条\|判据" backend/tests/test_backend_tests_workflow_runs_on_every_pr.py
+```
+
+对**每一条**命中定性：仍然成立，还是被本次改动翻转了。已知至少这几处要改
+（spec §4.2 家族②③，**不是全部**）：
 - docstring 里「三条判据」→ 现在是**五条**；
 - 「`backend pytest (full suite)` 不是分支保护的必需检查，所以无过滤器不会造成死锁」——
   前提已翻转，改成「它**是**必需检查；无过滤器保证它每个 PR 都报告，正是它能当必需检查的前提」；
-- 「又不是必需检查，于是能合进去」→ 改成「该必需检查会因此永远等不到结果，PR 反而会卡死」。
+- 「又不是必需检查，于是能合进去」→ 改成「该必需检查会因此永远等不到结果，PR 反而会卡死」；
+- **`:123` 附近**「合并前的强制拦截需要独立的必需检查，属本次范围之外的已知残留」——
+  前提同样翻转（backend 成为必需检查后，自我排除型 PR 会卡在
+  「Expected — waiting for status」，**合并前拦截事实上已存在**）。
+  ⚠️ 这一处 plan 初版**漏了**（Kimi plan-R1 指出）：spec §4.2 明写家族③有 3 处，我只抄了
+  2 处 —— 又一次「修复弄丢上一轮的修复」。这正是本步骤改用命令口径的原因。
 
 - [ ] **Step 6: 两条判绿命令都跑，然后提交**
 
