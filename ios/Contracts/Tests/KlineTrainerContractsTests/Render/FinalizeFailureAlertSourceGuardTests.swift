@@ -388,12 +388,39 @@ struct FinalizeFailureAlertSourceGuardTests {
         // ⚠️ 上一轮我在验收文档里写了「另有 2 条行为测试」，却没有任何机制绑定它
         //    ⇒ 有人删掉或改名，文档说法就静默过期（Kimi R5-low）。
         //    这里钉**函数名存在性**而不是条数：比数字更准，也不会因为同文件新增别的测试而失真。
-        let src = try code("Tests/KlineTrainerContractsTests/AppRouterTests.swift")
+        // ⚠️ 这条判据要看**行结构**（`@Test` 在函数上一行），所以读**原文**而非 `code()`。
+        //    首版就栽在这里：`code()` 删空白 ⇒ 匹配 "func \(fn)"（带空格）永远找不到 ⇒
+        //    `if let` 不成立 ⇒ 整个检查被跳过 ⇒ **恒真**。两个变异都不红才发现（Kimi R14 修复中）。
+        let raw = try rawSource("Tests/KlineTrainerContractsTests/AppRouterTests.swift")
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        #expect(!lines.contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("#if false") },
+                "⛔ AppRouterTests 里出现 `#if false` —— 可能把逃生路测试整块关掉了")
+
         for fn in ["loadHome_unreadablePending_fallsBackToEmptyHomeSoUserCanEscape",
                    "loadHome_readablePending_showsResume"] {
-            #expect(src.contains(fn),
-                    "⛔ \(fn) 不见了 —— 文案许诺的逃生路失去行为测试保护")
+            guard let idx = lines.firstIndex(where: {
+                $0.contains("func \(fn)")
+            }) else {
+                Issue.record("⛔ \(fn) 不见了 —— 文案许诺的逃生路失去行为测试保护")
+                continue
+            }
+            // 向上找最近的一个非空、非注释行，它必须是 `@Test(`。
+            // ⛔ 只查函数名挡不住除名（Kimi R14）：删掉 `@Test` 属性行、或整块 `#if false`，
+            //    函数名照样在 ⇒ 测试悄悄退出套件，而总数少 2 落在 catalyst-gate 的 ±30 容差内
+            //    不报警、条数对账又不覆盖本文件 ⇒ 三道门同时失效。
+            var j = idx - 1
+            while j >= 0 {
+                let t = lines[j].trimmingCharacters(in: .whitespaces)
+                if t.isEmpty || t.hasPrefix("//") || t.hasPrefix("///") { j -= 1; continue }
+                break
+            }
+            let above = j >= 0 ? lines[j].trimmingCharacters(in: .whitespaces) : ""
+            #expect(above.hasPrefix("@Test("),
+                    "⛔ \(fn) 头上没有紧邻的 @Test（实为「\(above.prefix(40))」）—— 函数还在但已不在测试套件里")
         }
+        // ⚠️ 文本层的极限：把整个文件从 test target 移除、或改 scheme 排除它，本守卫都看不见。
+        //    那一层由 Catalyst 总数基线（±30）与人工验收 8h 兜底。
     }
 
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
