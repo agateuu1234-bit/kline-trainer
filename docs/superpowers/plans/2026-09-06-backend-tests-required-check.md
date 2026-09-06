@@ -216,8 +216,16 @@ FIX = pathlib.Path("tests/scripts/governance/fixtures")
 src = FIX / "ruleset-extra-bypass.json"
 d = json.loads(src.read_text())
 # 拿掉「多出的 bypass actor」——只留 admin 那一条
-d["bypass_actors"] = [a for a in d.get("bypass_actors", [])
-                      if a.get("actor_type") == "RepositoryRole" and a.get("actor_id") == 5]
+before = d.get("bypass_actors", [])
+kept = [a for a in before
+        if a.get("actor_type") == "RepositoryRole" and a.get("actor_id") == 5]
+# fail-closed：过滤条件若与 fixture 结构不符，会把 bypass_actors 清空 ——
+# 那时 rc=0 不再证明任何事，归因建立在被改坏的 fixture 上（Kimi plan-R6 指出）。
+assert len(before) == 2 and len(kept) == 1, (
+    f"探针过滤结果不符预期：原 {len(before)} 条、保留 {len(kept)} 条（应为 2 → 1）。"
+    f"原始内容：{before}"
+)
+d["bypass_actors"] = kept
 tmp = FIX / "_attr_probe.json"
 tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
 print("探针 fixture 已生成:", tmp)
@@ -366,14 +374,24 @@ def test_job_name_equals_canonical_backend_context():
     assert isinstance(jobs, dict) and jobs, (
         f"{WORKFLOW.name} 里取不到 jobs 段 —— 本判据的解析口径已失效"
     )
-    names = {j.get("name") for j in jobs.values() if isinstance(j, dict)}
-    assert mod.BACKEND_TESTS_CONTEXT in names, (
-        f"没有任何 job 的 name 等于 canonical 必需 context "
-        f"{mod.BACKEND_TESTS_CONTEXT!r}（实得 {sorted(n for n in names if n)}）。\n"
+    named = [j for j in jobs.values()
+             if isinstance(j, dict) and j.get("name") == mod.BACKEND_TESTS_CONTEXT]
+    assert len(named) == 1, (
+        f"名为 canonical 必需 context {mod.BACKEND_TESTS_CONTEXT!r} 的 job 有 "
+        f"{len(named)} 个（应恰好 1 个）。实得的全部 job 名："
+        f"{sorted(n for n in (j.get('name') for j in jobs.values() if isinstance(j, dict)) if n)}\n"
         "GitHub 的必需检查按 job 显示名匹配：名字对不上 ⇒ 该检查永远停在\n"
         "「Expected — waiting for status」⇒ **全仓 PR 都合不了**。\n"
         "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
         "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
+    )
+    # 光有「某个 job 叫这个名字」不够：挂一个同名空壳 job 就能让必需检查报绿，
+    # 而真正的后端套件不再门控合并（Kimi plan-R6 指出）。把名字**绑定到真的在跑 pytest**。
+    steps = named[0].get("steps") or []
+    assert any("pytest" in (s.get("run") or "")
+               for s in steps if isinstance(s, dict)), (
+        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步在跑 pytest —— "
+        "必需检查会由一个不跑测试的 job 报绿，等于门控失效"
     )
 
 
@@ -409,7 +427,15 @@ import test_backend_tests_workflow_runs_on_every_pr as g
 
 REAL = pathlib.Path(".github/workflows/backend-tests.yml")
 BASE = REAL.read_text(encoding="utf-8")
-NAME = "name: backend pytest (full suite)"
+NAME = "name: " + g._builder().BACKEND_TESTS_CONTEXT
+
+
+def _other_ctx():
+    """从 canonical 清单里取一条**不是** backend 的 context（M7 要用）。"""
+    mod = g._builder()
+    others = [c for c in mod.REQUIRED_CONTEXTS if c != mod.BACKEND_TESTS_CONTEXT]
+    assert others, "清单里只剩 backend 一项，M7 这档无从构造"
+    return others[0]
 # 锚点唯一性（与 Task 1 的 mut() 保持同样的防护；Kimi plan-R4 指出这里原先缺这道）：
 # 若该字符串在文件里不止一处，replace 会改到别处，M6/M7 的红/绿归因就失真了。
 assert BASE.count(NAME) == 1, f"锚点出现 {BASE.count(NAME)} 次，拒绝变异（预期恰 1 次）"
@@ -417,7 +443,10 @@ assert BASE.count(NAME) == 1, f"锚点出现 {BASE.count(NAME)} 次，拒绝变�
 CASES = {
     "M5 反向对照（不变异）":   BASE,
     "M6 改掉一个字符":         BASE.replace(NAME, "name: backend pytest (full suit)"),
-    "M7 改成清单里的另一条":   BASE.replace(NAME, "name: Mac Catalyst build-for-testing on macos-15"),
+    # M7 的「另一条」从 builder 动态读——抄第二份字符串就是造第二份真相；
+    # 且 Catalyst 那条日后一改，这档就会退化成普通的「名字不匹配」，
+    # 「专打成员关系绕过」的原意静默丢失（Kimi plan-R6 指出）。
+    "M7 改成清单里的另一条":   BASE.replace(NAME, "name: " + _other_ctx()),
 }
 for label, text in CASES.items():
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False, encoding="utf-8") as f:
@@ -602,7 +631,7 @@ git commit -m "验收清单 A0-A8 + 真实 ruleset 干跑 diff 凭据"
 
 ## Self-Review
 
-**Spec 覆盖**：§3.1 连带效应 → Task 6 Step 2 核 diff；§3.2.1 钉名 → Task 4；§4 改动面 6 个文件 → Task 1/2/3/4/5 全覆盖；§4.2 三个家族 → Task 3（①）、Task 4 Step 5（②③）；§5.1 双命令口径 → Global Constraints + 每个 Task 的验证步；§5.2 变异 M1–M8 → **M1/M3/M4 在 Task 1 Step 5；M2≡M8 与 M8 在 Task 4 Step 4；M5/M6/M7 在 Task 4 Step 3**（Task 2 Step 5 是 #6d 归因探针，**不属于**变异表，初版 Self-Review 把它算进覆盖是虚报，Kimi plan-R3 指出）；§5.3 干跑 → Task 6；§7 交付次序与第 0 步（在途 PR）→ 验收 A0（Task 6 Step 3）；§9 回滚凭据 → 验收 A7b。
+**Spec 覆盖**：§3.1 连带效应 → Task 6 Step 2 核 diff；§3.2.1 钉名 → Task 4；§4 改动面（**以那张表为准，此处刻意不复述条数** —— 手抄数字必然漂移，同 §4.3 的道理；初版写「6 个文件」与表格实际行数不符，Kimi plan-R6 指出）→ Task 1/2/3/4/5 逐行对应；§4.2 三个家族 → Task 3（①）、Task 4 Step 5（②③）；§5.1 双命令口径 → Global Constraints + 每个 Task 的验证步；§5.2 变异 M1–M8 → **M1/M3/M4 在 Task 1 Step 5；M2≡M8 与 M8 在 Task 4 Step 4；M5/M6/M7 在 Task 4 Step 3**（Task 2 Step 5 是 #6d 归因探针，**不属于**变异表，初版 Self-Review 把它算进覆盖是虚报，Kimi plan-R3 指出）；§5.3 干跑 → Task 6；§7 交付次序与第 0 步（在途 PR）→ 验收 A0（Task 6 Step 3）；§9 回滚凭据 → 验收 A7b。
 
 **占位符扫描**：无 TBD/TODO；每个代码步骤都有可直接执行的代码块；「哪几个 fixture」刻意留给实跑决定，但给了判断规则（只改「语义上应已合规」的）与不要动的反例。
 
