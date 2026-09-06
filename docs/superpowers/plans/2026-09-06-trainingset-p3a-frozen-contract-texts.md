@@ -282,6 +282,12 @@ _SCOPE_DIRS = [REPO_ROOT / "docs" / "governance", REPO_ROOT / "backend"]
 
 _OLD_WORDING = "严格递增"
 
+# ⛔ 守卫**不扫自己**：本文件的 docstring 必须能**逐字引用**它所禁止的那句旧表述
+# （不然它就没法说明自己在禁什么），于是天然满足「同行既有『严格递增』又有 global_index」。
+# 用**解析后的自身路径**排除，⛔ 不按文件名字符串（改名后会静默重新自指、红得莫名其妙），
+# ⛔ 也不整目录排除 `backend/tests/`（那等于把一整个目录永久移出作用域）。
+_SELF = Path(__file__).resolve()
+
 
 def _scope_lines():
     """作用域内所有 (相对路径, 行号, 行文本)。"""
@@ -291,6 +297,8 @@ def _scope_lines():
                   if p.is_file() and p.suffix in (".md", ".py", ".sql", ".sh")
                   and "__pycache__" not in p.parts]
     for p in files:
+        if p.resolve() == _SELF:
+            continue
         try:
             text = p.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
@@ -526,4 +534,5 @@ Expected：`git status --short` 无输出 + 全套回到 `1399 passed`。
 
 - Task 1/2/3 的用例**写完就是绿的**，价值完全押在 Task 4 的变异上。若某组跑不出预期的红，⛔ **不要改期望值让它红**，回来问「这条断言是不是根本没在测它」。
 - `1399` 是**推算**（实测基线 1394 + 5），属计划内嵌的「事实」类，必须实测。
+- ⭐ **执行中被实施者挡下一个计划缺陷（2026-09-07）**：守卫的作用域含 `backend/**/*.py`，而守卫**自己就住在那里**，且它的 docstring 必须逐字引用所禁止的那句话 ⇒ **它把自己判成违例**（实测 `:52` 那行，全套 1398 过 1 失败）。裁定 = **按解析后的自身路径排除自己**，⛔ 不改写 docstring 去绕开自己的判据（说不出自己在禁什么的守卫是更糟的守卫）、⛔ 不整目录排除、⛔ 不按文件名字符串排除（改名会静默重新自指）。控制者亲跑对照：往 `generate_training_sets.py` 塞一行假违例 ⇒ 守卫①**照样红并点名该文件**（`:845`）⇒ 自排除**没有把守卫弄瞎**；复原后 `git status` 空、全套 1399 全过。
 - 守卫①用「同行含 `global_index`」作筛选，**对跨行改写无判别力**（有人把旧表述拆成两行就绕过去了）。这是有意的取舍：按语句/段落匹配 markdown 表格与列表的复杂度远高于收益。**M4 那组变异只证明了判据不是裸词，没有证明它抗跨行绕过** —— 如实记进变异记录。
