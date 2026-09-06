@@ -748,7 +748,13 @@ public struct TrainingView: View {
     // replay 的 finalizeForSettlement 是不抛的早返 nil（shouldSaveRecord()==false）→ 仍走
     // onSessionEnded(nil) = 正常 retreat 路径，不受本 alert 影响。
     /// 「暂时退不出本局」的文案 —— 按**保不住的成因**分支。
-    /// ⛔ 三支不得合并：补救动作不同（能腾空间 / 不能腾空间 / 只能重试），说错等于把用户支去做无效操作。
+    /// ⛔ 三支不得合并：**能给的出路不同**，说错等于把用户支去做无效操作。逐支现状（2026-09-06 订正）：
+    ///   · `.none`（一次都没存成）        → 清存储再重试入账；放弃必然也失败；可关掉 App 重开（这一局丢失）
+    ///   · `.unreadable`（存档读不出来）  → 重试入账；放弃**也可能**失败；可关掉 App 重开（这一局丢失）
+    ///   · `.trainingSetMissing`（文件没了）→ 清存储再重试入账；放弃**带条件**；⛔ 不给「关掉 App」
+    ///     （它的存档还在，重开会引到一个打不开的「继续训练」）
+    /// ⛔ 本行曾概括为「能腾空间 / 不能腾空间 / 只能重试」，那是按「找回文件」这一个目的下的旧分工；
+    ///    订正后三支里有两支都建议清存储（目的是让**入账**写得进去）⇒ 旧概括会误导后人改回去（Kimi R9-low）。
     private var cannotPreserveCopy: String {
         switch cannotPreserveReason {
         case .trainingSetMissing:
