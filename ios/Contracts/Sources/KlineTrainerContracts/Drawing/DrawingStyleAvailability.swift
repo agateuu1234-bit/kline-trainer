@@ -10,32 +10,61 @@ public enum DrawingStyleAvailability {
         }
     }
 
+    /// 本构建懂某个工具的哪些**样式语义**。一行 = 一个工具；P1c 后续切片加工具 = **加一行**。
+    ///
+    /// ⛔⛔ **第一列是「有效性」，不是 UI 灰态判据**（P1c 第 1 片 spec D120）：它回答的是
+    ///    「这个值会不会让线画不出来 ⇒ 该不该**拒收**这条数据」。样式面板的灰态是**另一个维度**，
+    ///    今天独立存在于 `DrawingStyleParams`（`:39` / `:142` 直接调横线专用函数），由第 4 片正式建立。
+    ///    把这一列接到面板灰态上，箱体 / 折线落地时必然二选一地坏掉 ——
+    ///    母 spec §3.1 要求它们「三个线型全灰」，但 `DrawingObject.lineSubType` **非可选**、
+    ///    每条线都必带一个值：写成三个全 false ⇒ 落线被 `TrainingEngine` 的 append 门拒 ⇒ **画不出来**；
+    ///    写成 `.straight` 为 true 好让写入通过 ⇒ 面板会把「直线」显示成**可点** ⇒ 违反 §3.1。
+    ///    ⇒ 箱体 / 折线的正确取值是「有效性**全 ✅**（工具忽略该字段，不得据此拒收）+ 灰态全灰（另一维）」。
+    struct ToolStyleRules: Sendable {
+        /// 【有效性】该 `lineSubType` 会不会让这条线画不出来 ⇒ 该不该拒收。⛔ 不得接到 UI 灰态（D120）。
+        let renderableLineSubType: @Sendable (LineSubType) -> Bool
+        /// 【归一化】该 `labelMode` 在此 `lineSubType` 下可不可用；不可用由 `normalizedLabelMode` 回落
+        /// `.hidden`（**是归一化，不是拒收** —— 故这一列没有「有效性 vs 灰态」的分裂问题）。
+        let labelModeEnabled: @Sendable (LabelMode, LineSubType) -> Bool
+    }
+
+    /// 本构建**写得出样式矩阵**的工具表 —— 这些语义的**唯一登记处**。
+    /// ⚠️ 与 `DrawingToolType.implemented`（= 画得出 / 提交得了）是**两件事**；今天二者恰好相等，
+    ///    由 `DrawingObjectStyleEditTests` 的漂移告警钉死：只把新工具加进 `implemented` 而没在这里
+    ///    加行，那条断言当场红（fail-closed：现象是「新工具样式控件不生效」，一眼可见、不污染数据）。
+    static let styleRules: [DrawingToolType: ToolStyleRules] = [
+        .horizontal: ToolStyleRules(renderableLineSubType: horizontalLineSubTypeEnabled,
+                                    labelModeEnabled: horizontalLabelModeEnabled),
+    ]
+
     /// D59/D67 共享单点：该 `toolType` 下 `lineSubType` 是否**恒可渲染**（与 viewport 无关）。
     /// append 家族的引擎门、`DrawingObject.withStyle` 的可用性闸、设置面板的线型灰态**三处共用**它，
     /// 禁止各写一份（D59「与设置面板灰态同一真相」）。
     /// ⚠️ 横规则**只对水平工具成立**（`horizontalLineSubTypeEnabled` 的头注：本期只实现水平线）——
     /// 对非水平工具无条件套它，会把合法的 `.trend` 线段在共享写入边界静默拒掉（codex WB re-attest R1 实证）。
     public static func isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool {
-        guard toolType == .horizontal else { return true }   // 非水平：横规则不适用（矩阵属 P1c）
-        return horizontalLineSubTypeEnabled(sub)
+        guard let rules = styleRules[toolType] else { return true }   // 表里没有 → 放行（与泛化前逐字等价）
+        return rules.renderableLineSubType(sub)
     }
 
     /// 本构建**写得出样式矩阵**的工具集。与 `DrawingToolType.implemented`（= 画得出 / 提交得了）
     /// **是两件不同的事**（codex plan-R13-F2）：那个集合回答"能不能画"，本集合回答"本构建懂不懂它的
     /// 样式语义"。今天只有水平线有矩阵（`horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled`）。
     /// ⚠️ P1c 给新工具接线时：加进 `DrawingToolType.implemented` 之后它就能画了，但**样式仍改不动**，
-    ///   直到你为它写出子类型/标注矩阵并加进本集合 —— 这个方向的漂移是 **fail-closed**（现象是
+    ///   直到你为它在 `styleRules` 表里加一行（**本集合由表的键派生**，不再是手写清单）——
+    ///   这个方向的漂移是 **fail-closed**（现象是
     ///   "新工具的样式控件不生效"，一眼可见、且不污染数据），比反过来 fail-open
     ///   （尚无矩阵就允许编辑 → 把不受支持的样式组合持久化）安全。
-    static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]
+    static var toolsWithStyleMatrix: Set<DrawingToolType> { Set(styleRules.keys) }
 
     /// 该工具的样式语义是否被本构建理解 → **能否编辑**（codex plan-R11-F1）。
     /// ⚠️ **复用既有单一真相 `DrawingToolType.implemented`**（`Models.swift:50`），**绝不另立第二份登记表**
     ///   （codex plan-R12-F2：我上一稿真的另写了一个 `implementedToolTypes`，那会在 P1c 打开新工具时漂移成
     ///   「画得出、样式控件却永远不生效」）。该集合已被激活门（`TrainingEngine:1342`）与落锚阈值
     ///   （`DefaultDrawingInputController:43`，其注释原文「单一真相派生」）消费。
-    ///   `DrawingToolType.implemented` 管**能不能画**，`toolsWithStyleMatrix`（上面）管**本构建懂不懂它的
-    ///   样式语义**——两件事，P1c 落新工具要**两处都加**：只加前者 → 画得出但样式控件不生效，这是
+    ///   `DrawingToolType.implemented` 管**能不能画**，`toolsWithStyleMatrix`（上面，由 `styleRules`
+    ///   表的键派生）管**本构建懂不懂它的样式语义**——两件事，P1c 落新工具要**两处都加**（`implemented`
+    ///   加 case + `styleRules` 加一行）：只加前者 → 画得出但样式控件不生效，这是
     ///   fail-closed 的有意设计（见上面 `toolsWithStyleMatrix` 头注），且有 `implemented == toolsWithStyleMatrix`
     ///   漂移告警测试（`DrawingObjectStyleEditTests`）当场红，不会悄悄漏掉。
     /// ⚠️ **与 `isRenderableSubType`（append 侧）刻意不对称，别"统一"掉**：
@@ -57,8 +86,8 @@ public enum DrawingStyleAvailability {
     /// 非水平工具：原样返回（它们的 labelMode 矩阵属 P1c，本期不替它们做决定）。
     public static func normalizedLabelMode(current: LabelMode, lineSubType: LineSubType,
                                            toolType: DrawingToolType) -> LabelMode {
-        guard toolType == .horizontal else { return current }
-        return normalizedLabelMode(current: current, lineSubType: lineSubType)
+        guard let rules = styleRules[toolType] else { return current }   // 表里没有 → 原样（与泛化前逐字等价）
+        return rules.labelModeEnabled(current, lineSubType) ? current : .hidden
     }
 
     /// 标注：水平线 隐藏/左/右可选、显示恒灰；选射线时『左』再灰（母 spec §3.1）。
