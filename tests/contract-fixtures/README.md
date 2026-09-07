@@ -14,3 +14,9 @@ fixture（per outline §3.1）。
 unsent < count 时服务端返回 **200 LeaseResponse**，`sets` 含 0..count 项（partial
 fulfillment，从不为库存不足返回错误码）。`lease_response_empty.json` / `_partial.json`
 是该冻结的 canonical 实例。
+
+## training-set/：训练组跨端契约 fixture
+
+`training-set/` 下那份 zip 是训练组产物的跨端共用样本（后端生成器 ↔ App 读取链路），
+形态、判据与再生方式见 `training-set/README.md`。它与本目录下的 JSON 是**两类**东西：
+JSON 钉的是 HTTP 接口的响应形状，那份 zip 钉的是**下载下来的训练组文件本身**。
