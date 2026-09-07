@@ -503,7 +503,7 @@ find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
 python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q 2>&1 | tail -3
 # ① 侧：spec 5.2 写明 M8「两边都会红」，① 侧也必须亲跑一次
 #（初版只跑了 ②，而 Self-Review 却声称全覆盖；Kimi plan-R7 指出）
-bash tests/scripts/governance/run-all.sh 2>&1 | grep -E "^FAIL|ALL GREEN" | head -3
+bash tests/scripts/governance/run-all.sh 2>&1 | grep -E "^FAIL|SOME FAILED|ALL GREEN" | head -3
 cp /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
 md5 -q /tmp/builder-backup.py scripts/governance/build-protection-put-payload.py
 git status --porcelain scripts/governance/build-protection-put-payload.py   # 必须为空
