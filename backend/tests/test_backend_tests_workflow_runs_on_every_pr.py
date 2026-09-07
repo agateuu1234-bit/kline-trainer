@@ -184,11 +184,39 @@ def test_job_name_equals_canonical_backend_context():
         "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
         "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
     )
-    steps = named[0].get("steps") or []
-    assert any("pytest" in (s.get("run") or "")
-               for s in steps if isinstance(s, dict)), (
-        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步在跑 pytest —— "
-        "必需检查会由一个不跑测试的 job 报绿，等于门控失效"
+    job = named[0]
+    steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+
+    # ① 必须真的跑那条被批准的全套命令。
+    #    ⚠️ 只查「run 里有 pytest 字样」是不够的：`run: echo pytest` 就能骗过去
+    #    （codex code-R2 指出，复核属实）。所以要求 `-m pytest` + 目标目录 `tests/`，
+    #    且该步骤的 working-directory 是 backend（否则跑的是别处的测试）。
+    runners = [s for s in steps
+               if "-m pytest" in (s.get("run") or "") and "tests/" in (s.get("run") or "")]
+    assert runners, (
+        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步真的在跑后端全套 "
+        "（判据：run 同时含 `-m pytest` 与 `tests/`）—— "
+        "必需检查会由一个不跑测试的 job 报绿，等于门控失效。\n"
+        f"实得各步骤 run 首行：{[((s.get('run') or '').strip().splitlines() or ['<无 run>'])[0][:60] for s in steps]}"
+    )
+    assert any(s.get("working-directory") == "backend" for s in runners), (
+        "跑 pytest 的那一步没有 `working-directory: backend` —— "
+        "跑的可能不是后端那套测试"
+    )
+
+    # ② 不许有任何抑制失败的开关：加了 continue-on-error 之后，
+    #    测试红了这道 job 照样绿，必需检查就形同虚设（codex code-R2）。
+    def _suppresses(node):
+        return str(node.get("continue-on-error", "")).lower() == "true"
+
+    assert not _suppresses(job), (
+        f"job {mod.BACKEND_TESTS_CONTEXT!r} 设了 continue-on-error: true —— "
+        "测试失败不会让这道必需检查变红，门控形同虚设"
+    )
+    bad = [(s.get("name") or s.get("uses") or "?") for s in steps if _suppresses(s)]
+    assert not bad, (
+        f"这些步骤设了 continue-on-error: true：{bad} —— "
+        "其中任何一步若是跑测试的那步，失败都不会传播到必需检查上"
     )
 
 
