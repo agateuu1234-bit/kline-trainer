@@ -61,7 +61,7 @@ set -e
 check "apply mutate → 0" 0 "$rc"
 put_count=$(grep -c "PUT" "$log" || true)
 [ "$put_count" -eq 1 ] && echo "PASS: mutate PUT 恰 1 次" || { echo "FAIL: 期望 PUT=1 得 $put_count"; fail=1; }
-# R3-F2：mock 持久化的 state == 提交的 payload（证明 PUT body 正确）+ 恰一条 Catalyst+15368
+# R3-F2：mock 持久化的 state == 提交的 payload（证明 PUT body 正确）+ canonical REQUIRED_CONTEXTS 每条恰一条 +15368
 diff -q "$log.state" "$d/payload.json" >/dev/null && echo "PASS: PUT body == payload.json（mock 持久化提交内容）" || { echo "FAIL: PUT body 与 payload.json 不符"; fail=1; }
 all_required_contexts "$d/payload.json" "PUT body"
 

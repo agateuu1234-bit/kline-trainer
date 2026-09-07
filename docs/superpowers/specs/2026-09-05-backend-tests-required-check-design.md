@@ -163,7 +163,7 @@ ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，**没
 | `scripts/governance/verify-required-checks.sh` | 订正头注释（把谓词描述成「Catalyst check 在位」） |
 | `scripts/governance/admin-configure-required-checks.sh` | **订正 §4.2 那条 grep 命令在本文件命中的全部过时表述**（实测 `:2` 头注释、`:71` **`GATE PASS` 用户可见输出**、`:114` **函数内部注释** —— 三处，别只改前两处） |
 | `.github/workflows/codeowners-config-check.yml` | **仅订正注释**（`:21` 那段安全论证以「backend-tests 不是必需检查」为前提，本次改动后变假）。**不改任何逻辑/触发器/job 名**。⚠️ Claude 对该目录硬 deny → 走 ceremony 由 user `cp` 落地 |
-| 本 spec + 后续 plan | 文档 |
+| 本 spec + 后续 plan + `docs/acceptance/<交付日>-backend-tests-required-check.md` | 文档（验收清单按本仓治理条款是每次交付的必备件，故也在改动面内；日期以实际交付日为准） |
 
 **不新增文件。**唯一触及 `.github/workflows/` 的是上表最后一行，且**只改注释**——
 理由见 §4.4（原本写的「不改任何 workflow」会惩罚发现该矛盾的实施者）。

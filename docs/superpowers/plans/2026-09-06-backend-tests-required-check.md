@@ -299,10 +299,12 @@ grep -rn "Catalyst" scripts/governance/
 - [ ] **Step 3: 标识符与注释的文本扫描**（测试发现不了这些）
 
 ```bash
-grep -rn "both_contexts\|两条\|两项" tests/scripts/governance/ scripts/governance/
+grep -rniE "both_contexts|两条|两项|恰一条|Catalyst" tests/scripts/governance/ scripts/governance/
 ```
 
-`test-admin-runbook.sh` 的 helper 名 `both_contexts` 与其注释在三项清单下已过时。**改名要连同全部调用点一起改**（本仓 memory：大批量机械改名是缺陷源 —— 改完按语义分组复核，不是只扫残留为 0）。
+`test-admin-runbook.sh` 的 helper 名 `both_contexts` 与其注释在三项清单下已过时。
+⚠️ **初版这条命令的关键词漏了「恰一条 / Catalyst」**，于是 `:64` 那条「恰一条 Catalyst+15368」注释**零命中、被漏掉**（code-R1 指出，复核属实：用初版命令扫确为零命中）。
+教训与 §4.2 同源 —— **命令口径本身也会有盲区**，关键词要覆盖同一说法的不同措辞。**改名要连同全部调用点一起改**（本仓 memory：大批量机械改名是缺陷源 —— 改完按语义分组复核，不是只扫残留为 0）。
 
 - [ ] **Step 4: 两条判绿命令都跑一遍**
 
@@ -605,7 +607,7 @@ git commit -m "订正必需门里那段已翻转的安全论证（只改注释�
 ### Task 6: 真环境干跑 + 验收文档
 
 **Files:**
-- Create: `docs/acceptance/2026-09-06-backend-tests-required-check.md`
+- Create: `docs/acceptance/2026-09-07-backend-tests-required-check.md`
 
 - [ ] **Step 1: 拿真实 ruleset 跑 builder（纯函数，不发网络请求）**
 
@@ -634,7 +636,7 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 
 - [ ] **Step 3: 写验收文档**
 
-把 spec §8 的 A0–A8 抄进 `docs/acceptance/2026-09-06-backend-tests-required-check.md`，并附上 Step 1 的 diff 原文（作为 A5 的凭据）。
+把 spec §8 的 A0–A8 抄进 `docs/acceptance/2026-09-07-backend-tests-required-check.md`，并附上 Step 1 的 diff 原文（作为 A5 的凭据）。
 
 - [ ] **Step 4: 提交**
 

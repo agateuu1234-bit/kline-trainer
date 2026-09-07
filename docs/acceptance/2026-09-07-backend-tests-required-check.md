@@ -97,5 +97,5 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 - **F-A**：canonical 清单**无人守** —— `verify-required-checks.sh` 没有任何 workflow 在跑。
 - **F-B**：`branch-protection-config-self-check` 是**永不失败**的橡皮图章（只打印警告 + 无条件退出成功；且读旧版 API，实测本仓恒 404）。
 - **F-C**：`tests/scripts/governance/` **没有任何 CI 在跑**，本次改的 canonical 常量 CI 不会验证它。
-- **F4 新引入的代价**：`codeowners-config-check` 这道治理门从此依赖 `pip install pyyaml pytest`，装依赖失败会让一道必需检查因不相干原因变红。
+- **F4（归因订正）**：`codeowners-config-check` 这道治理门依赖 `pip install pyyaml pytest`，装依赖失败会让一道必需检查因不相干原因变红。⚠️ 这条**不是本次引入的** —— 该安装步骤与跑 pin 测试那步都是 **PR #180** 加的；本次对该 workflow 只改了注释（diff 逐行可查）。初版验收文档把它写成「本次新引入的代价」属归因失实，已订正（code-R1 指出）。
 - **F6**：仓库内守卫无法自证（PR #180 已记）；且**管理员对 ruleset 有 always-bypass**，所以本次改动防的是**意外**，不是防所有者刻意为之。
