@@ -186,12 +186,20 @@ def fresh_slots(universe: dict, cursor: dict, quota: dict) -> list[Slot]:
     改完 `cursor` 直接调它。而游标为负时 `range(-2, n)` 会产出 `universe[-2]`
     这样的**尾部**元素 —— 不崩溃、不报错，只是给出一份指错股的工作单。
 
-    ⚠️ **`quota` 同样要守**（开工前扫描 · 裁定 2）：给 `cursor` 立守卫的那条理由
-    对 `quota` 一字不差地成立，而我当初只看见了手上那一个字段 —— 这是本仓
-    「**按字段穷尽、而不是按判据句穷尽**」那条教训的又一次复现。更要紧的是
-    `quota` 与 `failures` 同属**非必需持久化键**，读侧 `validate_manifest`
-    **一个字都不校验**（S2-F64 已实证这类字段的危险）：一个被改成负数的 `quota`
-    会让本层静默空跑，而外部把它读成「池穷尽」。
+    （`qmt_manifest._validate_cursor` 对同一字段抛的是 `ManifestInvalidError`，
+    因为那是**从磁盘读回来**那条路；到了本函数手上它已经是调用方的内存值，
+    坏了就是调用方的 bug。同一字段两个族，是**两条不同的信任边界**，不是不一致。）
+
+    ⚠️ **`quota` 同样要守，但理由不是「账本可能被改」**（最终评审 F2 更正）：
+    `quota` 每次都从 `--quota`/默认值经 `resolve_quota` **现算**（spec §4.4），
+    写进 manifest 只是留痕、**不读回来做决策** —— 所以它坏掉只可能是**调用方的 bug**，
+    故与 `cursor` 同属族②（`ValueError`），不是族③。
+    真正要守的原因是：本函数是**纯内存**入口，S4 完全可能**绕过** `resolve_quota`
+    直接调它（崩溃恢复路径就没有 CLI 参数可解析）。而负配额会让 `range()` 退化成空批，
+    **空批与「这一层池穷尽了」在外部完全不可区分** —— 操作者读到「没候选了」，
+    真相是传进来的值坏了。
+    给 `cursor` 立守卫的那条理由对 `quota` 一字不差地成立，而我当初只守了一个字段：
+    这是「**按字段穷尽、而不是按判据句穷尽**」的复现。
     """
     for name, m in (("cursor", cursor), ("quota", quota)):
         missing = [mk for mk in MARKETS if mk not in m]
@@ -295,5 +303,19 @@ def plan_batch(universe: dict, cursor: dict, quota: dict, *, failures=()) -> lis
     ⚠️ **重试项不占配额**：它们的槽位早已被 `cursor` 走过，而配额记的是
     「累计尝试到第几个」。若让重试占配额，一层里失败得越多能新拉的股越少，
     池子会**安静地**缩水，最终报出假的 `pool_exhausted`。
+
+    ⚠️ **必须按槽位去重（最终评审 F1）**：`cursor` **不是单调的** ——
+    spec §4.4 崩溃恢复**第③档**明令把 `cursor` 回退为 `min(cursor, universe_idx)`，
+    而 S2-F8 把「回退后存在 `universe_idx ≥ cursor` 的条目」定性为**合法状态**。
+    回退之后，一条 `universe_idx` 落进 `[cursor, quota)` 的失败记录会**同时**出现在
+    重试项与续新项里，于是同一只股被要求拷两遍：重复的 SMB 读取与哈希、
+    `committed_bytes` 双记（**直接击穿 `--max-bytes` 这条硬上限**）、
+    `attempts` 双增（把「一次重试」变成「零次」）。
+    **不能留给 S4 兜**：交接单写的是「以 `pool_order` 为准跳过已成功槽位」，
+    而重试项按定义**不在** `pool_order` 里（拷贝失败不进池）。
     """
-    return retry_slots(universe, failures) + fresh_slots(universe, cursor, quota)
+    retries = retry_slots(universe, failures)
+    seen = {(s.market, s.universe_idx) for s in retries}
+    fresh = [s for s in fresh_slots(universe, cursor, quota)
+             if (s.market, s.universe_idx) not in seen]
+    return retries + fresh

@@ -158,15 +158,26 @@ def test_the_four_rejection_counters_partition_the_universe():
     entries: dict = {}
     entries.update(_stock("600000.SH"))                     # 通过
     entries.update(_stock("600004.SH", daily_months=10))    # 判据 (b)
+    entries.update(_stock("600006.SH", daily_months=10))    # 判据 (b)，第二只——见下方注释
     entries.update(_stock("000001.SZ", m1_months=3))        # 判据 (c)
     entries.update(_stock("301583.SZ", status="empty"))     # 判据 (a)
     entries[("430047.BJ", "1m")] = _entry("430047.BJ", "1m",
                                           first=_start_of_span(13), last=_END)  # 缺 daily
     codes, s = prefilter(entries)
-    assert s.total == 5
+    assert s.total == 6
     assert codes == ["600000.SH"]
     assert (s.passed + s.rejected_incomplete + s.rejected_status
             + s.rejected_daily_span + s.rejected_1m_span) == s.total
+
+    # ⚠️ 四个计数器必须**逐键**断言 —— 全零载荷下把两个键对调也不会红（最终评审
+    # F3）：那样这份「关于数据源的第一份真实观测」可以把 468 只报成 1m 判据剔的、
+    # 0 只报成日线判据剔的，无人察觉。原样本四个 rejected_* 恰好都是 1（区分不开
+    # `rejected_daily_span` 与 `rejected_1m_span`），故上面多加了一只 daily_months=10
+    # 的股把 `rejected_daily_span` 顶到 2 —— 把这两个键对调，下面这条断言必须红
+    # （已用变异验证，见 final-fix-report.md）。
+    assert s.as_manifest_field() == {
+        "total": 6, "rejected_incomplete": 1, "rejected_status": 1,
+        "rejected_daily_span": 2, "rejected_1m_span": 1, "passed": 1}
 
 
 def test_output_order_does_not_depend_on_export_log_row_order():
@@ -435,8 +446,12 @@ def test_a_negative_quota_is_refused_rather_than_silently_emptying_the_batch():
     """⚠️ 负配额不会崩，只会让 `range(start, 负数)` 变成空批。
 
     而**空批与「这一层池穷尽了」在外部完全不可区分** —— 操作者读到的是
-    「没候选了」，真相是账本被改过。`quota` 是**非必需持久化键**，
-    读侧 `validate_manifest` 一个字都不校验（同 `failures`，见 S2-F64）。
+    「没候选了」，真相是传进来的值坏了。
+
+    ⚠️ 它坏掉只可能是**调用方的 bug**（`quota` 每次现算、不从账本读回），
+    故属族②`ValueError`。守它的理由是：本函数是纯内存入口，S4 可能绕过
+    `resolve_quota` 直接调 —— 而负配额会让本层静默空跑，
+    **空批与「池穷尽」在外部完全不可区分**。
     """
     with pytest.raises(ValueError, match="必须是非负整数"):
         fresh_slots(_uni(), {"SH": 0, "SZ": 0, "BJ": 0},
@@ -528,6 +543,29 @@ def test_plan_batch_puts_retries_before_fresh_slots():
     got = plan_batch(uni, {"SH": 2, "SZ": 0, "BJ": 0}, {"SH": 4, "SZ": 0, "BJ": 0},
                      failures=[_fail(uni, "SH", 0, 1)])
     assert [s.universe_idx for s in got] == [0, 2, 3]
+
+
+def test_a_cursor_rolled_back_by_crash_recovery_does_not_duplicate_a_slot():
+    """崩溃恢复第③档会把 `cursor` **回退**（spec §4.4，`min(cursor, universe_idx)`）。
+
+    回退之后，一条 `universe_idx` 落进 `[cursor, quota)` 的失败记录会**同时**
+    出现在重试项与续新项里。同一只股拷两遍 ⇒ `committed_bytes` 双记击穿
+    `--max-bytes`、`attempts` 双增把「一次重试」变成「零次」。
+
+    ⚠️ 这一档**不能靠 S4 的「跳过已成功槽位」兜住** —— 重试项按定义不在
+    `pool_order` 里（拷贝失败不进池）。
+    """
+    uni = _uni(n_sh=6)
+    fail = [_fail(uni, "SH", 3, 1)]
+    quota = {"SH": 6, "SZ": 0, "BJ": 0}
+
+    before = plan_batch(uni, {"SH": 5, "SZ": 0, "BJ": 0}, quota, failures=fail)
+    assert [(s.market, s.universe_idx) for s in before] == [("SH", 3), ("SH", 5)]
+
+    after = plan_batch(uni, {"SH": 2, "SZ": 0, "BJ": 0}, quota, failures=fail)
+    shape = [(s.market, s.universe_idx) for s in after]
+    assert shape == [("SH", 3), ("SH", 2), ("SH", 4), ("SH", 5)]
+    assert len(shape) == len(set(shape)), f"同一槽位被排了两次：{shape}"
 
 
 def test_a_retry_does_not_consume_quota():
