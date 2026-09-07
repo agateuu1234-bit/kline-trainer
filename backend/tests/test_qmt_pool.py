@@ -352,3 +352,100 @@ def test_the_returned_mapping_is_a_copy_of_the_default():
     q["SH"] = 1
     assert resolve_quota()["SH"] == 120
     assert DEFAULT_QUOTA["SH"] == 120
+
+
+from qmt_pool import Slot, fresh_slots
+
+
+def _uni(n_sh: int = 5, n_sz: int = 4, n_bj: int = 3) -> dict:
+    """直接造宇宙，绕开 shuffle —— 本 task 测的是区间算术，不是打乱。"""
+    return {"SH": [f"60{i:04d}.SH" for i in range(n_sh)],
+            "SZ": [f"00{i:04d}.SZ" for i in range(n_sz)],
+            "BJ": [f"43{i:04d}.BJ" for i in range(n_bj)]}
+
+
+def test_a_first_run_takes_the_quota_from_the_head_of_each_layer():
+    uni = _uni()
+    slots = fresh_slots(uni, {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 2, "SZ": 1, "BJ": 0})
+    assert [(s.market, s.universe_idx) for s in slots] == [
+        ("SH", 0), ("SH", 1), ("SZ", 0)]
+    assert slots[0] == Slot(code=uni["SH"][0], market="SH", universe_idx=0)
+
+
+def test_every_slot_anchors_to_the_frozen_universe():
+    uni = _uni()
+    for s in fresh_slots(uni, {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 5, "SZ": 4, "BJ": 3}):
+        assert uni[s.market][s.universe_idx] == s.code
+
+
+def test_rerunning_with_the_same_quota_takes_nothing_new():
+    """**S3-F3 的正向档**：配额是累计目标，重跑不会再拉一批。
+
+    按「每批数量」实现的话，这里会再拿到 2 个 SH 槽位 ——
+    而操作者以为自己只是重跑了一次。
+    """
+    assert fresh_slots(_uni(), {"SH": 2, "SZ": 1, "BJ": 0},
+                       {"SH": 2, "SZ": 1, "BJ": 0}) == []
+
+
+def test_raising_the_quota_continues_from_the_cursor():
+    """**S3-F3 的反向档**：提高配额才拉下一批，且从游标处续、零重复零遗漏。"""
+    uni = _uni()
+    slots = fresh_slots(uni, {"SH": 2, "SZ": 0, "BJ": 0}, {"SH": 4, "SZ": 0, "BJ": 0})
+    assert [s.universe_idx for s in slots] == [2, 3]
+    assert all(s.market == "SH" for s in slots)
+
+
+def test_a_quota_larger_than_the_layer_takes_the_whole_layer():
+    """spec §4.4：「配额大于可用数不是错误，取全部即可」。"""
+    slots = fresh_slots(_uni(n_sh=3), {"SH": 0, "SZ": 0, "BJ": 0},
+                        {"SH": 999, "SZ": 0, "BJ": 0})
+    assert [s.universe_idx for s in slots] == [0, 1, 2]
+
+
+def test_a_quota_lowered_below_the_cursor_takes_nothing_rather_than_going_backwards():
+    assert fresh_slots(_uni(), {"SH": 4, "SZ": 0, "BJ": 0},
+                       {"SH": 1, "SZ": 0, "BJ": 0}) == []
+
+
+def test_an_exhausted_layer_is_a_legal_terminal_state():
+    """`cursor == len(universe[mk])` 是「池穷尽」这个合法终态，不是错误。"""
+    assert fresh_slots(_uni(n_sh=3), {"SH": 3, "SZ": 0, "BJ": 0},
+                       {"SH": 120, "SZ": 0, "BJ": 0}) == []
+
+
+def test_a_negative_cursor_is_refused_rather_than_silently_wrapping():
+    """⚠️ Python 的负下标会**静默**取到另一只股。
+
+    `range(-2, 120)` 会产出 `universe[-2]`、`universe[-1]` —— 两个来自层**尾部**
+    的股，而 `Slot.universe_idx` 记的是 -2/-1。这不是崩溃，是一份看起来完全
+    正常、却指错了股的工作单。
+    """
+    with pytest.raises(ValueError, match="越界"):
+        fresh_slots(_uni(), {"SH": -2, "SZ": 0, "BJ": 0}, {"SH": 3, "SZ": 0, "BJ": 0})
+
+
+def test_a_cursor_past_the_end_of_the_layer_is_refused():
+    with pytest.raises(ValueError, match="越界"):
+        fresh_slots(_uni(n_sh=3), {"SH": 4, "SZ": 0, "BJ": 0},
+                    {"SH": 3, "SZ": 0, "BJ": 0})
+
+
+def test_a_negative_quota_is_refused_rather_than_silently_emptying_the_batch():
+    """⚠️ 负配额不会崩，只会让 `range(start, 负数)` 变成空批。
+
+    而**空批与「这一层池穷尽了」在外部完全不可区分** —— 操作者读到的是
+    「没候选了」，真相是账本被改过。`quota` 是**非必需持久化键**，
+    读侧 `validate_manifest` 一个字都不校验（同 `failures`，见 S2-F64）。
+    """
+    with pytest.raises(ValueError, match="必须是非负整数"):
+        fresh_slots(_uni(), {"SH": 0, "SZ": 0, "BJ": 0},
+                    {"SH": -1, "SZ": 0, "BJ": 0})
+
+
+def test_a_map_missing_a_market_is_refused_rather_than_raising_a_bare_keyerror():
+    """缺一层要给出说得清的错，而不是一个来路不明的 KeyError。"""
+    with pytest.raises(ValueError, match="缺市场"):
+        fresh_slots(_uni(), {"SH": 0, "SZ": 0}, {"SH": 1, "SZ": 0, "BJ": 0})
+    with pytest.raises(ValueError, match="缺市场"):
+        fresh_slots(_uni(), {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 1, "BJ": 0})

@@ -163,6 +163,60 @@ def freeze_universe(codes: Iterable[str], *, seed: str) -> dict[str, list[str]]:
 DEFAULT_QUOTA = {"SH": 120, "SZ": 160, "BJ": 120}
 
 
+@dataclass(frozen=True)
+class Slot:
+    """一个「要尝试的槽位」= 冻结名单里的一个位置。
+
+    `universe_idx` 随槽位走到底（进 `pool_order` / `failures`），
+    因为它才是 pilot 的消费顺序锚点（R12-F1）。
+    """
+    code: str
+    market: str
+    universe_idx: int
+
+
+def fresh_slots(universe: dict, cursor: dict, quota: dict) -> list[Slot]:
+    """从各层游标续到该层的**累计目标**（S3-F3）。
+
+    区间 `[cursor[mk], min(quota[mk], len(universe[mk])))`。
+    `cursor >= quota` 时该层返回空 —— **用同样的配额重跑不会再拉一批**。
+
+    ⚠️ **必须自己再查一次游标边界**：读侧 `_validate_cursor` 已经查过，但那是
+    「从磁盘读回来」这条路；本函数是**纯内存**接口，S4 完全可能在崩溃恢复里
+    改完 `cursor` 直接调它。而游标为负时 `range(-2, n)` 会产出 `universe[-2]`
+    这样的**尾部**元素 —— 不崩溃、不报错，只是给出一份指错股的工作单。
+
+    ⚠️ **`quota` 同样要守**（开工前扫描 · 裁定 2）：给 `cursor` 立守卫的那条理由
+    对 `quota` 一字不差地成立，而我当初只看见了手上那一个字段 —— 这是本仓
+    「**按字段穷尽、而不是按判据句穷尽**」那条教训的又一次复现。更要紧的是
+    `quota` 与 `failures` 同属**非必需持久化键**，读侧 `validate_manifest`
+    **一个字都不校验**（S2-F64 已实证这类字段的危险）：一个被改成负数的 `quota`
+    会让本层静默空跑，而外部把它读成「池穷尽」。
+    """
+    for name, m in (("cursor", cursor), ("quota", quota)):
+        missing = [mk for mk in MARKETS if mk not in m]
+        if missing:
+            raise ValueError(f"{name} 缺市场 {missing} —— 三层必须齐全，不许缺")
+
+    out: list[Slot] = []
+    for mk in MARKETS:
+        layer = universe[mk]
+        start = cursor[mk]
+        if not isinstance(start, int) or isinstance(start, bool) or not 0 <= start <= len(layer):
+            raise ValueError(
+                f"cursor[{mk}] = {start!r} 越界（本层冻结名单长度 {len(layer)}，"
+                f"合法范围 0..{len(layer)}，取到 {len(layer)} 表示该层已取遍）")
+        cap = quota[mk]
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+            raise ValueError(
+                f"quota[{mk}] = {cap!r} 必须是非负整数 —— 负值会让本层的区间退化成"
+                "空批，而**空批与「池穷尽」在外部完全不可区分**：操作者会读到一份"
+                "「这一层没候选了」的结论，真相却是账本被改过。")
+        for idx in range(start, min(cap, len(layer))):
+            out.append(Slot(code=layer[idx], market=mk, universe_idx=idx))
+    return out
+
+
 def resolve_quota(overrides: "Mapping[str, int] | None" = None) -> dict[str, int]:
     """§4.4 的默认配额 + `--quota SH=..,SZ=..,BJ=..` 覆盖（命令行接线在 S5）。
 
