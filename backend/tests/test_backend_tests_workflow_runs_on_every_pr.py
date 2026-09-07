@@ -16,22 +16,38 @@
 必须与套件实际读取面永远同步的清单，不划算。
 
 所以决定：**取消过滤器，每个 PR 都跑**。这样「漏了某个外部输入」这件事从根上不可能
-发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去 —— 三条
-判据分别管：触发器还在、`pull_request` 下一个键都没有、`push` 那条兜底退路没被过滤。
+发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去 —— 五条
+判据分别管：触发器还在、`pull_request` 下一个键都没有、`push` 那条兜底退路没被过滤、
+job 名等于 canonical 必需 context 且那个 job 真的在跑 pytest、该 context 仍在 canonical 清单里。
 
 （同款配置在本仓有先例：`hardening_6_gate.yml` 也没有 paths 过滤器。另注：
-`backend pytest (full suite)` 不是分支保护的必需检查，所以无过滤器不会造成
-必需检查等不到状态的死锁。）
+`backend pytest (full suite)` **已被列入 canonical 必需检查清单**——正因为它无过滤器、
+每个 PR 都报告状态，才够格当必需检查；反过来说，一旦给它加回过滤器，那些不匹配的 PR
+就会卡在「Expected — waiting for status」。这也是下面那几条判据要钉住它的原因。）
 """
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import yaml
 
-WORKFLOW = (
-    Path(__file__).resolve().parents[2] / ".github/workflows/backend-tests.yml"
-)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = _REPO_ROOT / ".github/workflows/backend-tests.yml"
+_BUILDER = _REPO_ROOT / "scripts/governance/build-protection-put-payload.py"
+
+
+def _builder():
+    """按路径加载 canonical 必需检查清单（文件名带连字符，不能直接 import）。
+
+    只依赖 stdlib（该脚本仅 import argparse/json/sys），所以在 codeowners-config-check
+    那道**必需门**里（只装了 pyyaml+pytest）也跑得起来。
+    """
+    assert _BUILDER.is_file(), f"{_BUILDER} 不存在 —— canonical 清单没了，判据无从谈起"
+    spec = importlib.util.spec_from_file_location("build_payload", _BUILDER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _on_section() -> dict:
@@ -113,14 +129,16 @@ def test_push_trigger_is_not_narrowed_by_paths():
     为什么这条也要钉（codex R4 引出）：本文件的判据**跑在它自己看守的那道工作流里**。
     如果有人提一个只改 workflow 的 PR、加上一条把该文件本身排除在外的
     `pull_request.paths`，那个 PR 上这道 job 压根不会启动，判据也就不会红 ——
-    而 `backend pytest (full suite)` 又不是必需检查，于是能合进去。
+    此时该必需检查会永远等不到结果，那个 PR 反而**卡在「Expected — waiting for status」**
+    合不进去（管理员可显式绕过）。
 
     这时候**唯一还能兜住的就是 `push: branches: [main]`**：合并后 main 上会跑一次，
     钉子在那里变红。所以 `push` 一旦也被路径过滤，就真的全静默了。
     这条判据把那条退路焊死。
 
-    ⚠️ 它只保证「**合并后**一定被发现」，不保证合并前。合并前的强制拦截需要独立的
-    必需检查，属本次范围之外的已知残留（见计划文档 §F-4）。
+    ⚠️ 它只保证「**合并后**一定被发现」，不保证合并前。合并前的强制拦截由
+    `codeowners-config-check` 那道**必需门**独立执行（它跑本文件），
+    外加 `backend pytest (full suite)` 自身已被列为必需检查。
     """
     push = _on_section().get("push")
     assert isinstance(push, dict), (
@@ -135,4 +153,49 @@ def test_push_trigger_is_not_narrowed_by_paths():
     assert push["branches"] == ["main"], (
         f"on.push.branches 不再是 ['main']（实得 {push['branches']}）—— "
         "合并后的兜底重跑必须发生在默认分支上"
+    )
+
+
+def test_job_name_equals_canonical_backend_context():
+    """`backend-tests.yml` 里必须有**恰好一个** job，其 `name` 等于 canonical 常量，
+    且那个 job **真的在跑 pytest**。
+
+    为什么是「等于」而不是「在清单里」（spec §3.2.1）：清单里有多条 context，写成成员关系时，
+    把这个 job 改名成**清单里的另一条**（例如 Catalyst 那个名字）判据仍会绿，而必需检查
+    `backend pytest (full suite)` 永远等不到结果 → 全仓 PR 死锁。
+
+    为什么还要「真的在跑 pytest」：只断言「有 job 叫这个名字」的话，挂一个同名空壳 job
+    就能让必需检查报绿，而真正的后端套件不再门控合并。
+    """
+    mod = _builder()
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = doc.get("jobs")
+    assert isinstance(jobs, dict) and jobs, (
+        f"{WORKFLOW.name} 里取不到 jobs 段 —— 本判据的解析口径已失效"
+    )
+    named = [j for j in jobs.values()
+             if isinstance(j, dict) and j.get("name") == mod.BACKEND_TESTS_CONTEXT]
+    assert len(named) == 1, (
+        f"名为 canonical 必需 context {mod.BACKEND_TESTS_CONTEXT!r} 的 job 有 "
+        f"{len(named)} 个（应恰好 1 个）。实得全部 job 名："
+        f"{sorted(n for n in (j.get('name') for j in jobs.values() if isinstance(j, dict)) if n)}\n"
+        "GitHub 的必需检查按 job 显示名匹配：名字对不上 ⇒ 该检查永远停在\n"
+        "「Expected — waiting for status」⇒ **全仓 PR 都合不了**。\n"
+        "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
+        "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
+    )
+    steps = named[0].get("steps") or []
+    assert any("pytest" in (s.get("run") or "")
+               for s in steps if isinstance(s, dict)), (
+        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步在跑 pytest —— "
+        "必需检查会由一个不跑测试的 job 报绿，等于门控失效"
+    )
+
+
+def test_backend_context_is_in_canonical_required_list():
+    """canonical 清单里必须留着这一项，否则应用脚本不再保证该必需检查在位。"""
+    mod = _builder()
+    assert mod.BACKEND_TESTS_CONTEXT in mod.REQUIRED_CONTEXTS, (
+        "BACKEND_TESTS_CONTEXT 不在 REQUIRED_CONTEXTS 里 —— "
+        "应用脚本只遍历 REQUIRED_CONTEXTS，将不再保证该必需检查在位"
     )
