@@ -49,7 +49,7 @@ final class M01MatrixSyncGuardTests: XCTestCase {
     func test_m01_matrix_three_rows_are_in_sync() throws {
         let r = Self.rows(try matrixSection())
         XCTAssertGreaterThanOrEqual(r.count, 5, "只解析出 \(r.count) 行 —— 表解析坏了（防空转）")
-        XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.13\"`", "m01 顶层版本行未同步")
+        XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.14\"`", "m01 顶层版本行未同步")
         XCTAssertEqual(r["app.sqlite GRDB migration"], "`0010_v1.13_drawing_default_style`",
                        "m01 app.sqlite migration 行未同步")
         XCTAssertEqual(r["Swift 模型版本（`M0.3`）"], "`1.4`", "m01 Swift 模型版本行未同步")
@@ -57,22 +57,26 @@ final class M01MatrixSyncGuardTests: XCTestCase {
 
     /// 双向自检：**用同一个解析器**跑一份「三行都还是旧值、但 bump 记录里三个新值全都出现过」的样本。
     /// 旧稿的自检只对局部字符串调 `String.contains`，测的是标准库不是判据 —— 恒绿。
+    ///
+    /// ⚠️ 本样本是**人造**的：顶层那行用本次 bump（`1.13` → `1.14`）作素材，
+    ///    而 app.sqlite / Swift 模型版本两行仍沿用上一次 bump 的素材 —— 本次 bump 并未改动它们。
+    ///    样本只需满足「数据行是旧值、引用块里出现新值」，不必对应一次真实发生过的 bump。
     func test_parser_is_immune_to_values_that_only_appear_in_bump_notes() {
         let sample = """
         | 维度 | 当前版本 | 变更触发 bump 的条件 |
         |---|---|---|
-        | `CONTRACT_VERSION`（顶层标识） | `"1.12"` | … |
+        | `CONTRACT_VERSION`（顶层标识） | `"1.13"` | … |
         | PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | … |
         | 训练组 SQLite `PRAGMA user_version` | `1` | … |
         | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | … |
         | Swift 模型版本（`M0.3`） | `1.3` | … |
 
-        > **bump 记录**：顶层 `CONTRACT_VERSION` `"1.12"` → `"1.13"`；app.sqlite 同步至
+        > **bump 记录**：顶层 `CONTRACT_VERSION` `"1.13"` → `"1.14"`；app.sqlite 同步至
         > `0010_v1.13_drawing_default_style`；Swift 模型版本 `1.3` → `1.4`。
         """
         let r = Self.rows(sample)
         XCTAssertEqual(r.count, 5, "样本应解析出 5 行（防空转）")
-        XCTAssertNotEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.13\"`")
+        XCTAssertNotEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.14\"`")
         XCTAssertNotEqual(r["app.sqlite GRDB migration"], "`0010_v1.13_drawing_default_style`")
         XCTAssertNotEqual(r["Swift 模型版本（`M0.3`）"], "`1.4`")
     }
