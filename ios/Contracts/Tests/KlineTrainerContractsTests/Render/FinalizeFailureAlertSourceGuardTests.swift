@@ -206,6 +206,233 @@ struct FinalizeFailureAlertSourceGuardTests {
             #expect(claimed == actual,
                     "验收清单声称 \(claimed) 条，\(file) 实际 \(actual) 条 —— 复核者会按文档对账")
         }
+
+        // ⚠️ 第三个会过期的数字：文档里写的 Catalyst 基线。它已经错过三轮（1890/1894/1896），
+        //    每次都是我加完守卫忘了回头改（Kimi R6-medium）。⇒ 同样机械绑定到基线文件本身。
+        let hit = try #require(doc.range(of: "跨轮累计 1864→"), "锚点失效：文档里找不到基线陈述")
+        let claimedBaseline = String(doc[hit.upperBound...].prefix { $0.isNumber })
+        let liveBaseline = try String(contentsOf: root
+            .appendingPathComponent(".github/scripts/catalyst-total-baseline.txt"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(claimedBaseline == liveBaseline,
+                "验收清单写基线 \(claimedBaseline)，而 catalyst-total-baseline.txt 是 \(liveBaseline)")
+    }
+
+    /// 取 `cannotPreserveCopy` 里某一支 `case` 返回的**那一个字符串字面量**（不含代码与注释）。
+    /// ⛔ 不是「取到下一个 case 之前」：最后一支后面没有下一个 case，那样会一路吃到文件末尾
+    ///    （见下方实现里的 ⛔ 注释）。三支各自独立断言，防「改了一支殃及另一支」。
+    private func copyBranch(_ text: String, caseName: String) throws -> String {
+        let body = try #require(text.range(of: sq("private var cannotPreserveCopy: String {")),
+                                "锚点失效：找不到 cannotPreserveCopy")
+        let rest = text[body.upperBound...]
+        let start = try #require(rest.range(of: sq("case .\(caseName)")),
+                                 "锚点失效：找不到 case .\(caseName)")
+        // ⛔ 只取该 case 返回的**那一个字符串字面量**，不能「取到下一个 case 为止」——
+        //    最后一支后面没有下一个 case，会一路吃到文件末尾，断言就会被文件别处的字样蒙混。
+        let after = rest[start.upperBound...]
+        let open = try #require(after.range(of: "return\""), "锚点失效：case .\(caseName) 之后找不到 return 字面量")
+        var body2 = after[open.upperBound...]
+        var out = ""
+        while let ch = body2.first {
+            body2 = body2.dropFirst()
+            if ch == "\\" { if let esc = body2.first { out.append(ch); out.append(esc); body2 = body2.dropFirst() }; continue }
+            if ch == "\"" { break }
+            out.append(ch)
+        }
+        return out
+    }
+
+    /// 「提到『放弃本局』的**每一句**都必须带否定/警告语气」——共用判据。
+    /// ⛔ 不能靠「禁掉某一句原话」：换个措辞（「也可以回到结算弹窗选『放弃本局』试试」）就绕过了。
+    ///    本仓在这条判据上已经连栽五次，每次都是「补被点名的那一条」，形态一变又漏（Kimi R5-low）。
+    /// ⇒ 现行判据（见实现）：「放弃本局」在本支**至多出现一次**，且那一次必须落在一个
+    ///    **固定的警告短语**里。⛔ 头注与实现必须同步 —— 本 PR 已经在别处栽过两次
+    ///    「陈旧头注教后人把洞改回来」（TrainingSessionLifecycle:52、
+    ///    TrainingSessionCoordinator:1034），这里是第三次（Kimi R7-low）：
+    ///    上一稿头注还写着已被废弃的「同句共现」规则，而那条规则 Kimi R6 已证明可绕过。
+    /// ⚠️ 本判据是**文本层**的，有固有极限（见实现内的说明）；真正兜底的是验收清单 8f/8g/8h。
+    ///
+    /// ⛔⛔ **订正一个结论时，它的回声散在八处**（本 PR 逐轮被 Kimi 点出来才补齐，血泪清单）：
+    ///   ①生产文案本身 ②生产代码注释 ③守卫判据 ④守卫的 `@Test` 显示名
+    ///   ⑤断言的失败信息字符串 ⑥验收清单对应条目 ⑦文档正文说明
+    ///   ⑧**CI／闸门脚本里的维护记录注释**（`catalyst-gate.test.sh` 的每轮纪事 —— Kimi R12
+    ///     在那里又抓到一处旧前提；这一类不在代码目录里，最容易被整片忘掉）
+    ///   —— ④⑤⑥ 最常被漏：改判据时眼睛只盯着代码，而测试名和失败信息**会在将来变红时
+    ///   直接教后人把洞改回去**。改完请按这八类各扫一遍，别只 grep 一个自己编的关键词。
+    /// ⛔ 交叉引用**一律写符号名，不写行号** —— 行号随每次编辑漂移，本文件已因此指错过一次
+    ///   （Kimi R12：「见下方 494 行」指到了注释自己身上，真正判据在二十多行之后）。
+    private func discardMentionsAreAllWarnings(_ branch: String) -> Bool {
+        // ⚠️ 上一稿判据是「同句里同时出现『放弃本局』和『失败』」，Kimi R6 证明它分不清
+        //    那个「失败」修饰的是谁：「若重试入账仍然失败，也可以选择『放弃本局』离开。」
+        //    —— 共现成立，而句子实际是在**推荐**放弃。
+        // ⇒ 收紧两处：①「放弃本局」在本支**至多出现一次**（多处提及无法逐一判性质）；
+        //             ②那一次必须落在**固定的警告短语**里，措辞不许自由发挥。
+        let occurrences = branch.components(separatedBy: "放弃本局").count - 1
+        guard occurrences <= 1 else { return false }
+        guard occurrences == 1 else { return true }          // 一次都不提，本来就没问题
+        return branch.contains("「放弃本局」也会失败")
+            || branch.contains("「放弃本局」也可能失败")
+    }
+
+    @Test("⭐⭐存储写不进去那一支：⛔ 不得把「放弃本局」说成出路（它同样要写库，多半也失败）")
+    func noneBranchMustNotOfferDiscardAsAWayOut() throws {
+        // 真机验收（2026-09-05）暴露：8c 情形下三个按钮构成闭环 —— 重试失败、退出被拦、
+        // 放弃同样失败（`discardSession` 走 `pendingRepo.clearPending()`，**必须写库**）。
+        // 而文案却让用户「去上一个提示里选择放弃本局」⇒ 把人支去做一件多半会白忙的事。
+        let branch = try copyBranch(try code(tv), caseName: "none")
+        #expect(discardMentionsAreAllWarnings(branch),
+                "⛔ 存储坏掉时「放弃本局」多半也失败 —— 提到它的每一句都必须是警告，不得写成建议")
+        // ⚠️ 这里比对的是**字面量内部**的文案，而扫描器刻意保留字面量里的空白
+        //    ⇒ 断言一律用原文，⛔ 不能套 sq()（它会把「关闭 App」压成「关闭App」而永远不匹配）。
+        #expect(branch.contains("关闭 App"),
+                "必须给出真实出路：关掉 App 重开（内存里这一局随进程一起没了，人一定出得来 —— ⛔ 别写死『回到开始训练』，见 cannotPreserveCopy 的 R16-low 注释）")
+        #expect(branch.contains("这一局会丢失"),
+                "出路的代价必须一并说清 —— 否则又是一句半真话")
+
+        // ⚠️ **按「这一类」补齐，不是按被点到的那一条**（Kimi R3-medium）。
+        //    同一片改动里「立了不变量却没人兑现」已经犯了三次：
+        //      R1 → `.trainingSetMissing` 不给「关闭 App」；R2 → 两个方向都不许绝对断言；
+        //      R3 → 8f① 的「必须明说放弃也会失败」。每次我只补被点名的那一条。
+        //    这次把验收清单里**所有**对本支的要求逐条落成断言（8c 两项 + 8f 三项）：
+        // ⚠️ 「同样会失败」曾是这里的必含项，已改为带条件的「也会失败」（Kimi R10-low）：
+        //    `saveProgress` 还会因 `loadedDrawingsLossy.reconciled` 检出重复/空 id 而抛 `.dbCorrupted`
+        //    （fail-closed 设计路径，TrainingSessionCoordinator:671）——那时**存储完全健康**、
+        //    本局从未写成 pending ⇒ status 正是 `.none`，而 `clearPending()` 会成功。
+        //    ⇒ 我在这一支下了全称断言，与我自己在 `.trainingSetMissing` 支批判的「成因外推」同型。
+        for required in [
+            "也会失败",              // 8f①：告知放弃可能白忙，但⛔不下全称断言
+            "全部丢失",              // 8c：退出的后果必须说死
+            "请先清理设备存储空间",   // 8c：给出可操作的补救
+        ] {
+            #expect(branch.contains(required),
+                    "⛔ 验收清单要求本支说明「\(required)」，删掉它守卫必须变红")
+        }
+    }
+
+    @Test("⭐存档读不出来那一支：同样不得对「放弃本局」打包票")
+    func unreadableBranchMustNotPromiseDiscard() throws {
+        let branch = try copyBranch(try code(tv), caseName: "unreadable")
+        #expect(discardMentionsAreAllWarnings(branch),
+                "⛔ 存档层出问题时清槽也可能失败 —— 提到它的每一句都必须是警告，不得写成建议")
+        #expect(branch.contains("关闭 App"), "必须给出真实出路")
+
+        // ⚠️ **横向对齐**（Kimi R4-low）：上一轮我给 `.none` 支补齐了正向必含断言，却没有
+        //    同步到本支 ⇒ 本支只剩「禁那句旧原话」这一条否定判据，绕过方式一改措辞就成立：
+        //    「若不要这一局了，直接点『放弃本局』即可。也可以关闭 App 再重新打开」——
+        //    不含被禁原话、含「关闭 App」⇒ 全绿，而「前两支不得把放弃说成出路」已被破坏。
+        //    ⇒「按这一类穷尽」不只是穷尽一支内的要求，还要横向对齐所有同类支。
+        for required in [
+            "也可能失败",      // 保留条件：⛔ 不得把「放弃本局」说成确定可行
+            "这一局会丢失",    // 出路的代价必须说清（与 `.none` 支同一标准）
+        ] {
+            #expect(branch.contains(required),
+                    "⛔ 本支必须保留「\(required)」—— 删掉它守卫必须变红")
+        }
+    }
+
+    @Test("⭐⭐⭐文件被淘汰那一支：⛔ 既不得打包票说放弃能成，也不得断言它必然失败")
+    func trainingSetMissingBranchMustNotMakeAbsoluteClaimsAboutDiscard() throws {
+        // 这一支被我改了两稿，两次都错在**只看了路的一半**：
+        //  · 初稿：「成因是缓存淘汰 ⇒ 存储是好的 ⇒ 放弃一定能成」——漏了「能进本弹窗说明写库失败过」；
+        //  · 二稿（矫枉过正）：「写库失败过 ⇒ 放弃同样会失败」——**时态错了**。
+        //    `exitPreservingProgress` 里 `saveProgress` **成功**也会继续查 status
+        //    （`savedCurrent = true` 那条路照样往下走），而 `.trainingSetMissing` 只要求**读**成功
+        //    + 文件不在 ⇒ 存在「写库刚刚成功、只是文件没了」的真实路径，此刻 `clearPending()`
+        //    会成功、放弃是**真出路**。断言它「同样会失败」= 把用户从走得通的路前吓退（Kimi R1-medium）。
+        // ⇒ 正确姿态：**带条件地**提，两个方向都不许下全称断言。
+        let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
+
+        // ⛔ 两个方向的绝对说法都不许。
+        // ⚠️ 上一稿只挡了「必然失败」这一边，且正向判据松到「全文任意位置含『若』即过」
+        //    ⇒ 「……放弃本局，它一定能成功。若刚才是存储写满导致的，请先清理…」照样全绿
+        //    （Kimi R2-medium 给出的绕过例子）。我在文档里声称「两个方向都钉死了」，其实没有
+        //    —— 与上一轮刚被指出的「立了不变量却没人兑现」是同一个毛病。
+        // ⚠️ 黑名单是**有限清单**，「必定会失败」这类新措辞仍能绕（Kimi R6 明确指出）。
+        //    ⛔ 别再往上堆词 —— 文本判据在这里已到极限。真正兜住「文案说的是不是实话」的
+        //    是验收清单 8f/8g/8h 三条**人工验收**；守卫只负责挡住已知的退化写法。
+        for absolute in ["同样会失败", "必然会失败", "一定会失败", "肯定会失败", "必定会失败",
+                         "一定能成功", "必然成功", "肯定能成功", "一定可以成功", "必定能成功"] {
+            #expect(!branch.contains(absolute),
+                    "⛔ 「\(absolute)」是全称断言 —— 此刻写库是好是坏，代码里没有任何东西能保证")
+        }
+
+        // 正向：提到「放弃本局」的**每一句**都要自带条件。
+        // ⚠️ 演进史（两次都因为扫描范围没对准判据本身）：
+        //   · 一稿只查**第一处**出现，第二处起完全不受检（Kimi R6）；
+        //   · 二稿改为逐处扫，但只取该处**之后**到句读为止 ⇒ 实际执行的是「条件必须写在提及
+        //     之后」这条文体偶然性，而**条件在前**的合法写法（「若存储此刻仍写不进去，
+        //     「放弃本局」也会失败」——正是本文件 `.none` 支采用的句式）会被误红（Kimi R13）。
+        // ⇒ 按句读切分整句，含「放弃本局」的句子整句都算，前后皆可。
+        for sentence in branch.split(whereSeparator: { $0 == "。" || $0 == "；" }) {
+            guard sentence.contains("放弃本局") else { continue }
+            #expect(sentence.contains("如果") || sentence.contains("若"),
+                    "⛔ 提「放弃本局」的每一句都必须自带条件限定，不能由别处的『若』代劳")
+        }
+    }
+
+    @Test("⭐⭐文件被淘汰那一支：⛔ 不得给「关闭 App」的建议（存档还在，关掉重开会引到坏状态）")
+    func trainingSetMissingBranchMustNotSuggestClosingApp() throws {
+        // ⚠️ 这条不变量我先写进了源码注释和验收清单 8g，却**没有任何守卫兑现它**
+        //    （Kimi R1-medium 实测：全仓搜「关闭 App」只有另外两支的正向断言）。
+        //    本仓踩过同款：写「必须 X」之前先核实既有机制兑现得了 X 吗。
+        // 为什么这一支不能给：它的 pending 还在 ⇒ 关掉重开后首页是「继续训练」，
+        // 点进去会因训练组数据文件不在而失败 —— 把人引到一个打不开的局里。
+        let branch = try copyBranch(try code(tv), caseName: "trainingSetMissing")
+        #expect(!branch.contains("关闭 App"),
+                "⛔ 这一支给「关闭 App」= 把用户引向一个点进去就失败的「继续训练」")
+    }
+
+    @Test("⭐「关掉 App 重开能出来」这条出路的行为测试必须还在（⛔ 删了/改名了要报警）")
+    func escapeHatchBehaviourTestsStillExist() throws {
+        // 文案对用户许诺「可以直接关闭 App 再重新打开」，兑现它的是 AppRouterTests 里那两条。
+        // ⚠️ 上一轮我在验收文档里写了「另有 2 条行为测试」，却没有任何机制绑定它
+        //    ⇒ 有人删掉或改名，文档说法就静默过期（Kimi R5-low）。
+        //    这里钉**函数名存在性**而不是条数：比数字更准，也不会因为同文件新增别的测试而失真。
+        // ⚠️ 这条判据要看**行结构**（`@Test` 在函数上一行），所以读**原文**而非 `code()`。
+        //    首版就栽在这里：`code()` 删空白 ⇒ 匹配 "func \(fn)"（带空格）永远找不到 ⇒
+        //    `if let` 不成立 ⇒ 整个检查被跳过 ⇒ **恒真**。两个变异都不红才发现（Kimi R14 修复中）。
+        let raw = try rawSource("Tests/KlineTrainerContractsTests/AppRouterTests.swift")
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        #expect(!lines.contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("#if false") },
+                "⛔ AppRouterTests 里出现 `#if false` —— 可能把逃生路测试整块关掉了")
+
+        for fn in ["loadHome_unreadablePending_fallsBackToEmptyHomeSoUserCanEscape",
+                   "loadHome_readablePending_showsResume"] {
+            guard let idx = lines.firstIndex(where: {
+                $0.contains("func \(fn)")
+            }) else {
+                Issue.record("⛔ \(fn) 不见了 —— 文案许诺的逃生路失去行为测试保护")
+                continue
+            }
+            // 向上找最近的一个非空、非注释行，它必须是 `@Test(`。
+            // ⛔ 只查函数名挡不住除名（Kimi R14）：删掉 `@Test` 属性行、或整块 `#if false`，
+            //    函数名照样在 ⇒ 测试悄悄退出套件，而总数少 2 落在 catalyst-gate 的 ±30 容差内
+            //    不报警、条数对账又不覆盖本文件 ⇒ 三道门同时失效。
+            var j = idx - 1
+            while j >= 0 {
+                let t = lines[j].trimmingCharacters(in: .whitespaces)
+                if t.isEmpty || t.hasPrefix("//") || t.hasPrefix("///") { j -= 1; continue }
+                break
+            }
+            let above = j >= 0 ? lines[j].trimmingCharacters(in: .whitespaces) : ""
+            #expect(above.hasPrefix("@Test("),
+                    "⛔ \(fn) 头上没有紧邻的 @Test（实为「\(above.prefix(40))」）—— 函数还在但已不在测试套件里")
+
+            // ⛔ 除名手段要**穷尽框架提供的那几种**，不能只想到自己先想到的两种（Kimi R15-medium）：
+            //    我处理了「删 @Test 行」和「#if false」，却漏了 swift-testing 里最惯用的
+            //    `.disabled()` —— 它仍以 `@Test(` 开头、函数名也在 ⇒ 上面两条判据全绿，
+            //    而测试实际不再执行；总数少 2 又落在闸门 ±30 容差内不报警。
+            // ⚠️ 判据只看 `@Test` 到 `func` 之间那几行：本仓测试文件里也有界面按钮的
+            //    `.disabled(!enabled)`，全文件扫会误伤。
+            let traitBlock = lines[max(0, j)..<idx].joined()
+            for kill in [".disabled(", ".enabled(if:"] {
+                #expect(!traitBlock.contains(kill),
+                        "⛔ \(fn) 被 \(kill)…) 停用了 —— 文案许诺的逃生路失去行为测试保护")
+            }
+        }
+        // ⚠️ 文本层的极限：把整个文件从 test target 移除、或改 scheme 排除它，本守卫都看不见。
+        //    那一层由 Catalyst 总数基线（±30）与人工验收 8h 兜底。
     }
 
     @Test("锚点有效 + 恰好三个出口（重试 / 退出本局 / 放弃本局）")
@@ -311,7 +538,9 @@ struct FinalizeFailureAlertSourceGuardTests {
         // ⚠️ hasDurablePendingCheckpoint 返回 false 有三个原因：①没有 pending ②pending 属于别的会话
         //    ③pending 在、是本局的，但训练组文件被缓存淘汰了。上一稿把三者压成同一句话，
         //    而那句话把原因写死成①（「本局还没有过任何自动存档」）——在③里那是**假的**，
-        //    且随附建议「清理存储空间」对③**无效**（文件已删，腾空间也回不来）。
+        //    且随附建议「清理存储空间」在③下**对找回文件无效**（文件已删，腾空间也回不来）。
+        //    ⚠️ 但对「让**入账**写得进去」它是有效的 —— 订正后③支照样建议清存储（现行判据见本函数末尾 `missingBranchCopy.contains("清理设备存储空间")` 那段）。
+        //    ⛔ 本行曾写成绝对的「对③无效」；那句话与同一函数下方的新判据并排矛盾（Kimi R9-low）。
         // 判据不是「删掉那句话」，而是「**按原因分支**」：
         #expect(code.contains(sq("case .cannotPreserve(let")),
                 "必须把原因解构出来消费掉 —— 否则文案不可能分得开")
@@ -321,15 +550,29 @@ struct FinalizeFailureAlertSourceGuardTests {
                 "③『文件被淘汰』那一支必须如实说明是数据文件没了，⛔ 不得复用①那句假话")
         #expect(code.contains(sq("存档读取失败")),
                 "④『存档读不出来』（数据库损坏 / IO）也必须有自己的说法 —— 报成①会让用户做无效补救")
-        // ⛔ ③ 那一支不得建议「清理存储空间」——文件已被删除，腾出空间也回不来。
+        // ③ 那一支**可以**带条件地提「清理存储空间」（2026-09-06 订正，现行判据见本函数末尾 `missingBranchCopy.contains("清理设备存储空间")` 那段）。
+        // ⛔ 本行曾是「不得建议清理存储空间——文件已被删除，腾出空间也回不来」，那只在
+        //    「找回文件」这个目的下成立；重试入账要写库、写库要空间 ⇒ 另一个目的下它有效。
+        //    旧禁令与下方新判据并排会误导后人把新文案改回去（Kimi R8-low）。
         // ⚠️ 范围必须切到**那一条字面量自己的收尾引号**为止：上一稿取「附近 160 字符」，
         //    会串进紧邻的①那一支（它本来就该有这条建议）⇒ 假阳性。
         let hit = try #require(code.range(of: sq("训练组数据文件")))
         let rest = code[hit.upperBound...]
         let endQuote = try #require(rest.firstIndex(of: "\""), "找不到该文案的收尾引号（锚点失效）")
         let missingBranchCopy = String(rest[..<endQuote])
-        #expect(!missingBranchCopy.contains(sq("清理设备存储空间")),
-                "⛔ 对『文件已被清理』那一支，建议清理存储空间是无效建议")
+        // ⚠️ **判据随前提订正**（2026-09-06）：上一稿在这里禁止本支出现「清理设备存储空间」，
+        //    理由是「文件已删，腾空间也回不来」。那个理由只针对**找回文件**这一个目的成立。
+        //    自查发现前提变了：能走到本弹窗说明写库已失败过，而**重试入账要写库** ⇒ 清理存储
+        //    在这一支有了第二个、真实有效的用途。⛔ 沿用旧禁令会逼出一句对用户没用的空话。
+        //    新判据：可以提清理存储，但**必须说清目的是重试入账**，绝不能暗示文件能回来。
+        if missingBranchCopy.contains("清理设备存储空间") {
+            #expect(missingBranchCopy.contains("重试入账"),
+                    "⛔ 这一支提清理存储时必须说明是为了重试入账 —— 否则会被读成『腾空间就能找回文件』")
+        }
+        for lie in ["恢复训练组", "找回", "重新下载后即可继续"] {
+            #expect(!missingBranchCopy.contains(lie),
+                    "⛔ 不得暗示清理存储能让被删掉的训练组数据文件回来")
+        }
         // ④ 同理：存档读不出来时，清存储也解决不了
         let hit4 = try #require(code.range(of: sq("存档读取失败")))
         let rest4 = code[hit4.upperBound...]
