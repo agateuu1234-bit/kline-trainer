@@ -37,4 +37,47 @@ struct DrawingToolStyleMatrixGuardTests {
         #expect(avail.contains(squeeze("func horizontalLineSubTypeEnabled(")))
         #expect(avail.contains(squeeze("func horizontalLabelModeEnabled(")))
     }
+
+    @Test("T2b 有效性列没有被接到 UI 上（D120 的落地闸门）")
+    func t2b_validityPredicateNotUsedByUI() throws {
+        let files = try allSwiftFilesUnderSources()
+        #expect(!files.isEmpty)
+
+        var byFile: [String: Int] = [:]
+        var uiHits: [String] = []
+        for path in files {
+            let n = try squeezedSource(path).components(separatedBy: squeeze("isRenderableSubType(")).count - 1
+            guard n > 0 else { continue }
+            byFile[URL(fileURLWithPath: path).lastPathComponent] = n
+            if path.contains("/Sources/KlineTrainerContracts/UI/") { uiHits.append(path) }
+        }
+        // ① UI 层零命中 —— 有效性判据不得当灰态用
+        #expect(uiHits.isEmpty, "有效性判据被接到 UI 层，违反 D120：\(uiHits)")
+        // ② 反向自检：四处写入闸各自命中。
+        //    只写「UI 零命中」会与「这个函数被整个删掉」这种坏实现**同时为绿**。
+        #expect(byFile["TrainingEngine.swift"] != nil, "append 门不再经共享单点？\(byFile)")
+        #expect(byFile["DrawingObjectStyleEdit.swift"] != nil, "withStyle 可用性闸不见了？\(byFile)")
+        #expect(byFile["DrawingEnums.swift"] != nil, "sanitized(for:) 不再经共享单点？\(byFile)")
+        #expect(byFile["DrawingStyleAvailability.swift"] != nil, "定义处不见了？\(byFile)")
+    }
+
+    @Test("T1f 边界：本片不碰锚数（D119）——定义仍只在输入控制器里，且它不引用样式表")
+    func t1f_anchorCountBoundary() throws {
+        let files = try allSwiftFilesUnderSources()
+        #expect(!files.isEmpty)
+
+        var defs: [String] = []
+        for path in files where try squeezedSource(path).contains(squeeze("func minAnchors(")) {
+            defs.append(URL(fileURLWithPath: path).lastPathComponent)
+        }
+        // ① 锚数定义恰好一处，且仍在原文件
+        #expect(defs == ["DefaultDrawingInputController.swift"], "锚数定义处异常：\(defs)")
+
+        let ctrlPath = try fileNamed("Drawing/DefaultDrawingInputController.swift", in: files)
+        let ctrl = try squeezedSource(ctrlPath)
+        // ② 该文件不得引用样式表 —— 锚数不是样式，单一真相归第 4 片的 requiredAnchors（D119/Q12）
+        #expect(!ctrl.contains(squeeze("styleRules")), "锚数不得从样式表取值（D119 边界）")
+        // ③ 反向自检：文件真被扫到（防「路径写错 → 零命中 → 恒过」）
+        #expect(ctrl.contains(squeeze("func shouldCommit(")), "锚点失效：扫不到 shouldCommit")
+    }
 }
