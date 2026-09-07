@@ -18,8 +18,9 @@ import sys
 GITHUB_ACTIONS_INTEGRATION_ID = 15368   # GitHub Actions app 全局 id（UI: source = GitHub Actions）
 CATALYST_CONTEXT = "Mac Catalyst build-for-testing on macos-15"
 APP_BUILD_CONTEXT = "iOS app build-for-running on macos-15"
+BACKEND_TESTS_CONTEXT = "backend pytest (full suite)"
 # canonical 必需 context 单一真相（codex H-NEW-2）；verifier/admin/测试经 --list-contexts 派生
-REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT]
+REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]
 # GitHub rulesets PUT 接受的字段；其余（id/node_id/created_at/updated_at/_links/source/source_type 等）只读，必须剥离
 PUT_FIELDS = ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")
 

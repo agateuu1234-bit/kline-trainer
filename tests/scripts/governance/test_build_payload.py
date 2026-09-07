@@ -14,6 +14,7 @@ def _load():
 mod = _load()
 CATALYST = "Mac Catalyst build-for-testing on macos-15"
 APP_BUILD = "iOS app build-for-running on macos-15"
+BACKEND = "backend pytest (full suite)"
 APP_ID = 15368
 
 def _ruleset(name):
@@ -116,8 +117,8 @@ def test_list_contexts_cli():
     p = subprocess.run([sys.executable, str(SCRIPT), "--list-contexts"],
                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
     assert p.returncode == 0
-    assert json.loads(p.stdout) == [CATALYST, APP_BUILD]
+    assert json.loads(p.stdout) == [CATALYST, APP_BUILD, BACKEND]
 
 # REQUIRED_CONTEXTS 常量 = canonical 列表（单一真相）
 def test_required_contexts_constant():
-    assert mod.REQUIRED_CONTEXTS == [CATALYST, APP_BUILD]
+    assert mod.REQUIRED_CONTEXTS == [CATALYST, APP_BUILD, BACKEND]
