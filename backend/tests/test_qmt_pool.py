@@ -592,3 +592,129 @@ def test_plan_batch_without_failures_equals_fresh_slots():
     uni = _uni()
     cur, quo = {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 2, "SZ": 1, "BJ": 0}
     assert plan_batch(uni, cur, quo) == fresh_slots(uni, cur, quo)
+
+
+# ── 最终评审 F5/F6/F7/F8：补上零覆盖的守卫 ───────────────────────
+# 最终评审逐条变异实测，发现下面这些守卫**删掉之后 51 条测试全绿** ——
+# 行为今天是对的，明天没人守。三点要害：
+#   ① `resolve_quota` 有完整坏值表，而 `fresh_slots` 里**一模一样**的判据
+#      一个坏值都没测 —— 判据复制过来了，测试表没复制；
+#   ② `attempts` 那条正是 S2-F64 整条在讲的洞（缺席/坏型能复活一个已耗尽重试的
+#      候选），守卫写对了却没有任何测试钉住它，而隔壁 `universe_idx` 有专属档；
+#   ③ `retry_slots` 换用 `qmt_normalize` 那份宽松正则（`$`，容忍尾随换行）**不红**
+#      —— 直接架空 Task 4「写侧读侧用同一个正则对象」的全部意义。
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "2", True, None])
+def test_fresh_slots_refuses_a_malformed_cursor(bad):
+    """与 `resolve_quota` 那张坏值表**同规格**：判据复制过来了，测试表也必须复制。"""
+    with pytest.raises(ValueError):
+        fresh_slots(_uni(), {"SH": bad, "SZ": 0, "BJ": 0}, {"SH": 1, "SZ": 0, "BJ": 0})
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "2", True, None])
+def test_fresh_slots_refuses_a_malformed_quota(bad):
+    """⚠️ `True` 那一档：`isinstance(True, int)` 是 True，不显式排除 bool 会被当成 1。"""
+    with pytest.raises(ValueError):
+        fresh_slots(_uni(), {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": bad, "SZ": 0, "BJ": 0})
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("stock_code", None), ("stock_code", 600000), ("stock_code", "600000.SH\n"),
+    ("market", "HK"), ("market", 1), ("market", None),
+    ("universe_idx", "1"), ("universe_idx", 1.0), ("universe_idx", True),
+    ("universe_idx", 99), ("universe_idx", -1),
+    ("attempts", "1"), ("attempts", 1.5), ("attempts", True), ("attempts", -1),
+])
+def test_retry_slots_refuses_a_malformed_failure_entry(field, bad):
+    """`failures` 是账本的**非必需字段**，读侧一个字都不校验 —— 本函数是它唯一的门。
+
+    ⚠️⚠️ **`("stock_code", "600000.SH\\n")` 这一档钉不住正则的宽严 —— 如实登记，
+    不要误以为它钉住了**（最终评审 F5 第 10 组，控制者变异实测）：
+    严格版（`\\Z`）与宽松版（`$`）**唯一**不同的输入类是 `<合法码>\\n`，
+    而本函数在正则之后还有一道 `code.endswith("." + market)` ——
+    `"600000.SH\\n".endswith(".SH")` 是 `False`，**后缀检查结构上抢先拦住了它**。
+    所以在 `retry_slots` 里换用宽松正则是一个**等价变异**（换了不红，不是覆盖缺口）。
+    正则的宽严在 `freeze_universe` 里**才**可观测（那里正则之后直接按后缀分层，
+    `"SH\\n"` 会 KeyError），已由 `test_a_malformed_code_is_refused` 钉住。
+    这一档保留的价值是「这个输入必须被拒」这件事本身，**不是**"它证明了用哪个正则"。
+
+    ⚠️ `attempts` 的四档专钉 S2-F64：一条 `attempts` 缺席/坏型的记录，
+    能让一个**已耗尽重试**的候选被复活。
+    """
+    uni = _uni()
+    rec = _fail(uni, "SH", 1, 0)
+    rec[field] = bad
+    with pytest.raises(ManifestInvalidError):
+        retry_slots(uni, [rec])
+
+
+def test_retry_slots_refuses_a_non_object_entry():
+    """一条不是对象的记录要给出说得清的错，而不是在取键时炸出 TypeError。"""
+    with pytest.raises(ManifestInvalidError, match="必须是对象"):
+        retry_slots(_uni(), ["not-a-dict"])
+
+
+@pytest.mark.parametrize("bad", [None, 5, "failures", {"SH": []}])
+def test_retry_slots_refuses_a_non_list_ledger(bad):
+    """容器本身的门（F6）：S4 读账本必然写 `manifest.get("failures", [])`，
+    账本里一个 `"failures": null` 就走到这里 —— 必须是 `ManifestInvalidError`，
+    不是裸 `TypeError`（后者一句恢复指引都印不出来）。"""
+    with pytest.raises(ManifestInvalidError, match="必须是列表"):
+        retry_slots(_uni(), bad)
+
+
+@pytest.mark.parametrize("consumer", ["fresh_slots", "retry_slots"])
+@pytest.mark.parametrize("bad_universe", [
+    {"SH": [], "SZ": []},                      # 缺一层
+    {"SH": [], "SZ": [], "BJ": [], "HK": []},  # 多一层
+    {"SH": None, "SZ": [], "BJ": []},          # 某层不是列表
+    "not-a-dict",
+])
+def test_both_consumers_refuse_a_malformed_universe(consumer, bad_universe):
+    """冻结名单是**全部**锚点的来源（F7）。
+
+    给 `cursor` 立守卫的理由（「本函数是纯内存入口，S4 可能绕过直接调」）
+    对 `universe` **一字不差地成立**，而它此前一道门都没有：
+    缺一层 → 裸 `KeyError`；某层是 None → `TypeError: ... has no len()`。
+    """
+    zero = {"SH": 0, "SZ": 0, "BJ": 0}
+    with pytest.raises(ValueError):
+        if consumer == "fresh_slots":
+            fresh_slots(bad_universe, zero, {"SH": 1, "SZ": 0, "BJ": 0})
+        else:
+            retry_slots(bad_universe, [])
+
+
+@pytest.mark.parametrize("bad", [None, "", 123, b"s1"])
+def test_freeze_universe_refuses_a_malformed_seed(bad):
+    """`seed` 是全部可复现性的锚点，却曾是唯一没被校验的入参（F8）。
+
+    `f"{seed}:{market}"` 会把**任何东西**字符串化 —— 加门之前 `seed=None`
+    与 `seed="None"` 冻出的名单**逐字相同**，`seed=""` 也照收。
+    而读侧 `qmt_manifest` 要求 `seed` 是非空字符串：**写侧不能比读侧松**。
+    """
+    with pytest.raises(ValueError, match="非空文字"):
+        freeze_universe(["600000.SH"], seed=bad)
+
+
+def test_prefilter_checks_both_periods_status_not_just_one():
+    """status 门必须**两个周期都看** —— 只看一个的话，另一个周期坏掉的股会溜过去，
+    而它的时间戳是 `None`，下游算月数时才炸（且炸在离病因很远的地方）。"""
+    for bad_period in ("1m", "daily"):
+        entries = _stock("600000.SH")
+        entries[("600000.SH", bad_period)] = _entry(
+            "600000.SH", bad_period, status="empty", rows=0)
+        codes, stats = prefilter(entries)
+        assert codes == [] and stats.rejected_status == 1, f"{bad_period} 坏掉时没被拦住"
+
+
+def test_prefilter_checks_both_periods_present_not_just_one():
+    """「两个周期缺一不可」也必须**两边都查** —— 只查 daily 的话，缺 1m 的股会溜到
+    status 门，而 `per.get("1m")` 是 None，取 `.status` 当场炸。"""
+    for present in ("1m", "daily"):
+        code = "600000.SH"
+        full = _stock(code)
+        entries = {(code, present): full[(code, present)]}
+        codes, stats = prefilter(entries)
+        assert codes == [] and stats.rejected_incomplete == 1, f"只有 {present} 时没被拦住"

@@ -120,6 +120,30 @@ def prefilter(entries: dict[tuple[str, str], ExportLogEntry]
         rejected_1m_span=n_1m, passed=len(passed))
 
 
+def _require_universe(universe: object) -> dict:
+    """冻结名单是**全部**锚点的来源，坏了下游一切判据失去意义（最终评审 F7）。
+
+    ⚠️ 与守 `cursor` / `quota` 是**同一条理由**：`fresh_slots` / `retry_slots`
+    都是**纯内存**入口，S4 完全可能绕过 `freeze_universe`、把从账本读回的名单
+    直接喂进来。没有这道门时：缺一层 → 裸 `KeyError`；某层是 `None` →
+    `TypeError: object of type 'NoneType' has no len()` —— 两者都是**来路不明**的
+    异常，`ManifestInvalidError` 那句恢复指引一个字印不出来。
+
+    ⚠️ 这是「**按字段穷尽、而不是按判据句穷尽**」在本模块的第二次复现：
+    给 `cursor` 立守卫的理由对 `quota` 成立（裁定 2 补上了），
+    对 `universe` **一字不差地同样成立**，而我两次都没看见它。
+    """
+    if not isinstance(universe, dict) or set(universe) != set(MARKETS):
+        got = sorted(universe) if isinstance(universe, dict) else type(universe).__name__
+        raise ValueError(
+            f"universe 必须是三层字典，键恰为 {list(MARKETS)}，读到 {got}")
+    for mk in MARKETS:
+        if not isinstance(universe[mk], list):
+            raise ValueError(
+                f"universe[{mk}] 必须是列表，读到 {type(universe[mk]).__name__}")
+    return universe
+
+
 def freeze_universe(codes: Iterable[str], *, seed: str) -> dict[str, list[str]]:
     """§4.4：按 code 后缀分三层，各层内**独立** seeded 打乱，产出冻结名单。
 
@@ -136,7 +160,19 @@ def freeze_universe(codes: Iterable[str], *, seed: str) -> dict[str, list[str]]:
     staging 要到读侧校验才被判死，而那时已经离病因十万八千里；重复更狠 ——
     读侧 `_validate_source_snapshot` **不查层内唯一性**，两个下标指向同一只股
     会一路活到 `pool_order` 的锚点校验处才爆。
+
+    ⚠️ **`seed` 必须是非空文字**（最终评审 F8）：它是全部可复现性的锚点，
+    而 `f"{seed}:{market}"` 会把**任何东西**字符串化 —— 加门之前
+    `seed=None` 与 `seed="None"` 冻出的名单**逐字相同**，`seed=""` 也照收。
+    读侧 `qmt_manifest` 对 `seed` 要求非空字符串（`_require_nonempty_str`），
+    **写侧不能比读侧松**。
     """
+    if not isinstance(seed, str) or not seed:
+        raise ValueError(
+            f"seed 必须是非空文字，读到 {seed!r} —— 它是全部可复现性的锚点，"
+            '而 f"{seed}:{market}" 会把任何东西字符串化：`None` 与 `"None"` '
+            "会冻出**逐字相同**的名单。读侧对 seed 要求非空字符串，写侧不能更松。")
+
     layers: dict[str, list[str]] = {mk: [] for mk in MARKETS}
     seen: set[str] = set()
     for code in sorted(codes):
@@ -201,6 +237,7 @@ def fresh_slots(universe: dict, cursor: dict, quota: dict) -> list[Slot]:
     给 `cursor` 立守卫的那条理由对 `quota` 一字不差地成立，而我当初只守了一个字段：
     这是「**按字段穷尽、而不是按判据句穷尽**」的复现。
     """
+    _require_universe(universe)
     for name, m in (("cursor", cursor), ("quota", quota)):
         missing = [mk for mk in MARKETS if mk not in m]
         if missing:
@@ -257,7 +294,19 @@ def retry_slots(universe: dict, failures) -> list[Slot]:
     ⚠️ **每一条都要过校验，包括不会被重试的那些**：把「attempts 到顶所以跳过」
     与「这条记录坏掉所以够不着」混成同一个 `continue`，两者会互相掩盖 ——
     漏站看起来就像一次正常跳过。
+
+    ⚠️ **容器本身也要有门**（最终评审 F6）：八道门都长在**每一条记录**上，
+    而这本台账自己一道都没有。S4 从账本读它必然写成 `manifest.get("failures", [])`，
+    账本里一个 `"failures": null` 就走到这里 —— 没有这道门时是
+    `TypeError: 'NoneType' object is not iterable`，一句恢复指引都印不出来。
+    与 `fresh_slots` 特意为「缺市场」立的那道「不许给裸 KeyError」是同一条纪律。
     """
+    _require_universe(universe)
+    if not isinstance(failures, (list, tuple)):
+        raise ManifestInvalidError(
+            f"failures 必须是列表，读到 {type(failures).__name__} —— "
+            "账本里这个字段坏了（读侧 validate_manifest 不校验它，本函数是唯一的门）")
+
     out: list[Slot] = []
     for i, rec in enumerate(failures):
         where = f"failures[{i}]"
