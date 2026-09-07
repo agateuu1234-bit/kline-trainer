@@ -284,7 +284,7 @@ def resolve_quota(overrides: "Mapping[str, int] | None" = None) -> dict[str, int
 RETRY_LIMIT = 2
 
 
-def retry_slots(universe: dict, failures) -> list[Slot]:
+def _validated_failures(universe: dict, failures) -> "list[tuple[Slot, int]]":
     """补拉时要先重试的槽位（§4.4 有界重试）。
 
     ⚠️ **读侧校验完全不碰 `failures`**（S2-F64 实测坐实：`validate_manifest` 的
@@ -341,9 +341,17 @@ def retry_slots(universe: dict, failures) -> list[Slot]:
                 f"{where} 的锚点对不上：universe[{market}][{idx}] 是 {layer[idx]!r}，"
                 f"而这条记录自称是 {code!r}。这份 manifest 被编辑过或来自另一次 fetch。")
 
-        if attempts < RETRY_LIMIT:
-            out.append(Slot(code=code, market=market, universe_idx=idx))
+        out.append((Slot(code=code, market=market, universe_idx=idx), attempts))
     return out
+
+
+def retry_slots(universe: dict, failures) -> list[Slot]:
+    """补拉时要**先重试**的槽位 —— 即 `attempts < RETRY_LIMIT` 的那些（§4.4 有界重试）。
+
+    校验与「全部条目」的枚举在 `_validated_failures` 里，本函数只做筛选。
+    """
+    return [s for s, attempts in _validated_failures(universe, failures)
+            if attempts < RETRY_LIMIT]
 
 
 def plan_batch(universe: dict, cursor: dict, quota: dict, *, failures=()) -> list[Slot]:
@@ -363,8 +371,18 @@ def plan_batch(universe: dict, cursor: dict, quota: dict, *, failures=()) -> lis
     **不能留给 S4 兜**：交接单写的是「以 `pool_order` 为准跳过已成功槽位」，
     而重试项按定义**不在** `pool_order` 里（拷贝失败不进池）。
     """
-    retries = retry_slots(universe, failures)
-    seen = {(s.market, s.universe_idx) for s in retries}
+    entries = _validated_failures(universe, failures)
+
+    # ⚠️⚠️ **去重键必须由「**全部**失败条目」导出，不能由 `retries` 导出**
+    # （复审 N1 —— 第一版修复只堵了一半，这是控制者自己写出来的洞）：
+    # `retries` 已经被 `attempts < RETRY_LIMIT` 过滤过，于是一条
+    # **已耗尽重试**（`attempts == 2`）的记录不会进 `seen`；游标一旦回退到它前面，
+    # 它就原样出现在**续新段**里 —— 也就是被**复活**了一次本不该再有的尝试。
+    # 而 spec 把「复活一个已耗尽重试的候选」判为 **high**（S2-F25 / S2-F34）。
+    # 判据：**一条失败记录所在的槽位，按定义就不是「新槽位」** ——
+    # 无论它还能不能重试。
+    seen = {(s.market, s.universe_idx) for s, _ in entries}
+    retries = [s for s, attempts in entries if attempts < RETRY_LIMIT]
     fresh = [s for s in fresh_slots(universe, cursor, quota)
              if (s.market, s.universe_idx) not in seen]
     return retries + fresh

@@ -594,6 +594,40 @@ def test_plan_batch_without_failures_equals_fresh_slots():
     assert plan_batch(uni, cur, quo) == fresh_slots(uni, cur, quo)
 
 
+def test_an_exhausted_candidate_is_not_revived_by_a_cursor_rollback():
+    """⚠️⚠️ **复审 N1：第一版去重只堵了一半的洞**（控制者自己写出来的）。
+
+    第一版的 `seen` 是从 `retry_slots()` 的返回值建的，而那个返回值**已经被
+    `attempts < RETRY_LIMIT` 过滤过**。于是一条**已耗尽重试**（`attempts == 2`）
+    的失败记录不会进 `seen` —— 游标一旦被崩溃恢复第③档回退到它前面，
+    它就原样出现在**续新段**里，等于**复活了一次本不该再有的尝试**。
+    spec 把「复活一个已耗尽重试的候选」判为 **high**（S2-F25 / S2-F34）。
+
+    判据：**一条失败记录所在的槽位，按定义就不是「新槽位」** —— 无论它还能不能重试。
+    """
+    uni = _uni(n_sh=6)
+    quota = {"SH": 6, "SZ": 0, "BJ": 0}
+    exhausted = [_fail(uni, "SH", 3, RETRY_LIMIT)]      # 已耗尽，不该再被尝试
+
+    # 游标在它后面：本来就取不到它
+    assert [(s.market, s.universe_idx) for s in
+            plan_batch(uni, {"SH": 5, "SZ": 0, "BJ": 0}, quota, failures=exhausted)] \
+        == [("SH", 5)]
+
+    # 游标回退到它**前面**：它必须仍然不出现（第一版这里会冒出 ('SH', 3)）
+    for rolled_back in (3, 2, 0):
+        shape = [(s.market, s.universe_idx) for s in
+                 plan_batch(uni, {"SH": rolled_back, "SZ": 0, "BJ": 0},
+                            quota, failures=exhausted)]
+        assert ("SH", 3) not in shape, f"cursor={rolled_back} 时已耗尽的候选被复活：{shape}"
+
+    # 对照：还能重试的（attempts=1）**必须**出现，且排在最前 —— 别把门修过头
+    retryable = [_fail(uni, "SH", 3, RETRY_LIMIT - 1)]
+    shape = [(s.market, s.universe_idx) for s in
+             plan_batch(uni, {"SH": 2, "SZ": 0, "BJ": 0}, quota, failures=retryable)]
+    assert shape[0] == ("SH", 3) and shape.count(("SH", 3)) == 1, shape
+
+
 # ── 最终评审 F5/F6/F7/F8：补上零覆盖的守卫 ───────────────────────
 # 最终评审逐条变异实测，发现下面这些守卫**删掉之后 51 条测试全绿** ——
 # 行为今天是对的，明天没人守。三点要害：

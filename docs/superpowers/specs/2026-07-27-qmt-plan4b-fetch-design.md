@@ -293,7 +293,7 @@ QMT 只导出约**一年**的 1m 数据（实测覆盖月数：min 1 / 中位 13
  "rejected_daily_span": 468, "rejected_1m_span": 0, "passed": 5139}
 ```
 
-六个整数，且 **`total == passed + 四个 `rejected_*` 之和`** 是不变量
+六个整数，且 **`total` == `passed` + 四个 `rejected_*` 之和** 是不变量
 （每只被剔的股按判定次序**恰好归因一次**）。
 
 **预筛统计写进 `fetch_manifest.json`**（各条命中数），它本身就是关于数据源的第一份真实观测。
