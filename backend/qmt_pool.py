@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping
 
 from qmt_ingest import ExportLogEntry
-from qmt_manifest import MARKETS, STOCK_CODE_RE
+from qmt_manifest import MARKETS, STOCK_CODE_RE, ManifestInvalidError
 from qmt_normalize import QmtSchemaError, trading_date
 
 # §4.3 的两条月数下界。
@@ -233,3 +233,67 @@ def resolve_quota(overrides: "Mapping[str, int] | None" = None) -> dict[str, int
             raise ValueError(f"--quota 的 {mk} 必须是非负整数，读到 {value!r}")
         out[mk] = value
     return out
+
+
+# §4.4「有界重试」：补拉时只重试 attempts < 2 的条目（一次重试，覆盖瞬时网络故障）。
+RETRY_LIMIT = 2
+
+
+def retry_slots(universe: dict, failures) -> list[Slot]:
+    """补拉时要先重试的槽位（§4.4 有界重试）。
+
+    ⚠️ **读侧校验完全不碰 `failures`**（S2-F64 实测坐实：`validate_manifest` 的
+    判据里没有它）。于是这份台账**从未被任何人校验过**就交到这里，而它能授权
+    「再去拷一次」——一个能授权做事的结构，自己必须先被校验（R21-F3 同族）。
+
+    ⚠️ **每一条都要过校验，包括不会被重试的那些**：把「attempts 到顶所以跳过」
+    与「这条记录坏掉所以够不着」混成同一个 `continue`，两者会互相掩盖 ——
+    漏站看起来就像一次正常跳过。
+    """
+    out: list[Slot] = []
+    for i, rec in enumerate(failures):
+        where = f"failures[{i}]"
+        if not isinstance(rec, dict):
+            raise ManifestInvalidError(f"{where} 必须是对象，读到 {type(rec).__name__}")
+        for key in ("stock_code", "market", "universe_idx", "attempts"):
+            if key not in rec:
+                raise ManifestInvalidError(f"{where} 缺 {key}")
+
+        code, market = rec["stock_code"], rec["market"]
+        if not isinstance(code, str) or STOCK_CODE_RE.match(code) is None:
+            raise ManifestInvalidError(f"{where}.stock_code 不是合法股票代码：{code!r}")
+        if market not in MARKETS:
+            raise ManifestInvalidError(
+                f"{where}.market = {market!r} 不在 {list(MARKETS)} 内")
+        if not code.endswith("." + market):
+            raise ManifestInvalidError(
+                f"{where}.stock_code = {code!r} 的后缀与 market {market!r} 不符")
+
+        idx, attempts = rec["universe_idx"], rec["attempts"]
+        for key, value in (("universe_idx", idx), ("attempts", attempts)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ManifestInvalidError(
+                    f"{where}.{key} 必须是非负整数，读到 {value!r}")
+
+        layer = universe[market]
+        if idx >= len(layer):
+            raise ManifestInvalidError(
+                f"{where}.universe_idx = {idx} 越界（本层冻结名单长度 {len(layer)}）")
+        if layer[idx] != code:
+            raise ManifestInvalidError(
+                f"{where} 的锚点对不上：universe[{market}][{idx}] 是 {layer[idx]!r}，"
+                f"而这条记录自称是 {code!r}。这份 manifest 被编辑过或来自另一次 fetch。")
+
+        if attempts < RETRY_LIMIT:
+            out.append(Slot(code=code, market=market, universe_idx=idx))
+    return out
+
+
+def plan_batch(universe: dict, cursor: dict, quota: dict, *, failures=()) -> list[Slot]:
+    """本批的完整工作单：**先重试、再续新**（§4.4）。
+
+    ⚠️ **重试项不占配额**：它们的槽位早已被 `cursor` 走过，而配额记的是
+    「累计尝试到第几个」。若让重试占配额，一层里失败得越多能新拉的股越少，
+    池子会**安静地**缩水，最终报出假的 `pool_exhausted`。
+    """
+    return retry_slots(universe, failures) + fresh_slots(universe, cursor, quota)

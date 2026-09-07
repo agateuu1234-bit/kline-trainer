@@ -449,3 +449,100 @@ def test_a_map_missing_a_market_is_refused_rather_than_raising_a_bare_keyerror()
         fresh_slots(_uni(), {"SH": 0, "SZ": 0}, {"SH": 1, "SZ": 0, "BJ": 0})
     with pytest.raises(ValueError, match="缺市场"):
         fresh_slots(_uni(), {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 1, "BJ": 0})
+
+
+from qmt_manifest import ManifestInvalidError
+from qmt_pool import RETRY_LIMIT, plan_batch, retry_slots
+
+
+def _fail(uni: dict, mk: str, idx: int, attempts: int) -> dict:
+    return {"stock_code": uni[mk][idx], "market": mk,
+            "universe_idx": idx, "attempts": attempts,
+            "reason": "fetch_missing_file"}
+
+
+def test_entries_below_the_retry_limit_are_retried():
+    uni = _uni()
+    got = retry_slots(uni, [_fail(uni, "SH", 1, 0), _fail(uni, "SZ", 0, 1)])
+    assert [(s.market, s.universe_idx) for s in got] == [("SH", 1), ("SZ", 0)]
+
+
+def test_an_entry_at_the_retry_limit_is_not_retried():
+    """spec §4.4：`attempts < 2` 才自动重试；仍失败则加一后不再自动重试。"""
+    uni = _uni()
+    assert RETRY_LIMIT == 2
+    assert retry_slots(uni, [_fail(uni, "SH", 1, RETRY_LIMIT)]) == []
+
+
+def test_a_corrupt_entry_is_refused_even_when_it_would_not_be_retried():
+    """⚠️ 校验必须跑遍**每一条**，不能因为「反正不重试」就跳过。
+
+    「断定不是目标」与「判据够不着」混成同一个 `continue`，两者会**互相掩盖**：
+    漏站看起来像正常跳过。这条台账读侧从不校验（S2-F64 实测坐实
+    `validate_manifest` 的判据里没有 `failures`），本函数是它唯一的门。
+    """
+    uni = _uni()
+    bad = _fail(uni, "SH", 1, RETRY_LIMIT)
+    bad["stock_code"] = "not-a-code"
+    with pytest.raises(ManifestInvalidError, match="不是合法股票代码"):
+        retry_slots(uni, [bad])
+
+
+def test_a_negative_universe_idx_is_refused_rather_than_wrapping():
+    uni = _uni()
+    bad = _fail(uni, "SH", 1, 0)
+    bad["universe_idx"] = -1
+    with pytest.raises(ManifestInvalidError, match="非负整数"):
+        retry_slots(uni, [bad])
+
+
+def test_an_anchor_that_does_not_match_the_frozen_universe_is_refused():
+    """锚点对不上 = 这份 manifest 被编辑过，或来自另一次 fetch。"""
+    uni = _uni()
+    bad = _fail(uni, "SH", 1, 0)
+    bad["universe_idx"] = 2               # 指向另一只股
+    with pytest.raises(ManifestInvalidError, match="锚点对不上"):
+        retry_slots(uni, [bad])
+
+
+def test_a_market_that_disagrees_with_the_code_suffix_is_refused():
+    uni = _uni()
+    bad = _fail(uni, "SH", 1, 0)
+    bad["market"] = "SZ"
+    with pytest.raises(ManifestInvalidError, match="后缀与"):
+        retry_slots(uni, [bad])
+
+
+def test_a_missing_key_is_refused():
+    uni = _uni()
+    for key in ("stock_code", "market", "universe_idx", "attempts"):
+        bad = _fail(uni, "SH", 1, 0)
+        del bad[key]
+        with pytest.raises(ManifestInvalidError, match=f"缺 {key}"):
+            retry_slots(uni, [bad])
+
+
+def test_plan_batch_puts_retries_before_fresh_slots():
+    """spec §4.4：「**先重试** `attempts < 2` 的条目，**再从 `cursor` 继续**」。"""
+    uni = _uni()
+    got = plan_batch(uni, {"SH": 2, "SZ": 0, "BJ": 0}, {"SH": 4, "SZ": 0, "BJ": 0},
+                     failures=[_fail(uni, "SH", 0, 1)])
+    assert [s.universe_idx for s in got] == [0, 2, 3]
+
+
+def test_a_retry_does_not_consume_quota():
+    """重试的槽位早已被 `cursor` 走过；配额记的是「累计尝试到第几个」。
+
+    若重试占配额，一层里失败得越多、能新拉的股越少 —— 而 `cursor` 照样在推进，
+    池子会**安静地**缩水，最终报出假的 `pool_exhausted`。
+    """
+    uni = _uni()
+    got = plan_batch(uni, {"SH": 2, "SZ": 0, "BJ": 0}, {"SH": 2, "SZ": 0, "BJ": 0},
+                     failures=[_fail(uni, "SH", 0, 0)])
+    assert [(s.market, s.universe_idx) for s in got] == [("SH", 0)]
+
+
+def test_plan_batch_without_failures_equals_fresh_slots():
+    uni = _uni()
+    cur, quo = {"SH": 0, "SZ": 0, "BJ": 0}, {"SH": 2, "SZ": 1, "BJ": 0}
+    assert plan_batch(uni, cur, quo) == fresh_slots(uni, cur, quo)
