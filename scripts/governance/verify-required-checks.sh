@@ -2,11 +2,11 @@
 # verify-required-checks.sh — 三模式校验 main ruleset required-checks（rulesets API 源真相）
 #
 # 源真相 = Rulesets API（main 的 legacy branches/main/protection 返回 404；保护全在 ruleset）。
-# H10 机器可检查谓词：Catalyst check 在位 + integration_id=15368（GitHub Actions app，防伪造）+ enforcement=active。
+# H10 机器可检查谓词：canonical REQUIRED_CONTEXTS 的每一条都在位 + integration_id=15368（GitHub Actions app，防伪造）+ enforcement=active。
 #
 # Modes:
 #   --mode preflight  mutation 前：main branch ruleset（name=main + target=branch）+ 有 required_status_checks 规则
-#   --mode assert     断言 main branch ruleset + Catalyst check 在位 + 绑 app(15368) + active（= 1c 跑的 H10 gate）
+#   --mode assert     断言 main branch ruleset + REQUIRED_CONTEXTS 全在位 + 绑 app(15368) + active（= 1c 跑的 H10 gate）
 #   --mode diff       打印 payload 会做的变更 vs 当前；非 mutating
 #
 # Exit codes（R3-F1 分层，供 runbook 区分 rollback vs 人工介入）：

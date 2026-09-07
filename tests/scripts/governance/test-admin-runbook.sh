@@ -15,7 +15,7 @@ no_readonly() { # file desc：断言 PUT payload 无只读字段（否则 GitHub
   done
   echo "PASS: $2 无只读字段"
 }
-both_contexts() { # file desc：断言 PUT body 对每个 REQUIRED_CONTEXTS 恰含一条 + integration_id 15368（R3-F2 / codex M-NEW-1）
+all_required_contexts() { # file desc：断言 PUT body 对每个 REQUIRED_CONTEXTS 恰含一条 + integration_id 15368（R3-F2 / codex M-NEW-1）
   local builder="$ROOT/scripts/governance/build-protection-put-payload.py"
   REQ_JSON="$("$builder" --list-contexts)" python3 - "$1" <<'PY' && echo "PASS: $2 每 required context 恰一条+15368" || { echo "FAIL: $2 context 校验未过"; fail=1; }
 import json, os, sys
@@ -63,7 +63,7 @@ put_count=$(grep -c "PUT" "$log" || true)
 [ "$put_count" -eq 1 ] && echo "PASS: mutate PUT 恰 1 次" || { echo "FAIL: 期望 PUT=1 得 $put_count"; fail=1; }
 # R3-F2：mock 持久化的 state == 提交的 payload（证明 PUT body 正确）+ 恰一条 Catalyst+15368
 diff -q "$log.state" "$d/payload.json" >/dev/null && echo "PASS: PUT body == payload.json（mock 持久化提交内容）" || { echo "FAIL: PUT body 与 payload.json 不符"; fail=1; }
-both_contexts "$d/payload.json" "PUT body"
+all_required_contexts "$d/payload.json" "PUT body"
 
 # 4) PUT 干净失败（PUT 非零 + re-read 仍原状态）→ 无 mutation → 1
 d=$(newdir); log="$d/calls.log"
