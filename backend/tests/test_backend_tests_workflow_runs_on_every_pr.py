@@ -187,21 +187,37 @@ def test_job_name_equals_canonical_backend_context():
     job = named[0]
     steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
 
-    # ① 必须真的跑那条被批准的全套命令。
-    #    ⚠️ 只查「run 里有 pytest 字样」是不够的：`run: echo pytest` 就能骗过去
-    #    （codex code-R2 指出，复核属实）。所以要求 `-m pytest` + 目标目录 `tests/`，
-    #    且该步骤的 working-directory 是 backend（否则跑的是别处的测试）。
-    runners = [s for s in steps
-               if "-m pytest" in (s.get("run") or "") and "tests/" in (s.get("run") or "")]
+    # ① 必须有一步的**首行命令与被批准的那条逐字相等**。
+    #
+    #    ⚠️ 这里刻意用**白名单（逐字相等）**，不是「含某些子串」。
+    #    子串匹配连续三轮被绕过（codex code-R1/R2，全部本地复现）：
+    #      `echo pytest`                          —— 只打印，不跑；
+    #      `echo python -m pytest tests/`         —— 含全部关键子串，仍然只打印；
+    #      `python -m pytest tests/ --collect-only` —— 只收集不执行；
+    #      `python -m pytest tests/ -q || true`     —— 失败被 shell 吞掉。
+    #    「补一个洞漏三个」正是本仓 memory feedback_same_predicate_multiple_bypasses
+    #    说的形态：判据有多种正交绕过时，逐个去禁禁不完，必须反过来只接受已知正确的形态。
+    #
+    #    代价（有意接受）：以后合理地改这条命令（加个 flag）会让本判据变红，
+    #    必须同步改下面这个常量。这正是想要的——它是必需检查的执行内容，改动应当是**显式**的。
+    APPROVED_RUN = (
+        'python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"'
+    )
+
+    def _first_line(step):
+        lines = [ln.strip() for ln in (step.get("run") or "").splitlines() if ln.strip()]
+        return lines[0] if lines else ""
+
+    runners = [s for s in steps if _first_line(s) == APPROVED_RUN]
     assert runners, (
-        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步真的在跑后端全套 "
-        "（判据：run 同时含 `-m pytest` 与 `tests/`）—— "
-        "必需检查会由一个不跑测试的 job 报绿，等于门控失效。\n"
-        f"实得各步骤 run 首行：{[((s.get('run') or '').strip().splitlines() or ['<无 run>'])[0][:60] for s in steps]}"
+        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里，没有任何一步的首行命令等于被批准的\n"
+        f"全套命令：\n    {APPROVED_RUN}\n"
+        "⇒ 这道必需检查可能在「不跑测试 / 只收集 / 吞掉失败」的情况下报绿，门控失效。\n"
+        f"实得各步骤 run 首行：{[_first_line(s) or '<无 run>' for s in steps]}\n"
+        "若你是**有意**修改了这条命令，请同步改本判据里的 APPROVED_RUN，并说明理由。"
     )
     assert any(s.get("working-directory") == "backend" for s in runners), (
-        "跑 pytest 的那一步没有 `working-directory: backend` —— "
-        "跑的可能不是后端那套测试"
+        "跑全套的那一步没有 `working-directory: backend` —— 跑的可能不是后端那套测试"
     )
 
     # ② 不许有任何抑制失败的开关：加了 continue-on-error 之后，
