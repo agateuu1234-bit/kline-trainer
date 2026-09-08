@@ -220,19 +220,39 @@ def test_job_name_equals_canonical_backend_context():
         "跑全套的那一步没有 `working-directory: backend` —— 跑的可能不是后端那套测试"
     )
 
-    # ② 不许有任何抑制失败的开关：加了 continue-on-error 之后，
-    #    测试红了这道 job 照样绿，必需检查就形同虚设（codex code-R2）。
-    def _suppresses(node):
-        return str(node.get("continue-on-error", "")).lower() == "true"
+    # ② **键级白名单**：这个 job 与那一步，只允许出现已批准的键。
+    #
+    #    ⚠️ 为什么是白名单而不是「禁止 continue-on-error」（codex code-R4，三种全部本地复现）：
+    #      `if: false`（步骤级）          —— 命令还在，但永远不执行；
+    #      `if: github.event_name == …`（job 级）—— PR 上整个 job 被跳过，
+    #         而 GitHub **允许被跳过的必需 job 满足合并保护**，ruleset 也堵不住；
+    #      `continue-on-error: ${{ true }}` —— 表达式形态，字符串比较认不出，
+    #         但 GitHub 会求值为真，测试红了 job 照样成功。
+    #    前一版我把**命令**做成了白名单，却把**周围的键**留成不受约束的 ——
+    #    于是绕过换个属性就成立。所以把白名单上移一层：**只接受已知的键**。
+    #    好处是连将来 GitHub 新增的执行控制键也一并挡住（判据不需要预知它们）。
+    #
+    #    代价（有意接受）：给这个 job 或这一步加任何新键（哪怕是无害的 `env`）都会让
+    #    本判据变红，必须显式扩下面的白名单。这正是想要的——它决定「必需检查是否真的在跑」。
+    ALLOWED_JOB_KEYS = {"name", "runs-on", "steps"}
+    ALLOWED_RUNNER_STEP_KEYS = {"name", "run", "working-directory"}
 
-    assert not _suppresses(job), (
-        f"job {mod.BACKEND_TESTS_CONTEXT!r} 设了 continue-on-error: true —— "
-        "测试失败不会让这道必需检查变红，门控形同虚设"
+    extra_job = sorted(set(job) - ALLOWED_JOB_KEYS)
+    assert not extra_job, (
+        f"job {mod.BACKEND_TESTS_CONTEXT!r} 出现了未批准的键：{extra_job}\n"
+        f"（只允许 {sorted(ALLOWED_JOB_KEYS)}）\n"
+        "⇒ 其中 `if` 会让整个 job 在 PR 上被跳过，而**被跳过的必需 job 仍能满足合并保护**；\n"
+        "  `continue-on-error` 则让测试失败不再传播。两者都会让这道必需检查形同虚设。\n"
+        "若确有必要，请显式扩 ALLOWED_JOB_KEYS 并写清为什么它不影响「是否真的跑、失败是否传播」。"
     )
-    bad = [(s.get("name") or s.get("uses") or "?") for s in steps if _suppresses(s)]
-    assert not bad, (
-        f"这些步骤设了 continue-on-error: true：{bad} —— "
-        "其中任何一步若是跑测试的那步，失败都不会传播到必需检查上"
+
+    runner = runners[0]
+    extra_step = sorted(set(runner) - ALLOWED_RUNNER_STEP_KEYS)
+    assert not extra_step, (
+        f"跑全套那一步出现了未批准的键：{extra_step}\n"
+        f"（只允许 {sorted(ALLOWED_RUNNER_STEP_KEYS)}）\n"
+        "⇒ `if` 会让它被跳过、`continue-on-error`（含 ${{ … }} 表达式形态）会吞掉失败。\n"
+        "若确有必要，请显式扩 ALLOWED_RUNNER_STEP_KEYS 并写清理由。"
     )
 
 
