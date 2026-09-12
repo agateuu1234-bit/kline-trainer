@@ -28,7 +28,7 @@
 |---|---|---|
 | `CONTRACT_VERSION`（顶层标识） | `"1.14"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
-| 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
+| 训练组 SQLite `PRAGMA user_version` | `2` | 训练组 schema **结构变更，或字段语义变更导致新旧产物互不可读**；联动顶层（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地） |
 | app.sqlite GRDB migration | `0010_v1.13_drawing_default_style` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.4` | Codable 字段 / 枚举 case 变更；联动顶层 |
 | `P2 journal states` enum | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
