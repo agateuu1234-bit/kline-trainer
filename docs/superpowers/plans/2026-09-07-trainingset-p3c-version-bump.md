@@ -653,15 +653,17 @@ def test_p7_source_rule_carries_the_p4_precondition():
         f"0 行 = 规则又变回无条件，会把操作者指向同样是 v1 的那份副本")
 ```
 
-- [ ] **Step 4: 跑，确认 2 条全绿**
+- [ ] **Step 4: 跑，确认 5 条全绿**
+
+⚠️ **2026-09 最终评审修复波后**：这份计划写于两函数结构（一条禁令 + 一条合并的正向对照）；最终评审 I1 又把正向对照拆到四条（`test_rewritten_p7_source_rule_is_present` / `test_mac_copy_archive_note_is_present` / `test_nas_handoff_copy_archive_note_is_present` / `test_p7_source_rule_carries_the_p4_precondition`），交付态是**五条**。以下 Step 5–9 的期望数字已按交付态五函数**实测重跑**核对（原样输出见 `.superpowers/sdd/2026-09-07-trainingset-p3c-version-bump/final-fix-report.md` 修复波补遗一节）。
 
 ```bash
 cd backend && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_deployment_source_texts.py -v
 ```
 
-期望：**2 passed**。
+期望：**5 passed**（`test_p7_source_wording_no_longer_offers_the_mac_copy` / `test_rewritten_p7_source_rule_is_present` / `test_mac_copy_archive_note_is_present` / `test_nas_handoff_copy_archive_note_is_present` / `test_p7_source_rule_carries_the_p4_precondition` 五条全绿）。
 
-- [ ] **Step 5: 变异 M5 —— 把 `:138` 改回原句，两条都必须红**
+- [ ] **Step 5: 变异 M5 —— 把 `:138` 改回原句，禁令与两条正向对照必须红**
 
 ```bash
 cp docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md /tmp/nas.bak
@@ -682,9 +684,9 @@ cp /tmp/nas.bak docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md
 git status --short
 ```
 
-期望：**2 failed**（禁令红 + 正向对照红）。
+期望：**3 failed, 2 passed**——红的是 `test_p7_source_wording_no_longer_offers_the_mac_copy`（旧文案回来了）、`test_rewritten_p7_source_rule_is_present`（新规则不见了）、`test_p7_source_rule_carries_the_p4_precondition`（P4 前置条件也随 `:138` 一起没了）；`test_mac_copy_archive_note_is_present` 与 `test_nas_handoff_copy_archive_note_is_present` 不受影响（`:135`/`:136` 未被这条变异碰到），仍绿。
 
-- [ ] **Step 6: ⭐ 变异 M6 —— 把 `:138` **整行删掉**，禁令必须变绿、只有正向对照红**
+- [ ] **Step 6: ⭐ 变异 M6 —— 把 `:138` **整行删掉**，禁令必须变绿、只有 :138 相关的两条正向对照红**
 
 ```bash
 cp docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md /tmp/nas.bak
@@ -703,7 +705,7 @@ cp /tmp/nas.bak docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md
 git status --short
 ```
 
-期望：**1 failed / 1 passed** —— 红的是正向对照那条，禁令那条**绿**。
+期望：**2 failed, 3 passed** —— 红的是 `test_rewritten_p7_source_rule_is_present` 与 `test_p7_source_rule_carries_the_p4_precondition`（都在已被删掉的 `:138` 那一行上）；禁令 `test_p7_source_wording_no_longer_offers_the_mac_copy` **绿**（旧文案确实也没了）；`test_mac_copy_archive_note_is_present` 与 `test_nas_handoff_copy_archive_note_is_present`（管 `:135`/`:136`，未被这条变异碰到）同样**绿**。
 ⭐ 这就是「正向对照不可省」的观测量：**光有禁令，删证据也能蒙混过关**。
 
 - [ ] **Step 7: 变异 M7 —— 删掉 `:135` 的「历史记述，非判据」，正向对照必须红**
@@ -724,7 +726,7 @@ cp /tmp/nas.bak docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md
 git status --short
 ```
 
-期望：**1 failed**，失败信息含「历史记述，非判据」。
+期望：**1 failed, 4 passed** —— 红的是 `test_mac_copy_archive_note_is_present`，失败信息含「历史记述，非判据」；其余四条（含管 `:136` 的 `test_nas_handoff_copy_archive_note_is_present`，未被这条变异碰到）仍绿。
 
 - [ ] **Step 8: ⭐ 变异 M8 —— 往 runbook 里塞一行假违例，禁令必须红并点名 runbook**
 
@@ -739,7 +741,7 @@ cp /tmp/rb.bak docs/runbooks/2026-08-24-qmt-nas-deployment.md
 git status --short
 ```
 
-期望：**1 failed**，且失败信息里**点名** `docs/runbooks/2026-08-24-qmt-nas-deployment.md` 与行号。
+期望：**1 failed, 4 passed** —— 红的是 `test_p7_source_wording_no_longer_offers_the_mac_copy`，且失败信息里**点名** `docs/runbooks/2026-08-24-qmt-nas-deployment.md` 与行号；其余四条（都只看那份部署设计文档，不看 runbook）不受影响，仍绿。
 
 - [ ] **Step 9: 跑后端全套**
 
@@ -747,8 +749,9 @@ git status --short
 cd backend && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/ -q
 ```
 
-期望：`1403 passed`（基线 1399 + Task 2 的 1 条 + 本任务 3 条）。
-⚠️ **原写 1402 / 2 条**：Task 3 的最终评审要求把正向对照拆成两个测试函数（见本片最终评审的修复波），故为 3 条。
+期望：`1405 passed`（基线 1399 + Task 2 的 1 条 + 本任务 5 条）。
+⚠️ **原写 1402 / 2 条**：Task 3 的最终评审要求把正向对照拆成两个测试函数（见本片最终评审的修复波），故为 3 条（`1403`）。
+⚠️ **2026-09 最终评审修复波后再订正一次**：I1 又把正向对照从两条拆成四条（新增 `test_nas_handoff_copy_archive_note_is_present` 与 `test_p7_source_rule_carries_the_p4_precondition`），本任务因此从 3 条变 5 条，总数从 `1403` 变 `1405`。
 
 - [ ] **Step 10: 提交**
 
