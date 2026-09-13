@@ -1,6 +1,6 @@
 # 切片一 P3c（顶层契约版本 bump + 治理矩阵订正 + Mac 旧包作废）· 非程序员验收清单
 
-**这一片做了什么（一句话）**：把整个系统的「总版本号」从 `1.13` 升到 `1.14`（10 处写着这个号码的地方，跨 6 个文件，全部一起改，谁也不能漏），把治理台账里一行写错的记录（训练组数据库版本号）改对并补上触发条件，把 Mac 电脑本地那三个已经过时的压缩包正式标成「只做历史存档、不能再用」，然后给后两件事各自加上自动检查，防止以后再有人不小心把这些事弄错。
+**这一片做了什么（一句话）**：把整个系统的「总版本号」从 `1.13` 升到 `1.14`（10 处需要一起动的地方，跨 6 个文件；⚠️ 其中一处是把「自我体检」用的样本数据整体往前挪一代，所以那里改完之后**仍然会看到 `1.13`**——这是对的、不是漏改），把治理台账里一行写错的记录（训练组数据库版本号）改对并补上触发条件，把 Mac 电脑本地那三个已经过时的压缩包正式标成「只做历史存档、不能再用」，然后给后两件事各自加上自动检查，防止以后再有人不小心把这些事弄错。
 
 **为什么要做**：
 
@@ -36,18 +36,18 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 
 （这条命令的意思：把后端程序里**所有**自动检查项都跑一遍，一次跑 1400 多项。）
 
-**期望看到**：最后一行是 `1403 passed in <某个秒数>`。
+**期望看到**：最后一行是 `1405 passed in <某个秒数>`。
 
 **通过判定**：
 
-- 通过 —— 数字是 **1403**，且这一行里**没有** `failed`（失败）、`skipped`（跳过没跑）、`error`（出错）这三个词。
-- 不通过 —— 出现上述任一个词；或数字不是 1403。
+- 通过 —— 数字是 **1405**，且这一行里**没有** `failed`（失败）、`skipped`（跳过没跑）、`error`（出错）这三个词。
+- 不通过 —— 出现上述任一个词；或数字不是 1405。
 
-⚠️ **1403 是这条分支上的快照**（这条改动合并进主干之后，别人的新改动会让这个数字继续变化）。对不上时先查是不是别的改动动了这份基准数字，⛔ 不要直接改这份清单里的数字。
+⚠️ **1405 是这条分支上的快照**（这条改动合并进主干之后，别人的新改动会让这个数字继续变化）。对不上时先查是不是别的改动动了这份基准数字，⛔ 不要直接改这份清单里的数字。
 
 ---
 
-## A2 · 这一片新加的 4 条检查，逐条列给你看
+## A2 · 这一片新加的 6 条检查，逐条列给你看
 
 **动作**：
 
@@ -55,7 +55,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m pytest tests/test_frozen_contract_texts.py::test_m01_matrix_training_set_row_matches_backend_ddl tests/test_deployment_source_texts.py -v
 ```
 
-**期望看到**：4 行，每行都**含有** `PASSED`（通过），最后一行形如 `4 passed in <某个秒数>`。四条分别在管：
+**期望看到**：含 `PASSED`（通过）的行**恰好 6 行**（前面还会有几行环境信息，不用管），最后一行形如 `6 passed in <某个秒数>`。六条分别在管：
 
 | 序 | 这条在管什么 |
 |---|---|
@@ -63,11 +63,13 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run/ba
 | 2 | 部署说明文档里，**不得再出现**「这三份 Mac 旧包既可以直接用」这句旧话 |
 | 3 | 部署说明文档里，**必须真的写着**「这三份 Mac 旧包只能从服务器上重新取、旧包只作历史存档」这句改写后的新规则 |
 | 4 | 那三份 Mac 旧包的指纹（CRC32，一种给文件算出的「校验码」，用来确认文件有没有损坏）旁边，**必须带着**「这是历史记录、不能拿来当判断标准」这句说明 |
+| 5 | NAS（一台家用网络存储设备）上那份「交接目录」里同样三份旧包的指纹旁边，**也必须带着**同一句「历史记录、不能当判断标准」的说明——这三份指纹跟第 4 条里 Mac 那三份逐字相同，其实是同一批旧包的两份副本 |
+| 6 | 「只能从 NAS 交接目录取」这条新规则，**必须带着一个前提条件**：要等重新生成新一代数据、并把新数据同步进那个交接目录之后，才能从那里取——不能不带条件地把交接目录当成一定能用的来源 |
 
 **通过判定**：
 
-- 通过 —— 4 行都含 `PASSED`，最后一行以 `4 passed` 开头。
-- 不通过 —— 任何一行是 `FAILED`（失败）；或条数不是 4 条。
+- 通过 —— 含 `PASSED` 的行恰好 6 行，最后一行以 `6 passed` 开头。
+- 不通过 —— 任何一行是 `FAILED`（失败）；或含 `PASSED` 的行数不是 6 行。
 
 ---
 
@@ -113,10 +115,12 @@ backend/qmt_pilot_db.py:827:CONTRACT_VERSION = "1.14"
 ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7:public let CONTRACT_VERSION = "1.14"
 ```
 
+⚠️ 两行的先后次序可能与这里相反，不影响判定 —— 只要两行都在、且都是 `1.14`。
+
 **通过判定**：
 
 - 通过 —— 恰好 2 行，且都写着 `"1.14"`。
-- 不通过 —— 少于 2 行（说明有一处没改到）；数字不是 1.14；或出现除这两个文件外的第三处（说明「唯一源头」的设计被破坏了）。
+- 不通过 —— 少于 2 行（说明有一处没改到）；数字不是 1.14。
 
 ---
 
@@ -222,13 +226,16 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" &
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-nas-deploy-run" && git diff --name-only origin/main...HEAD | sort
 ```
 
-**期望看到**（9 行；⚠️ **若你在跑本清单之前，这份验收清单、变异记录、施工计划这三份文档已经被提交进版本记录**，会多出这 3 行，共 12 行——参考上一片 P3a 那份清单 A6 的同类说明）：
+**期望看到**（12 行——这份验收清单、变异记录、施工计划这三份文档已经提交进版本记录，所以是 12 行；⚠️ 若你是在这三份文档提交**之前**跑这条命令，会看到 9 行，少了标星号 ⭐ 那 3 行；参考上一片 P3a 那份清单 A6 的同类说明）：
 
 ```
 backend/qmt_pilot_db.py
 backend/tests/test_deployment_source_texts.py
 backend/tests/test_frozen_contract_texts.py
+docs/acceptance/2026-09-07-trainingset-p3c-acceptance.md
+docs/acceptance/2026-09-07-trainingset-p3c-mutation-log.md
 docs/governance/m01-schema-versioning-contract.md
+docs/superpowers/plans/2026-09-07-trainingset-p3c-version-bump.md
 docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md
 ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift
 ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift
@@ -236,10 +243,12 @@ ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.sw
 ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift
 ```
 
+⭐ 上面 12 行里，`docs/acceptance/2026-09-07-trainingset-p3c-acceptance.md`（本清单）、`docs/acceptance/2026-09-07-trainingset-p3c-mutation-log.md`（变异记录）、`docs/superpowers/plans/2026-09-07-trainingset-p3c-version-bump.md`（施工计划文档）这 3 个，就是「提交前只有 9 行、提交后变 12 行」里多出来的那 3 个。
+
 | 文件 | 干什么的 |
 |---|---|
 | `backend/qmt_pilot_db.py` | 后端侧「总版本号」常量，改成 `1.14` |
-| `backend/tests/test_deployment_source_texts.py` | 新建文件，装 A2 表格里第 2、3、4 条检查 |
+| `backend/tests/test_deployment_source_texts.py` | 新建文件，装 A2 表格里第 2、3、4、5、6 条检查 |
 | `backend/tests/test_frozen_contract_texts.py` | 在已有文件里加一条检查（A2 表格里第 1 条） |
 | `docs/governance/m01-schema-versioning-contract.md` | 治理台账：顶层版本号、训练组那一行、以及一段说明这次升级原因的记录 |
 | `docs/superpowers/specs/2026-08-14-qmt-nas-deployment-design.md` | 部署说明文档：Mac 旧包那两处文字改写 |
@@ -248,11 +257,9 @@ ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift
 | `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift` | 手机 App 测试代码：一处测试的显示名字与断言数字同步改 |
 | `ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift` | 手机 App 测试代码：对照治理台账的断言数字同步改，以及刷新一份「自我体检」用的样本数据 |
 
-（若三份文档已提交，另外多出：`docs/acceptance/2026-09-07-trainingset-p3c-acceptance.md`——本清单；`docs/acceptance/2026-09-07-trainingset-p3c-mutation-log.md`——变异记录；`docs/superpowers/plans/2026-09-07-trainingset-p3c-version-bump.md`——这一片的施工计划文档。）
-
 **通过判定**：
 
-- 通过 —— 只出现上面这 9 个（提交后是 12 个）。
+- 通过 —— 只出现上面这 12 个（若在三份文档提交之前跑，是 9 个）。
 - 不通过 —— 出现清单之外的文件。
 
 ---
@@ -278,9 +285,9 @@ ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift
 ⛔ 因此**不能说**「手机能用了」「跨端约定已闭合」「版本已对齐」。
 可以说：**「顶层契约版本已升到 1.14，治理矩阵与后端建表代码已经对齐」**。
 
-### R5 · 切片二必须再升一次版号，升到 1.15
+### R5 · 切片二必须再升一次版号（多半是 1.15，但不保证）
 
-`1.14` 是一个**故意留着的过渡状态**：代表「数据已经是新格式，但手机 App 还没跟上」。如果切片二做完之后不再升一次版号，那「手机 App 还读不了新格式」和「手机 App 已经能读新格式」这两种完全不同的状态，就会共用同一个版本号 `1.14`，所有跨语言的自动检查在两种状态下都会显示「正常」——版本号就失去了应有的意义。
+`1.14` 是一个**故意留着的过渡状态**：代表「数据已经是新格式，但手机 App 还没跟上」。如果切片二做完之后不再升一次版号，那「手机 App 还读不了新格式」和「手机 App 已经能读新格式」这两种完全不同的状态，就会共用同一个版本号 `1.14`，所有跨语言的自动检查在两种状态下都会显示「正常」——版本号就失去了应有的意义。⚠️ 至于升完是不是正好 `1.15`：**如果这段时间里没有别的改动先占用了下一个号，那就是 `1.15`**；但现在同时还有另一条工作线（划线工具那条线）也欠着「必须升一次版号」的账，它很可能比切片二先把下一个号用掉 —— 所以这里只能说「下一个号」，不能咬死一定是 `1.15`。
 
 ### R6 · 带着旧版本号 `1.13` 的既有测试数据库，会被一道检查拒绝
 
