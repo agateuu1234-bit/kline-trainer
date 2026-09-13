@@ -737,7 +737,7 @@ git diff --name-only origin/main...HEAD -- ios/Contracts/Sources/ | wc -l
 
 期望 `1`（只有 `Models.swift` 那一个源文件，且它只改了一个字符串字面量）。
 
-- [ ] **Step 2: 写变异记录**（**9 组：M1–M9**；M9 是 Task 3 修复轮新增的「两行一起删」，用来证明拆成两个测试函数确实让两条各自点名自己那一处），逐条含：改了什么、跑了什么、**原样贴出的观测输出**、结论。
+- [ ] **Step 2: 写变异记录**（**10 组：M1 / M2 / M3 / M4 / M4b / M5 / M6 / M7 / M8 / M9**），⚠️ **编号为什么有个 `M4b`**：控制者在 Task 2 的评审之后补跑了一组「把训练组行再抄一份」（评审指出 `>1 行` 那个分支没人测过），当时记作 M5；但 Task 3 的计划已把 M5–M8 分配给 Mac 副本那一批，**且 M6/M8 已写进 commit `e402ed1` 的提交信息、改不了** ⇒ 遂把 Task 2 那组改名为 **M4b**。M9 则是 Task 3 修复轮新增的「两行一起删」，用来证明拆成两个测试函数确实让两条各自点名自己那一处。**这段由来必须写进记录文件**，否则读者会以为漏了一组。逐条含：逐条含：改了什么、跑了什么、**原样贴出的观测输出**、结论。
 
 - [ ] **Step 3: 把残留写进验收清单末尾**（见下节「已知残留」，逐条照抄）
 
@@ -745,7 +745,7 @@ git diff --name-only origin/main...HEAD -- ios/Contracts/Sources/ | wc -l
 
 ```bash
 git add docs/acceptance/2026-09-07-trainingset-p3c-acceptance.md docs/acceptance/2026-09-07-trainingset-p3c-mutation-log.md docs/superpowers/plans/2026-09-07-trainingset-p3c-version-bump.md
-git commit -m "docs(p3c): 验收清单（8 条）+ 变异记录（9 组）+ 实施计划"
+git commit -m "docs(p3c): 验收清单（8 条）+ 变异记录（10 组）+ 实施计划"
 ```
 
 ---
