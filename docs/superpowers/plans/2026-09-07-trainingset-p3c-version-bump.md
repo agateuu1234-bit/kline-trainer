@@ -168,7 +168,7 @@ cd backend && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python3" -m py
 插到 `:46`（2026-08-13 那条记录）之后、`**存储表位 速查**` 之前，**空一行**再写：
 
 ```markdown
-> **bump 记录（2026-09-07，训练组时间戳语义订正 · 切片一 P3c）**：顶层 `CONTRACT_VERSION` `"1.13"` → `"1.14"`。触发 = A 类**两条同时命中**：「改既有语义」（`end_global_index` 由「一律按下一根开盘反算」改为「按每周期 `datetime` 标注语义分流后反算」，非 `3m` 周期**允许重复**）+「跨系统契约字段调整」（该列是后端产物与 App 读取端共享的字段）。**无结构性 DDL 变更**（表 / 列 / 类型 / 约束逐列相同；`training_set_schema_v1.sql` 仅 `PRAGMA user_version` 一行由 `1` 改 `2`），先例 = 2026-05-25 E2「无 DDL 的读取端语义收紧照样 bump 顶层」（`"1.4"` → `"1.5"`）。⚠️ **与 E2 的不同**：E2 是「无 DDL ⇒ 三套 sub-version 全不动」，本次是「无结构性 DDL，**但**训练组 sub-version 必须动」—— 因为本次的判据是**新旧产物能否互读**，不是**列有没有变**。三套 sub-version 里**只有训练组 SQLite 同步 `1` → `2`**（判据是「新旧产物能否互读」，不是「列有没有变」）；PostgreSQL schema、app.sqlite GRDB migration、Swift 模型版本、P2 journal states **均不变**。
+> **bump 记录（2026-09-07，训练组时间戳语义订正 · 切片一 P3c）**：顶层 `CONTRACT_VERSION` `"1.13"` → `"1.14"`。触发 = A 类**两条同时命中**：「改既有语义」（`end_global_index` 由「一律按下一根开盘反算」改为「按每周期 `datetime` 标注语义分流后反算」，非 `3m` 周期**允许重复**）+「跨系统契约字段调整」（该列是后端产物与 App 读取端共享的字段）。**无结构性 DDL 变更**（表 / 列 / 类型 / 约束逐列相同；`training_set_schema_v1.sql` 仅 `PRAGMA user_version` 一行由 `1` 改 `2`），先例 = 2026-05-25 E2「无 DDL 的读取端语义收紧照样 bump 顶层」（`"1.4"` → `"1.5"`）。⚠️ **与 E2 的不同**：E2 是「无 DDL ⇒ 三套 sub-version 全不动」，本次是「无结构性 DDL，**但**训练组 sub-version 必须动」—— 因为本次的判据是**新旧产物能否互读**，不是**列有没有变**。三套 sub-version 里**只有训练组 SQLite 同步 `1` → `2`**；PostgreSQL schema、app.sqlite GRDB migration、Swift 模型版本、P2 journal states **均不变**。
 >
 > ⚠️ **`1.14` 是一个有意的过渡态**：产物已是第 2 代，而 **App 读取端仍钉在第 1 代**（`DownloadAcceptanceRunner.swift` 的 `TRAINING_SET_SCHEMA_VERSION = 1`、`TrainingSessionCoordinator.swift` 写死的 `expectedSchemaVersion: 1` —— 本片一行未改）。⇒ **切片二必须再 bump 一次顶层**（⚠️ **不得与 `1.14` 共号**；**若期间没有别的 PR 动过顶层号，那就是 `"1.15"`** —— ⛔ 这个数**不是**无条件的：当前主线「划线 P1c 七切片」自带 bump 义务，很可能先把号用掉）：`1.14` = 「产物已升第 2 代、App 尚不支持」，`1.15` = 「App 支持第 2 代」。若切片二不再 bump，「读不了库存的中间态 App」与「能读的完成态 App」会共用 `1.14`，跨语言一致性守卫在两种状态下都绿，这个标识就失去兼容性与回滚审计的意义。
 >
@@ -775,8 +775,8 @@ git commit -F <(printf '%s\n' 'fix(deploy-doc): Mac 三个 v1 包作废为审计
 
 | 序 | 动作 | 期望 |
 |---|---|---|
-| A1 | 跑后端全套 | `1403 passed`，无 `failed`/`skipped`/`error` |
-| A2 | 跑本片新加的 4 条守卫 | 4 行 `PASSED` |
+| A1 | 跑后端全套 | `1405 passed`，无 `failed`/`skipped`/`error` |
+| A2 | 跑本片新加的 6 条守卫 | 6 行 `PASSED` |
 | A3 | 跑 Swift 全套 | `Executed 302 tests, with 0 failures` + `Test run with 1993 tests in 232 suites passed` |
 | A4 | 列出全仓 `CONTRACT_VERSION` 的两处源 | 两行，都是 `1.14` |
 | A5 | 看 m01 矩阵那两行 | 顶层 = `` `"1.14"` ``、训练组 = `` `2` `` 且带过渡态标注 |
@@ -807,7 +807,7 @@ git diff --name-only origin/main...HEAD -- ios/Contracts/Sources/ | wc -l
 
 期望 `1`（只有 `Models.swift` 那一个源文件，且它只改了一个字符串字面量）。
 
-- [ ] **Step 2: 写变异记录**（**10 组：M1 / M2 / M3 / M4 / M4b / M5 / M6 / M7 / M8 / M9**），⚠️ **编号为什么有个 `M4b`**：控制者在 Task 2 的评审之后补跑了一组「把训练组行再抄一份」（评审指出 `>1 行` 那个分支没人测过），当时记作 M5；但 Task 3 的计划已把 M5–M8 分配给 Mac 副本那一批，**且 M6/M8 已写进 commit `e402ed1` 的提交信息、改不了** ⇒ 遂把 Task 2 那组改名为 **M4b**。M9 则是 Task 3 修复轮新增的「两行一起删」，用来证明拆成两个测试函数确实让两条各自点名自己那一处。**这段由来必须写进记录文件**，否则读者会以为漏了一组。逐条含：改了什么、跑了什么、**原样贴出的观测输出**、结论。
+- [ ] **Step 2: 写变异记录**（**12 组：M1 / M2 / M3 / M4 / M4b / M5 / M6 / M7 / M8 / M9 / M10 / M11**），⚠️ **编号为什么有个 `M4b`**：控制者在 Task 2 的评审之后补跑了一组「把训练组行再抄一份」（评审指出 `>1 行` 那个分支没人测过），当时记作 M5；但 Task 3 的计划已把 M5–M8 分配给 Mac 副本那一批，**且 M6/M8 已写进 commit `e402ed1` 的提交信息、改不了** ⇒ 遂把 Task 2 那组改名为 **M4b**。M9 则是 Task 3 修复轮新增的「两行一起删」，用来证明拆成两个测试函数确实让两条各自点名自己那一处。**M10/M11 是整支最终评审 I1（本片最严重那条缺陷）的修复波新增的两组**：I1 的裁定要求给新补的两条检查（NAS 副本标注 / P4 前置条件）各配一组能证伪的变异，顺着 M9 之后接着编号。**这段由来必须写进记录文件**，否则读者会以为漏了一组。逐条含：改了什么、跑了什么、**原样贴出的观测输出**、结论。
 
 - [ ] **Step 3: 把残留写进验收清单末尾**（见下节「已知残留」，逐条照抄）
 
@@ -846,4 +846,4 @@ git commit -m "docs(p3c): 验收清单（8 条）+ 变异记录（10 组）+ 实
 
 **3. 类型/命名一致性**：`_TRANSITION_NOTE`（复用 P3a 已有常量，⛔ 不新定义第二份）· `M01` / `TRAINING_SET_DDL`（Task 2 新增，仅本文件内用）· `_FORBIDDEN` / `_REWRITTEN_MARKERS` / `_ARCHIVE_NOTE_MARKERS`（Task 3 新文件内用）· 测试函数名三条互不重名。
 
-**4. 计数自查**：后端测试数 1399 → 1400（Task 2）→ 1402（Task 3）→ **1403**（Task 3 修复轮把正向对照拆成两个测试函数）；Swift 测试数**不变**（只改名与字面量）⇒ Catalyst 四处基线不动。
+**4. 计数自查**：后端测试数 1399 → 1400（Task 2）→ 1402（Task 3）→ 1403（Task 3 修复轮把正向对照拆成两个测试函数）→ **1405**（整支最终评审 I1 修复波又给 `test_deployment_source_texts.py` 新增两条正向对照：NAS 副本标注 `test_nas_handoff_copy_archive_note_is_present`、P4 前置条件 `test_p7_source_rule_carries_the_p4_precondition`）；Swift 测试数**不变**（只改名与字面量）⇒ Catalyst 四处基线不动。
