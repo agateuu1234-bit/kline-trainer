@@ -206,7 +206,7 @@ E       AssertionError: m01 矩阵里训练组行应恰好 1 行，实测 2 行 
 
 ---
 
-⚠️ **M5–M8 的观测取自拆分前的版本**（当时正向对照还是合在一个检查里的）。拆分之后禁令那条**逐字未变**，所以 M5/M8 的结论照样成立；正向对照拆分后的证据见 **M9**。
+⚠️ **下面 M5–M8 各有两次观测**：第一次取自**拆分前**的版本（当时正向对照还合在一个检查里、整个文件只有 2 条检查），第二次是**最终评审修复波之后**针对交付态（5 条检查）**重跑**的。两次都列出来，是因为本片后来又给 I1 补了两条检查（NAS 副本标注 / P4 前置条件），**判据集合变了、期望条数也跟着变了** —— 只贴旧数字会让人以为记录与代码对不上，只贴新数字则抹掉了「当初为什么这么设计」的证据链。⛔ 两套数字必须同时在场且各自标明时点。
 
 ### M5 —— 把 Mac 旧包那句改写后的新规则改回原句
 
@@ -225,6 +225,30 @@ E       AssertionError: 部署设计里「P7 只能从 NAS handoff 取 / Mac 副
 还原后 `git status --short`：只剩本任务当时的 1 个已改文件加 2 个未跟踪文件，无本次变异残留。
 
 **结论**：**2 failed**——「不许出现旧文案」的禁令检查和「必须出现新规则」的正向对照检查**同时**报错，因为改回原句相当于「旧文案回来了、新规则也不见了」，两件坏事一起发生，两条检查各自都抓到了。符合预期。
+
+**② 交付态重跑（5 条检查）**
+
+最终评审 I1 又给这份文件补了两条检查（NAS 副本标注 / P4 前置条件），于是针对交付态（5 条检查）把同一组变异（改回 `:138` 原句）重新跑了一遍。
+
+**跑了什么**：同上（`cd backend && $PY -m pytest tests/test_deployment_source_texts.py -v`），跑完同样还原、核对 `git status --short`。
+
+**原样贴出的观测输出**：
+
+```
+tests/test_deployment_source_texts.py::test_p7_source_wording_no_longer_offers_the_mac_copy FAILED [ 20%]
+tests/test_deployment_source_texts.py::test_rewritten_p7_source_rule_is_present FAILED [ 40%]
+tests/test_deployment_source_texts.py::test_mac_copy_archive_note_is_present PASSED [ 60%]
+tests/test_deployment_source_texts.py::test_nas_handoff_copy_archive_note_is_present PASSED [ 80%]
+tests/test_deployment_source_texts.py::test_p7_source_rule_carries_the_p4_precondition FAILED [100%]
+FAILED tests/test_deployment_source_texts.py::test_p7_source_wording_no_longer_offers_the_mac_copy
+FAILED tests/test_deployment_source_texts.py::test_rewritten_p7_source_rule_is_present
+FAILED tests/test_deployment_source_texts.py::test_p7_source_rule_carries_the_p4_precondition
+3 failed, 2 passed in 0.02s
+```
+
+还原后 `diff` 与备份逐字一致，`git status --short` 无本次变异残留。
+
+**结论**：**3 failed, 2 passed**——红的是禁令 `test_p7_source_wording_no_longer_offers_the_mac_copy`（旧文案回来了）、`test_rewritten_p7_source_rule_is_present`（新规则不见了）、`test_p7_source_rule_carries_the_p4_precondition`（P4 前置条件也随 `:138` 整句一起没了）；绿的是 `test_mac_copy_archive_note_is_present` 与 `test_nas_handoff_copy_archive_note_is_present`（各自管 `:135`/`:136`，未被这条变异碰到）。判据集合从 2 条扩到 5 条后，M5 的结论没有变化：改回原句同时打掉禁令与所有跟 `:138` 相关的正向对照，逻辑与拆分前一致。
 
 ---
 
@@ -247,6 +271,27 @@ E       AssertionError: 部署设计里「…」应恰好 1 行，实测 0 行 �
 
 **结论**：**1 failed, 1 passed**——「不许出现旧文案」的禁令检查**变绿了**（因为那句旧文案确实也没了），只有「必须出现新规则」的正向对照检查报了错。这是这份记录里**最关键**的一次实测：它证明**光靠「不许说旧话」这一道检查是不够的**——如果只有这一道，「把整行连证据一起删掉」这种做法能**蒙混过关**（检查显示全绿，但实际上「新规则应该写着的那句话」根本不在文档里了）。必须同时有「新规则必须真的写着」这第二道检查，才能防住这个漏洞。
 
+**② 交付态重跑（5 条检查）**
+
+针对交付态（5 条检查）把同一组变异（把 `:138` 整行删掉，不是改回原句而是整行不留）重新跑了一遍。
+
+**跑了什么**：同上（`cd backend && $PY -m pytest tests/test_deployment_source_texts.py -q`），跑完同样还原、核对 `git status --short`。
+
+**原样贴出的观测输出**：
+
+```
+.F..F                                                                    [100%]
+FAILED tests/test_deployment_source_texts.py::test_rewritten_p7_source_rule_is_present
+FAILED tests/test_deployment_source_texts.py::test_p7_source_rule_carries_the_p4_precondition
+2 failed, 3 passed in 0.02s
+```
+
+还原后 `diff` 与备份逐字一致，`git status --short` 无本次变异残留。
+
+**结论**：**2 failed, 3 passed**——红的是 `test_rewritten_p7_source_rule_is_present`（新规则那句不见了）与 `test_p7_source_rule_carries_the_p4_precondition`（P4 前置条件同样在被删的那一行上）；绿的是禁令 `test_p7_source_wording_no_longer_offers_the_mac_copy`、`test_mac_copy_archive_note_is_present`、`test_nas_handoff_copy_archive_note_is_present`（后两者各自管 `:135`/`:136`，未被这条变异碰到）。
+
+**「禁令那条仍然是绿的吗？」—— 是，仍然绿。** 这正是 M6 存在的全部意义：判据集合从 2 条扩到 5 条、正向对照从 1 条拆到 4 条之后，「光有禁令挡不住把证据整行删掉」这条结论**没有改变**——禁令检查在交付态下依旧对「整行删掉」这种做法视而不见，必须靠正向对照（现在是四条里的两条：新规则、P4 前置条件）才能抓到。
+
 ---
 
 ### M7 —— 删掉 `:135` 的「历史记述，非判据」标注
@@ -265,6 +310,24 @@ E       AssertionError: Mac 三个 zip 那行应带「历史记述，非判据�
 还原后核对：`diff` 与备份逐字一致。
 
 **结论**：**1 failed**，失败信息明确写着「历史记述，非判据」标注缺失，说明这道检查确实在盯着这句提醒有没有被删掉。符合预期。
+
+**② 交付态重跑（5 条检查）**
+
+针对交付态（5 条检查）把同一组变异（删掉 `:135` 的「历史记述，非判据」标注）重新跑了一遍。
+
+**跑了什么**：同上（`cd backend && $PY -m pytest tests/test_deployment_source_texts.py -q`），跑完同样还原、核对 `git status --short`。
+
+**原样贴出的观测输出**：
+
+```
+..F..                                                                    [100%]
+FAILED tests/test_deployment_source_texts.py::test_mac_copy_archive_note_is_present
+1 failed, 4 passed in 0.02s
+```
+
+还原后 `diff` 与备份逐字一致，`git status --short` 无本次变异残留。
+
+**结论**：**1 failed, 4 passed**——只有 `test_mac_copy_archive_note_is_present` 报错，失败信息仍明确写着「历史记述，非判据」标注缺失；其余四条（含新增的 `test_nas_handoff_copy_archive_note_is_present`，它管的是 `:136` 那份 NAS 副本的标注，未被这条变异碰到）不受影响，仍绿。判据集合扩大后，M7 的结论没有变化：这条检查只认自己该管的那一行。
 
 ---
 
@@ -286,6 +349,25 @@ E       assert not ['docs/runbooks/2026-08-24-qmt-nas-deployment.md:951: <!-- �
 还原后核对：`diff` 与备份逐字一致。
 
 **结论**：**1 failed**，而且错误信息**精确点名**了是哪个文件（`docs/runbooks/2026-08-24-qmt-nas-deployment.md`）、第几行（`951`）。这证明这道检查扫描的范围**确实**覆盖了运维手册目录，而不是只盯着一份设计文档——「作用域没有被弄瞎」。符合预期。
+
+**② 交付态重跑（5 条检查）**
+
+针对交付态（5 条检查）把同一组变异（往运维手册末尾塞一行假违例）重新跑了一遍。
+
+**跑了什么**：同上（`cd backend && $PY -m pytest tests/test_deployment_source_texts.py -q`），跑完同样还原、核对 `git status --short`。
+
+**原样贴出的观测输出**：
+
+```
+F....                                                                    [100%]
+E         docs/runbooks/2026-08-24-qmt-nas-deployment.md:951: <!-- 变异 M8 临时行：P7 的 zip 既可从 Mac scp -->
+FAILED tests/test_deployment_source_texts.py::test_p7_source_wording_no_longer_offers_the_mac_copy
+1 failed, 4 passed in 0.02s
+```
+
+还原后 `diff` 与备份逐字一致，`git status --short` 无本次变异残留。
+
+**结论**：**1 failed, 4 passed**——只有禁令 `test_p7_source_wording_no_longer_offers_the_mac_copy` 报错，且仍**精确点名**同一个文件（`docs/runbooks/2026-08-24-qmt-nas-deployment.md`）与同一行号（`951`）；其余四条正向对照（都只看那份部署设计文档，不看 runbook）不受影响，仍绿。判据集合扩大后，M8 的结论没有变化：作用域覆盖仍然没有被弄瞎。
 
 ---
 
@@ -358,6 +440,8 @@ $ git status --short
 ---
 
 ## 四组最值得看的结论
+
+⚠️ 下面 M6、M8 的定性结论（未引用具体条数）在**拆分前**与**最终评审修复波之后针对交付态的重新实测**两次观测里都成立——各自的两次条数见上方 M6/M8 小节的「①」「②」。
 
 - **M2** —— 证明那道检查**真的在读代码**，不是拿一个写死的数字自欺欺人：把后端建表代码里的版本号改成从没出现过的 `3`，检查当场报错，而且错误信息里原样写出「实际是 `3`」。
 - **M6** —— 证明**光有「不许出现旧文案」是不够的**：把改写后的新规则那一行**整行删掉**，禁令检查反而**变绿了**，只有「新规则必须真的写着」的正向对照检查报了错——这说明「把证据也一起删掉」这种手法能骗过只有一道禁令的检查，正向对照不可省。
