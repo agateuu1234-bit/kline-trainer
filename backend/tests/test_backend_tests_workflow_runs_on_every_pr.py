@@ -28,9 +28,13 @@
     「哪些 PR 会跑」被收窄、job 被改名、命令被换成不跑测试的东西。
 
 （同款配置在本仓有先例：`hardening_6_gate.yml` 也没有 paths 过滤器。另注：
-`backend pytest (full suite)` **已被列入 canonical 必需检查清单**——正因为它无过滤器、
-每个 PR 都报告状态，才够格当必需检查；反过来说，一旦给它加回过滤器，那些不匹配的 PR
-就会卡在「Expected — waiting for status」。这也是下面那几条判据要钉住它的原因。）
+`backend pytest (full suite)` **已被写入 canonical 必需检查清单**——正因为它无过滤器、
+每个 PR 都报告状态，才够格当必需检查。⚠️ **「在清单里」不等于「已经是 GitHub 侧的必需
+检查」**：要管理员跑过应用脚本、ruleset 真的带上它之后才是。在那之后，给它加回过滤器
+会让那些不匹配的 PR 卡在「Expected — waiting for status」；**在那之前它只是咨询信号**，
+加回过滤器不会卡住任何人，盲区会原样回来。这也是下面那几条判据要钉住它的原因。
+（这个前提不是形式上的：`iOS app build-for-running on macos-15` 就长期在清单里、
+不在 ruleset 里 —— 见本次交付的残留 F-A / F-C：没有任何 CI 在守这份清单。））
 """
 from __future__ import annotations
 
@@ -289,16 +293,18 @@ def test_push_trigger_is_not_narrowed_by_paths():
     为什么这条也要钉（codex R4 引出）：本文件的判据**跑在它自己看守的那道工作流里**。
     如果有人提一个只改 workflow 的 PR、加上一条把该文件本身排除在外的
     `pull_request.paths`，那个 PR 上这道 job 压根不会启动，判据也就不会红 ——
-    此时该必需检查会永远等不到结果，那个 PR 反而**卡在「Expected — waiting for status」**
-    合不进去（管理员可显式绕过）。
+    **在管理员应用过 canonical 清单之后**，该必需检查会永远等不到结果，那个 PR 反而
+    **卡在「Expected — waiting for status」**合不进去（管理员可显式绕过）；
+    **在应用之前**，它只是个没人等的咨询信号，那种 PR 照样能合进去。
 
     这时候**唯一还能兜住的就是 `push: branches: [main]`**：合并后 main 上会跑一次，
     钉子在那里变红。所以 `push` 一旦也被路径过滤，就真的全静默了。
     这条判据把那条退路焊死。
 
     ⚠️ 它只保证「**合并后**一定被发现」，不保证合并前。合并前的强制拦截由
-    `codeowners-config-check` 那道**必需门**独立执行（它跑本文件），
-    外加 `backend pytest (full suite)` 自身已被列为必需检查。
+    `codeowners-config-check` 那道**必需门**独立执行（它跑本文件）—— 这一条**当下就成立**，
+    与应用与否无关；`backend pytest (full suite)` 自身则是**进入了 canonical 清单**，
+    要管理员应用之后才成为 GitHub 侧的必需检查、才添上第二道。
     """
     push = _on_section().get("push")
     assert isinstance(push, dict), (
@@ -328,7 +334,9 @@ def test_job_name_equals_canonical_backend_context():
     就能让必需检查报绿，而真正的后端套件不再门控合并。
     """
     mod = _builder()
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # 走 _document() 而不是直接 safe_load：文件不存在时要给出**可读的断言**，
+    # 别靠 FileNotFoundError 兜底 —— 同本文件上面那两道 fail-closed 的理由。
+    doc = _document()
     jobs = doc.get("jobs")
     assert isinstance(jobs, dict) and jobs, (
         f"{WORKFLOW.name} 里取不到 jobs 段 —— 本判据的解析口径已失效"
@@ -339,8 +347,9 @@ def test_job_name_equals_canonical_backend_context():
         f"名为 canonical 必需 context {mod.BACKEND_TESTS_CONTEXT!r} 的 job 有 "
         f"{len(named)} 个（应恰好 1 个）。实得全部 job 名："
         f"{sorted(n for n in (j.get('name') for j in jobs.values() if isinstance(j, dict)) if n)}\n"
-        "GitHub 的必需检查按 job 显示名匹配：名字对不上 ⇒ 该检查永远停在\n"
-        "「Expected — waiting for status」⇒ **全仓 PR 都合不了**。\n"
+        "GitHub 的必需检查按 job 显示名匹配。**在管理员应用过 canonical 清单之后**，\n"
+        "名字对不上 ⇒ 该检查永远停在「Expected — waiting for status」⇒ **全仓 PR 都合不了**；\n"
+        "在应用之前，名字对不上只是让这个 job 不再被任何人等，盲区悄悄回来。\n"
         "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
         "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
     )

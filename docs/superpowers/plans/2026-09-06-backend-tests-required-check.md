@@ -528,11 +528,20 @@ grep -n "必需检查\|三条\|判据" backend/tests/test_backend_tests_workflow
 - docstring 里「三条判据」→ 现在是**六条**（写本步骤时是五条；整支代码评审 code-R5
   又加了「整份工作流全等比对」那一条，见 spec §4.5）；
 - 「`backend pytest (full suite)` 不是分支保护的必需检查，所以无过滤器不会造成死锁」——
-  前提已翻转，改成「它**是**必需检查；无过滤器保证它每个 PR 都报告，正是它能当必需检查的前提」；
-- 「又不是必需检查，于是能合进去」→ 改成「该必需检查会因此永远等不到结果，PR 反而会卡死」；
+  前提已翻转，改成「它已**进入 canonical 必需检查清单**；无过滤器保证它每个 PR 都报告，
+  正是它能当必需检查的前提」；
+- 「又不是必需检查，于是能合进去」→ 改成「**管理员应用之后**，该必需检查会永远等不到结果，
+  PR 反而会卡死；**在应用之前**它仍能合进去」；
 - **`:123` 附近**「合并前的强制拦截需要独立的必需检查，属本次范围之外的已知残留」——
-  前提同样翻转（backend 成为必需检查后，自我排除型 PR 会卡在
-  「Expected — waiting for status」，**合并前拦截事实上已存在**）。
+  前提同样翻转（**应用之后**，自我排除型 PR 会卡在「Expected — waiting for status」）。
+
+> ⚠️ **本步骤初版的指令自己就是缺陷源**（Opus 通道 R1 Major-2 指出，复核属实）：
+> 上面三条原本写的是「它**是**必需检查」「合并前拦截**事实上已存在**」—— 照着改出来的
+> 就是三处不带条件的绝对断言。「在 canonical 清单里」与「已经是 GitHub 侧的必需检查」
+> **是两件事**，中间隔着一个纯人工、且本仓没有任何 CI 在守的「应用」动作
+> （残留 F-A / F-C）—— 实证：`iOS app build-for-running on macos-15` 此刻就在清单里、
+> 不在 ruleset 里。所以凡写到拦截效果的地方，一律带上「应用之后 / 应用之前」。
+> 本仓 memory `feedback_absolute_claims_are_causal_overreach` 记的就是这个形态。
   ⚠️ 这一处 plan 初版**漏了**（Kimi plan-R1 指出）：spec §4.2 明写家族③有 3 处，我只抄了
   2 处 —— 又一次「修复弄丢上一轮的修复」。这正是本步骤改用命令口径的原因。
 
@@ -633,7 +642,8 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 - [ ] **Step 2: 逐字段核 diff（spec §5.3）**
 
 确认：**只多出 2 条 context**（backend + app-build）；且以下**一个字都没变** ——
-`enforcement`、`conditions`、`bypass_actors`、其余 4 条 context 及其 `integration_id`、
+`enforcement`、`conditions`、`bypass_actors`、**除 canonical 清单那几条之外的每一条**既有
+context 及其 `integration_id`（⚠️ 别照写死的数字数 —— 初版写「4 条」，实测 **5 条**）、
 **`rules` 数组里那条 `pull_request` 规则**（它装着批准数；单人仓库一旦被改成 ≥1 就再也合不了任何 PR）。
 
 - [ ] **Step 3: 写验收文档**

@@ -27,19 +27,20 @@ def _entries_for(payload, ctx):
 # happy：缺 check 时补上，绑 integration_id
 def test_adds_missing_checks():
     out = mod.build_payload(_ruleset("ruleset-without-check.json"))
-    for ctx in (CATALYST, APP_BUILD):
+    for ctx in mod.REQUIRED_CONTEXTS:   # 遍历 canonical 清单本身：以后加项自动被覆盖
         es = _entries_for(out, ctx)
         assert len(es) == 1 and es[0]["integration_id"] == APP_ID
 
 # 幂等：已在位时不重复添加
 def test_idempotent_when_present():
     out = mod.build_payload(_ruleset("ruleset-with-check.json"))
-    assert len(_entries_for(out, CATALYST)) == 1
+    for ctx in mod.REQUIRED_CONTEXTS:
+        assert len(_entries_for(out, ctx)) == 1
 
 # any-source 漂移修复：补 integration_id
 def test_fixes_anysource_drift():
     out = mod.build_payload(_ruleset("ruleset-anysource.json"))
-    for ctx in (CATALYST, APP_BUILD):
+    for ctx in mod.REQUIRED_CONTEXTS:   # 遍历 canonical 清单本身：以后加项自动被覆盖
         es = _entries_for(out, ctx)
         assert len(es) == 1 and es[0]["integration_id"] == APP_ID
 
@@ -92,7 +93,8 @@ def test_cli_malformed_json():
 # normalize-only（rollback 形状）：剥离只读字段、不添加任一 required context（忠实复制原状态）
 def test_normalize_only_preserves_without_adding():
     out = mod.build_payload(_ruleset("ruleset-without-check.json"), ensure_required=False)
-    assert _entries_for(out, CATALYST) == [] and _entries_for(out, APP_BUILD) == []   # 不添加任一
+    for ctx in mod.REQUIRED_CONTEXTS:
+        assert _entries_for(out, ctx) == []   # 不添加任一
     for ro in ("id", "node_id", "_links", "source", "source_type", "created_at", "updated_at"):
         assert ro not in out   # 只读字段已剥离（否则 rollback PUT 会 422）
 

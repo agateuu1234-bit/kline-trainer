@@ -281,7 +281,7 @@ pytest 红了脚本继续往下走，第二条只数 skip 不看 failure，于�
    各自的退出码，最后 `exit $rc`；skip 检查同时看 `skipped`/`failures`/`errors`。
    这样失败传播**不再依赖 shell 的 `-e`**，`defaults.run.shell` 那条路自己就失效了。
    实测五种情形（全绿 / 有失败 / 有跳过 / XML 干净但 rc 非 0 / 报告根本没生成）在
-   `bash -e -o pipefail` 与裸 `bash` 两种 shell 下退出码完全一致；并拿**真实的 1401
+   `bash -e -o pipefail` 与裸 `bash` 两种 shell 下退出码完全一致；并拿**真实的 1402
    条后端套件**跑过绿、红两侧。
 
 2. **治标 —— 守卫改成整份文档全等比对**：逐层枚举永远差「上一层」（工作流级除
@@ -405,7 +405,11 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 必须逐条确认「没变」的东西（**按字段穷尽，不能只看眼熟的那几个**）：
 
 - `enforcement`、`conditions`、`bypass_actors`；
-- `required_status_checks` 里**其余 4 条 context 及其 `integration_id`**；
+- `required_status_checks` 里**除 canonical 清单那几条之外的每一条既有 context 及其
+  `integration_id`** —— ⚠️ **别照一个写死的数字去数**。初版写「4 条」，实测是 **5 条**
+  （live ruleset 现有 6 条 context，其中只有 Catalyst 属于 canonical 清单；误算来源是
+  把 6 减去 Catalyst 之后又多减了一次 app-build，而 app-build 本就不在那 6 条里）。
+  ruleset 以后再增删 context，写死的数字还会漂 —— 同 §4.3「消灭重复」的道理；
 - ⚠️ **`rules` 数组里的其它规则整体逐字不变** —— 尤其那条 `pull_request` 规则，
   它装着 `require_code_owner_review` / `required_approving_review_count`。§2 把「不动这两个
   值」列为非目标，而应用走的是**整份 PUT**：只要 builder 对它不认识的规则处理有偏差，
@@ -472,7 +476,7 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 | A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
-| A5 | 看我给出的干跑 diff | 只新增两条 context；`enforcement`、绕过名单、其它四条 context 一个字都没变 | |
+| A5 | 看我给出的干跑 diff | 只新增两条 context；`enforcement`、绕过名单、**其余每一条既有 context**（当前 5 条，别照写死的数字数）一个字都没变 | |
 | A6 | 应用之后再看网页上的必需检查列表 | 从 6 项变成 8 项，新增的正是后端测试和 iOS 构建 | |
 | A7 | 应用之后随便开一个新 PR（或看已开的） | 检查列表里 `backend pytest (full suite)` 标着「Required」 | |
 | A0 | **应用之前**跑 `gh pr list`，看还有没有开着的 PR | 要么没有；要么每个都已 rebase 到含 `06373ef` 之后的 main。**否则先别应用** —— 应用后它们会永久卡在「Expected — waiting for status」（见 §7 第 0 步） | |
