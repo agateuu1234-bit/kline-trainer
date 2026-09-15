@@ -334,98 +334,39 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 
 - [ ] **Step 1: 加载 builder 并写新判据**
 
-> ⚠️ **下面这段代码已按后续轮次同步过，不是 Task 4 当天那一版**（Opus R2 Major-A 指出）：
-> 解析入口由 `yaml.safe_load(...)` 改为 `_document()`（code-R5 引入的 fail-closed helper），
-> 报错文案补上了「应用之后 / 应用之前」的条件。
-> 之所以同步而不是只加标注：本仓 memory `feedback_change_the_place_the_doer_reads` ——
-> 改动必须落在**执行者真正会读的那一处**，而这里正是会被复制粘贴的那一处。
-> 上一轮我只改了下方 Step 5 的**说明文字**、漏了这个代码块，照抄它会把两个刚修掉的缺陷一起带回来。
-> **以交付态文件为准**；本块仅供理解 Task 4 的结构。
+本 Task 的产出**不在此复制** —— 见交付态
+`backend/tests/test_backend_tests_workflow_runs_on_every_pr.py`。
 
-三处改动：
+> ⛔ **这里原本贴着一整块可照抄的代码，已删除**（Opus R3 Major-1）。
+> 删而不是补，理由有三，都是实测出来的：
+>
+> 1. **它撒谎**：上一轮我给它加了「已按后续轮次同步过」的横幅，实际只同步了 2 项，
+>    **89 行仍是 Task 4 当天那一版**（机械测量：块 42 行 vs 交付态同名函数 95 行，
+>    `diff` 共 89 个 ± 行）。
+> 2. **照抄跑不起来**：块里调用 `_document()`，而本 plan **从未定义过它**
+>    —— `_document()` 是 code-R5 才引入的 helper，Task 4 当天不存在。
+>    讽刺的是本 Task 自己就为 `_builder()` 预防过同款 `NameError`。
+> 3. **最严重**：块里那条判据是 `any("pytest" in ...)`，正是 code-R1..R4 花四轮淘汰掉的
+>    **第一代子串判据**（被 `echo pytest` / `echo python -m pytest tests/` /
+>    `--collect-only` / `|| true` 四种方式绕过，见 spec §4.5 那张表）。
+>    照抄它带回来的不是「两个刚修掉的缺陷」，而是比它们严重得多的第一代缺陷。
+>
+> 根因不是这个块写错了，是 **plan 复制交付代码这件事本身就在造第二份真相**。
+> 本 plan 通篇在防这个（`:357-358` 就写着「再加一份就是制造第二份真相」），
+> 却对自己的代码块破了例。**交付态文件是唯一真相。**
 
-1. 在 `import yaml` 之后加一行 `import importlib.util`；
-2. 把文件里**已有的** `WORKFLOW` 定义块（当前 32-34 行，形如
-   `WORKFLOW = (` / `    Path(__file__)...` / `)`）**整块替换**为下面代码块里
-   `_REPO_ROOT` / `WORKFLOW` / `_BUILDER` **那三行**（不是代码块开头的 import 行）；
-3. 下面代码块里的 `def _builder():` **整个函数照抄进去**，位置放在那三行常量之后、
-   已有的 `def _on_section():` 之前。
+Task 4 Step 1 当时做了什么（**只记结构，不记代码**）：
 
-> ⚠️ 三段都要落地，别把 `_builder()` 当成「示例上下文」跳过（Kimi plan-R4 指出这处歧义）——
-> 跳过它的话，本 Task 末尾新增的两个测试都会 `NameError`。
+1. 加 `import importlib.util`；
+2. 把已有的 `WORKFLOW` 定义块整块替换为 `_REPO_ROOT` / `WORKFLOW` / `_BUILDER` 三行常量
+   （**是替换不是新增** —— 该文件已有一份 `WORKFLOW`，再加一份就是第二份真相）；
+3. 加 `def _builder():`（按路径加载 canonical 清单，只依赖 stdlib，
+   这样必需门那种「只装 pyyaml+pytest」的环境也跑得起来）；
+4. 加两条判据：job 名等于 canonical 常量且那个 job 真在跑 pytest、该 context 仍在清单里。
 
-⚠️ **是替换、不是新增**：该文件已有一份 `WORKFLOW` 定义，再加一份就是制造第二份真相
-（本 plan 通篇在防这个；Kimi plan-R1 指出）。
-
-
-
-```python
-import importlib.util
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW = _REPO_ROOT / ".github/workflows/backend-tests.yml"
-_BUILDER = _REPO_ROOT / "scripts/governance/build-protection-put-payload.py"
-
-
-def _builder():
-    """按路径加载 canonical 清单（文件名带连字符，不能直接 import）。
-
-    只依赖 stdlib（该脚本仅 import argparse/json/sys），所以在 codeowners-config-check
-    那道必需门里（只装了 pyyaml+pytest）也能跑。
-    """
-    assert _BUILDER.is_file(), f"{_BUILDER} 不存在 —— canonical 清单没了，判据无从谈起"
-    spec = importlib.util.spec_from_file_location("build_payload", _BUILDER)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-```
-
-在文件末尾追加：
-
-```python
-def test_job_name_equals_canonical_backend_context():
-    """`backend-tests.yml` 里必须有一个 job 的 name **等于** canonical 常量。
-
-    为什么是「等于」而不是「在清单里」（spec §3.2.1）：清单里有多条 context，
-    写成成员关系时，把这个 job 改名成**清单里的另一条**（例如 Catalyst 那个名字）
-    判据仍会绿，而必需检查 `backend pytest (full suite)` 永远等不到结果 → 全仓 PR 死锁。
-    """
-    mod = _builder()
-    doc = _document()
-    jobs = doc.get("jobs")
-    assert isinstance(jobs, dict) and jobs, (
-        f"{WORKFLOW.name} 里取不到 jobs 段 —— 本判据的解析口径已失效"
-    )
-    named = [j for j in jobs.values()
-             if isinstance(j, dict) and j.get("name") == mod.BACKEND_TESTS_CONTEXT]
-    assert len(named) == 1, (
-        f"名为 canonical 必需 context {mod.BACKEND_TESTS_CONTEXT!r} 的 job 有 "
-        f"{len(named)} 个（应恰好 1 个）。实得的全部 job 名："
-        f"{sorted(n for n in (j.get('name') for j in jobs.values() if isinstance(j, dict)) if n)}\n"
-        "GitHub 的必需检查按 job 显示名匹配。**在管理员应用过 canonical 清单之后**，\n"
-        "名字对不上 ⇒ 该检查永远停在「Expected — waiting for status」⇒ **全仓 PR 都合不了**；\n"
-        "在应用之前，名字对不上只是让这个 job 不再被任何人等，盲区悄悄回来。\n"
-        "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
-        "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
-    )
-    # 光有「某个 job 叫这个名字」不够：挂一个同名空壳 job 就能让必需检查报绿，
-    # 而真正的后端套件不再门控合并（Kimi plan-R6 指出）。把名字**绑定到真的在跑 pytest**。
-    steps = named[0].get("steps") or []
-    assert any("pytest" in (s.get("run") or "")
-               for s in steps if isinstance(s, dict)), (
-        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里没有任何一步在跑 pytest —— "
-        "必需检查会由一个不跑测试的 job 报绿，等于门控失效"
-    )
-
-
-def test_backend_context_is_in_canonical_required_list():
-    """canonical 清单里必须留着这一项，否则应用脚本不会再保证它在位。"""
-    mod = _builder()
-    assert mod.BACKEND_TESTS_CONTEXT in mod.REQUIRED_CONTEXTS, (
-        "BACKEND_TESTS_CONTEXT 不在 REQUIRED_CONTEXTS 里 —— "
-        "应用脚本将不再保证该必需检查在位（它只遍历 REQUIRED_CONTEXTS）"
-    )
-```
+⚠️ code-R5 之后这个文件已被**大幅重写**（整块逐字相等的 `APPROVED_RUN`、键级白名单、
+整份工作流全等比对、`_document()` fail-closed 入口），上面四条只够用来理解 Task 4 的
+结构，**不足以据此重建交付态**。
 
 - [ ] **Step 2: 跑，确认现在是绿的**
 
@@ -443,6 +384,11 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -
 - [ ] **Step 3: 变异验证 —— 必须亲眼看到红（全程不碰真文件）**
 
 把下面这段写成 `/tmp/mut-pin.py` 再跑。它把**临时副本**喂给测试模块，真文件全程不动：
+
+> ℹ️ 这是 Task 4 当时那版变异脚本（**工具**，不是交付代码的副本，所以保留）。
+> 交付态的矩阵后来扩到 **24 组**（加了工作流级 `defaults`/`env`/`concurrency`、
+> actions SHA、permissions 提权、拿掉 `exit $rc`、以及三组「**必须保持绿**」的
+> 反向档：只改注释 / 插空行 / 不变异）—— 见 spec §4.5 与提交 `1234386`。
 
 ```python
 import pathlib, sys, tempfile

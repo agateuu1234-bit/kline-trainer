@@ -133,11 +133,35 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 
 ## 四、已知残留
 
+> ### ⛔ 首要残留：**本 PR 未经 codex 评审，由 user override 收口**
+>
+> CLAUDE.md 的治理条款要求所有 PR 过 `codex:adversarial-review`。本 PR **没有**。
+> 经过与代价如实记在这里：
+>
+> - **codex 通道**：code-R1..R4 四轮都给了 `needs-attention` 并被逐条修掉；
+>   第 5 轮（HEAD `1234386`）**撞到账号额度上限**（提示恢复时间 2026-09-19），
+>   `Turn failed`、无 verdict。按本仓惯例「评审被杀 ≠ 判决」，**这不算一轮评审**。
+> - **替代通道**：按 user 指示改用 Opus 5 xhigh 子代理做对抗性评审，跑了 **3 轮**
+>   （独立上下文，非 fork）。它累计做了 **40+ 组变异**、真实 ruleset 干跑逐字复现、
+>   必需门最小环境重跑、1402 条全套套件绿红两侧对拍，判定
+>   **可执行产物（工作流 / builder / verifier / 应用脚本 / fixtures / 守卫测试）零缺陷**；
+>   三轮共 7 条 Major **全部落在散文**（措辞缺前提、文档改坏、编号撞号）。
+> - **但这个通道写不了 attest 账本** ⇒ **不兑现 CLAUDE.md 那道闸门**。
+> - **收敛判断**：第 3 轮时本仓「该不该换做法」的三条指标**全中**
+>   （①归因率 0%→50%→**100%** ②Major 数 2→2→**3**，一轮都没降 ③三轮 7 条全落在两个家族）。
+>   评审员独立判「**该换做法，不要再开一轮**」。据此做了一次**结构性去重**
+>   （删 plan 里那个会照抄出事的代码块、立一条全文约定替代逐句补条件、残留编号去撞号）
+>   而不是再开 R4。
+> - **user 决策**：override 收口（2026-09-15）。⇒ 账本里有一条 override 记录，**没有 approve**。
+>
+> **这条残留意味着什么**：代码侧的信心来自 Opus 通道三轮 + 本地 24 组变异 + 全部闸门，
+> 不来自 codex。若你希望补上那道门，9/19 之后可以对这条分支（或合并后的 main）补跑一轮。
+
 - **F-A**：canonical 清单**无人守** —— `verify-required-checks.sh` 没有任何 workflow 在跑。
 - **F-B**：`branch-protection-config-self-check` 是**永不失败**的橡皮图章（只打印警告 + 无条件退出成功；且读旧版 API，实测本仓恒 404）。
 - **F-C**：`tests/scripts/governance/` **没有任何 CI 在跑**，本次改的 canonical 常量 CI 不会验证它。
 - **F4（归因订正）**：`codeowners-config-check` 这道治理门依赖 `pip install pyyaml pytest`，装依赖失败会让一道必需检查因不相干原因变红。⚠️ 这条**不是本次引入的** —— 该安装步骤与跑 pin 测试那步都是 **PR #180** 加的；本次对该 workflow 只改了注释（diff 逐行可查）。初版验收文档把它写成「本次新引入的代价」属归因失实，已订正（code-R1 指出）。
-- **F6**：仓库内守卫无法自证（PR #180 已记）；且**管理员对 ruleset 有 always-bypass**，所以本次改动防的是**意外**，不是防所有者刻意为之。
-- **F-D（Opus R2 挖出，非本次引入）**：`integration_id` 漂移修复那条判据，**测试盖不住**。把 builder 的 `c["integration_id"] = …` 改成 `c.setdefault(…)`，`test_build_payload.py` 仍 0 failed —— 因为唯一的漂移样本 `ruleset-anysource.json` 里是**整个键缺失**，`setdefault` 恰好也能补上。换成 `integration_id: null` 或 `integration_id: 99999`（别的 app）两种真实漂移形状，好坏 builder 就分得开了。这条「防伪造同名 status」是该脚本的立身之本。**不阻断的理由**：`verify-required-checks.sh --mode assert` 独立拦得住（该档实测绿），且 live ruleset 6 条全是 15368、当前无漂移。**补法很便宜**：给 fixtures 加一条 `integration_id: 99999` 的样本。本次不做，是因为它不属本 PR 的改动面，而本 PR 已经三轮栽在「改动面写了三遍、每次漏改一两处」上。
-- **F-E（Opus R2 挖出，非本次引入）**：往 canonical 清单里混进一条**没有任何 job 会产出**的 context（例如打错字的 `backend pytest (ful suite)`），必需门里的 pin 测试**全绿**；唯一会红的是 `test_build_payload.py`，而它**没有任何 CI 在跑**（即 F-C）。应用之后其后果是**全仓 PR 死锁**。spec §3.2.1 的口径是诚实的（只声称「在这一个常量上补掉一角」），但这条风险值得单独记着。
+- **F-D（＝ spec §6 的 F-D；也就是 PR #180 记的 F6）**：仓库内守卫无法自证；且**管理员对 ruleset 有 always-bypass**，所以本次改动防的是**意外**，不是防所有者刻意为之。
+- **F-E（Opus R2 挖出，非本次引入）**：`integration_id` 漂移修复那条判据，**测试盖不住**。把 builder 的 `c["integration_id"] = …` 改成 `c.setdefault(…)`，`test_build_payload.py` 仍 0 failed —— 因为唯一的漂移样本 `ruleset-anysource.json` 里是**整个键缺失**，`setdefault` 恰好也能补上。换成 `integration_id: null` 或 `integration_id: 99999`（别的 app）两种真实漂移形状，好坏 builder 就分得开了。这条「防伪造同名 status」是该脚本的立身之本。**不阻断的理由**：`verify-required-checks.sh --mode assert` 独立拦得住（该档实测绿），且 live ruleset 6 条全是 15368、当前无漂移。**补法很便宜**：给 fixtures 加一条 `integration_id: 99999` 的样本。本次不做，是因为它不属本 PR 的改动面，而本 PR 已经三轮栽在「改动面写了三遍、每次漏改一两处」上。
+- **F-F（Opus R2 挖出，非本次引入）**：往 canonical 清单里混进一条**没有任何 job 会产出**的 context（例如打错字的 `backend pytest (ful suite)`），必需门里的 pin 测试**全绿**；唯一会红的是 `test_build_payload.py`，而它**没有任何 CI 在跑**（即 F-C）。应用之后其后果是**全仓 PR 死锁**。spec §3.2.1 的口径是诚实的（只声称「在这一个常量上补掉一角」），但这条风险值得单独记着。
 - **F-G（Opus R2 量化）**：本次把 `test_build_payload.py` 四个循环改成遍历 `REQUIRED_CONTEXTS` 之后，「清单被整体缩短」那两档变异的红数从 4 降到 2（循环跟着少转一圈，两条行为断言变空转）。**检出没有丢** —— `test_required_contexts_constant` / `test_list_contexts_cli` 两条列表相等断言仍然红，`run-all.sh` 照样 `SOME FAILED`；换来的是「builder 唯独漏掉新项」那一档从 **0 → 2**，而那才是本次真正要防的形状。spec §5.2 的 M3 行已按「红的是哪一条」订正。
