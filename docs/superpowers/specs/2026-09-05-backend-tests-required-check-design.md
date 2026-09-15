@@ -314,8 +314,11 @@ pytest 红了脚本继续往下走，第二条只数 skip 不看 failure，于�
    各自的退出码，最后 `exit $rc`；skip 检查同时看 `skipped`/`failures`/`errors`。
    这样失败传播**不再依赖 shell 的 `-e`**，`defaults.run.shell` 那条路自己就失效了。
    实测五种情形（全绿 / 有失败 / 有跳过 / XML 干净但 rc 非 0 / 报告根本没生成）在
-   `bash -e -o pipefail` 与裸 `bash` 两种 shell 下退出码完全一致；并拿**真实的 1402
-   条后端套件**跑过绿、红两侧。
+   `bash -e -o pipefail` 与裸 `bash` 两种 shell 下退出码完全一致；并拿**真实的完整后端套件**跑过绿、红两侧。
+   ⚠️ **刻意不写死条数**：写本节时是 1402 条，rebase 到 main `d0d4643` 后是 1499 ——
+   这个数随仓库演进会变，把它当判据就会像 §5.3 那条「其余 4 条 context」一样过期
+   （Opus R1 Major-1 的同一课）。**判据是行为，不是数字**：干净树两种 shell 都 exit 0，
+   塞一个必红测试后两种 shell 都 exit 非 0。复跑方法见验收清单 §一附 A8pre。
 
 2. **治标 —— 守卫改成整份文档全等比对**：逐层枚举永远差「上一层」（工作流级除
    `defaults` 外还有 `env`、`concurrency`、`run-name`…，GitHub 明年新增什么谁也不知道）。

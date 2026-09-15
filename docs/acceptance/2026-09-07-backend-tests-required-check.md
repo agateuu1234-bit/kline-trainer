@@ -143,7 +143,8 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 >   `Turn failed`、无 verdict。按本仓惯例「评审被杀 ≠ 判决」，**这不算一轮评审**。
 > - **替代通道**：按 user 指示改用 Opus 5 xhigh 子代理做对抗性评审，跑了 **3 轮**
 >   （独立上下文，非 fork）。它累计做了 **40+ 组变异**、真实 ruleset 干跑逐字复现、
->   必需门最小环境重跑、1402 条全套套件绿红两侧对拍，判定
+>   必需门最小环境重跑、**完整**后端套件绿红两侧对拍（写这句时 1402 条，
+>   rebase 到 main `d0d4643` 后 1499 —— 条数随仓库演进会变，**不是判据**），判定
 >   **可执行产物（工作流 / builder / verifier / 应用脚本 / fixtures / 守卫测试）零缺陷**；
 >   三轮共 7 条 Major **全部落在散文**（措辞缺前提、文档改坏、编号撞号）。
 > - **但这个通道写不了 attest 账本** ⇒ **不兑现 CLAUDE.md 那道闸门**。
