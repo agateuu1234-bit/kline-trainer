@@ -334,6 +334,14 @@ git commit -m "清掉「清单=两项」家族的过时表述（按 grep 口径�
 
 - [ ] **Step 1: 加载 builder 并写新判据**
 
+> ⚠️ **下面这段代码已按后续轮次同步过，不是 Task 4 当天那一版**（Opus R2 Major-A 指出）：
+> 解析入口由 `yaml.safe_load(...)` 改为 `_document()`（code-R5 引入的 fail-closed helper），
+> 报错文案补上了「应用之后 / 应用之前」的条件。
+> 之所以同步而不是只加标注：本仓 memory `feedback_change_the_place_the_doer_reads` ——
+> 改动必须落在**执行者真正会读的那一处**，而这里正是会被复制粘贴的那一处。
+> 上一轮我只改了下方 Step 5 的**说明文字**、漏了这个代码块，照抄它会把两个刚修掉的缺陷一起带回来。
+> **以交付态文件为准**；本块仅供理解 Task 4 的结构。
+
 三处改动：
 
 1. 在 `import yaml` 之后加一行 `import importlib.util`；
@@ -383,7 +391,7 @@ def test_job_name_equals_canonical_backend_context():
     判据仍会绿，而必需检查 `backend pytest (full suite)` 永远等不到结果 → 全仓 PR 死锁。
     """
     mod = _builder()
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    doc = _document()
     jobs = doc.get("jobs")
     assert isinstance(jobs, dict) and jobs, (
         f"{WORKFLOW.name} 里取不到 jobs 段 —— 本判据的解析口径已失效"
@@ -394,8 +402,9 @@ def test_job_name_equals_canonical_backend_context():
         f"名为 canonical 必需 context {mod.BACKEND_TESTS_CONTEXT!r} 的 job 有 "
         f"{len(named)} 个（应恰好 1 个）。实得的全部 job 名："
         f"{sorted(n for n in (j.get('name') for j in jobs.values() if isinstance(j, dict)) if n)}\n"
-        "GitHub 的必需检查按 job 显示名匹配：名字对不上 ⇒ 该检查永远停在\n"
-        "「Expected — waiting for status」⇒ **全仓 PR 都合不了**。\n"
+        "GitHub 的必需检查按 job 显示名匹配。**在管理员应用过 canonical 清单之后**，\n"
+        "名字对不上 ⇒ 该检查永远停在「Expected — waiting for status」⇒ **全仓 PR 都合不了**；\n"
+        "在应用之前，名字对不上只是让这个 job 不再被任何人等，盲区悄悄回来。\n"
         "要改名，必须同时改 scripts/governance/build-protection-put-payload.py 的\n"
         "BACKEND_TESTS_CONTEXT，并重新跑一次 admin 应用脚本把 ruleset 也改掉。"
     )
@@ -534,6 +543,8 @@ grep -n "必需检查\|三条\|判据" backend/tests/test_backend_tests_workflow
   PR 反而会卡死；**在应用之前**它仍能合进去」；
 - **`:123` 附近**「合并前的强制拦截需要独立的必需检查，属本次范围之外的已知残留」——
   前提同样翻转（**应用之后**，自我排除型 PR 会卡在「Expected — waiting for status」）。
+  ⚠️ 这一处 plan 初版**漏了**（Kimi plan-R1 指出）：spec §4.2 明写家族③有 3 处，我只抄了
+  2 处 —— 又一次「修复弄丢上一轮的修复」。这正是本步骤改用命令口径的原因。
 
 > ⚠️ **本步骤初版的指令自己就是缺陷源**（Opus 通道 R1 Major-2 指出，复核属实）：
 > 上面三条原本写的是「它**是**必需检查」「合并前拦截**事实上已存在**」—— 照着改出来的
@@ -542,8 +553,13 @@ grep -n "必需检查\|三条\|判据" backend/tests/test_backend_tests_workflow
 > （残留 F-A / F-C）—— 实证：`iOS app build-for-running on macos-15` 此刻就在清单里、
 > 不在 ruleset 里。所以凡写到拦截效果的地方，一律带上「应用之后 / 应用之前」。
 > 本仓 memory `feedback_absolute_claims_are_causal_overreach` 记的就是这个形态。
-  ⚠️ 这一处 plan 初版**漏了**（Kimi plan-R1 指出）：spec §4.2 明写家族③有 3 处，我只抄了
-  2 处 —— 又一次「修复弄丢上一轮的修复」。这正是本步骤改用命令口径的原因。
+>
+> ⚠️ **而这段注释落地时自己又制造了一个缺陷**（Opus R2 Major-B，真解析器实测非目测）：
+> 初版把本引用块插在上面那条 bullet 与它的收尾两行**中间、且没有留空行** ——
+> CommonMark 的**惰性续行**会把那两行吸进本引用块，渲染出来是「Opus R1 指出…
+> Kimi plan-R1 指出…」两个署名挤在同一段，「这一处」也失去了指代对象，
+> 而那条 bullet 丢掉了它的警告尾巴。⇒ 引用块与列表之间**必须留空行**，
+> 且这类缺陷**看源码看不出来**，改完要用 CommonMark 解析器重新渲染复核。
 
 - [ ] **Step 6: 两条判绿命令都跑，然后提交**
 

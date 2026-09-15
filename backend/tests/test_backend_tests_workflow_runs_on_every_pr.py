@@ -166,11 +166,11 @@ def _on_section() -> dict:
     字符串 `"on"`，`doc["on"]` 会 KeyError。两种键都试，都取不到就报错 —— 不返回
     空字典，否则下面几条判据会一起恒真。
     """
-    assert WORKFLOW.is_file(), (
-        f"{WORKFLOW.name} 不存在 —— 后端测试工作流被删掉了，PR 上一次都不会跑。"
-        "（本判据由 codeowners-config-check 那道必需门独立执行，所以删文件也拦得住）"
-    )
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # 走 _document()：文件不存在**或解析结果不是映射**时都给出可读断言。
+    # 上一版这里自己手搓 is_file() + safe_load，漏了「能解析但不是映射」那一档 ——
+    # 文档是列表/裸标量/空文件时，下面 doc.get 会抛 AttributeError，仍然红，
+    # 但那是撞出来的、不是判据判出来的（Opus R1 非阻断② / R2 判 PARTIAL，实测三档）。
+    doc = _document()
     section = doc.get("on", doc.get(True))
     assert isinstance(section, dict), (
         "backend-tests.yml 里取不到 on: 段（PyYAML 把裸 on 解析成 True）—— "

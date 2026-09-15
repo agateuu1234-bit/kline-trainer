@@ -131,9 +131,23 @@ R9 提出一条组合路径：一个 PR **同时**把 job 名改成 X、把 `BAC
 在协同三改这一路径上**不是** —— 拦它的是另一套机制，用户看到的现象也不同（PR 卡住 ≠ 检查变红）。
 措辞已在此处修正。
 
-**不接受的部分（严重度）**：该路径**不可落地**，因为它是 fail-closed 的：
-ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，**没有任何 job 产出那个 context** ⇒
-该必需检查停在「Expected — waiting for status」⇒ **这个 PR 自己合不了**（非 admin）。
+**不接受的部分（严重度）—— 但这个结论有前提**：该路径在**管理员应用过 canonical 清单之后**
+是 fail-closed 的：ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，
+**没有任何 job 产出那个 context** ⇒ 该必需检查停在「Expected — waiting for status」⇒
+**这个 PR 自己合不了**（非 admin）。
+
+> ⛔ **在应用之前，这条 backstop 不存在** —— ruleset 里还没有 `backend pytest (full suite)`
+> 这一条，改名后没有任何检查在等它。实测「协同三改」（job 名 + `BACKEND_TESTS_CONTEXT`
+> + 单测常量同时改）：`run-all.sh` **是红的**（4 条 bash 断言），但它
+> **在 CI 里一次都不跑**（残留 F-C，`grep -rn 'run-all.sh\|tests/scripts' .github/workflows/`
+> 命中 0）；CI 里唯一跑的是必需门里的 pin 测试 → **6 passed 全绿**。
+> ⇒ 这样一个 PR **CI 全绿、能合进去**。
+>
+> 所以 §7「先合并再应用」不是流程洁癖，而是**这条严重度判断成立的必要条件**；
+> 在应用完成之前，R9 那条路径是可落地的。而「应用」这一步没有任何机制保证会发生 ——
+> 实证：`iOS app build-for-running on macos-15` 2026-06 就进了 canonical 清单，
+> 至今（2026-09）取 live ruleset 仍**不在**里面，三个月无人发现。
+> （Opus 通道 R2 Major-A 指出，逐条复核并自己重跑过实验）
 
 > 这不是我的推断 —— 机制有仓库内的书面依据：
 > `docs/governance/2026-06-10-pr2-app-build-required-check-runbook.md:13` 明写
@@ -373,7 +387,7 @@ python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py  
 |---|---|---|
 | M1 | 常量拼写改错一个字符 | 红，且报出的是 context 不匹配 |
 | M2 | 从 `REQUIRED_CONTEXTS` 里删掉新加的那项 | 红 |
-| M3 | 删掉 `APP_BUILD_CONTEXT`（既有项） | 红 —— 证明测试不是只盯新项 |
+| M3 | 删掉 `APP_BUILD_CONTEXT`（既有项） | 红 —— 证明测试不是只盯新项。⚠️ **红的是哪一条要看清**（Opus R2）：自 Opus R1 把四个循环改成遍历 `REQUIRED_CONTEXTS` 之后，本档红在 `test_required_contexts_constant` / `test_list_contexts_cli` 这两条**列表相等**断言上；证明「builder 对**既有**项也生效」的是**另一档**变异（builder 单独跳过某个既有 context，实测 2 failed）。别把两者混为一谈 |
 | M4 | 常量顺序调换 | 记录是红是绿。**若绿**，说明判据不约束顺序 —— 那就明写「顺序无语义」，别假装它被测了 |
 | M6 | 把 `backend-tests.yml` 里那个 job 的 `name` 改掉一个字符 | 新加的第四条判据必须**红**（§3.2.1）。这条变异模拟的正是「全仓 PR 卡死」那个场景 |
 | **M7** | 把那个 job 的 `name` 改成 **`REQUIRED_CONTEXTS` 里的另一条**（如 Catalyst 那个名字） | 必须**红**。这一条专打「成员关系判据」那个绕过（见 §3.2.1 的 ⚠️）——**此档若变绿，说明判据被写回成员关系了** |
