@@ -425,7 +425,8 @@ find . -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
 python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q
 ```
 
-预期：`5 passed`。
+预期：`5 passed`（写本步骤时的条数；整支代码评审 code-R5 又加了「整份工作流全等
+比对」那一条，交付态是 **`6 passed`** —— 见 spec §4.5）。
 
 > ⚠️ 这条判据钉的是**已经成立的不变量**，所以它一写出来就是绿的 —— 没有「功能缺失导致的红」可看。
 > 它的判别力只能靠**变异**来证明，见下一步。**不做下一步就等于没验证过**。
@@ -524,7 +525,8 @@ grep -n "必需检查\|三条\|判据" backend/tests/test_backend_tests_workflow
 
 对**每一条**命中定性：仍然成立，还是被本次改动翻转了。已知至少这几处要改
 （spec §4.2 家族②③，**不是全部**）：
-- docstring 里「三条判据」→ 现在是**五条**；
+- docstring 里「三条判据」→ 现在是**六条**（写本步骤时是五条；整支代码评审 code-R5
+  又加了「整份工作流全等比对」那一条，见 spec §4.5）；
 - 「`backend pytest (full suite)` 不是分支保护的必需检查，所以无过滤器不会造成死锁」——
   前提已翻转，改成「它**是**必需检查；无过滤器保证它每个 PR 都报告，正是它能当必需检查的前提」；
 - 「又不是必需检查，于是能合进去」→ 改成「该必需检查会因此永远等不到结果，PR 反而会卡死」；

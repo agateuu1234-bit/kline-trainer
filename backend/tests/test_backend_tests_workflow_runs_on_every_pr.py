@@ -16,9 +16,16 @@
 必须与套件实际读取面永远同步的清单，不划算。
 
 所以决定：**取消过滤器，每个 PR 都跑**。这样「漏了某个外部输入」这件事从根上不可能
-发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去 —— 五条
-判据分别管：触发器还在、`pull_request` 下一个键都没有、`push` 那条兜底退路没被过滤、
-job 名等于 canonical 必需 context 且那个 job 真的在跑 pytest、该 context 仍在 canonical 清单里。
+发生，也就不需要那套清单和守卫了。本文件只负责钉住这个决定别被悄悄改回去 —— 六条
+判据分别管：**整份文档与被批准的结构全等**、触发器还在、`pull_request` 下一个键都没有、
+`push` 那条兜底退路没被过滤、job 名等于 canonical 必需 context 且那个 job 真的在跑 pytest、
+该 context 仍在 canonical 清单里。
+
+第一条（全等比对）与后面五条是**互补**的，两者都不能少：
+  - 全等比对是**钉子**：任何层级多一个键少一个键都红，包括没人枚举过的层级。
+    但它对「两边一起改」无能为力。
+  - 后面五条是**语义判断**：即便有人同时改了工作流和本文件，它们照样拦得住
+    「哪些 PR 会跑」被收窄、job 被改名、命令被换成不跑测试的东西。
 
 （同款配置在本仓有先例：`hardening_6_gate.yml` 也没有 paths 过滤器。另注：
 `backend pytest (full suite)` **已被列入 canonical 必需检查清单**——正因为它无过滤器、
@@ -35,6 +42,104 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = _REPO_ROOT / ".github/workflows/backend-tests.yml"
 _BUILDER = _REPO_ROOT / "scripts/governance/build-protection-put-payload.py"
+
+
+# 那一步被批准的**整个** run 块，逐字。
+#
+# ⚠️ 为什么是「整块逐字」而不是「含某些子串」：判据被连续绕过四轮，每一轮我都在
+# 收紧同一处，而绕过每次换个形状（全部本地复现过）：
+#   `echo pytest`                            —— 只打印，不跑；
+#   `echo python -m pytest tests/`           —— 含全部关键子串，仍然只打印；
+#   `python -m pytest tests/ --collect-only` —— 只收集不执行；
+#   `python -m pytest tests/ -q || true`     —— 失败被 shell 吞掉。
+# 判据有多种正交绕过时逐个去禁禁不完（本仓 memory
+# feedback_same_predicate_multiple_bypasses），所以反过来只接受已知正确的形态。
+#
+# ⚠️ 块内为什么要自己记退出码、而不是靠 shell 的 `-e`（codex code-R5）：
+# GitHub 默认用 `bash --noprofile --norc -e -o pipefail` 跑 run，`-e` 让任何一条命令
+# 失败就中止。但工作流级 `defaults: run: shell: bash {0}` 能把 `-e` 拿掉；届时 pytest
+# 红了脚本不中止，而后面那段若只数 skip 就会打印「OK」并以 0 退出 —— 测试全红、
+# 必需检查报绿。所以本块显式记住两段各自的退出码，最后 `exit $rc`；skip 检查同时
+# 看 skipped/failures/errors。实测五种情形（全绿 / 有失败 / 有跳过 / XML 干净但 rc 非 0
+# / 报告没生成）在两种 shell 下退出码完全一致。
+#
+# 代价（有意接受）：以后合理地改这条命令会让判据变红，必须同步改本常量。
+# 这正是想要的 —— 它是必需检查真正执行的内容，改动应当是**显式**的。
+APPROVED_RUN = (
+    'rc=0\n'
+    'python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml" || rc=$?\n'
+    "python - <<'PY' || rc=1\n"
+    'import os, sys, xml.etree.ElementTree as ET\n'
+    'path = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "pytest-report.xml")\n'
+    'root = ET.parse(path).getroot()\n'
+    'def total(attr):\n'
+    '    return sum(int(s.get(attr, 0)) for s in root.iter("testsuite"))\n'
+    'bad = [f"{n} 个 {label}" for n, label in\n'
+    '       ((total("skipped"), "skipped"),\n'
+    '        (total("failures"), "failed"),\n'
+    '        (total("errors"), "errored")) if n]\n'
+    'if bad:\n'
+    '    print("FAIL: " + " / ".join(bad) + " —— CI 拒绝静默 skip，也拒绝红着报绿")\n'
+    '    sys.exit(1)\n'
+    'print("OK: 0 skipped / 0 failed / 0 errored")\n'
+    'PY\n'
+    'exit $rc\n'
+)
+
+
+def _approved_doc(mod) -> dict:
+    """整份 `backend-tests.yml` 解析后应当长成的样子。
+
+    ⚠️ 键 `True` 不是笔误：YAML 1.1 把裸键 `on:` 解析成**布尔 True**（PyYAML 6.0.3 实测）。
+
+    job 名刻意取自 `mod.BACKEND_TESTS_CONTEXT` 而非写死字符串 —— 这样只改一边
+    （工作流改名 / 应用脚本改名）就会红，只有**协调一致地改两边**才绿。
+    """
+    return {
+        "name": "Backend Tests",
+        True: {
+            "pull_request": None,
+            "push": {"branches": ["main"]},
+        },
+        "permissions": {"contents": "read"},
+        "jobs": {
+            "pytest": {
+                "name": mod.BACKEND_TESTS_CONTEXT,
+                "runs-on": "ubuntu-latest",
+                "steps": [
+                    {"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"},
+                    {
+                        "name": "Setup Python 3.11",
+                        "uses": "actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b",
+                        "with": {"python-version": "3.11"},
+                    },
+                    {
+                        "name": "Install test deps",
+                        "working-directory": "backend",
+                        "run": "python -m pip install -r requirements-test.txt",
+                    },
+                    {
+                        "name": "Run full backend suite (fail on any skip)",
+                        "working-directory": "backend",
+                        "run": APPROVED_RUN,
+                    },
+                ],
+            }
+        },
+    }
+
+
+def _document() -> dict:
+    """解析 workflow；文件不在就红（不返回空字典，否则各条判据会一起恒真）。"""
+    assert WORKFLOW.is_file(), (
+        f"{WORKFLOW.name} 不存在 —— 后端测试工作流被删掉了，PR 上一次都不会跑。"
+        "（本判据由 codeowners-config-check 那道必需门独立执行，所以删文件也拦得住）"
+    )
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert isinstance(doc, dict), (
+        f"{WORKFLOW.name} 解析结果不是映射（实得 {type(doc).__name__}）—— 解析口径已失效"
+    )
+    return doc
 
 
 def _builder():
@@ -68,6 +173,61 @@ def _on_section() -> dict:
         f"本文件的解析口径已失效，实得 {type(section).__name__}"
     )
     return section
+
+
+def test_workflow_document_is_exactly_the_approved_structure():
+    """**整份文档全等比对** —— 一次封死所有层级的绕过（codex code-R5）。
+
+    为什么需要这条：前四轮是一层层列白名单（命令 → job 的键 → 步骤的键），
+    而每一轮评审都从**上一层**进来。第五轮进来的是**工作流级**设置：
+
+        defaults:
+          run:
+            shell: bash {0}
+
+    这三行让当时那五条语义判据**全绿**，却把 GitHub 默认 shell 的 `-e` 拿掉。
+    结果是 pytest 红了脚本不中止，后面那段只数 skip 不看 failure，打印「OK」
+    并以 0 退出 —— **整套测试红着，必需检查报绿**。
+
+    逐层枚举永远差「上一层」（工作流级还有 `env`、`concurrency`、`run-name`…，
+    以及 GitHub 明年会新增什么谁也不知道）。文档之上没有层，所以在这里收口。
+
+    代价（有意接受）：改这份工作流的**任何**内容 —— 连 actions 的 SHA 版本号 ——
+    都会让本判据变红，必须显式同步本文件里的 `_approved_doc`。这正是想要的：
+    它决定「后端测试这道必需检查是否真的在门控合并」，改动应当是显式且被看见的。
+    注释与空行不进解析结果，所以改注释不会误红。
+
+    ⚠️ 这条是**钉子**，不是语义判断：有人同时改工作流和 `_approved_doc` 就会绿。
+    所以下面那五条语义判据一条都不能删 —— 它们在「两边一起改」时照样拦得住
+    危险内容（触发器被收窄、job 被改名、命令被换成不跑测试的东西）。
+    """
+    import difflib
+    import pprint
+
+    mod = _builder()
+    actual = _document()
+    expected = _approved_doc(mod)
+    if actual == expected:
+        return
+    # ⚠️ sort_dicts=False 是必须的：本字典同时有 True 与字符串键，排序会抛 TypeError。
+    diff = "\n".join(
+        difflib.unified_diff(
+            pprint.pformat(expected, width=100, sort_dicts=False).splitlines(),
+            pprint.pformat(actual, width=100, sort_dicts=False).splitlines(),
+            fromfile="被批准的结构 (_approved_doc)",
+            tofile=f"实际的 {WORKFLOW.name}",
+            lineterm="",
+        )
+    )
+    raise AssertionError(
+        f"{WORKFLOW.name} 与被批准的结构不一致。\n"
+        "这份工作流决定「后端测试」这道必需检查是否真的在门控合并，所以它的**每一个键**\n"
+        "都被钉住 —— 包括 job 与步骤之外的层级（`defaults`、`env`、`concurrency`…）。\n"
+        "其中 `defaults: run: shell: bash {0}` 能拿掉默认 shell 的 `-e`，让测试红着报绿。\n\n"
+        "若这次改动是**有意**的，请同步改本文件的 `_approved_doc`，并在 PR 里写清\n"
+        "为什么它不影响「这道必需检查是否真的在跑、测试失败是否会传播出去」。\n\n"
+        f"{diff}"
+    )
 
 
 def test_workflow_still_triggers_on_pull_request():
@@ -187,34 +347,23 @@ def test_job_name_equals_canonical_backend_context():
     job = named[0]
     steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
 
-    # ① 必须有一步的**首行命令与被批准的那条逐字相等**。
-    #
-    #    ⚠️ 这里刻意用**白名单（逐字相等）**，不是「含某些子串」。
-    #    子串匹配连续三轮被绕过（codex code-R1/R2，全部本地复现）：
-    #      `echo pytest`                          —— 只打印，不跑；
-    #      `echo python -m pytest tests/`         —— 含全部关键子串，仍然只打印；
-    #      `python -m pytest tests/ --collect-only` —— 只收集不执行；
-    #      `python -m pytest tests/ -q || true`     —— 失败被 shell 吞掉。
-    #    「补一个洞漏三个」正是本仓 memory feedback_same_predicate_multiple_bypasses
-    #    说的形态：判据有多种正交绕过时，逐个去禁禁不完，必须反过来只接受已知正确的形态。
-    #
-    #    代价（有意接受）：以后合理地改这条命令（加个 flag）会让本判据变红，
-    #    必须同步改下面这个常量。这正是想要的——它是必需检查的执行内容，改动应当是**显式**的。
-    APPROVED_RUN = (
-        'python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"'
-    )
-
+    # ① 必须有一步的 `run` **与被批准的运行块整块逐字相等**（常量见模块顶部）。
+    #    历史：含子串 → 首行逐字 → **整块逐字**。前两版分别被 `echo pytest`、
+    #    `echo python -m pytest tests/`、`--collect-only`、`|| true` 绕过（全部本地复现）。
+    #    改成整块之后，块内那句「自己记退出码、最后 exit $rc」也一并被钉住 ——
+    #    那是「测试红了必需检查也红」这件事**不依赖 shell 的 `-e`** 的原因。
     def _first_line(step):
         lines = [ln.strip() for ln in (step.get("run") or "").splitlines() if ln.strip()]
         return lines[0] if lines else ""
 
-    runners = [s for s in steps if _first_line(s) == APPROVED_RUN]
+    runners = [s for s in steps if s.get("run") == APPROVED_RUN]
     assert runners, (
-        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里，没有任何一步的首行命令等于被批准的\n"
-        f"全套命令：\n    {APPROVED_RUN}\n"
-        "⇒ 这道必需检查可能在「不跑测试 / 只收集 / 吞掉失败」的情况下报绿，门控失效。\n"
+        f"名为 {mod.BACKEND_TESTS_CONTEXT!r} 的 job 里，没有任何一步的 run 等于被批准的运行块。\n"
+        "⇒ 这道必需检查可能在「不跑测试 / 只收集 / 吞掉失败 / 失败不传播」的情况下报绿，\n"
+        "  门控失效。\n"
         f"实得各步骤 run 首行：{[_first_line(s) or '<无 run>' for s in steps]}\n"
-        "若你是**有意**修改了这条命令，请同步改本判据里的 APPROVED_RUN，并说明理由。"
+        "若你是**有意**修改了这条命令，请同步改模块顶部的 APPROVED_RUN 与 _approved_doc，"
+        "并说明理由。"
     )
     assert any(s.get("working-directory") == "backend" for s in runners), (
         "跑全套的那一步没有 `working-directory: backend` —— 跑的可能不是后端那套测试"

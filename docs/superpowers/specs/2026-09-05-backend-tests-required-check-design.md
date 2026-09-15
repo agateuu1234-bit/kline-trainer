@@ -159,14 +159,16 @@ ruleset 上的必需 context 仍是**旧名**，而 PR 把 job 改名后，**没
 | `tests/scripts/governance/test-verify-required-checks.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/test-admin-runbook.sh` | 同上（见下方 ⚠️） |
 | `tests/scripts/governance/fixtures/*.json` | 代表「已合规」的 fixture 需含新 context（**哪几个由实跑决定，不靠猜**） |
-| `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正过时表述（见 §4.2） |
+| `backend/tests/test_backend_tests_workflow_runs_on_every_pr.py` | ①新增第四条判据钉住 job 名（§3.2.1）；②订正过时表述（见 §4.2）；③**整份工作流全等比对**（§4.5，code-R5） |
+| `.github/workflows/backend-tests.yml` | **让失败传播不再依赖 shell 的 `-e`**（§4.5，code-R5）。⚠️ Claude 对该目录硬 deny → 走 ceremony 由 user `cp` 落地 |
 | `scripts/governance/verify-required-checks.sh` | 订正头注释（把谓词描述成「Catalyst check 在位」） |
 | `scripts/governance/admin-configure-required-checks.sh` | **订正 §4.2 那条 grep 命令在本文件命中的全部过时表述**（实测 `:2` 头注释、`:71` **`GATE PASS` 用户可见输出**、`:114` **函数内部注释** —— 三处，别只改前两处） |
 | `.github/workflows/codeowners-config-check.yml` | **仅订正注释**（`:21` 那段安全论证以「backend-tests 不是必需检查」为前提，本次改动后变假）。**不改任何逻辑/触发器/job 名**。⚠️ Claude 对该目录硬 deny → 走 ceremony 由 user `cp` 落地 |
 | 本 spec + 后续 plan + `docs/acceptance/<交付日>-backend-tests-required-check.md` | 文档（验收清单按本仓治理条款是每次交付的必备件，故也在改动面内；日期以实际交付日为准） |
 
-**不新增文件。**唯一触及 `.github/workflows/` 的是上表最后一行，且**只改注释**——
-理由见 §4.4（原本写的「不改任何 workflow」会惩罚发现该矛盾的实施者）。
+**不新增文件。**触及 `.github/workflows/` 的有**两个**文件：
+`codeowners-config-check.yml`（**只改注释**，理由见 §4.4）与 `backend-tests.yml`
+（**改了那一步的 run 块**，理由见 §4.5）。两个都走 ceremony 由 user `cp` 落地。
 
 ### ⚠️ 4.1 改动面比初版 spec 写的大（Kimi 评审 R1 指出，已复核）
 
@@ -251,6 +253,45 @@ R3 让我订正 pin 测试里两处注释，我照做了；R4 立刻指出**同�
 权衡后**破例纳入，但只改注释**：一段变假的安全论证写在必需门里，风险高于多跑一次 ceremony；
 而且同一条标准我已在 pin 测试上执行了三次，不能选择性适用。**逻辑、触发器、job 名一律不动**
 （动了就会牵连 PR #180 那套判据）。代价是 user 要多跑一次 `cp`。
+
+### 4.5 为什么最终还是改了 `backend-tests.yml` 的逻辑（code-R5）
+
+§4.4 说过「逻辑、触发器、job 名一律不动」。那句话的对象是
+`codeowners-config-check.yml`，本节是**另一个文件、另一条理由**，不是推翻它。
+
+整支代码评审连续五轮落在同一条判据上 ——「这道必需检查是不是真的在跑、测试失败
+会不会传播出去」。前四轮我都在**列白名单**，一层比一层高：
+
+| 轮次 | 我收紧的层 | 下一轮被从哪里绕过 |
+|---|---|---|
+| code-R1 | 「run 里有 pytest 字样」 | `echo pytest` |
+| code-R2 | 「含 `-m pytest` 且含 `tests/`」 | `echo python -m pytest tests/` / `--collect-only` / `\|\| true` |
+| code-R3 | 首行命令**逐字**相等 | 步骤级 `if: false`、job 级 `if:`、`continue-on-error: ${{ true }}` |
+| code-R4 | job 与步骤的**键级**白名单 | **工作流级** `defaults: run: shell: bash {0}` |
+
+最后这一个之所以致命：GitHub 默认用 `bash --noprofile --norc -e -o pipefail` 跑
+`run`，`-e` 让任何一条命令失败就中止。改成 `bash {0}` 就没有 `-e` 了。而那一步的
+脚本有两条命令 —— 先跑 pytest，再解析 junit XML 看有没有被跳过的用例。没有 `-e`，
+pytest 红了脚本继续往下走，第二条只数 skip 不看 failure，于是打印 `OK` 并以 0 退出：
+**整套测试红着，必需检查报绿。**
+
+⇒ 两处改动，一处治标一处治本：
+
+1. **治本 —— 改 `backend-tests.yml` 那一步的 run 块**：显式记住 pytest 与 skip 检查
+   各自的退出码，最后 `exit $rc`；skip 检查同时看 `skipped`/`failures`/`errors`。
+   这样失败传播**不再依赖 shell 的 `-e`**，`defaults.run.shell` 那条路自己就失效了。
+   实测五种情形（全绿 / 有失败 / 有跳过 / XML 干净但 rc 非 0 / 报告根本没生成）在
+   `bash -e -o pipefail` 与裸 `bash` 两种 shell 下退出码完全一致；并拿**真实的 1401
+   条后端套件**跑过绿、红两侧。
+
+2. **治标 —— 守卫改成整份文档全等比对**：逐层枚举永远差「上一层」（工作流级除
+   `defaults` 外还有 `env`、`concurrency`、`run-name`…，GitHub 明年新增什么谁也不知道）。
+   文档之上没有层，所以在那里收口。**原有五条语义判据一条不删** —— 全等比对是钉子，
+   两边一起改就绿；那五条即便在两边一起改时也照样拦得住危险内容。
+
+代价明写：改这份工作流的任何内容（连 actions 的 SHA）都会让守卫变红，必须显式同步
+`_approved_doc`。这正是想要的 —— 它决定这道必需检查是否真的在门控合并。
+注释与空行不进解析结果，改注释不会误红。
 
 ### 4.3 为什么验收 A1 不复述文件清单
 
@@ -419,10 +460,15 @@ builder 是**纯函数、不发网络请求**（其 docstring 明写）。因此
 ## 8. 验收清单（非程序员可执行）
 
 > 每条：动作 / 预期 / 判定。判定只填「通过」或「不通过」。
+>
+> ⚠️ **交付时以 `docs/acceptance/2026-09-07-backend-tests-required-check.md` 为准**。
+> 那一份是实际执行的清单，且比本节多出 A2b（判据条数）、A7d/A7e（整份工作流全等
+> 比对的判别力与「改注释不误红」）、A8pre（在本地就能证明「测试红了这一步真的会红」）。
+> 本节保留为设计当时的记录。
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| A1 | 把 PR 的改动文件列表与本文档 **§4 那张改动面表**逐行对照（**不要照下面这句话去数个数** —— 见 §4.3 说明为什么这里刻意不复述清单） | 两边一一对应，PR 里没有表外的文件。⚠️ 表里**有且只有一个** `.github/workflows/` 文件（`codeowners-config-check.yml`），打开它确认**只改了注释**——若它的 `on:`、job 名或任何 `run:` 步骤被动过，判**不通过**（理由见 §4.4） | |
+| A1 | 把 PR 的改动文件列表与本文档 **§4 那张改动面表**逐行对照 | 两边一一对应，PR 里没有表外的文件。**改动面以那张表为唯一真相**，本行刻意不复述文件名（§4.3：复述过三次、漏改过三次；code-R5 又漏了一次——那次改动面多了 `backend-tests.yml`，而这里还写着「有且只有一个」）。表里每个 `.github/workflows/` 文件都打开看，确认改动范围与表上那格写的一致（理由见 §4.4、§4.5） | |
 | A2 | 在 worktree 里跑 `bash tests/scripts/governance/run-all.sh` | 最后一行是 `ALL GREEN`，且**没有**任何 `FAIL:` 行 | |
 | A3 | 跑 `build-protection-put-payload.py --list-contexts` | 打印出**三项**，其中一项逐字是 `backend pytest (full suite)` | |
 | A4 | 把那三项与 GitHub 网页上「必需检查」列表对照（**应用之前**） | 三项里有**两项还不在**网页上（后端测试、iOS 构建）—— 这正是待应用的差异 | |
