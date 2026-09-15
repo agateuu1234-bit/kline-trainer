@@ -89,7 +89,10 @@ LIFECYCLE_KEYS = frozenset({
 # 三个都改，按判据本身穷尽（2026-08-26 整支评审实测：`$` 下 gmt_token / sha256
 # 带一个尾随 "\n" 都会被放行）。
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
-_STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)\Z")
+# **公开**（S3 Task 4）：写侧（qmt_pool 冻结宇宙）与读侧必须用**同一个对象**判定
+# 「什么是合法股票代码」。qmt_normalize 里那份用的是 `$`、容忍一个尾随换行，
+# 两份近似实现迟早漂开。
+STOCK_CODE_RE = re.compile(r"^\d+\.(SH|SZ|BJ)\Z")
 _GMT_TOKEN_RE = re.compile(r"^@GMT-\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}\Z")
 
 # `fetch_fatal_error.errno` 的闭合枚举：仅两种能触发「留在挂载点内」的逃逸
@@ -271,7 +274,7 @@ def _validate_source_snapshot(snap: object) -> None:
     uni = _require_market_map(snap["universe"], "source_snapshot.universe", "list")
     for mk in MARKETS:
         for i, code in enumerate(uni[mk]):
-            _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+            _require(isinstance(code, str) and STOCK_CODE_RE.match(code) is not None,
                      f"source_snapshot.universe[{mk}][{i}] 不是合法股票代码：{code!r}")
             _require(code.endswith("." + mk),
                      f"source_snapshot.universe[{mk}][{i}] = {code!r} 的后缀与所在层不符")
@@ -324,7 +327,7 @@ def _validate_pool_order(pool: object, universe: dict) -> None:
             _require("code" in item and "universe_idx" in item,
                      f"{where} 必须同时有 code 与 universe_idx，读到 {sorted(item)}")
             code = item["code"]
-            _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+            _require(isinstance(code, str) and STOCK_CODE_RE.match(code) is not None,
                      f"{where}.code 不是合法股票代码：{code!r}")
             _require(code.endswith("." + mk),
                      f"{where}.code = {code!r} 的后缀与所在层 {mk} 不符")
@@ -397,7 +400,7 @@ def _validate_files(files: object, pool: dict) -> None:
             _require(key in rec, f"{where} 缺 {key}")
 
         code = rec["stock_code"]
-        _require(isinstance(code, str) and _STOCK_CODE_RE.match(code) is not None,
+        _require(isinstance(code, str) and STOCK_CODE_RE.match(code) is not None,
                  f"{where}.stock_code 不是合法股票代码：{code!r}")
         _require(rec["period"] in PERIODS,
                  f"{where}.period 必须是 {list(PERIODS)} 之一，读到 {rec['period']!r}")
@@ -1181,7 +1184,7 @@ class RecoveryScope:
 
     def __post_init__(self) -> None:
         if not isinstance(self.stock_code, str) or \
-                _STOCK_CODE_RE.match(self.stock_code) is None:
+                STOCK_CODE_RE.match(self.stock_code) is None:
             raise ValueError(f"stock_code 形如 600000.SH，收到 {self.stock_code!r}")
         if not isinstance(self.market, str) or self.market not in MARKETS:
             raise ValueError(f"market 必须是 {list(MARKETS)} 之一，收到 {self.market!r}")

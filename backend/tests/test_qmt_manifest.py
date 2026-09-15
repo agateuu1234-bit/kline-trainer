@@ -1295,7 +1295,7 @@ def test_trailing_newline_after_sha256_or_gmt_token_is_rejected():
     之前的位置，不要求那是字符串真正的末尾），于是 `sha256 + "\\n"` 与
     `"@GMT-...\\n"` 都会被当成合法值放行（2026-08-26 整支评审实测证实）。
 
-    ⚠️ **`_STOCK_CODE_RE` 的同一个问题未在此处配档**（2026-08-26 逐个 call
+    ⚠️ **`STOCK_CODE_RE` 的同一个问题未在此处配档**（2026-08-26 逐个 call
     site 实测确认为等价变异）：股票代码在三处（`pool_order[mk][i].code` /
     `source_snapshot.universe[mk][i]` / `files[i].stock_code`）都伴随一条
     **字面量**判据（`.endswith("." + mk)`，或与文件名解析出的 code 相等）。
@@ -5417,7 +5417,7 @@ def test_the_ledger_tells_the_caller_whether_it_owes_a_staging_recheck(tmp_path)
 
 
 def test_recovery_scope_rejects_a_stock_code_with_a_trailing_newline():
-    """(*) [Opus-2 low] `_STOCK_CODE_RE` 的 \\Z 此前**没有任何测试守着**。
+    """(*) [Opus-2 low] `STOCK_CODE_RE` 的 \\Z 此前**没有任何测试守着**。
 
     模块里那条注释说「三个正则都改成 \\Z，按判据本身穷尽」并给了实测依据
     （不加 re.MULTILINE 时 `$` 仍容忍**恰好一个尾随换行**），而三个里只有
