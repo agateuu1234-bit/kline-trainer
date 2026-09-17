@@ -14,6 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 MODULES = REPO_ROOT / "kline_trainer_modules_v1.4.md"
 PLAN15 = REPO_ROOT / "kline_trainer_plan_v1.5.md"
+M01 = REPO_ROOT / "docs" / "governance" / "m01-schema-versioning-contract.md"
+TRAINING_SET_DDL = REPO_ROOT / "backend" / "sql" / "training_set_schema_v1.sql"
 
 # ── 守卫①作用域：**后端与治理文档**
 # ⛔ 不得扩成全仓：
@@ -166,3 +168,34 @@ def test_backend_production_side_is_already_generation_two():
     gen = (REPO_ROOT / "backend/generate_training_sets.py").read_text(encoding="utf-8")
     assert re.search(r"^SCHEMA_VERSION = 2\b", gen, re.M)
     assert "PRAGMA user_version = 2;" in gen
+
+
+def test_m01_matrix_training_set_row_matches_backend_ddl():
+    """m01 治理矩阵的训练组行 == 后端 DDL 里**真正写着**的那个值，且带过渡态标注。
+
+    ⚠️ 这条不是「让文档好看」：doc=1 / code=2 的漂移**真的发生过** —— #183（P1）把
+       `training_set_schema_v1.sql` 的 `PRAGMA user_version` 改成 2，而 m01 那行没人动，
+       且当时**没有任何测试在读它** ⇒ 漂移安安静静地存在了两周。
+    ⛔ **判据不是「等于字面量 2」**：那样在下一次 bump 时会跟 DDL 一起说谎（两边都改错也全绿）。
+       判据是「等于**从 DDL 解析出来的值**」——它把两个独立来源钉在一起，任一边单独动都会红。
+    ⛔ 也不能只比值：只断言值 = 2 会让 m01 声称「训练组第 2 代」，而 P3a 的守卫**同时**认证
+       「App 读取端 = 1」；谁拿 m01 去写读取端就会直接写 2、越过切片次序（与 spec 3b2 同一形状）。
+    """
+    ddl = TRAINING_SET_DDL.read_text(encoding="utf-8")
+    m = re.search(r"^PRAGMA user_version = (\d+);", ddl, re.M)
+    assert m, "training_set_schema_v1.sql 里找不到 `PRAGMA user_version = N;` 语句"
+    ddl_version = m.group(1)
+
+    rows = [l for l in M01.read_text(encoding="utf-8").splitlines()
+            if l.startswith("|") and "训练组 SQLite `PRAGMA user_version`" in l]
+    assert len(rows) == 1, (
+        f"m01 矩阵里训练组行应恰好 1 行，实测 {len(rows)} 行 —— "
+        f"0 行 = 被整行删掉（删证据不是订正）；>1 行 = 又抄了一份")
+
+    cells = [c.strip() for c in rows[0].strip("|").split("|")]
+    assert cells[1] == f"`{ddl_version}`", (
+        f"m01 矩阵训练组行写 {cells[1]}，而后端 DDL 实际是 `{ddl_version}` —— 文档与代码漂移")
+
+    assert _TRANSITION_NOTE in rows[0], (
+        "m01 训练组行改了值但**没带过渡态标注** —— 治理矩阵会声称「训练组已第 2 代」而不说"
+        "App 读取端仍是 1，谁照它去写读取端就会越过切片次序")
