@@ -18,8 +18,12 @@ jobs:
       # 为什么这条检查放在本 workflow 而不是留在 backend-tests.yml 自己那道 job 里：
       # 那道 job 的判据跑在它自己看守的工作流内。一个「只改 backend-tests.yml、
       # 同时给 pull_request 和 push 都加上把该文件排除在外的 paths」的 PR，会让那道
-      # 工作流一次都不启动 —— 判据永远执行不到，而它又不是必需检查，于是能合进去，
-      # 把「只改 scripts/** 或 iOS 契约文件的 PR 不跑后端测试」这个盲区原样放回来
+      # 工作流一次都不启动 —— 判据永远执行不到。canonical 清单已把 backend pytest 列为
+      # 必需检查，于是分两种情形：**管理员应用该清单之后**，那种 PR 会卡在
+      # 「Expected — waiting for status」而合不进去；**在应用之前**，它仍能合进去，
+      # 把「只改 scripts/** 或 iOS 契约文件的 PR 不跑后端测试」这个盲区原样放回来。
+      # 两种情形下判据都仍须放在本 workflow：「卡住」不等于「被判定为违规」，
+      # 也给不出可读的失败原因。
       # （codex R5；详见 docs/superpowers/plans/2026-08-30-ci-paths-suite-external-inputs.md）。
       # 本 workflow 既是分支保护的**必需检查**、又**无 paths 过滤**，所以那种 PR 在这里
       # 照样被拦在合并之前；backend-tests.yml 被整个删掉也一样拦得住（判据里有存在性断言）。

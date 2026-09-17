@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# admin-configure-required-checks.sh — admin 执行的 runbook：幂等配置 main ruleset 的 app-target required checks（Catalyst + app-build；canonical 列表见 build-protection-put-payload.py REQUIRED_CONTEXTS）。
+# admin-configure-required-checks.sh — admin 执行的 runbook：幂等配置 main ruleset 的 app-target required checks（canonical 列表 = build-protection-put-payload.py 的 REQUIRED_CONTEXTS，条数会随它变化）。
 #
 # 缺省 dry-run（只打印 diff 不 mutate）；--apply 才真改。源真相 = Rulesets API。
 # mutation safety：discover+snapshot(raw 计算 / redacted 审计分离) → preflight(name/target/绑默认分支/active/有 rsc 规则) →
@@ -68,7 +68,7 @@ assert_and_evidence() {
   fi
   rm -f "$tmp"
   if [ "$rc" -eq 0 ]; then
-    echo "GATE PASS：app-target required checks（Catalyst + app-build）已绑 app + active。evidence: $ARTIFACT_DIR/verify-evidence.txt"
+    echo "GATE PASS：canonical REQUIRED_CONTEXTS 的全部 required checks 已绑 app + active。evidence: $ARTIFACT_DIR/verify-evidence.txt"
   fi
   return "$rc"
 }
@@ -111,7 +111,7 @@ sys.exit(0)
 PY
 }
 
-# post-mutation 统一分类器（R4-F1 绝不自动 rollback；R6-F2 成功判据 = 保留不变量，非仅 Catalyst 谓词）。
+# post-mutation 统一分类器（R4-F1 绝不自动 rollback；R6-F2 成功判据 = 保留不变量，非仅「required checks 在位」谓词）。
 # re-read 实际状态 → preservation_ok(payload, reread)：
 #   保留齐全(0)  → 成功（容许并发合法追加）；再 assert 写 evidence，return 0
 #   观测失败(2)  → 状态未知，人工介入，return 1
