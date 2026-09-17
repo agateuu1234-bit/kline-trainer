@@ -140,10 +140,19 @@ def test_assign_non_min_period_global_index_is_null():
     assert out["60m"]["global_index"].isna().all()
 
 def test_assign_end_global_index_interior_historical_trailing():
+    """新公式（spec §2.2）下的期望值。3m 轴 = [0,10,20,30,40,50]（n3=6）。
+
+    · 15m 标收盘 [0,30,60]  ⇒ upper 即本根 ⇒ bisect_right = 1/4/6 ⇒ −1 ⇒ [0,3,5]
+    · 60m 标收盘 [-100,-90,40] ⇒ upper=-100/-90 落在轴前 ⇒ clamp 到 0；40 ⇒ 5−1=4 ⇒ [0,0,4]
+    · monthly 标开盘侧 [-100,20] ⇒ 两者都落在 1970-01，月末 = 2649599（1970-01-31
+      23:59:59 Asia/Shanghai）已超过轴末根 50 ⇒ 均 clamp 到 5 ⇒ [5,5]
+    ⚠️ monthly 这组在本 fixture 上判别力归零（两根都被 clamp），
+       真实量级的 monthly 判据见 test_assign_monthly_realistic_scale。
+    """
     out = assign_global_indices(_index_windows())
-    assert list(out["15m"]["end_global_index"]) == [2, 5, 5]
-    assert list(out["60m"]["end_global_index"]) == [0, 3, 5]
-    assert list(out["monthly"]["end_global_index"]) == [1, 5]
+    assert list(out["15m"]["end_global_index"]) == [0, 3, 5]
+    assert list(out["60m"]["end_global_index"]) == [0, 0, 4]
+    assert list(out["monthly"]["end_global_index"]) == [5, 5]
 
 def test_assign_end_global_index_monotonic_and_in_range():
     out = assign_global_indices(_index_windows())
@@ -766,3 +775,286 @@ def test_stock_lock_key_deterministic_and_int4():
     assert a == b and 0 <= a <= 0x7FFFFFFF          # 同 code 恒定、落 int4 正区间
     assert isinstance(stock_lock_key("000002.SZ"), int)  # 别股也返 int（碰撞允许，故不断言不等）
     assert IMPORT_GEN_LOCK_KEY != B2_GENERATION_LOCK_KEY
+
+
+# ── Task 1：_week_end_date 必须在模块级，且 select_period_window 用的就是它（变异 B66）
+
+def _ep(y, m, d, H=0, M=0):
+    """构造 Asia/Shanghai 的 Unix 秒（测试内独立实现，⛔ 不 import 被测模块的时区常量）。"""
+    import datetime as _d
+    from zoneinfo import ZoneInfo
+    return int(_d.datetime(y, m, d, H, M, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+
+def test_week_end_date_is_module_level_and_shared(monkeypatch):
+    """B66：period_end(weekly) 与 select_period_window 必须共用同一个 _week_end_date。
+
+    判据 = monkeypatch 模块级函数后，两个消费者各自确实调到了它——
+    - select_period_window：若内部仍有一份嵌套闭包，spy 不会被调用 ⇒ 本测试红；
+    - period_end(weekly)：若 weekly 分支就地内联了等价公式（例如
+      `d + timedelta(days=(6 - d.weekday()))`），语义不变但没调模块级函数，spy 同样不会被调用
+      ⇒ 本测试红。
+    两处都要各自断言，缺一侧就挡不住那一侧漂移出第二份实现
+    ⇒ 「共用」没有兑现（这正是 spec §3.3 行 3e 要防的「两份实现漂移」）。
+    """
+    import generate_training_sets as g
+    assert hasattr(g, "_week_end_date"), "_week_end_date 必须提到模块级（现在还在函数体内）"
+
+    calls = []
+    real = g._week_end_date
+
+    def spy(e):
+        calls.append(e)
+        return real(e)
+
+    monkeypatch.setattr(g, "_week_end_date", spy)
+    bars = _df("weekly", [_ep(2026, 3, 23), _ep(2026, 3, 30)])
+    g.select_period_window(bars, _ep(2026, 4, 2), before_cap=None,
+                           after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
+    assert calls, "select_period_window 没有调用模块级 _week_end_date（说明它还在用内部闭包）"
+
+    calls.clear()
+    g.period_end(_ep(2026, 3, 23), "weekly")
+    assert calls, "period_end(weekly) 没有调用模块级 _week_end_date（说明它另抄了一份公式）"
+
+
+# ── Task 2：period_end 纯函数（spec §2.2）
+
+def _sh_dt(epoch):
+    """Unix 秒 → Asia/Shanghai 的 datetime（测试内独立实现）。"""
+    import datetime as _d
+    from zoneinfo import ZoneInfo
+    return _d.datetime.fromtimestamp(int(epoch), ZoneInfo("Asia/Shanghai"))
+
+
+def test_period_end_close_labelled_returns_input_unchanged():
+    """3m / 15m / 60m 的 datetime 本身就是收盘时刻 ⇒ 原样返回（spec §2.1）。"""
+    from generate_training_sets import period_end
+    e = _ep(2026, 4, 2, 11, 30)
+    for p in ("3m", "15m", "60m"):
+        assert period_end(e, p) == e
+
+
+def test_period_end_daily_is_end_of_that_trading_day():
+    from generate_training_sets import period_end
+    got = _sh_dt(period_end(_ep(2026, 4, 2), "daily"))
+    assert (got.year, got.month, got.day) == (2026, 4, 2)
+    assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_weekly_is_that_weeks_sunday():
+    """含两类真实边界（spec §3.1 实测）：首日非周一、跨年周。
+
+    ⛔ 跨年周是 isocalendar() 的坑：date(2024,12,30).isocalendar() 的 ISO 年是 2025。
+    本函数一律 6 - weekday()，与 ISO 年无关。
+    """
+    from generate_training_sets import period_end
+    import datetime as _d
+    cases = [
+        (_ep(2024, 12, 30), _d.date(2025, 1, 5)),    # 跨年周（周一 → 次年周日）
+        (_ep(2025, 12, 29), _d.date(2026, 1, 4)),    # 跨年周
+        (_ep(2025, 2, 5),   _d.date(2025, 2, 9)),    # 首日非周一（春节后周三）
+        (_ep(2025, 10, 9),  _d.date(2025, 10, 12)),  # 首日非周一（国庆后周四）
+        (_ep(2026, 3, 23),  _d.date(2026, 3, 29)),   # 常规周一
+    ]
+    for e, expected_date in cases:
+        got = _sh_dt(period_end(e, "weekly"))
+        assert got.date() == expected_date, f"{_sh_dt(e).date()} 的周日应为 {expected_date}"
+        assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_monthly_is_last_moment_of_that_month():
+    from generate_training_sets import period_end
+    import datetime as _d
+    cases = [
+        (_ep(2026, 2, 2),  _d.date(2026, 2, 28)),   # 平年 2 月
+        (_ep(2024, 2, 5),  _d.date(2024, 2, 29)),   # 闰年 2 月
+        (_ep(2026, 4, 1),  _d.date(2026, 4, 30)),
+        (_ep(2026, 12, 1), _d.date(2026, 12, 31)),  # 跨年边界
+    ]
+    for e, expected_date in cases:
+        got = _sh_dt(period_end(e, "monthly"))
+        assert got.date() == expected_date
+        assert (got.hour, got.minute, got.second) == (23, 59, 59)
+
+
+def test_period_end_rejects_unknown_period():
+    """⛔ 显式常量表，不做字符串把戏 ⇒ 未知周期必须炸，不能静默走某个分支。"""
+    from generate_training_sets import period_end
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        period_end(_ep(2026, 4, 2), "30m")
+
+
+# ── Task 3：分流后的边界判据（spec §1.2 / §1.3；变异 B1 / B2 / B3 / B4 / B5 / B7）
+
+def _intraday_axis():
+    """两个交易日、每日 4 根 3m：09:33 / 11:30 / 14:57 / 15:00。
+
+    ⇒ 11:30→14:57 之间是**午休缺口**、15:00→次日 09:33 之间是**日界**。
+    下标：[0]=04-02 09:33 [1]=04-02 11:30 [2]=04-02 14:57 [3]=04-02 15:00
+          [4]=04-03 09:33 [5]=04-03 11:30 [6]=04-03 14:57 [7]=04-03 15:00
+    """
+    return [_ep(2026, 4, d, H, M)
+            for d in (2, 3)
+            for (H, M) in ((9, 33), (11, 30), (14, 57), (15, 0))]
+
+
+def test_assign_intraday_crosses_lunch_and_day_boundary():
+    """B1 / B5：日内周期必须用【本根 datetime】当 upper，不得用「下一根 − 1」或固定偏移。
+
+    15m 标收盘 [04-02 11:30, 04-02 15:00, 04-03 11:30, 04-03 15:00]
+      新公式 ⇒ [1, 3, 5, 7]      （每根都精确指向它自己那一刻的 3m）
+      旧公式 ⇒ [2, 4, 6, 7]      （跨午休 / 跨日各晚 1 根；末根因退化而恰好相同）
+    60m 标收盘 [04-02 15:00, 04-03 15:00]
+      新公式 ⇒ [3, 7]            旧公式 ⇒ [6, 7]（第一根晚了 3 根 = 跨了一整个日界）
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3], axis[5], axis[7]]),
+        "60m": _df("60m", [axis[3], axis[7]]),
+        "daily": _df("daily", [_ep(2026, 4, 2), _ep(2026, 4, 3)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["15m"]["end_global_index"]) == [1, 3, 5, 7]
+    assert list(out["60m"]["end_global_index"]) == [3, 7]
+
+
+def test_assign_daily_unchanged_by_the_split():
+    """正向对照（spec §4.1 ①）：`daily` 在新旧两式下**逐根相同** ⇒ 必须放行。
+
+    daily 标开盘侧 [04-02 00:00, 04-03 00:00]
+      新公式：period_end = 当日 23:59:59 ⇒ [3, 7]
+      旧公式：下一根 − 1 / 末根退化 ⇒ 同样 [3, 7]
+    ⇒ 若把分流方向弄反（变异 B2）或顺手也改了 daily（变异 B7），本条会红。
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3], axis[5], axis[7]]),
+        "60m": _df("60m", [axis[3], axis[7]]),
+        "daily": _df("daily", [_ep(2026, 4, 2), _ep(2026, 4, 3)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["daily"]["end_global_index"]) == [3, 7]
+    assert list(out["3m"]["end_global_index"]) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(out["3m"]["global_index"]) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def test_assign_monthly_realistic_scale():
+    """monthly 在真实量级上的判据（spec §3.3 行 4c 要求的专用用例）。
+
+    3m 轴同上（2026-04-02 / 04-03，8 根）。monthly 标开盘侧：
+      2026-02-02 ⇒ 月末 02-28 23:59:59，早于轴首 ⇒ clamp 0
+      2026-03-02 ⇒ 月末 03-31 23:59:59，早于轴首 ⇒ clamp 0
+      2026-04-01 ⇒ 月末 04-30 23:59:59，晚于轴末 ⇒ clamp 7
+    ⇒ [0, 0, 7]。⭐ 前两根落在 0 = spec §4.1 特征①「≥2 根落在 end_global_index = 0」。
+    ⭐ 判别力：若把分流方向弄反（变异 B2，monthly 被当成收盘标注）⇒ upper 变成
+       02-02 / 03-02 / 04-01 这三个开盘侧时刻本身，全都早于轴首 ⇒ 结果变成 [0, 0, 0]，本条红。
+       把「月末」误算成月初/月中同理会红。
+    ⛔ 本条对**时区**变异（B4：period_end 里 tzinfo 改 UTC）**没有**判别力 —— 实测三根仍是
+       [0, 0, 7]（月末整体晚 8 小时，但相对轴首/轴末的位置没变）。B4 由 test_period_end_daily /
+       _weekly / _monthly 三条抓：它们直接断言 Asia/Shanghai 下的 23:59:59。
+    ⛔ 本条对**旧公式本身**（B1，即把改动整体还原）在本 fixture 上同样**没有**判别力 ——
+       三根巧合地新旧公式都给出 [0, 0, 7]。B1 对 monthly 的判别力由
+       test_assign_end_global_index_interior_historical_trailing 更新后的期望值
+       （[1, 5] → [5, 5]）覆盖。
+    """
+    axis = _intraday_axis()
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[3]]),
+        "60m": _df("60m", [axis[3]]),
+        "daily": _df("daily", [_ep(2026, 4, 2)]),
+        "weekly": _df("weekly", [_ep(2026, 3, 30)]),
+        "monthly": _df("monthly", [_ep(2026, 2, 2), _ep(2026, 3, 2), _ep(2026, 4, 1)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["monthly"]["end_global_index"]) == [0, 0, 7]
+
+
+def test_assign_weekly_hole_uses_calendar_period_end():
+    """B3：开盘侧**不得**用「下一根 − 1」—— 周线序列允许有洞（spec §1.3）。
+
+    3m 轴 = 03-27(Fri) / 03-30(Mon) / 04-02(Thu) 各 2 根（09:33、15:00），共 6 根：
+      [0]=03-27 09:33 [1]=03-27 15:00 [2]=03-30 09:33 [3]=03-30 15:00
+      [4]=04-02 09:33 [5]=04-02 15:00
+    起点设 04-02（**周四，周中**）⇒ select_period_window 的 weekly before 过滤会删掉
+    03-30 那根（其周末 04-05 ≥ start 日 04-02）⇒ 窗口里只剩 03-23 一根 ⇒ **有洞**。
+
+      新公式：period_end(03-23, weekly) = 03-29 23:59:59 ⇒ 指向 03-27 15:00 = 下标 1
+      旧公式：「下一根」已被删 ⇒ 退化成轴末根 ⇒ 下标 5
+    ⇒ 差 4 根，判别力充足。
+    """
+    axis = [_ep(y, m, d, H, M)
+            for (y, m, d) in ((2026, 3, 27), (2026, 3, 30), (2026, 4, 2))
+            for (H, M) in ((9, 33), (15, 0))]
+    raw_weekly = _df("weekly", [_ep(2026, 3, 23), _ep(2026, 3, 30)])
+    win_weekly = select_period_window(raw_weekly, _ep(2026, 4, 2), before_cap=None,
+                                      after_end=_ep(2026, 4, 3, 23, 59), period="weekly")
+    assert len(win_weekly) == 1, "03-30 那根应被 weekly 跨界过滤删掉（这是本用例的前提）"
+
+    windows = {
+        "3m": _df("3m", axis),
+        "15m": _df("15m", [axis[1], axis[5]]),
+        "60m": _df("60m", [axis[5]]),
+        "daily": _df("daily", [_ep(2026, 4, 2)]),
+        "weekly": win_weekly,
+        "monthly": _df("monthly", [_ep(2026, 3, 2)]),
+    }
+    out = assign_global_indices(windows)
+    assert list(out["weekly"]["end_global_index"]) == [1]
+
+
+# ── Task 4：确定性压缩（spec §3.4「其它硬要求」；变异 B34）
+
+def test_zip_and_hash_is_deterministic_across_runs(tmp_path):
+    """同一输入连跑两次 ⇒ zip 字节与 CRC32 完全相同。
+
+    ⭐ 这是 P4 恢复模型的唯一依据（「产物有疑就重跑 R2，必得同一批包」）。
+    默认 zipfile 会把 db 文件的 mtime 嵌进 zip 头 ⇒ 不固定 date_time 就每跑一次都变。
+    构造：先造一份 .db，再改它的 mtime（模拟两次运行落在不同时刻），压两次比字节。
+    """
+    import os
+    from generate_training_sets import zip_and_hash
+
+    db = tmp_path / "x.db"
+    db.write_bytes(b"deterministic-payload" * 64)
+
+    z1 = tmp_path / "a.zip"
+    os.utime(db, (1_600_000_000, 1_600_000_000))
+    h1 = zip_and_hash(db, z1)
+    b1 = z1.read_bytes()
+
+    z2 = tmp_path / "b.zip"
+    os.utime(db, (1_700_000_000, 1_700_000_000))   # mtime 变了
+    h2 = zip_and_hash(db, z2)
+    b2 = z2.read_bytes()
+
+    assert h1 == h2, "CRC32 随 mtime 变化 ⇒ 确定性不成立"
+    assert b1 == b2, "zip 字节随 mtime 变化 ⇒ 确定性不成立"
+
+    import stat as _st
+    import zipfile as _z
+    with _z.ZipFile(z1) as zf:
+        info = zf.infolist()[0]
+        assert info.external_attr == (_st.S_IFREG | 0o644) << 16, (
+            f"external_attr 必须含常规文件类型位 S_IFREG —— App 侧 DefaultZipExtractor "
+            f"按 entry.type 分流（实测 {info.external_attr:#x}）")
+
+
+def test_zip_member_name_is_db_basename(tmp_path):
+    """成员名契约不变（`<code>_<start>.db`）—— 改确定性时不得顺手改它。"""
+    import zipfile as _z
+    from generate_training_sets import zip_and_hash
+    db = tmp_path / "600519.SH_1762099200.db"
+    db.write_bytes(b"payload")
+    zp = tmp_path / "out.zip"
+    zip_and_hash(db, zp)
+    with _z.ZipFile(zp) as zf:
+        assert zf.namelist() == ["600519.SH_1762099200.db"]

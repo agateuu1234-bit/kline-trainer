@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """build-protection-put-payload.py — 从 main 分支 ruleset GET JSON 构造幂等 PUT payload。
 
-确保 required_status_checks 规则内存在全部 required checks（Catalyst + app-build）且绑 GitHub Actions app
+确保 required_status_checks 规则内存在 canonical 清单 REQUIRED_CONTEXTS 的全部 context 且绑 GitHub Actions app
 (integration_id=15368)，防止任意来源伪造同名 status 满足 gate（trust-boundary spoof）。
 纯函数式：不发任何网络请求。确定性序列化（sort_keys + 紧凑分隔符）保证幂等可 diff。
 
@@ -18,8 +18,9 @@ import sys
 GITHUB_ACTIONS_INTEGRATION_ID = 15368   # GitHub Actions app 全局 id（UI: source = GitHub Actions）
 CATALYST_CONTEXT = "Mac Catalyst build-for-testing on macos-15"
 APP_BUILD_CONTEXT = "iOS app build-for-running on macos-15"
+BACKEND_TESTS_CONTEXT = "backend pytest (full suite)"
 # canonical 必需 context 单一真相（codex H-NEW-2）；verifier/admin/测试经 --list-contexts 派生
-REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT]
+REQUIRED_CONTEXTS = [CATALYST_CONTEXT, APP_BUILD_CONTEXT, BACKEND_TESTS_CONTEXT]
 # GitHub rulesets PUT 接受的字段；其余（id/node_id/created_at/updated_at/_links/source/source_type 等）只读，必须剥离
 PUT_FIELDS = ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")
 
@@ -28,7 +29,7 @@ def build_payload(ruleset, ensure_required=True):
     """从 GET ruleset 构造规范化 PUT payload。
 
     剥离只读字段（id/node_id/created_at/updated_at/_links/source/source_type 等），保证 PUT 可接受。
-    ensure_required=True：幂等确保 REQUIRED_CONTEXTS（Catalyst + app-build）全在位且绑 app（正常 apply payload）。
+    ensure_required=True：幂等确保 REQUIRED_CONTEXTS 的每一条全在位且绑 app（正常 apply payload）。
     ensure_required=False：仅规范化、不动 check（rollback 形状——忠实复制原状态；
       用 raw GET 当 rollback PUT 会被 GitHub 422 拒绝，见 codex R1-F1）。
     """

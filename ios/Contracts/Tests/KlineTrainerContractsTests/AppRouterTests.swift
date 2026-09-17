@@ -114,6 +114,52 @@ struct AppRouterTests {
 
     // [C] 修：HomeContent 的 configuredCapital/hasPending 只是 init 参，非 stored property——断言改读 stored 派生属性
     //         （hasCachedSets / isHistoryEmpty 是 stored；hasPending→isResuming 派生）。
+    /// ⭐⭐ 钉住「存档读不出来时，关掉 App 重开能出来」这条**用户可见文案所依赖的**路径。
+    ///
+    /// 「暂时退不出本局」的 `.unreadable` 支对用户说「可以直接关闭 App 再重新打开」。
+    /// 那句话能不能兑现，全靠 `loadHome()` 里 `try pendingRepo.loadPending()` 抛错后
+    /// 走 catch → `emptyHome()`（`hasPending: false`）⇒ 首页落到「开始训练」，人就出来了。
+    /// ⛔ 在此之前**没有任何测试**钉这条路径（Kimi R3-low）：若哪天 catch 改成保留旧 homeContent
+    ///    或渲染错误页，那句文案会**无声腐烂**，而扫文案的守卫照样绿（它只检查文案里有没有
+    ///    「关闭 App」四个字，管不到这四个字兑不兑现）。
+    @Test("⭐⭐存档读不出来时 loadHome 落到空首页（=「开始训练」）—— 文案里那条逃生路的地基")
+    func loadHome_unreadablePending_fallsBackToEmptyHomeSoUserCanEscape() async throws {
+        let f = Self.makeRouter(seedRecords: [])
+        // 用**真实开局**产生一条 pending（比手工拼字段更贴近实际）：
+        // 若不注入故障，首页本该是「继续训练」——下面的反向对照证明这一点。
+        let engine = try await f.coordinator.startNewNormalSession()
+        try await f.coordinator.saveProgress(engine: engine)
+        await f.coordinator.endSession()
+
+        // ⚠️ **必须先把首页装到「继续训练」**再注入故障。
+        //    否则这条测试是**恒真**的：`homeContent` 的初值本来就是空首页（isResuming == false），
+        //    断言在「catch 什么都不做」的变异下照样成立 —— 实测过，那次变异一条都没红。
+        await f.router.loadHome()
+        #expect(try #require(f.router.homeContent).isResuming == true, "前置：此刻应是「继续训练」")
+
+        f.pending.failNextLoadPending = .persistence(.dbCorrupted)
+        await f.router.loadHome()
+
+        let home = try #require(f.router.homeContent)
+        #expect(home.isResuming == false,
+                "⛔ 读不出存档时首页必须**落回**「开始训练」——否则文案许诺的『关掉重开就能出来』兑现不了")
+        #expect(home.primaryActionLabel == "开始训练")
+    }
+
+    @Test("反向对照：pending 读得出来时首页是「继续训练」（证明上一条不是恒真）")
+    func loadHome_readablePending_showsResume() async throws {
+        let f = Self.makeRouter(seedRecords: [])
+        let engine = try await f.coordinator.startNewNormalSession()
+        try await f.coordinator.saveProgress(engine: engine)
+        await f.coordinator.endSession()
+
+        await f.router.loadHome()
+
+        let home = try #require(f.router.homeContent)
+        #expect(home.isResuming == true)
+        #expect(home.primaryActionLabel == "继续训练")
+    }
+
     @Test("loadHome 装配：有缓存集 + 有 records → hasCachedSets=true / isHistoryEmpty=false / 无错误")
     func loadHome_assembles() async {
         let f = Self.makeRouter(seedRecords: [Self.record(id: 1, profit: 100), Self.record(id: 2, profit: -50)])

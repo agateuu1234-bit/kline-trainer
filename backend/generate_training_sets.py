@@ -13,16 +13,19 @@
 # 决议：
 # - D2 最小周期 = 3m，global_index 仅赋 3m（其它 NULL）
 # - D3 content_hash = format(zlib.crc32(zip_file_bytes) & 0xFFFFFFFF, '08x')（8 字符小写；modules L750 字面）
-# - D4 end_global_index = bisect_right(3m_dts, [open,下一open) 上界) - 1，clamp[0,N-1]
+# - D4 end_global_index = bisect_right(3m_dts, period_end(本根 datetime, 周期)) - 1，clamp[0,N-1]
+#      （spec 2026-09-01 §2.2；⛔ 旧表述「[open,下一open) 上界」已作废，见 §1.1）
 # - D5 起始 idx ∈ [30, len-9]，rng 可注入；月线<39 → GenerateSkipException
 # - D6 before=min(pivot,cap)（monthly=ALL），after=[start, after_end]；per-period before≥30 & after≥1 硬校验
 # - D8 SQLite 逐字 training_set_schema_v1.sql；numpy→python int/float，NaN→None
 from __future__ import annotations
 
+import calendar
 import datetime as _dt
 import json
 import random
 import sqlite3
+import stat
 import tempfile
 import zipfile
 import zlib
@@ -34,9 +37,12 @@ from typing import Any, Optional, Sequence
 import pandas as pd
 
 from qmt_normalize import is_valid_stock_code, trading_date
+from qmt_normalize import _SH as _SHANGHAI      # ⭐ 刻意复用私有常量而非另建一个 ZoneInfo：
+                                                #    本片的整个主题就是「不要写第二份」，
+                                                #    tz 对象的单一真相在 qmt_normalize。
 from qmt_resample import period_boundaries
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIN_PERIOD = "3m"
 # 训练组包含的周期（plan §8.3 period_configs；最细=3m）
 PERIODS = ("monthly", "weekly", "daily", "60m", "15m", "3m")
@@ -52,6 +58,51 @@ B2_GENERATION_LOCK_KEY = 0x42345CEE
 
 # 与 B2_GENERATION_LOCK_KEY 刻意不同（同用会让 B1 导入把 B2 挡在启动外）。
 IMPORT_GEN_LOCK_KEY = 0x42345CF0
+
+
+def _week_end_date(open_epoch: int) -> _dt.date:
+    """该周的周日（Asia/Shanghai 交易日历）。
+
+    ⭐ 单一真相：`select_period_window` 的 weekly 过滤与 `period_end(weekly)` **共用本函数**
+    —— 两处各写一份正是本次整个缺陷的成因（spec §1.4 / §3.1）。
+    ⛔ **不得用 `isocalendar()` 的周数反推**：`date(2024,12,30).isocalendar()` 的 ISO 年是
+    **2025**，任何以 `(iso_year, iso_week)` 为键的写法都会在跨年周出错。实现一律 `6 - weekday()`。
+    """
+    d = trading_date(open_epoch)
+    return d + _dt.timedelta(days=(6 - d.weekday()))
+
+
+# 周期 → datetime 标注约定（spec §2.1）。⛔ 显式常量表，不得用「周期名里有没有 m」之类的字符串把戏。
+_CLOSE_LABELLED = frozenset({"3m", "15m", "60m"})
+
+
+def period_end(datetime_epoch: int, period: str) -> int:
+    """spec §2.2：这根 K 线所属【日历周期】的**结束时刻**（Unix 秒）。
+
+    - **收盘标注**（`3m` / `15m` / `60m`）：`datetime` 本身就是收盘时刻 ⇒ 原样返回；
+    - **开盘侧标注**（`daily` / `weekly` / `monthly`）：返回该日历周期的最后一秒。
+
+    时区一律 tz 数据库的 `Asia/Shanghai`（⛔ 不得写固定 `+08:00`）。
+    ⚠️ 当前数据下两种写法结果完全相同（1991 年及更早的夏令时区间全在 3m 轴起点之前、
+    一律 clamp 到 0）⇒ **没有任何测试能抓住这个差异**，故只写进规矩、不设守卫。
+
+    ⛔ **开盘侧不得退化成「下一根 − 1」**：那些序列**允许有洞**（spec §1.3 —— `select_period_window`
+    会故意删掉跨训练起点 / 跨 `after_end` 的那根周线），洞前那根会被判成「在洞里某个时刻才完成」。
+    """
+    if period in _CLOSE_LABELLED:
+        return int(datetime_epoch)
+    d = trading_date(datetime_epoch)
+    if period == "daily":
+        last = d
+    elif period == "weekly":
+        last = _week_end_date(datetime_epoch)
+    elif period == "monthly":
+        last = _dt.date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
+    else:
+        raise ValueError(f"period_end: 未知周期 {period!r}（认识的只有 {sorted(_CLOSE_LABELLED)} "
+                         f"+ daily/weekly/monthly）")
+    return int(_dt.datetime(last.year, last.month, last.day, 23, 59, 59,
+                            tzinfo=_SHANGHAI).timestamp())
 
 
 def stock_lock_key(stock_code: str) -> int:
@@ -92,10 +143,6 @@ def select_period_window(bars: pd.DataFrame, start_datetime: int, before_cap: Op
     before_count = pivot if before_cap is None else min(pivot, before_cap)
     before = b.iloc[pivot - before_count: pivot]
     after = b[(b["datetime"] >= start_datetime) & (b["datetime"] <= after_end)]
-
-    def _week_end_date(open_epoch):
-        d = trading_date(open_epoch)
-        return d + _dt.timedelta(days=(6 - d.weekday()))   # 该周周日
 
     if period == "weekly":
         ae_date = trading_date(after_end)
@@ -271,9 +318,15 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
 
 
 def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """D2/D4：3m 升序赋 global_index 0,1,2…（其它周期 NULL）；所有周期(含3m)
-    end_global_index = 覆盖区间 [open, 下一根 open) 内最后一根 3m 的 global_index
-    = bisect_right(3m_dts, upper) - 1，clamp[0, N3-1]（datetime 二分匹配）。"""
+    """D2/D4：3m 升序赋 global_index 0,1,2…（其它周期 NULL）；所有周期（含 3m）
+    end_global_index = 「这根 K 线在全局 3 分钟轴上**于第几刻形成**」
+    = bisect_right(3m_dts, period_end(本根 datetime, 周期)) - 1，clamp[0, N3-1]。
+
+    ⭐ upper 由 `period_end` 按 datetime 标注语义分流（spec §2.1 / §2.2）：
+       收盘标注（3m/15m/60m）取本根 datetime；开盘侧标注（daily/weekly/monthly）
+       取该【日历周期】的结束时刻。
+    ⛔ **不得退化成「下一根 open − 1」** —— 开盘侧序列允许有洞（spec §1.3）。
+    """
     three = windows[MIN_PERIOD].sort_values("datetime").reset_index(drop=True)
     three_dts = three["datetime"].tolist()
     n3 = len(three_dts)
@@ -285,9 +338,8 @@ def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.Data
         d = df.sort_values("datetime").reset_index(drop=True).copy()
         opens = d["datetime"].tolist()
         egi = []
-        for i, _open in enumerate(opens):
-            nxt = opens[i + 1] if i + 1 < len(opens) else None
-            upper = (nxt - 1) if nxt is not None else three_dts[-1]
+        for _open in opens:
+            upper = period_end(_open, period)
             j = bisect_right(three_dts, upper) - 1
             egi.append(max(0, min(j, n3 - 1)))
         d["end_global_index"] = egi
@@ -310,10 +362,12 @@ def _float_or_none(v: Any) -> Optional[float]:
 
 
 # 训练组 SQLite DDL（逐字 backend/sql/training_set_schema_v1.sql，D8；本 PR 只读不改源文件）
-# 注：`PRAGMA user_version = 1` 用字面 1（== SCHEMA_VERSION）以逐字对齐冻结 schema 文件
-# （原 f-string `{SCHEMA_VERSION}` 渲染后不含子串 "user_version = 1"，会让验收 grep 锚失配）。
+# 注：`PRAGMA user_version = 2` 用字面 2（== SCHEMA_VERSION）以逐字对齐冻结 schema 文件
+# （原 f-string `{SCHEMA_VERSION}` 渲染后不含子串 "user_version = 2"，会让验收 grep 锚失配）。
+# 锚点在：scripts/acceptance/plan_b2_generate_training_sets.sh:30
+#         docs/acceptance/2026-05-29-pr-b2-generate-training-sets.md:46
 _TRAINING_SET_DDL = """
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 CREATE TABLE meta (
     stock_code TEXT NOT NULL, stock_name TEXT NOT NULL,
     start_datetime INTEGER NOT NULL, end_datetime INTEGER NOT NULL
@@ -366,9 +420,21 @@ def build_training_set_sqlite(db_path: Path, *, stock_code: str, stock_name: str
 
 
 def zip_and_hash(db_path: Path, zip_path: Path) -> str:
-    """D3：把 .db 压进 zip → 返回整个 zip 文件字节的 CRC32（8 字符小写）。"""
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(db_path, arcname=db_path.name)
+    """D3：把 .db 压进 zip → 返回整个 zip 文件字节的 CRC32（8 字符小写）。
+
+    ⭐ **确定性**（spec §3.4「其它硬要求」）：固定 `ZipInfo.date_time` 与权限位，使同一输入
+    **恒产出同一字节** —— `zipfile` 默认把文件 mtime 嵌进 zip 头，不固定就每跑一次 CRC 都变，
+    而运维侧「产物有疑就重跑、必得同一批包」这条恢复前提完全架在本条上。
+    ⛔ 成员名仍是 `db_path.name`（`<code>_<start>.db`），契约不变。
+    """
+    info = zipfile.ZipInfo(filename=db_path.name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    # 固定权限位，避免 umask 影响字节；必须带 S_IFREG 类型位——消费端
+    # （ios DefaultZipExtractor）按 entry.type 分流，缺类型位只能靠解压库的
+    # 兜底启发式（无尾部斜杠猜 .file），不是靠这一位本身。
+    info.external_attr = (stat.S_IFREG | 0o644) << 16
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(info, db_path.read_bytes())
     return crc32_hex(zip_path.read_bytes())
 
 

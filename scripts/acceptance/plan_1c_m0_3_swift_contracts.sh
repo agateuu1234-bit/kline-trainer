@@ -38,8 +38,20 @@ run "file: swift-contracts-smoke.yml" test -s .github/workflows/swift-contracts-
 # ---- Swift 测试（codex round 5 finding: 解析 swift test summary 字符串跨
 # 工具链脆弱。改为 swift test exit code only；测试套件完整性靠前面 3 个
 # 测试文件存在性检查兜底）----
-run "swift test: exit 0" \
-    bash -c 'cd ios/Contracts && swift test'
+# swift test 依赖 Apple 平台专有框架（CoreGraphics / UIKit / SwiftUI / QuartzCore）。
+# 实测 28 个源文件裸 import CoreGraphics（另 10 个在 #if 块内）
+# ⇒ 在非 Darwin 平台上【结构上】无法编译，不是可修的失败。
+# 该覆盖在 CI 上由 .github/workflows/swift-contracts-smoke.yml（runs-on: macos-15）承担。
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    run "swift test: exit 0" \
+        bash -c 'cd ios/Contracts && swift test'
+else
+    echo ""
+    echo "========== swift test: exit 0 =========="
+    echo "SKIP: 非 Darwin 平台（$(uname -s)）。本 package 依赖 Apple 专有框架"
+    echo "      （28 个源文件裸 import CoreGraphics），结构上无法在此编译。"
+    echo "      该覆盖由 .github/workflows/swift-contracts-smoke.yml（macos-15）承担。"
+fi
 
 # ---- YAML 合法 ----
 run "yaml: swift-contracts-smoke.yml parse" \

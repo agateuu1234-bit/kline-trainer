@@ -172,4 +172,8 @@ def test_download_unknown_id_returns_404():
 # ---- /health 回归 ----
 def test_health_still_ok():
     client, _ = _client([])
-    assert client.get("/health").json() == {"status": "ok"}
+    # 提醒下一个读者：_client([]) 注入的 InMemory repo 走的是 dependency_overrides，
+    # 而 current_repository_kind() 刻意**绕开** Depends 直接读模块全局。所以下面
+    # "repository": "inmemory" 断的是那个没被动过的模块全局，不是这里注入的那个 repo。
+    # （不是恒真断言：把 current_repository_kind() 变异成返回 "asyncpg" 这条会红。）
+    assert client.get("/health").json() == {"status": "ok", "repository": "inmemory"}

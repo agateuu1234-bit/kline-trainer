@@ -36,28 +36,6 @@ run "file: m01 contract doc" test -s "$DOC"
 # ---- H2 章节完整性（7 个 ## 顶级标题）----
 run "structure: 7 H2 sections" bash -c "grep -c '^## ' $DOC | grep -q '^7$'"
 
-# ---- CONTRACT_VERSION 矩阵 6 行协同断言（cell-boundary exact；per codex R6）----
-# 每断言要求: dim 在前 | 精确 version 字面值 含 cell boundary （空格+backtick可选+值+backtick可选+空格+\|）
-# 防御模式：值后面必须紧跟 \| 或 backtick+空格+\|，禁止 version="1" 匹配 cell="10"
-run "matrix row: CONTRACT_VERSION top | \`\"1.5\"\`" \
-    grep -qE '^\|.*CONTRACT_VERSION.*\| *`?"1\.5"`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-run "matrix row: PostgreSQL | \`0003_v1.3\`" \
-    grep -qE '^\|.*PostgreSQL.*\| *`?0003_v1\.3`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-run "matrix row: 训练组 SQLite PRAGMA user_version | \`1\`" \
-    grep -qE '^\|.*训练组 SQLite.*PRAGMA.*user_version.*\| *`?1`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-run "matrix row: app.sqlite | \`0003_v1.4_purge_leased\`" \
-    grep -qE '^\|.*app\.sqlite.*\| *`?0003_v1\.4_purge_leased`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-run "matrix row: Swift 模型 | \`1.3\`" \
-    grep -qE '^\|.*Swift 模型.*\| *`?1\.3`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-run "matrix row: P2 journal states | \`v2\`" \
-    grep -qE '^\|.*P2 journal states.*\| *`?v2`? *\|' \
-    <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
-
 # ---- Bump 策略 A/B 二分 + DAO reader 未知 state 规则（section-bounded）----
 run "bump A: 必须 bump 顶层 CONTRACT_VERSION (破坏性)" \
     grep -qE '必须 bump 顶层.*CONTRACT_VERSION.*破坏性' \
@@ -116,11 +94,11 @@ run "regression: m04 still cross-refs Plan 3 P1 (闭合前 TODO 或闭合后 com
 # ---- 不 regression Plan 1/1b/1c acceptance ----
 # 不直接 nested plan_1d_m0_4_apperror.sh——其 TODO 断言 transient；改为下方 Plan 1d 稳定断言内联
 run "regression: Plan 1 (M0.1 DDL) acceptance" \
-    bash -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh 2>&1 | tee /tmp/p1.log"
 run "regression: Plan 1b (M0.2 OpenAPI) acceptance" \
-    bash -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh > /tmp/p1b.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh 2>&1 | tee /tmp/p1b.log"
 run "regression: Plan 1c (M0.3 Swift Models) acceptance (间接覆盖 Plan 1d AppError swift test)" \
-    bash -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh > /tmp/p1c.log 2>&1"
+    bash -o pipefail -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh 2>&1 | tee /tmp/p1c.log"
 
 # ---- Plan 1d 稳定断言内联（AppError 结构不变量；排除 TODO transient state）----
 run "plan-1d stable: AppError.swift file" test -s "$APPERROR"

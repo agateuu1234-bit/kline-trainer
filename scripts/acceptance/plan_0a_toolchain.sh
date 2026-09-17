@@ -68,8 +68,18 @@ check "push-to-main in deny list" bash -c '
 '
 
 # 6. FastAPI
+# ⚠️ 判据刻意**不写死条数**（codex R4 实测坐实）：本行原为 `grep -q "1 passed"`，
+#    而 test_health.py 从 1 条扩到 4 条后，测试**全部通过**时这道闸门反而判失败。
+#    条数是会随功能增长的量，把它写进判据等于给自己埋一颗定时炸弹。
+#    现在要两条同时成立：
+#      ① pytest 退出码为 0 —— pytest 在「一条用例都没收集到」时退出码是 5，
+#         所以退出码 0 已蕴含「至少跑了一条」，不会出现「零执行量却判绿」；
+#      ② 结论行形如 `<N> passed` —— 读**执行量**，不读「成功」字样。
+#    用 $(...) 捕获而不是管道，避免管道吞掉 pytest 的退出码。
 check "FastAPI health test passes" bash -c '
-    cd backend && python3 -m pytest tests/test_health.py -q 2>&1 | grep -q "1 passed"
+    cd backend
+    out=$(python3 -m pytest tests/test_health.py -q 2>&1) || exit 1
+    printf "%s\n" "$out" | grep -qE "^[0-9]+ passed"
 '
 
 # 7. NAS preflight — opt-in via ACCEPT_WITH_NAS=1
