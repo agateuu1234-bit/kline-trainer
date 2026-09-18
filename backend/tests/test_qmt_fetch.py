@@ -122,16 +122,31 @@ def test_copy_one_precheck_rejects_via_stat_before_touching_disk(roots):
     assert not (stg_path / (rel + PART)).exists()
 
 
-def test_copy_one_mid_stream_charge_rejects_and_refunds(roots, monkeypatch):
+def test_copy_one_charge_enforces_independently_of_precheck(roots, monkeypatch):
+    # `precheck` 用 `stat` 量到的大小早拒，但源挂在**正在导出**的 SMB 上时那个大小
+    # 可能是陈旧的——真读出来的字节比 `stat` 当时更多。`charge` 必须独立再守一遍，
+    # 不能假定「precheck 过了，逐块扣账就一定不会拒」。用一个「读出来的字节比
+    # `stat` 量到的还多」的桩模拟这种源文件仍在增长的场面。
     src_fd, stg_fd, src_path, stg_path = roots
-    rel = "1m/600000.SH_midstop.csv"
-    _put_source_file(src_path, rel, b"w" * 320)          # 5 块 × 64
+    rel = "1m/600000.SH_growing.csv"
+    _put_source_file(src_path, rel, b"w" * 64)            # `stat` 量到的是 64 字节
     monkeypatch.setattr(qmt_fetch, "_CHUNK", 64)
 
-    budget = ByteBudget(limit=100)                        # 第 2 块（累计 128）会超
+    real_read = os.read
+    call_count = {"n": 0}
+
+    def growing_read(fd, n):
+        call_count["n"] += 1
+        if call_count["n"] <= 3:
+            return b"g" * 64      # 比 `stat` 当时量到的还多读出两块
+        return real_read(fd, n)
+
+    monkeypatch.setattr(os, "read", growing_read)
+
+    budget = ByteBudget(limit=100)   # 64 能通过 precheck；累计到 128 时 charge 该拒
     with pytest.raises(MaxBytesExhausted):
         copy_one(src_fd, stg_fd, rel, budget)
-    assert budget.used == 0                                # 已扣的第 1 块也退还了
+    assert budget.used == 0          # 已扣的第 1 块（64）也退还了
 
 
 # ── D3：源侧叶子非普通文件 ⇒ fetch_missing_file ─────────────────
