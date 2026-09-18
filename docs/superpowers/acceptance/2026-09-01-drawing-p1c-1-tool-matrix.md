@@ -73,9 +73,15 @@
 为使这条记录可被第三方核验，写明三件事：
 
 1. **执行的是上表这一版**（8 条的内容与次序均与本文件当前内容一致）。该版本在执行时尚未落盘成文件，是逐条给出后由 user 照做的；本文件随后把它原样提交（提交 `ab675157`）。⛔ 本文件在此之前的旧版共 8 条，**第 6/7/8 条的内容与次序与上表不同**，那一版**未被执行过**。
-2. **所验构建**：安装的是本片实施提交，其时 head 为 `12ed38f`。⚠️ 该提交因随后 rebase 到新 main 而**不再存在于本分支**，无法从 PR 页面查到。可核验的等价关系是：**本片改动的 5 个文件（`DrawingStyleAvailability.swift` / `Models.swift` + 三个新测试文件）在 rebase 前后逐字相同**，判据：
-   `git diff --name-only f54d9ff 12ed38f -- ios/` 与 `git diff --name-only origin/main HEAD -- ios/` 输出同一份名单；
-   rebase 带来的差异仅为 main 的 #189（`CONTRACT_VERSION` 1.13→1.14 及其三处断言），与本片行为无关。
+2. **所验构建与当前分支的差异，已直接写在下面**（⚠️ 刻意不依赖提交号：装机时 head 为 `12ed38f`，该提交因随后 rebase 而不在本分支上，且推送时的 force-push 会让它不被任何 ref 包含 ⇒ 任何「自己去 diff 那个 SHA」的判据都会在交付那一刻失效）：
+
+   - **进入 App 的源码（`Sources/`）全部差异只有一处**：`Models.swift` 里 `CONTRACT_VERSION` 由 `"1.13"` 改为 `"1.14"`。它来自 main 的 #189，不是本片改的，**上表 8 条没有任何一条读取或依赖这个字符串**。
+   - **本片唯一改变行为的文件 `DrawingStyleAvailability.swift`，与装机构建逐字相同。**
+   - 其余差异全部落在**测试文件**（`DrawingToolStyleMatrixGuardTests.swift` 因评审修复而改动），测试不进入 App 二进制，不影响手机上的行为。
+
+   ⇒ 手机上验的就是当前分支的这套行为。
+   （若 `12ed38f` 仍可达，可复跑核对：`git diff 12ed38f HEAD -- ios/Contracts/Sources/` 输出应恰为上述那一处；
+   `git diff --quiet 12ed38f HEAD -- ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingStyleAvailability.swift` 应为静默通过。）
 3. **测试数据确实灌入**（不是被静默跳过），判据为前后差分：训练记录 0→2、未完成对局 0→1、交易流水 0→4、训练组缓存目录 空→`1__debug-fixture-600001.sqlite`（3.8 MB）。
 
 ⚠️ **若上表任何一条日后被修改，本记录即不再覆盖被改的那一条，须重跑该条并更新本节。**
