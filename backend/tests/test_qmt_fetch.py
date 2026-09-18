@@ -600,6 +600,38 @@ def test_source_changed_mid_run_is_a_run_terminated_family_member():
     assert not issubclass(PathEscapeError, SourceChangedMidRun)
 
 
+# ── fix round 1 · I4：D1 拒绝折进既有的 StockCopyFailed 族（不新增第四族），
+# `slot` 类型错误的裸 `TypeError` 明确不属于任何一族——这里钉住的是「确实
+# 如此」，不是靠模块文档这么说。
+
+def test_copy_stock_invalid_stock_paths_is_a_stock_copy_failed_not_a_new_family(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, "1m/bad_name.csv", "daily/bad_name.csv",
+                   manifest, ledger=ledger, budget=budget)
+
+    assert ei.value.reason == "invalid_stock_paths"
+    assert isinstance(ei.value, StockCopyFailed)
+    assert not isinstance(ei.value, RunTerminated)
+    assert not isinstance(ei.value, PathEscapeError)
+
+
+def test_copy_stock_bad_slot_type_error_is_not_part_of_any_declared_family():
+    manifest, _export_log_bytes = _seed_manifest()
+    with pytest.raises(TypeError) as ei:
+        copy_stock(0, 0, {"code": "600000.SH", "market": "SH", "universe_idx": 0},
+                   "1m/x.csv", "daily/x.csv", manifest, ledger=None,
+                   budget=ByteBudget(limit=None))
+    assert not isinstance(ei.value, StockCopyFailed)
+    assert not isinstance(ei.value, RunTerminated)
+    assert not isinstance(ei.value, PathEscapeError)
+
+
 # ── `.inflight.json` 的形状（大 spec §4.5:468 钉死：code/universe_idx/
 #    targets/parts/started_at，不含 market——契约 §5 声明这份字段形状继续
 #    生效，fix round 1 · C1 订正：此前漏了 targets/parts/started_at 三个
