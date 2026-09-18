@@ -46,6 +46,7 @@ from qmt_manifest import (
     commit_stock,
     read_manifest,
 )
+from qmt_normalize import QmtSchemaError
 from qmt_pool import Slot
 
 
@@ -600,23 +601,24 @@ def test_source_changed_mid_run_is_a_run_terminated_family_member():
     assert not issubclass(PathEscapeError, SourceChangedMidRun)
 
 
-# ── fix round 1 · I4：D1 拒绝折进既有的 StockCopyFailed 族（不新增第四族），
-# `slot` 类型错误的裸 `TypeError` 明确不属于任何一族——这里钉住的是「确实
-# 如此」，不是靠模块文档这么说。
+# ── fix round 2 · N2：D1 拒绝**不**折进 StockCopyFailed（订正 fix round 1
+# · I4 的判断）——这是调用方违反了本函数的前置契约（两条路径要与 slot 对应、
+# 次序钉死），不是这只股的事实：与裸 `TypeError` 同规格，不属于三族任何
+# 一个，也不许成为 failures 的一个 reason（该全集已被大 spec:492 与契约 D3
+# 声明闭合）。这里钉住的是「确实如此」，不是靠模块文档这么说。
 
-def test_copy_stock_invalid_stock_paths_is_a_stock_copy_failed_not_a_new_family(roots):
+def test_copy_stock_invalid_stock_paths_belongs_to_no_family(roots):
     src_fd, stg_fd, src_path, stg_path = roots
     slot = Slot(code="600000.SH", market="SH", universe_idx=0)
     manifest, export_log_bytes = _seed_manifest()
     ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
-    with pytest.raises(StockCopyFailed) as ei:
+    with pytest.raises(QmtSchemaError) as ei:
         copy_stock(src_fd, stg_fd, slot, "1m/bad_name.csv", "daily/bad_name.csv",
                    manifest, ledger=ledger, budget=budget)
 
-    assert ei.value.reason == "invalid_stock_paths"
-    assert isinstance(ei.value, StockCopyFailed)
+    assert not isinstance(ei.value, StockCopyFailed)
     assert not isinstance(ei.value, RunTerminated)
     assert not isinstance(ei.value, PathEscapeError)
 
@@ -741,10 +743,9 @@ def test_copy_stock_rejects_swapped_period_order_before_marker_written(roots):
     ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
-    with pytest.raises(StockCopyFailed) as ei:
+    with pytest.raises(QmtSchemaError):
         copy_stock(src_fd, stg_fd, slot, rel_daily, rel_1m, manifest,   # 次序互换
                     ledger=ledger, budget=budget)
-    assert ei.value.reason == "invalid_stock_paths"
 
     assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / rel_1m).exists()
@@ -763,10 +764,9 @@ def test_copy_stock_rejects_path_whose_filename_code_does_not_match_slot(roots):
     ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
-    with pytest.raises(StockCopyFailed) as ei:
+    with pytest.raises(QmtSchemaError):
         copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
                     ledger=ledger, budget=budget)
-    assert ei.value.reason == "invalid_stock_paths"
 
     assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / rel_1m).exists()
@@ -890,13 +890,18 @@ def test_copy_stock_terminates_when_recorded_absent_target_and_source_changed(ro
     assert budget.used == baseline
 
 
-# ── fix round 1 · C2 回归钉：D4 第 2 条的比对必须按 (stock_code, period) 触发，
-# 不是按 relative_path——账本里这只股 1m 的记录若挂在与本次调用不同的
-# relative_path 下（路径怎么解析出来在契约 D1 里明写尚未选定，`{name}` 段
-# 换过就会导致这一情形），按路径去查记录会查不到、把它当成「无记录」，
-# 于是本该早于标记的比对被静默跳过，两个 final 落地、标记写下，直到
-# commit_stock 才被 `_validate_files` 拒掉——那时标记与 final 都已经在盘上，
-# 正是 D5/D6 要消灭的状态。
+# ── fix round 1 · C2 回归钉（fix round 2 · N1 收编）：D4 第 2 条的比对必须
+# 按 (stock_code, period) 触发，不是按 relative_path——账本里这只股 1m 的
+# 记录若挂在与本次调用不同的 relative_path 下（路径怎么解析出来在契约 D1
+# 里明写尚未选定，`{name}` 段换过就会导致这一情形），按路径去查记录会查
+# 不到、把它当成「无记录」。C2 当时只堵了「查得到记录、内容也确实不符」这
+# 半条路（比对到内容不同 → `SourceChangedMidRun`）；N1 发现「记录路径不同
+# 但内容碰巧没变」那半条路 C2 堵不住——比对通过、两个 final 落地、标记写
+# 下，直到 commit_stock 才因「会把已提交的 files 记录…回滚掉」拒绝。N1 在
+# 四象限之前新增了一道统一的门（按 relative_path 是否一致），本测试（内容
+# 也变了）与它的两个专门回归测试（内容没变的两个分支）一起，现在都在
+# `verdicts` 之前就被拦下，抛的是 `StockCopyFailed("untracked_target_
+# file", ...)`，不再是 `SourceChangedMidRun`。
 
 def test_copy_stock_detects_mismatch_when_existing_record_has_a_different_relative_path(roots):
     src_fd, stg_fd, src_path, stg_path = roots
@@ -930,13 +935,113 @@ def test_copy_stock_detects_mismatch_when_existing_record_has_a_different_relati
     baseline = budget.used
 
     assert classify_target(stg_fd, new_rel_1m, None) == TARGET_COPY, \
-        "按 new_rel_1m 这条路径查，staging 目标确实不存在"
+        "按 new_rel_1m 这条路径查，staging 目标确实不存在——不加 N1 的门，" \
+        "四象限本身看不出任何问题，会正常往下走到拷贝与比对"
 
-    with pytest.raises(SourceChangedMidRun):
+    with pytest.raises(StockCopyFailed) as ei:
         copy_stock(src_fd, stg_fd, slot, new_rel_1m, rel_daily, manifest,
                     ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
 
     assert not (stg_path / INFLIGHT).exists(), "标记未写"
+    assert not (stg_path / new_rel_1m).exists(), "新路径下不许落地 final"
+    assert not (stg_path / (new_rel_1m + PART)).exists()
+    assert budget.used == baseline
+
+
+# ── fix round 2 · N1 专门回归钉：两个分支都在「源没变」（比对本身不会拦
+# 下）的情况下发生，证明只靠 D5/D4 第 2 条的内容比对堵不住，必须靠一道单独
+# 的「记录路径与本次调用路径是否一致」门。
+
+def test_copy_stock_rejects_relocated_record_when_new_path_already_matches(roots):
+    # SKIP 分支：新路径下的文件已经完好存在（比如被人工搬过去、或恰好是
+    # 同一批导出复用了旧字节）——不加 N1 的门，四象限会判 SKIP，旧记录被
+    # 原样提交，指向一条盘上并不存在的路径，新路径那份完好的文件反而没有
+    # 任何记录（评审原话：committed 且账本是错的）。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    old_rel_1m = "1m/600000.SH_旧名字_1分钟K线_前复权.csv"
+    new_rel_1m = "1m/600000.SH_新名字_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    content_1m = b"A" * 120
+    daily_data = b"daily-ok" * 4
+
+    _put_source_file(src_path, new_rel_1m, content_1m)
+    _put_target_file(stg_path, new_rel_1m, content_1m)   # 新路径下已经完好
+    _put_source_file(src_path, rel_daily, daily_data)
+    _put_target_file(stg_path, rel_daily, daily_data)     # daily 也完好
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": old_rel_1m,
+              "bytes": len(content_1m), "sha256": hashlib.sha256(content_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(daily_data), "sha256": hashlib.sha256(daily_data).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = len(export_log_bytes) + len(content_1m) + len(daily_data)
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    assert classify_target(stg_fd, new_rel_1m, rec_1m) == TARGET_SKIP, (
+        "不加 N1 的门，四象限本身看不出问题——新路径下的字节与旧记录逐字相符"
+    )
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, new_rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+
+    assert not (stg_path / INFLIGHT).exists()
+    assert budget.used == baseline
+    # 新路径下那份完好的文件原样留着，没有被误判成「已提交」。
+    assert (stg_path / new_rel_1m).read_bytes() == content_1m
+
+
+def test_copy_stock_rejects_relocated_record_when_new_path_needs_fresh_copy(roots):
+    # COPY/RECOPY 分支、源没变：新路径下 staging 目标不存在，源内容与旧记录
+    # 逐字相同——不加 N1 的门，D5/D4 第 2 条的比对会通过（源没变，比对本身
+    # 拦不住），两个 final 落地、标记写下，直到 commit_stock 才因「会把已
+    # 提交的 files 记录…回滚掉」拒绝，那时标记与 final 都已经在盘上。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    old_rel_1m = "1m/600000.SH_旧名字_1分钟K线_前复权.csv"
+    new_rel_1m = "1m/600000.SH_新名字_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    content_1m = b"A" * 120        # 源没变——与账本记录逐字相同
+    daily_data = b"daily-ok" * 4
+
+    _put_source_file(src_path, new_rel_1m, content_1m)
+    # 新路径下 staging 目标不存在——quadrant 会判 TARGET_COPY。
+    _put_source_file(src_path, rel_daily, daily_data)
+    _put_target_file(stg_path, rel_daily, daily_data)
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": old_rel_1m,
+              "bytes": len(content_1m), "sha256": hashlib.sha256(content_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(daily_data), "sha256": hashlib.sha256(daily_data).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = len(export_log_bytes) + len(content_1m) + len(daily_data)
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    assert classify_target(stg_fd, new_rel_1m, rec_1m) == TARGET_COPY, (
+        "不加 N1 的门，四象限本身看不出问题——新路径下目标不存在，走的是正常拷贝"
+    )
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, new_rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+
+    assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / new_rel_1m).exists(), "新路径下不许落地 final"
     assert not (stg_path / (new_rel_1m + PART)).exists()
     assert budget.used == baseline

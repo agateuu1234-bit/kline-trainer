@@ -13,10 +13,10 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
 
 三族互不相交的异常（调用方靠这三族决定「跳过这只股」还是「终止整次运行」）：
   · **候选失败**——`StockCopyFailed`：这一只股这次不行，继续下一只。`reason`
-    全集含 `fetch_missing_file` / `fetch_copy_hash_mismatch`（Task 1）、
-    `untracked_target_file`（Task 2/D2）、`invalid_stock_paths`（Task 3/D1：
-    两条路径次序互换或代码不符——这是「这只股这次给的路径就是错的」，不是
-    整次运行必须停的信号，D1 原文只要求「拒绝且早于标记」，没有要求终止）。
+    全集**闭合**（大 spec:492 + 契约 D3：不新增值，账本读侧不校验
+    `failures[].reason`），含 `fetch_missing_file` / `fetch_copy_hash_
+    mismatch`（Task 1）、`untracked_target_file`（Task 2/D2，fix round 2 ·
+    N1 起也覆盖「账本记录挂着与本次调用不同的 `relative_path`」这一档）。
   · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。两个成员：
     `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
     （契约 D5：落地前比对发现源在本次运行期间变了）。调用方要能用一个
@@ -24,14 +24,20 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
   · **路径逃逸**——`qmt_fsroot.PathEscapeError`：信任边界被破坏，本模块不捕获、
     不包装，原样上抛（它不是 `OSError` 的子类，也不属于前两族）。
 
-⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——`bare TypeError`
-（`slot` 不是 `qmt_pool.Slot`）是调用方的类型错误，不是某只股的结果，语义上
-更接近“函数签名违反”，本模块刻意不把它折进任何一族（与 Task 2
-`_validate_record` 对坏 `record` 类型抛 `TypeError` 同规格）。**标记写下之后**
-`commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`（以及任何其它
-异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是**位置**（异常发生在
-标记写下之后），不是**类型**：调用方（S4b）只要处在“标记还在盘上”这一事实
-下接到任何异常，就必须按整次运行终止处理，不必也不应该去检查它的类型。
+⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——以下两种都不折进
+任何一族，因为它们是**调用方违反了本函数的前置契约**，不是某只股的事实、
+也不是环境变化（fix round 2 · N2 定案）：
+  · `bare TypeError`（`slot` 不是 `qmt_pool.Slot`），语义上是“函数签名违反”
+    （与 Task 2 `_validate_record` 对坏 `record` 类型抛 `TypeError` 同规格）；
+  · `qmt_normalize.QmtSchemaError` / `qmt_fsroot.PathDisciplineError`（契约
+    D1：两条路径次序互换、或文件名解析出的代码/周期与 `slot`/次序不符）
+    ——这两条路径来自调用方（S4b），出错是它没有满足“两条路径要与 `slot`
+    对应、次序钉死”这条前提，不许折成 `failures` 的一个 `reason`。
+**标记写下之后** `commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`
+（以及任何其它异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是
+**位置**（异常发生在标记写下之后），不是**类型**：调用方（S4b）只要处在
+“标记还在盘上”这一事实下接到任何异常，就必须按整次运行终止处理，不必也
+不应该去检查它的类型。
 """
 from __future__ import annotations
 
@@ -43,7 +49,6 @@ from typing import NamedTuple
 
 from qmt_fsroot import (
     NotARegularFileError,
-    PathDisciplineError,
     atomic_write_json,
     fsync_dir,
     open_regular_probe,
@@ -82,13 +87,18 @@ _CHUNK = 1 << 20  # 1 MiB
 class StockCopyFailed(Exception):
     """候选失败族：这一只股这次不行，调用方跳过它、继续下一只（不终止整次运行）。
 
-    `reason` 是给 4c 报告与账本 `failures` 记录读的字面量。本模块目前产生四个：
-    `fetch_missing_file`（D3：源侧叶子不是普通文件，或干脆不存在）、
-    `fetch_copy_hash_mismatch`（落地的 `.part` 重算与源哈希不符）、
-    `untracked_target_file`（D2：staging 目标来路不明，拒绝覆盖）、
-    `invalid_stock_paths`（D1：两条路径次序互换、或文件名解析出的代码/周期
-    与 `slot`/次序不符）。reason 全集由契约收口，本类不做穷尽性校验，只是
-    把调用方传入的字符串原样带上。
+    `reason` 是给 4c 报告与账本 `failures` 记录读的字面量。**这个全集是
+    闭合的**（大 spec:492 + 契约 D3 的取舍：不新增 `reason`，加值要同步改
+    4c 报告 schema，而账本读侧不校验 `failures[].reason`，第五个取值会
+    静默流进 manifest、落不进任何一个桶）：`fetch_missing_file`（D3：
+    源侧叶子不是普通文件，或干脆不存在）、`fetch_copy_hash_mismatch`
+    （落地的 `.part` 重算与源哈希不符）、`untracked_target_file`（D2：
+    staging 目标来路不明，拒绝覆盖；fix round 2 · N1 起也覆盖“账本记录
+    挂着与本次调用不同的 `relative_path`”这一档——同属“这只股当前的身份
+    对不上账本”）。**D1 的两条路径校验不产生 `StockCopyFailed`**（fix
+    round 2 · N2）——那是调用方违反前置契约，不是这只股的事实，见
+    `_validate_stock_paths`。本类不做穷尽性校验，只是把调用方传入的字符串
+    原样带上。
     """
 
     def __init__(self, reason: str, detail: str = ""):
@@ -334,8 +344,10 @@ def classify_target(stg_fd: int, rel: str, record) -> str:
     """幂等四象限判据：manifest 有无这只股这个文件的记录 × staging 目标在不在，
     返回 `TARGET_COPY` / `TARGET_SKIP` / `TARGET_RECOPY` / `TARGET_UNTRACKED`
     四个字面量之一（契约 D2、D4 第 1 条）。`record` 是调用方已经从 manifest
-    `files` 里按 `(stock_code, period, relative_path)` 查出来的那一条记录
-    （形如 `{"bytes": int, "sha256": str, ...}`），或 `None`（无记录）。
+    `files` 里按 `(stock_code, period)` 查出来的那一条记录（形如
+    `{"bytes": int, "sha256": str, ...}`），或 `None`（无记录）——**不按
+    `relative_path` 查**（fix round 1 · C2 订正：按路径查会在这只股的记录
+    换了路径时，把「有记录」误判成「无记录」，见 `copy_stock` 的查找逻辑）。
 
     | | 有记录 | 无记录 |
     |---|---|---|
@@ -442,27 +454,28 @@ def _validate_stock_paths(slot: Slot, rel_1m: str, rel_daily: str) -> None:
     校验的实现会一路跑到 `commit_stock` 才被 `_validate_files` 拒掉，而那时
     两个 final 已落地、标记还在盘上，正是 D6 要消灭的状态（契约 D1 的警告）。
 
-    坏输入折成候选失败 `StockCopyFailed("invalid_stock_paths", ...)`——这不是
-    「整次运行终止」的信号：D1 只要求「拒绝且必须早于标记」，没有要求终止
-    整次运行；对调用方（S4b）而言，「这只股这次给的两条路径就是错的」与
-    「这只股的源文件缺失」是同一种可处置结果（跳过它，继续下一只）。
+    ⚠️ **坏输入原样上抛 `QmtSchemaError`/`PathDisciplineError`（fix round 2 ·
+    N2 订正）——不折进 `StockCopyFailed`，不属于三族任何一个**，与裸
+    `TypeError`（`slot` 类型不对）同规格：这两条路径来自调用方（S4b），
+    文件名解析出的代码与 `slot` 不符、或次序被互换，是**调用方违反了本函数
+    的前置契约**（两条路径要与 `slot` 对应、次序钉死），不是这只股的事实、
+    也不是环境变化——不许把它记成 `failures` 的一个 `reason`：大 spec:492
+    与契约 D3 都把 failure 的 `reason` 全集声明为**闭合**（`fetch_missing_
+    file` / `fetch_copy_hash_mismatch` / `untracked_target_file` /
+    `fetch_interrupted_rollback`），账本读侧不校验 `failures[].reason`，
+    一个第五个取值会静默流进 manifest、落不进 4c 报告 schema 的任何一个桶。
     """
     for rel, expected_period in ((rel_1m, "1m"), (rel_daily, "daily")):
-        try:
-            parts = split_relative_components(rel)
-            code, _name, period = parse_qmt_filename(parts[-1])
-        except (PathDisciplineError, QmtSchemaError) as e:
-            raise StockCopyFailed("invalid_stock_paths", f"{rel}: {e}") from e
+        parts = split_relative_components(rel)
+        code, _name, period = parse_qmt_filename(parts[-1])
         if code != slot.code:
-            raise StockCopyFailed(
-                "invalid_stock_paths",
-                f"{rel!r} 解析出的股票代码是 {code!r}，与 slot.code {slot.code!r} 不符",
+            raise QmtSchemaError(
+                f"{rel!r} 解析出的股票代码是 {code!r}，与 slot.code {slot.code!r} 不符"
             )
         if period != expected_period:
-            raise StockCopyFailed(
-                "invalid_stock_paths",
+            raise QmtSchemaError(
                 f"{rel!r} 解析出的周期是 {period!r}，此处期望 {expected_period!r}"
-                "——两条路径的次序钉死为 (1m, daily)",
+                "——两条路径的次序钉死为 (1m, daily)"
             )
 
 
@@ -566,10 +579,17 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     次序钉死（契约 D1——路径怎么从 `Slot` 解析出来是 S4b 的范围，本函数只管
     收到之后怎么校验/怎么用）。
 
+    **前置校验（不消耗预算、不碰文件系统）先抛两类不属于任何族的异常**
+    （fix round 2 · N2 定案：这些是调用方违反了本函数的前置契约，不是这只股
+    的事实）：`slot` 类型不对 → 裸 `TypeError`；两条路径次序互换、或文件名
+    解析出的代码/周期与 `slot`/次序不符 → `qmt_normalize.QmtSchemaError` /
+    `qmt_fsroot.PathDisciplineError`。
+
     **失败/终止路径（标记写下之前）**：删这只股的两个 `.part`、退还本次已扣的
     预算、原样上抛——既接候选失败（`StockCopyFailed`，`reason` 可能是
     `fetch_missing_file` / `fetch_copy_hash_mismatch` / `untracked_target_file`
-    / `invalid_stock_paths`），也接终止条件（`SourceChangedMidRun` /
+    ——后者现在也覆盖「账本记录挂着与本次调用不同的 `relative_path`」，
+    fix round 2 · N1），也接终止条件（`SourceChangedMidRun` /
     `MaxBytesExhausted`），两者的清理动作相同，只是调用方（S4b）对它们的后续
     处置不同（前者跳过这只股继续下一只，后者终止整次运行）。
 
@@ -579,9 +599,6 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     `RunTerminated`——`commit_stock` 可能抛出 `qmt_manifest.ManifestInvalidError`
     等其它类型。契约 D6 的判据是**位置**（标记已经写下），不是**类型**：
     调用方在这一段捕到任何异常都必须按整次运行终止处理，不必检查它的类型。
-
-    `slot` 不是 `qmt_pool.Slot` 时抛裸 `TypeError`——这是调用方的类型错误
-    （函数签名违反），不属于以上任何一族，也不代表某只股的结果。
 
     返回 `("skipped", manifest)`——两个文件都已在池且完好，契约 D8：跳过由
     四象限判据本身承担，不做任何改动；或 `("committed", 提交后的那份 manifest)`。
@@ -606,6 +623,31 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
         if f.get("stock_code") == slot.code:
             by_period[f.get("period")] = f
     records_in = [by_period.get(period) for period in _PERIODS]
+
+    # fix round 2 · N1：C2 把查找键改按 period 之后，若账本对某个周期已有
+    # 记录、但那条记录的 relative_path 与本次调用给的路径不一致（生产场景：
+    # 股票改名/ST 状态变化换了文件名里的 {name} 段，S4b 解析出一条新路径），
+    # 必须在四象限判据之前就拒绝——不能让四象限或落地前比对把它悄悄放过去：
+    #   · 新路径下文件恰好完好 → 四象限判 SKIP → 旧记录被原样提交，
+    #     指向一条盘上并不存在的路径，新路径那份完好的文件反而没有任何记录；
+    #   · 新路径下文件不存在、源内容与旧记录一致 → 落地前比对（D5/D4 第 2
+    #     条）通过 → 两个 final 落地、标记写下，直到 commit_stock 才因
+    #     「会把已提交的 files 记录…回滚掉」拒绝——标记与 final 都已经在盘上，
+    #     正是 D6 要消灭的状态。
+    # qmt_manifest 的转移守卫（不得修改）没有 RecoveryScope 就不允许「同一
+    # (stock_code, period) 换一条 relative_path」这种隐式迁移，而发放
+    # RecoveryScope 是 S4b 崩溃恢复的职责，不是单股事务该做的事——一律拒绝，
+    # 继续下一只（同一族 `untracked_target_file`：这只股当前的身份对不上
+    # 账本，与「目标存在但无记录」是同一件事的另一种成因）。
+    for rel, rec in zip(rels, records_in):
+        if rec is not None and rec.get("relative_path") != rel:
+            raise StockCopyFailed(
+                "untracked_target_file",
+                f"{slot.code} 在账本里 {rec.get('period')!r} 周期的记录挂在 "
+                f"{rec.get('relative_path')!r}，与本次调用给的 {rel!r} 不一致"
+                "——多半是股票改名/ST 状态换了文件名段；路径迁移不是单股事务"
+                "的职责，这只股这次跳过。",
+            )
 
     verdicts = [classify_target(stg_fd, rel, rec) for rel, rec in zip(rels, records_in)]
     if TARGET_UNTRACKED in verdicts:
