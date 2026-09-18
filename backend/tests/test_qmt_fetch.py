@@ -1,0 +1,280 @@
+# backend/tests/test_qmt_fetch.py
+"""QMT 4b 切片 S4a · Task 1：字节预算 + 单文件流式拷贝。
+
+绑定契约 docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md 的 D3（源侧叶子
+非普通文件）与 D7（逐块记账、回滚退还）。Task 2（四象限）/ Task 3（在途标记 + 单股
+事务编排）不在本文件范围内，本文件只测 `copy_one` / `ByteBudget` 这两个底层符号。
+"""
+from __future__ import annotations
+
+import errno
+import hashlib
+import os
+import socket
+
+import pytest
+
+import qmt_fetch
+from qmt_fetch import (
+    PART,
+    ByteBudget,
+    CopyResult,
+    MaxBytesExhausted,
+    RunTerminated,
+    StockCopyFailed,
+    copy_one,
+)
+from qmt_fsroot import open_root
+
+
+# ── fixtures ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def roots(tmp_path):
+    """一对空的 (源, staging) 根，各自 `open_root` 拿到的 fd 由本 fixture 负责关。"""
+    src_path = tmp_path / "src"
+    stg_path = tmp_path / "stg"
+    src_path.mkdir()
+    stg_path.mkdir()
+    src_fd = open_root(str(src_path))
+    stg_fd = open_root(str(stg_path))
+    try:
+        yield src_fd, stg_fd, src_path, stg_path
+    finally:
+        os.close(src_fd)
+        os.close(stg_fd)
+
+
+def _put_source_file(src_path, rel: str, data: bytes) -> None:
+    p = src_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+
+
+# ── 异常三族：互不相交 ───────────────────────────────────────────
+
+def test_exception_families_are_disjoint():
+    assert issubclass(MaxBytesExhausted, RunTerminated)
+    assert not issubclass(MaxBytesExhausted, StockCopyFailed)
+    assert not issubclass(StockCopyFailed, RunTerminated)
+    assert not issubclass(RunTerminated, StockCopyFailed)
+
+
+# ── ByteBudget：事前早拒 / 逐块扣减 / 退还 ───────────────────────
+
+def test_byte_budget_precheck_rejects_before_charging():
+    budget = ByteBudget(limit=100, used=90)
+    with pytest.raises(MaxBytesExhausted):
+        budget.precheck(20)
+    assert budget.used == 90          # 早拒不扣账
+
+
+def test_byte_budget_charge_boundary_is_inclusive():
+    budget = ByteBudget(limit=10, used=0)
+    budget.charge(10)                 # 恰好用满：允许（判据是 `>`，不是 `>=`）
+    assert budget.used == 10
+    with pytest.raises(MaxBytesExhausted):
+        budget.charge(1)
+    assert budget.used == 10          # 拒绝时不改账
+
+
+def test_byte_budget_refund_rejects_over_refund():
+    budget = ByteBudget(limit=None, used=5)
+    with pytest.raises(ValueError):
+        budget.refund(6)
+
+
+def test_byte_budget_unlimited_never_rejects():
+    budget = ByteBudget(limit=None)
+    budget.precheck(10 ** 12)
+    budget.charge(10 ** 12)
+    assert budget.used == 10 ** 12
+
+
+# ── copy_one 正路 ────────────────────────────────────────────────
+
+def test_copy_one_streams_hashes_and_lands_part(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    data = b"hello qmt 4b s4a" * 5000
+    rel = "1m/600000.SH_浦发银行_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None)
+    result = copy_one(src_fd, stg_fd, rel, budget)
+
+    assert isinstance(result, CopyResult)
+    assert result.n_bytes == len(data)
+    assert result.sha256 == hashlib.sha256(data).hexdigest()
+    assert budget.used == len(data)
+    assert (stg_path / (rel + PART)).read_bytes() == data
+
+
+def test_copy_one_precheck_rejects_via_stat_before_touching_disk(roots):
+    # 事前 stat 早拒：--max-bytes 小于文件大小时，压根不该打开 staging 侧目的文件。
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_big.csv"
+    _put_source_file(src_path, rel, b"z" * 1000)
+
+    budget = ByteBudget(limit=500)
+    with pytest.raises(RunTerminated):
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert budget.used == 0
+    assert not (stg_path / (rel + PART)).exists()
+
+
+def test_copy_one_mid_stream_charge_rejects_and_refunds(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_midstop.csv"
+    _put_source_file(src_path, rel, b"w" * 320)          # 5 块 × 64
+    monkeypatch.setattr(qmt_fetch, "_CHUNK", 64)
+
+    budget = ByteBudget(limit=100)                        # 第 2 块（累计 128）会超
+    with pytest.raises(MaxBytesExhausted):
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert budget.used == 0                                # 已扣的第 1 块也退还了
+
+
+# ── D3：源侧叶子非普通文件 ⇒ fetch_missing_file ─────────────────
+
+def test_copy_one_source_leaf_missing_with_directory_present_is_fetch_missing_file(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    (src_path / "1m").mkdir(parents=True, exist_ok=True)   # 目录在，叶子文件不在
+    budget = ByteBudget(limit=None)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, "1m/600000.SH_never_exported.csv", budget)
+    assert ei.value.reason == "fetch_missing_file"
+    assert budget.used == 0
+
+
+def test_copy_one_source_whole_directory_missing_is_also_fetch_missing_file(roots):
+    # 与上一条互补：整段 period 目录都没导出过（不是「目录在、叶子不在」），
+    # 走的是 `parent_fd_under` 那条 FileNotFoundError，不是 `open_regular_probe` 那条。
+    src_fd, stg_fd, src_path, stg_path = roots
+    budget = ByteBudget(limit=None)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, "1m/600000.SH_never_exported.csv", budget)
+    assert ei.value.reason == "fetch_missing_file"
+    assert budget.used == 0
+
+
+def test_copy_one_source_fifo_is_fetch_missing_file(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_fifo.csv"
+    fifo_path = src_path / rel
+    fifo_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(fifo_path))
+
+    budget = ByteBudget(limit=None)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert ei.value.reason == "fetch_missing_file"
+    assert budget.used == 0
+
+
+def test_copy_one_source_socket_is_fetch_missing_file_but_permission_error_is_not(
+    roots, monkeypatch,
+):
+    # 源侧是 socket：`open(2)` 直接失败（macOS ENOTSUP，别处 EOPNOTSUPP/ENXIO），
+    # 回头 lstat 判非普通 → `fetch_missing_file`。
+    src_fd, stg_fd, src_path, stg_path = roots
+    sub = src_path / "1m"
+    sub.mkdir(parents=True, exist_ok=True)
+    leaf_name = "600000.SH_sock.csv"
+    rel = f"1m/{leaf_name}"
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # `AF_UNIX` 路径上限约 104 字节，pytest 的 tmp_path 本身经常就超了——
+    # 切进目标目录再用相对名绑定（与 test_qmt_manifest.py 里那条同规格）。
+    monkeypatch.chdir(sub)
+    try:
+        sock.bind(leaf_name)
+        budget = ByteBudget(limit=None)
+        with pytest.raises(StockCopyFailed) as ei:
+            copy_one(src_fd, stg_fd, rel, budget)
+        assert ei.value.reason == "fetch_missing_file"
+        assert budget.used == 0
+    finally:
+        sock.close()
+
+    # ⚠️ 判别力所在：权限错误（`EACCES`，打桩造，因为真 chmod 000 在以 root 跑的 CI
+    # 里会被无视）不得被同一条 `except` 混进 `fetch_missing_file` 这一族。
+    def fake_probe(dir_fd, name, *, flags, mode=0o600):
+        raise PermissionError(errno.EACCES, "打桩：模拟权限错误")
+
+    monkeypatch.setattr(qmt_fetch, "open_regular_probe", fake_probe)
+    budget2 = ByteBudget(limit=None)
+    with pytest.raises(PermissionError):
+        copy_one(src_fd, stg_fd, rel, budget2)
+    assert budget2.used == 0
+
+
+# ── D7：连续三次失败后预算与从未尝试过时相同（含「拷到一半抛异常」）──
+
+def test_budget_after_three_consecutive_failures_matches_untried(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel_missing = "1m/600000.SH_missing.csv"
+    rel_flaky = "1m/600000.SH_flaky.csv"
+
+    (src_path / "1m").mkdir(parents=True, exist_ok=True)   # 目录在，叶子文件不在
+
+    budget = ByteBudget(limit=None, used=100)   # 模拟运行里已有其它股花掉的 100 字节
+    baseline = budget.used
+
+    # 第 1 次：文件缺失（D3）——根本没开始扣账。
+    with pytest.raises(StockCopyFailed) as ei1:
+        copy_one(src_fd, stg_fd, rel_missing, budget)
+    assert ei1.value.reason == "fetch_missing_file"
+    assert budget.used == baseline
+
+    # 第 2 次：拷到一半抛异常（模拟 SMB 断线 EIO）——真扣过账、也要真退还。
+    # 只测「文件缺失」会漏掉这条路：missing-file 从不给 budget 记过账，
+    # 退还逻辑在那种场景下即使是空实现也能巧合地通过。
+    _put_source_file(src_path, rel_flaky, b"x" * 320)   # 5 块 × 64
+    monkeypatch.setattr(qmt_fetch, "_CHUNK", 64)
+    real_write = os.write
+    call_count = {"n": 0}
+
+    def flaky_write(fd, buf):
+        call_count["n"] += 1
+        if call_count["n"] == 2:                         # 第 2 块写到一半时断线
+            raise OSError(errno.EIO, "打桩：模拟 SMB 断线")
+        return real_write(fd, buf)
+
+    monkeypatch.setattr(os, "write", flaky_write)
+    with pytest.raises(OSError):
+        copy_one(src_fd, stg_fd, rel_flaky, budget)
+    assert budget.used == baseline, "拷到一半抛异常后，已扣的账必须原样退还"
+    monkeypatch.setattr(os, "write", real_write)
+
+    # 第 3 次：文件缺失（D3），再来一遍。
+    with pytest.raises(StockCopyFailed) as ei3:
+        copy_one(src_fd, stg_fd, rel_missing, budget)
+    assert ei3.value.reason == "fetch_missing_file"
+    assert budget.used == baseline
+
+
+# ── 落地复算不是恒等式：写出去的字节与读回来的不同 ⇒ fetch_copy_hash_mismatch ──
+
+def test_copy_one_detects_landed_part_diverging_from_source_hash(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_truncated.csv"
+    data = b"y" * 4096
+    _put_source_file(src_path, rel, data)
+
+    real_write = os.write
+
+    def lying_write(fd, buf):
+        # 打桩「少写一段」：只真的写出 data 的前 n-1 字节，却向调用方谎报「整段都写完了」，
+        # 让 `_write_all` 的重试循环以为已经写完——落地的 `.part` 因此比源少一字节。
+        n = len(buf)
+        if n > 0:
+            real_write(fd, buf[: n - 1])
+        return n
+
+    monkeypatch.setattr(os, "write", lying_write)
+
+    budget = ByteBudget(limit=None)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert ei.value.reason == "fetch_copy_hash_mismatch"
+    assert budget.used == 0, "落地复算不符也要退还本次已扣的账"
