@@ -4,10 +4,11 @@
 Spec（唯一契约）: docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md
 Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
 
-**本片只是 Task 1**：`--max-bytes` 记账对象 + 单文件流式拷贝。绑定契约 D3（源侧叶子
-非普通文件）与 D7（逐块记账、回滚退还）。四象限判据（D2/D4，Task 2）与在途标记 +
-单股事务编排（D1/D4-2/D5/D6/D8，Task 3）都不在本片范围内——本模块目前不认识
-「manifest」「Slot」「四象限」。
+**本片含 Task 1 + Task 2**：`--max-bytes` 记账对象 + 单文件流式拷贝（D3、D7），
+以及幂等四象限判据 `classify_target`（D2、D4 第 1 条）。在途标记 + 单股事务编排
+（D1、D4 第 2 条、D5、D6、D8，Task 3）不在本片范围内——本模块目前不认识
+「manifest 的完整形状」「Slot」「.inflight.json」，`classify_target` 只认一条
+相对路径 + 调用方已经从 manifest 里查出来的那一条记录（或 `None`）。
 
 三族互不相交的异常（调用方靠这三族决定「跳过这只股」还是「终止整次运行」）：
   · **候选失败**——`StockCopyFailed`：这一只股这次不行，继续下一只。
@@ -39,6 +40,11 @@ __all__ = [
     "PART",
     "CopyResult",
     "copy_one",
+    "TARGET_COPY",
+    "TARGET_SKIP",
+    "TARGET_RECOPY",
+    "TARGET_UNTRACKED",
+    "classify_target",
 ]
 
 
@@ -130,6 +136,19 @@ def _write_all(fd: int, data) -> None:
         view = view[n:]
 
 
+def _is_regular(st: os.stat_result) -> bool:
+    """D2/D3 共用的「是不是普通文件」判据：拿 `open_regular_probe` 交出的 `st`
+    自查 `stat.S_ISREG`——源侧（`copy_one`）与 staging 侧（`classify_target`）
+    两处消费者都必须经它，不得各自内联一份（两份内联副本正是本仓反复栽过的缺陷）。
+
+    **不含符号链接**：符号链接叶子在 `qmt_fsroot` 逐段无跟随时已经变成
+    `PathEscapeError`（不是 `OSError` 子类），根本传不到这里来判——`st` 只可能
+    来自「`open()` 成功打开的对象」或「`open()` 失败、`lstat` 证明存在的非普通对象
+    （如 socket）」这两种情形，两者均已排除符号链接。
+    """
+    return stat.S_ISREG(st.st_mode)
+
+
 def _open_source_leaf(src_fd: int, rel: str):
     """打开源侧叶子，交出 `(fd, st)`；D3 的类型判据由调用方对 `st` 自查 `S_ISREG`。
 
@@ -169,7 +188,7 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
     """
     sfd, st = _open_source_leaf(src_fd, rel)
     try:
-        if not stat.S_ISREG(st.st_mode):
+        if not _is_regular(st):
             raise StockCopyFailed("fetch_missing_file", f"{rel}: 不是普通文件")
         budget.precheck(st.st_size)
 
@@ -217,3 +236,113 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
         os.close(sfd)
 
     return CopyResult(n_bytes=charged, sha256=digest)
+
+
+# ── Task 2：幂等四象限判据（契约 D2、D4 第 1 条）──────────────────
+
+TARGET_COPY = "copy"
+TARGET_SKIP = "skip"
+TARGET_RECOPY = "recopy"
+TARGET_UNTRACKED = "untracked_target_file"
+
+
+def _validate_record(record) -> None:
+    """校验调用方传入的 manifest 记录形状：`None`（无记录）之外，必须是含
+    `bytes`（`int`，排除 `bool`）与 `sha256`（`str`）两个字段的 `dict`。
+
+    **一律拒绝，不是跳过**：字段缺失、类型不对（含不可哈希类型，如把 `sha256`
+    传成一个 `list`）都在这里被截住并抛出清楚的 `TypeError`——`classify_target`
+    的下游只用 `!=` / `==` 比较这两个字段，那两个运算符对几乎任何类型组合都
+    「悄悄」给得出一个结果（要么恒不等、要么巧合相等），不会自己报错，
+    坏记录会被静默当成「不符」或更糟「碰巧符合」，而不是被看见。
+    """
+    if record is None:
+        return
+    if not isinstance(record, dict):
+        raise TypeError(
+            f"manifest 记录必须是 dict 或 None，收到 {type(record).__name__}：{record!r}"
+        )
+    _MISSING = object()
+    n_bytes = record.get("bytes", _MISSING)
+    sha256_hex = record.get("sha256", _MISSING)
+    if not isinstance(n_bytes, int) or isinstance(n_bytes, bool):
+        raise TypeError(
+            f"manifest 记录的 'bytes' 字段必须是 int，收到 {n_bytes!r}"
+        )
+    if not isinstance(sha256_hex, str):
+        raise TypeError(
+            f"manifest 记录的 'sha256' 字段必须是 str，收到 {sha256_hex!r}"
+        )
+
+
+def _hash_target(fd: int) -> str:
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, _CHUNK)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def classify_target(stg_fd: int, rel: str, record) -> str:
+    """幂等四象限判据：manifest 有无这只股这个文件的记录 × staging 目标在不在，
+    返回 `TARGET_COPY` / `TARGET_SKIP` / `TARGET_RECOPY` / `TARGET_UNTRACKED`
+    四个字面量之一（契约 D2、D4 第 1 条）。`record` 是调用方已经从 manifest
+    `files` 里按 `(stock_code, period, relative_path)` 查出来的那一条记录
+    （形如 `{"bytes": int, "sha256": str, ...}`），或 `None`（无记录）。
+
+    | | 有记录 | 无记录 |
+    |---|---|---|
+    | 目标存在 | 相符→`TARGET_SKIP`；不符→`TARGET_RECOPY` | `TARGET_UNTRACKED` |
+    | 目标不存在 | `TARGET_COPY` | `TARGET_COPY` |
+
+    **D2（非普通文件不按有无记录分叉）**：staging 目标存在但不是普通文件
+    （目录 / FIFO / socket）——**不管有没有记录**——一律 `TARGET_UNTRACKED`，
+    不落进「重拷」那一格。判据是**调用方自己查 `stat.S_ISREG`**（`_is_regular`，
+    与 `copy_one` 共用同一个模块级判据），不是 `except NotARegularFileError`：
+    目录与 FIFO 打开都会**成功**（`open_regular_probe` 内部带 `O_NONBLOCK`），
+    只有 socket 那种「`open()` 本身就失败」的情形才会撞见
+    `NotARegularFileError`——那时把它携带的 `st` 原样接过来，
+    走的仍是同一条 `_is_regular(st)` 判据，**不是**拿异常类型本身当分支依据。
+
+    **符号链接不在本判据管辖范围**：`rel` 的叶子若是符号链接，`open_regular_probe`
+    背后的 `open_under` 会在逐段无跟随时先一步撞 `ELOOP` 抛出 `PathEscapeError`
+    （不是 `OSError` 子类）——本函数完全不捕获它，原样向上传播，**绝不会**被
+    归进 `TARGET_UNTRACKED`。一次符号链接就是一次信任边界破坏，必须整次运行
+    终止，而不是被这条判据降级成「这只股的目标来路不明」。
+
+    **R2-F3 回归钉**：目标是普通文件且字节数与记录相符，仍须比对 `sha256`——
+    同尺寸不同内容必须判 `TARGET_RECOPY`，不得因为字节数先对上就跳过哈希比对
+    而误判 `TARGET_SKIP`。
+
+    **不做**：源侧比对（那是 D3/`copy_one` 的范围）、落地前把新拷出的字节与
+    记录比对（D4 第 2 条，含「有记录 × 目标不存在」那一格，交 Task 3）、
+    任何标记/提交动作。本函数只读，不写。
+    """
+    _validate_record(record)
+    try:
+        pfd, leaf = parent_fd_under(stg_fd, rel)
+    except FileNotFoundError:
+        return TARGET_COPY
+    try:
+        try:
+            fd, st = open_regular_probe(pfd, leaf, flags=os.O_RDONLY)
+        except FileNotFoundError:
+            return TARGET_COPY
+        except NotARegularFileError as e:
+            fd, st = None, e.st
+    finally:
+        os.close(pfd)
+
+    try:
+        if not _is_regular(st):
+            return TARGET_UNTRACKED
+        if record is None:
+            return TARGET_UNTRACKED
+        if st.st_size != record["bytes"]:
+            return TARGET_RECOPY
+        return TARGET_SKIP if _hash_target(fd) == record["sha256"] else TARGET_RECOPY
+    finally:
+        if fd is not None:
+            os.close(fd)

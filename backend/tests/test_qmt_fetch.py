@@ -1,9 +1,11 @@
 # backend/tests/test_qmt_fetch.py
-"""QMT 4b 切片 S4a · Task 1：字节预算 + 单文件流式拷贝。
+"""QMT 4b 切片 S4a · Task 1 + Task 2。
 
-绑定契约 docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md 的 D3（源侧叶子
-非普通文件）与 D7（逐块记账、回滚退还）。Task 2（四象限）/ Task 3（在途标记 + 单股
-事务编排）不在本文件范围内，本文件只测 `copy_one` / `ByteBudget` 这两个底层符号。
+Task 1：字节预算 + 单文件流式拷贝，绑定契约 D3（源侧叶子非普通文件）与 D7
+（逐块记账、回滚退还）。
+Task 2：幂等四象限判据 `classify_target`，绑定契约 D2（staging 目标非普通文件一律
+拒绝覆盖，符号链接除外）与 D4 第 1 条（「相符」判据含 `S_ISREG`）。
+Task 3（在途标记 + 单股事务编排）不在本文件范围内。
 """
 from __future__ import annotations
 
@@ -17,14 +19,19 @@ import pytest
 import qmt_fetch
 from qmt_fetch import (
     PART,
+    TARGET_COPY,
+    TARGET_RECOPY,
+    TARGET_SKIP,
+    TARGET_UNTRACKED,
     ByteBudget,
     CopyResult,
     MaxBytesExhausted,
     RunTerminated,
     StockCopyFailed,
+    classify_target,
     copy_one,
 )
-from qmt_fsroot import open_root
+from qmt_fsroot import PathEscapeError, open_root
 
 
 # ── fixtures ─────────────────────────────────────────────────────
@@ -293,3 +300,142 @@ def test_copy_one_detects_landed_part_diverging_from_source_hash(roots, monkeypa
         copy_one(src_fd, stg_fd, rel, budget)
     assert ei.value.reason == "fetch_copy_hash_mismatch"
     assert budget.used == 0, "落地复算不符也要退还本次已扣的账"
+
+
+# ══════════════════════════════════════════════════════════════════
+# Task 2 · 幂等四象限判据 `classify_target`（契约 D2、D4 第 1 条）
+# ══════════════════════════════════════════════════════════════════
+
+def _put_target_file(stg_path, rel: str, data: bytes) -> None:
+    p = stg_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+
+
+# ── 四象限基本覆盖：目标不存在两列都是 copy，目标存在按有无记录分叉 ──
+
+def test_classify_target_no_record_no_target_is_copy(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    verdict = classify_target(stg_fd, "1m/600000.SH_new.csv", None)
+    assert verdict == TARGET_COPY
+
+
+def test_classify_target_has_record_but_target_absent_is_copy(roots):
+    # D4 第 2 条（「有记录 × 目标不存在」也要比对）交 Task 3——本函数只是判据，
+    # 不做比对，故这一格只回答「目标在不在」，答案与无记录那一列相同。
+    src_fd, stg_fd, src_path, stg_path = roots
+    record = {"bytes": 123, "sha256": "0" * 64}
+    verdict = classify_target(stg_fd, "1m/600000.SH_gone.csv", record)
+    assert verdict == TARGET_COPY
+
+
+def test_classify_target_no_record_target_exists_is_untracked(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_orphan.csv"
+    _put_target_file(stg_path, rel, b"orphan data")
+    verdict = classify_target(stg_fd, rel, None)
+    assert verdict == TARGET_UNTRACKED
+
+
+def test_classify_target_matching_record_is_skip(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_ok.csv"
+    data = b"intact content" * 20
+    _put_target_file(stg_path, rel, data)
+    record = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    verdict = classify_target(stg_fd, rel, record)
+    assert verdict == TARGET_SKIP
+
+
+def test_classify_target_size_and_hash_mismatch_is_recopy(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_stale.csv"
+    _put_target_file(stg_path, rel, b"short")
+    record = {"bytes": 9999, "sha256": "0" * 64}
+    verdict = classify_target(stg_fd, rel, record)
+    assert verdict == TARGET_RECOPY
+
+
+# ── R2-F3 回归钉：同尺寸不同内容必须重拷，不得因字节数先对上就跳过哈希比对 ──
+
+def test_classify_target_same_size_different_content_is_recopy_not_skip(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_tampered.csv"
+    original = b"A" * 200
+    tampered = b"B" * 200                      # 与 original **同尺寸**、内容不同
+    assert len(original) == len(tampered)
+    _put_target_file(stg_path, rel, tampered)
+    record = {"bytes": len(original), "sha256": hashlib.sha256(original).hexdigest()}
+    verdict = classify_target(stg_fd, rel, record)
+    assert verdict == TARGET_RECOPY, "同尺寸不同内容必须判重拷，不得因字节数相符就跳过哈希比对"
+
+
+# ── D2：staging 目标非普通文件一律拒绝覆盖，不按有无记录分叉 ──
+# 「记录的 bytes 恰等于那个非普通对象的 st_size」是关键构造：若实现忘了先查
+# S_ISREG、直接拿字节数与记录比对，这两档会被误判成 `skip`（字节数对上）
+# 甚至更糟；只有先查 S_ISREG 才会在字节数相符的情况下仍然判 `untracked_target_file`。
+
+def test_classify_target_directory_with_record_matching_st_size_is_untracked(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_dir.csv"
+    target_dir = stg_path / rel
+    target_dir.mkdir(parents=True)
+    actual_size = target_dir.stat().st_size
+    record = {"bytes": actual_size, "sha256": "0" * 64}   # 字节数恰好相符
+    verdict = classify_target(stg_fd, rel, record)
+    assert verdict == TARGET_UNTRACKED
+
+
+def test_classify_target_fifo_with_record_matching_st_size_is_untracked(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_fifo.csv"
+    target = stg_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(target))
+    actual_size = os.stat(str(target)).st_size
+    record = {"bytes": actual_size, "sha256": "0" * 64}   # 字节数恰好相符
+    verdict = classify_target(stg_fd, rel, record)
+    assert verdict == TARGET_UNTRACKED
+
+
+# ── 符号链接叶子必须走路径逃逸（整次致命），不得落进拒绝覆盖那一档 ──
+
+def test_classify_target_symlinked_leaf_escapes_not_untracked(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    real = stg_path / "1m" / "600000.SH_real.csv"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_bytes(b"data")
+    link = stg_path / "1m" / "600000.SH_link.csv"
+    link.symlink_to(real)
+
+    with pytest.raises(PathEscapeError) as ei:
+        classify_target(stg_fd, "1m/600000.SH_link.csv", None)
+    assert ei.value.errno == errno.ELOOP
+
+
+# ── 判据对任意坏输入安全：记录字段缺失 / 类型不对 / 不可哈希类型一律拒绝 ──
+
+def test_classify_target_rejects_record_missing_bytes_field(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    with pytest.raises(TypeError):
+        classify_target(stg_fd, "1m/whatever.csv", {"sha256": "0" * 64})
+
+
+def test_classify_target_rejects_record_wrong_type_for_bytes(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    with pytest.raises(TypeError):
+        classify_target(stg_fd, "1m/whatever.csv", {"bytes": "100", "sha256": "0" * 64})
+
+
+def test_classify_target_rejects_record_unhashable_sha256(roots):
+    # `sha256` 传成一个不可哈希类型（list）——不是「类型对但值坏」，
+    # 必须在能被 `==` 静默吞掉之前就被截住。
+    src_fd, stg_fd, src_path, stg_path = roots
+    with pytest.raises(TypeError):
+        classify_target(stg_fd, "1m/whatever.csv", {"bytes": 100, "sha256": ["not", "a", "str"]})
+
+
+def test_classify_target_rejects_non_dict_record(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    with pytest.raises(TypeError):
+        classify_target(stg_fd, "1m/whatever.csv", "not-a-dict")
