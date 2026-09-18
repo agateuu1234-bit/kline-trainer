@@ -4,7 +4,7 @@
 
 **Goal:** 把「本构建懂每个划线工具的哪些**样式语义**」从散落在四处的写死判据，收成 `DrawingStyleAvailability` 内部的一张按工具查的表；表内容一行不变（今天仍只有水平线）⇒ **对用户零可见变化**，但第 4/5/6 片每加一个工具从「改四处代码」变成「加一行」。
 
-**Architecture:** 纯结构重构 + 举证测试。新增一个内部 `ToolStyleRules` 结构与 `styleRules` 静态表，四处判据（有效性 / 标注归一化 / 工具集 / 可编辑性）全部改成查这张表；横线的两条规则函数体**原地保留**并被表引用。行为等价由一张**穷举真值表**（205 格）直接钉死，不靠推理；「四处确实都查了表」「有效性列没被接到 UI」「锚数没被顺手泛化」三条由**结构计数守卫**钉死。
+**Architecture:** 纯结构重构 + 举证测试。新增一个内部 `ToolStyleRules` 结构与 `styleRules` 静态表，四处判据（有效性 / 标注归一化 / 工具集 / 可编辑性）全部改成查这张表；横线的两条规则函数体**原地保留**并被表引用。行为等价由一张**穷举真值表**（208 格）直接钉死，不靠推理；「四处确实都查了表」「有效性列没被接到 UI」「锚数没被顺手泛化」三条由**结构计数守卫**钉死。
 
 **Tech Stack:** Swift 6（`swift-tools-version: 6.0`，严格并发）、swift-testing（`@Suite` / `@Test` / `#expect`）、既有源码守卫扫描器 `SourceGuardScanner.swift`（`allSwiftFilesUnderSources()` / `squeeze()` / `squeezedText()`）。
 
@@ -32,7 +32,7 @@
 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | 修改（1 行） | `DrawingToolType` 加 `CaseIterable`（D118），使穷举测试的遍历源是**生产枚举**而非测试里手写的数组 |
 | `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingStyleAvailability.swift` | 修改 | 新增 `ToolStyleRules` + `styleRules` 表；四处判据改查表；两条横线规则函数体原地不动 |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingToolTypeCaseIterableTests.swift` | 新建 | 锁死枚举形态（13 个 case）与 `implemented` 边界 |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingToolStyleMatrixTests.swift` | 新建 | T1 行为等价穷举真值表（205 格）+ 三条防空转 |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingToolStyleMatrixTests.swift` | 新建 | T1 行为等价穷举真值表（208 格）+ 三条防空转 |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingToolStyleMatrixGuardTests.swift` | 新建 | T2 单一真相守卫 / T2b 有效性列未接 UI / T1f 锚数边界（全部含反向自检） |
 | `docs/superpowers/acceptance/2026-09-01-drawing-p1c-1-tool-matrix.md` | 新建 | 非程序员验收清单（中文，动作 / 预期 / 通过标准） |
 
@@ -273,7 +273,7 @@ cd "ios/Contracts" && swift test --filter DrawingToolStyleMatrixTests 2>&1 | tai
 
 ```bash
 git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingToolStyleMatrixTests.swift
-git commit -m "P1c-1 Task2：T1 行为等价穷举真值表（205 格，重构前的安全网）
+git commit -m "P1c-1 Task2：T1 行为等价穷举真值表（208 格，重构前的安全网）
 
 本套件描述的是**当前**行为，故现在就是绿的；它的判别力由 Task 5 的变异验证提供。
 含三条防空转：遍历源是生产枚举 / 表的键恰好 {.horizontal} / 每档断言实际跑满的格数。
@@ -469,7 +469,7 @@ git commit -m "P1c-1 Task3：四处样式判据改成查同一张表（D117）�
 
 ⛔ 有效性列的语义严格限定为「该不该拒收数据」，不是 UI 灰态判据（D120，见表定义处的长注释）。
 横线两条规则函数体原地保留、两参归一化保留（面板在用）。
-T1 真值表 205 格重构前后全绿 = 行为一字未变。"
+T1 真值表 208 格重构前后全绿 = 行为一字未变。"
 ```
 
 ---
@@ -503,14 +503,22 @@ T1 真值表 205 格重构前后全绿 = 行为一字未变。"
             byFile[URL(fileURLWithPath: path).lastPathComponent] = n
             if path.contains("/Sources/KlineTrainerContracts/UI/") { uiHits.append(path) }
         }
-        // ① UI 层零命中 —— 有效性判据不得当灰态用
+        // ① **消费方恰好是这四个文件**（spec §5-T2b 的前半条）。
+        //    ⛔⛔ 这里**不得**写成「这四个各自 != nil」的存在性检查 —— 本片首版就是那样写的，
+        //       被对抗性评审用双臂变异实证打穿：存在性检查抓不到**多出来的第五个消费方**，
+        //       守卫的有效覆盖面塌缩成「仅 Sources/KlineTrainerContracts/UI/ 一个目录」，
+        //       而 D120 的第一现场在 `Render/KLineView+Drawing.swift:33`（按 toolType 决定画不画）。
+        #expect(Set(byFile.keys) == ["TrainingEngine.swift", "DrawingObjectStyleEdit.swift",
+                                     "DrawingEnums.swift", "DrawingStyleAvailability.swift"],
+                "有效性判据的消费方不再恰好是那四处写入闸：\(byFile)")
+        // ② UI 层零命中 —— 只为给最典型的违规一个可读文案；**覆盖面由 ① 承担**。
         #expect(uiHits.isEmpty, "有效性判据被接到 UI 层，违反 D120：\(uiHits)")
-        // ② 反向自检：四处写入闸各自命中。
-        //    只写「UI 零命中」会与「这个函数被整个删掉」这种坏实现**同时为绿**。
-        #expect(byFile["TrainingEngine.swift"] != nil, "append 门不再经共享单点？\(byFile)")
-        #expect(byFile["DrawingObjectStyleEdit.swift"] != nil, "withStyle 可用性闸不见了？\(byFile)")
-        #expect(byFile["DrawingEnums.swift"] != nil, "sanitized(for:) 不再经共享单点？\(byFile)")
-        #expect(byFile["DrawingStyleAvailability.swift"] != nil, "定义处不见了？\(byFile)")
+        // ③ 反向自检：两道 append 门**逐个**仍在（⛔ 不能只看该文件命中数非零：
+        //    TrainingEngine.swift 有 4 处命中，:1299 是私有 helper 定义、:1300 是转发，
+        //    把 :1157/:1265 两道门删光后计数仍为 2）。
+        let engineCode = try squeezedSource(try fileNamed("TrainingEngine/TrainingEngine.swift", in: files))
+        #expect(engineCode.components(separatedBy: squeeze("guard isRenderableSubType(drawing) else { return false }")).count - 1 == 2,
+                "两道 append 门不再各自经共享单点（D67）")
     }
 
     @Test("T1f 边界：本片不碰锚数（D119）——定义仍只在输入控制器里，且它不引用样式表")

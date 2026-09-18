@@ -51,14 +51,26 @@ struct DrawingToolStyleMatrixGuardTests {
             byFile[URL(fileURLWithPath: path).lastPathComponent] = n
             if path.contains("/Sources/KlineTrainerContracts/UI/") { uiHits.append(path) }
         }
-        // ① UI 层零命中 —— 有效性判据不得当灰态用
+        // ① **消费方恰好是这四个文件**（spec §5-T2b 的前半条）。
+        //    ⛔ 不得退化成「这四个各自 != nil」的存在性检查（本片首版就是那样写的，被对抗性评审
+        //       用双臂变异实证打穿）：存在性检查抓不到**多出来的第五个消费方**，于是这条守卫的
+        //       有效覆盖面塌缩成「仅 Sources/KlineTrainerContracts/UI/ 一个目录」。而 D120 那个矛盾
+        //       （箱体要么画不出、要么面板错误可点）的第一现场恰恰**不在** UI/ ——
+        //       `Render/KLineView+Drawing.swift:33` 就是「按 toolType 决定画不画」的渲染分支，
+        //       把有效性判据接进渲染层是最自然的手滑方向，而旧写法对此一声不吭。
+        //    ⇒ 精确集合断言同时兑现「恰好四处」+ 自动覆盖 Render/ 及任何未来新目录。
+        #expect(Set(byFile.keys) == ["TrainingEngine.swift", "DrawingObjectStyleEdit.swift",
+                                     "DrawingEnums.swift", "DrawingStyleAvailability.swift"],
+                "有效性判据的消费方不再恰好是那四处写入闸（多出来的可能是把它当灰态用了，违反 D120）：\(byFile)")
+        // ② UI 层零命中 —— 单列一条只为把「接进 UI」这个最典型的违规给出可读的失败文案。
+        //    ⚠️ 它**不是**覆盖面的来源：覆盖面由上面那条集合断言承担。
         #expect(uiHits.isEmpty, "有效性判据被接到 UI 层，违反 D120：\(uiHits)")
-        // ② 反向自检：四处写入闸各自命中。
-        //    只写「UI 零命中」会与「这个函数被整个删掉」这种坏实现**同时为绿**。
-        #expect(byFile["TrainingEngine.swift"] != nil, "append 门不再经共享单点？\(byFile)")
-        #expect(byFile["DrawingObjectStyleEdit.swift"] != nil, "withStyle 可用性闸不见了？\(byFile)")
-        #expect(byFile["DrawingEnums.swift"] != nil, "sanitized(for:) 不再经共享单点？\(byFile)")
-        #expect(byFile["DrawingStyleAvailability.swift"] != nil, "定义处不见了？\(byFile)")
+        // ③ 反向自检：两道 append 门**逐个**仍在（⛔ 不能只看 TrainingEngine.swift 的命中数非零 ——
+        //    该文件有 4 处命中，其中 :1299 是私有 helper 的定义、:1300 是它的转发，
+        //    把 :1157/:1265 两道门整个删掉后计数仍为 2，旧写法照样绿）。
+        let engineCode = try squeezedSource(try fileNamed("TrainingEngine/TrainingEngine.swift", in: files))
+        #expect(engineCode.components(separatedBy: squeeze("guard isRenderableSubType(drawing) else { return false }")).count - 1 == 2,
+                "两道 append 门不再各自经共享单点（D67）")
     }
 
     @Test("T1f 边界：本片不碰锚数（D119）——定义仍只在输入控制器里，且它不引用样式表")
