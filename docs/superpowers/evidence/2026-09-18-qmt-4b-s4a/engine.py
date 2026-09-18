@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
-"""一次性探针：最小拷贝引擎。**不进仓库**，只为把悬着的问题跑出答案。"""
+"""一次性探针：最小拷贝引擎。
+
+⛔⛔ **这不是参考实现，是实验当时的原样记录。不得照抄。**
+本文件的 `classify` 对「非普通文件」按**有无记录分叉**
+（`TARGET_UNTRACKED if record is None else TARGET_RECOPY`，见下方约 105/113 行）——
+那正是 **E6 证伪掉的写法**：目标是目录时「重拷」执行不了（`os.replace` 抛 `IsADirectoryError`），
+而那时在途标记已残留在盘上。
+**契约 D2 据此改判为「一律 `untracked_target_file`，不按有无记录分叉」**，由 E7（q2b.py）实测坐实。
+⇒ **以 `docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md` 的 D2 为准，不以本文件为准。**
+本文件刻意保留原样：改它就是伪造实验记录，而 E6 的结论恰恰建立在「原样跑出来会失败」上。
+**不进仓库**，只为把悬着的问题跑出答案。"""
 import hashlib, os, stat, sys
 sys.path.insert(0, "/Users/maziming/Coding/Prj_Kline trainer/backend")
 
