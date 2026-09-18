@@ -46,7 +46,6 @@ from qmt_manifest import (
     commit_stock,
     read_manifest,
 )
-from qmt_normalize import QmtSchemaError
 from qmt_pool import Slot
 
 
@@ -601,18 +600,28 @@ def test_source_changed_mid_run_is_a_run_terminated_family_member():
     assert not issubclass(PathEscapeError, SourceChangedMidRun)
 
 
-# ── `.inflight.json` 的形状 ──────────────────────────────────────
+# ── `.inflight.json` 的形状（大 spec §4.5:468 钉死：code/universe_idx/
+#    targets/parts/started_at，不含 market——契约 §5 声明这份字段形状继续
+#    生效，fix round 1 · C1 订正：此前漏了 targets/parts/started_at 三个
+#    字段、多写了一个 spec 未提及的 market）──────────────────────────
 
 def test_build_inflight_marker_shape():
     slot = Slot(code="600000.SH", market="SH", universe_idx=3)
-    assert build_inflight_marker(slot) == {
-        "code": "600000.SH", "market": "SH", "universe_idx": 3
-    }
+    marker = build_inflight_marker(slot, "1m/x_1分钟K线_前复权.csv",
+                                    "daily/x_日K线_前复权.csv")
+    assert marker["code"] == "600000.SH"
+    assert marker["universe_idx"] == 3
+    assert marker["targets"] == ["1m/x_1分钟K线_前复权.csv", "daily/x_日K线_前复权.csv"]
+    assert marker["parts"] == ["1m/x_1分钟K线_前复权.csv" + PART,
+                                "daily/x_日K线_前复权.csv" + PART]
+    assert isinstance(marker["started_at"], str) and marker["started_at"]
+    assert "market" not in marker, "大 spec 没有把 market 列进这份形状"
+    assert set(marker) == {"code", "universe_idx", "targets", "parts", "started_at"}
 
 
 def test_build_inflight_marker_rejects_non_slot():
     with pytest.raises(TypeError):
-        build_inflight_marker({"code": "600000.SH", "market": "SH", "universe_idx": 0})
+        build_inflight_marker({"code": "600000.SH"}, "1m/x.csv", "daily/x.csv")
 
 
 # ── 证据 1：端到端正路 ──────────────────────────────────────────
@@ -700,9 +709,10 @@ def test_copy_stock_rejects_swapped_period_order_before_marker_written(roots):
     ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
-    with pytest.raises(QmtSchemaError):
+    with pytest.raises(StockCopyFailed) as ei:
         copy_stock(src_fd, stg_fd, slot, rel_daily, rel_1m, manifest,   # 次序互换
                     ledger=ledger, budget=budget)
+    assert ei.value.reason == "invalid_stock_paths"
 
     assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / rel_1m).exists()
@@ -721,9 +731,10 @@ def test_copy_stock_rejects_path_whose_filename_code_does_not_match_slot(roots):
     ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
-    with pytest.raises(QmtSchemaError):
+    with pytest.raises(StockCopyFailed) as ei:
         copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
                     ledger=ledger, budget=budget)
+    assert ei.value.reason == "invalid_stock_paths"
 
     assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / rel_1m).exists()
@@ -844,6 +855,58 @@ def test_copy_stock_terminates_when_recorded_absent_target_and_source_changed(ro
     assert not (stg_path / INFLIGHT).exists()
     assert not (stg_path / rel_1m).exists(), "目标本就不存在，也不许被造出来"
     assert not (stg_path / (rel_1m + PART)).exists()
+    assert budget.used == baseline
+
+
+# ── fix round 1 · C2 回归钉：D4 第 2 条的比对必须按 (stock_code, period) 触发，
+# 不是按 relative_path——账本里这只股 1m 的记录若挂在与本次调用不同的
+# relative_path 下（路径怎么解析出来在契约 D1 里明写尚未选定，`{name}` 段
+# 换过就会导致这一情形），按路径去查记录会查不到、把它当成「无记录」，
+# 于是本该早于标记的比对被静默跳过，两个 final 落地、标记写下，直到
+# commit_stock 才被 `_validate_files` 拒掉——那时标记与 final 都已经在盘上，
+# 正是 D5/D6 要消灭的状态。
+
+def test_copy_stock_detects_mismatch_when_existing_record_has_a_different_relative_path(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    old_rel_1m = "1m/600000.SH_旧名字_1分钟K线_前复权.csv"    # 账本记录挂的老路径
+    new_rel_1m = "1m/600000.SH_新名字_1分钟K线_前复权.csv"    # 本次调用给的新路径
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    original_1m = b"A" * 120
+    changed_1m = b"B" * 120        # 源内容已经变了（与账本记录不符）
+    daily_data = b"daily-ok" * 4
+
+    _put_source_file(src_path, new_rel_1m, changed_1m)
+    _put_source_file(src_path, rel_daily, daily_data)
+    # 新路径的 staging 目标不存在（模拟「path 解析方式换了」——quadrant 落在
+    # TARGET_COPY，不是 TARGET_RECOPY，正是漏比对最隐蔽的那一格）。
+    _put_target_file(stg_path, rel_daily, daily_data)
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": old_rel_1m,
+              "bytes": len(original_1m), "sha256": hashlib.sha256(original_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(daily_data), "sha256": hashlib.sha256(daily_data).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = (
+        len(export_log_bytes) + len(original_1m) + len(daily_data))
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    assert classify_target(stg_fd, new_rel_1m, None) == TARGET_COPY, \
+        "按 new_rel_1m 这条路径查，staging 目标确实不存在"
+
+    with pytest.raises(SourceChangedMidRun):
+        copy_stock(src_fd, stg_fd, slot, new_rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert not (stg_path / INFLIGHT).exists(), "标记未写"
+    assert not (stg_path / new_rel_1m).exists(), "新路径下不许落地 final"
+    assert not (stg_path / (new_rel_1m + PART)).exists()
     assert budget.used == baseline
 
 

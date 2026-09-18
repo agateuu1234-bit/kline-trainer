@@ -12,23 +12,38 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
 时机）不在本模块内——见契约 §4「交接」。
 
 三族互不相交的异常（调用方靠这三族决定「跳过这只股」还是「终止整次运行」）：
-  · **候选失败**——`StockCopyFailed`：这一只股这次不行，继续下一只。
+  · **候选失败**——`StockCopyFailed`：这一只股这次不行，继续下一只。`reason`
+    全集含 `fetch_missing_file` / `fetch_copy_hash_mismatch`（Task 1）、
+    `untracked_target_file`（Task 2/D2）、`invalid_stock_paths`（Task 3/D1：
+    两条路径次序互换或代码不符——这是「这只股这次给的路径就是错的」，不是
+    整次运行必须停的信号，D1 原文只要求「拒绝且早于标记」，没有要求终止）。
   · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。两个成员：
     `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
     （契约 D5：落地前比对发现源在本次运行期间变了）。调用方要能用一个
     `except RunTerminated` 接住全族，且不会被它接住候选失败或路径逃逸。
   · **路径逃逸**——`qmt_fsroot.PathEscapeError`：信任边界被破坏，本模块不捕获、
     不包装，原样上抛（它不是 `OSError` 的子类，也不属于前两族）。
+
+⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——`bare TypeError`
+（`slot` 不是 `qmt_pool.Slot`）是调用方的类型错误，不是某只股的结果，语义上
+更接近“函数签名违反”，本模块刻意不把它折进任何一族（与 Task 2
+`_validate_record` 对坏 `record` 类型抛 `TypeError` 同规格）。**标记写下之后**
+`commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`（以及任何其它
+异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是**位置**（异常发生在
+标记写下之后），不是**类型**：调用方（S4b）只要处在“标记还在盘上”这一事实
+下接到任何异常，就必须按整次运行终止处理，不必也不应该去检查它的类型。
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import stat
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 from qmt_fsroot import (
     NotARegularFileError,
+    PathDisciplineError,
     atomic_write_json,
     fsync_dir,
     open_regular_probe,
@@ -67,11 +82,13 @@ _CHUNK = 1 << 20  # 1 MiB
 class StockCopyFailed(Exception):
     """候选失败族：这一只股这次不行，调用方跳过它、继续下一只（不终止整次运行）。
 
-    `reason` 是给 4c 报告与账本 `failures` 记录读的字面量。本片只产生两个：
+    `reason` 是给 4c 报告与账本 `failures` 记录读的字面量。本模块目前产生四个：
     `fetch_missing_file`（D3：源侧叶子不是普通文件，或干脆不存在）、
-    `fetch_copy_hash_mismatch`（落地的 `.part` 重算与源哈希不符）。
-    D2/Task 2 会另产 `untracked_target_file`——reason 全集由契约收口，
-    本类不做穷尽性校验，只是把调用方传入的字符串原样带上。
+    `fetch_copy_hash_mismatch`（落地的 `.part` 重算与源哈希不符）、
+    `untracked_target_file`（D2：staging 目标来路不明，拒绝覆盖）、
+    `invalid_stock_paths`（D1：两条路径次序互换、或文件名解析出的代码/周期
+    与 `slot`/次序不符）。reason 全集由契约收口，本类不做穷尽性校验，只是
+    把调用方传入的字符串原样带上。
     """
 
     def __init__(self, reason: str, detail: str = ""):
@@ -383,18 +400,37 @@ INFLIGHT = ".inflight.json"
 _PERIODS = ("1m", "daily")
 
 
-def build_inflight_marker(slot: Slot) -> dict:
-    """`.inflight.json` 的形状（契约 D1、D6）：写下之后，S4b 的崩溃恢复据它构造
-    `qmt_manifest.RecoveryScope`（`stock_code` / `market` / `universe_idx`）——
-    三个字段与 `RecoveryScope` 的必需字段一一对应，形状校验要求
-    `source_snapshot.universe[market][universe_idx] == code`（S4b 范围）。
+def build_inflight_marker(slot: Slot, rel_1m: str, rel_daily: str) -> dict:
+    """`.inflight.json` 的形状——**大 spec §4.5:468 钉死**，契约 §5 收尾段声明
+    「`.inflight.json` 的字段形状」继续生效（本片未覆盖这一条）：
+    `{code, universe_idx, targets: [两条 staging 内相对路径], parts: [两条
+    .part 路径], started_at}`。
 
-    只此一处构造标记内容——`copy_stock` 与 S4b 的崩溃恢复必须读同一份形状定义，
-    不得各自内联一份（本仓「写侧形状与读侧要求必须逐字相同」反复栽过的那类坑）。
+    **不含 `market`**：大 spec 没有把它列进这份形状。S4b 崩溃恢复要构造
+    `qmt_manifest.RecoveryScope` 时，`market` 可以从 `code` 的后缀直接派生
+    （`STOCK_CODE_RE` 形如 `^\\d+\\.(SH|SZ|BJ)$` 已经保证了这一点），没有必要
+    在标记里再存一份可能与 `code` 语义重复的字段。
+
+    `targets`/`parts` 必须是**这次事务真正会去 `os.replace`/`unlink` 的那两条
+    路径本身**，不是调用方之后可以重新推导出来的东西——大 spec §4.5:487
+    规定崩溃恢复「只删标记里明写的那两条 target 与两条 `.part`，不做任何
+    模式匹配式清扫」，而两条路径怎么从 `Slot` 解析出来这件事本身在契约 D1
+    里明写尚未选定路线；标记必须把「这一次实际用的是哪两条」原样钉住，
+    不能让 S4b 靠事后重新解析去猜。
+
+    只此一处构造标记内容——`copy_stock` 与 S4b 的崩溃恢复必须读同一份形状
+    定义，不得各自内联一份（本仓「写侧形状与读侧要求必须逐字相同」反复栽过
+    的那类坑）。
     """
     if not isinstance(slot, Slot):
         raise TypeError(f"slot 必须是 qmt_pool.Slot，收到 {type(slot).__name__}")
-    return {"code": slot.code, "market": slot.market, "universe_idx": slot.universe_idx}
+    return {
+        "code": slot.code,
+        "universe_idx": slot.universe_idx,
+        "targets": [rel_1m, rel_daily],
+        "parts": [rel_1m + PART, rel_daily + PART],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _validate_stock_paths(slot: Slot, rel_1m: str, rel_daily: str) -> None:
@@ -405,18 +441,28 @@ def _validate_stock_paths(slot: Slot, rel_1m: str, rel_daily: str) -> None:
     **不碰文件系统**——必须排在四象限判据、拷贝、在途标记之前：一个没有前置
     校验的实现会一路跑到 `commit_stock` 才被 `_validate_files` 拒掉，而那时
     两个 final 已落地、标记还在盘上，正是 D6 要消灭的状态（契约 D1 的警告）。
+
+    坏输入折成候选失败 `StockCopyFailed("invalid_stock_paths", ...)`——这不是
+    「整次运行终止」的信号：D1 只要求「拒绝且必须早于标记」，没有要求终止
+    整次运行；对调用方（S4b）而言，「这只股这次给的两条路径就是错的」与
+    「这只股的源文件缺失」是同一种可处置结果（跳过它，继续下一只）。
     """
     for rel, expected_period in ((rel_1m, "1m"), (rel_daily, "daily")):
-        parts = split_relative_components(rel)
-        code, _name, period = parse_qmt_filename(parts[-1])
+        try:
+            parts = split_relative_components(rel)
+            code, _name, period = parse_qmt_filename(parts[-1])
+        except (PathDisciplineError, QmtSchemaError) as e:
+            raise StockCopyFailed("invalid_stock_paths", f"{rel}: {e}") from e
         if code != slot.code:
-            raise QmtSchemaError(
-                f"{rel!r} 解析出的股票代码是 {code!r}，与 slot.code {slot.code!r} 不符"
+            raise StockCopyFailed(
+                "invalid_stock_paths",
+                f"{rel!r} 解析出的股票代码是 {code!r}，与 slot.code {slot.code!r} 不符",
             )
         if period != expected_period:
-            raise QmtSchemaError(
+            raise StockCopyFailed(
+                "invalid_stock_paths",
                 f"{rel!r} 解析出的周期是 {period!r}，此处期望 {expected_period!r}"
-                "——两条路径的次序钉死为 (1m, daily)"
+                "——两条路径的次序钉死为 (1m, daily)",
             )
 
 
@@ -454,14 +500,14 @@ def _replace_part_to_final(stg_fd: int, rel: str) -> None:
         os.close(pfd)
 
 
-def _write_inflight_marker(stg_fd: int, slot: Slot) -> None:
+def _write_inflight_marker(stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str) -> None:
     """写在途标记：tmp → `fsync`(文件) → `os.replace` → `fsync`(staging 根)，
     经 `qmt_fsroot.atomic_write_json` 的既有原子写路径（`full_sync` 取默认的
     `False`——大 spec 闭合清单只给 `.inflight.json` 的创建/删除记了普通
     `fsync`，`F_FULLFSYNC` 只用在 manifest 提交与 O2-F1 那道顺序屏障，
     两者都不是本函数）。
     """
-    atomic_write_json(stg_fd, INFLIGHT, build_inflight_marker(slot))
+    atomic_write_json(stg_fd, INFLIGHT, build_inflight_marker(slot, rel_1m, rel_daily))
 
 
 def _remove_inflight_marker(stg_fd: int) -> None:
@@ -513,13 +559,21 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     收到之后怎么校验/怎么用）。
 
     **失败/终止路径（标记写下之前）**：删这只股的两个 `.part`、退还本次已扣的
-    预算、原样上抛——既接候选失败（`StockCopyFailed`、`MaxBytesExhausted` 等
-    源侧异常），也接终止条件（`SourceChangedMidRun`），两者的清理动作相同，
-    只是调用方（S4b）对它们的后续处置不同。
+    预算、原样上抛——既接候选失败（`StockCopyFailed`，`reason` 可能是
+    `fetch_missing_file` / `fetch_copy_hash_mismatch` / `untracked_target_file`
+    / `invalid_stock_paths`），也接终止条件（`SourceChangedMidRun` /
+    `MaxBytesExhausted`），两者的清理动作相同，只是调用方（S4b）对它们的后续
+    处置不同（前者跳过这只股继续下一只，后者终止整次运行）。
 
     **标记写下之后，本函数不再捕获任何异常**（契约 D6：一经写下，只有「提交
     成功 + 删标记」与「终止整次运行」两条出路；接住异常继续下一只股这条路
-    不存在，S4a 只负责抛，S4b 负责收）。
+    不存在，S4a 只负责抛，S4b 负责收）。⚠️ 这一段可能逃出的异常**不限于**
+    `RunTerminated`——`commit_stock` 可能抛出 `qmt_manifest.ManifestInvalidError`
+    等其它类型。契约 D6 的判据是**位置**（标记已经写下），不是**类型**：
+    调用方在这一段捕到任何异常都必须按整次运行终止处理，不必检查它的类型。
+
+    `slot` 不是 `qmt_pool.Slot` 时抛裸 `TypeError`——这是调用方的类型错误
+    （函数签名违反），不属于以上任何一族，也不代表某只股的结果。
 
     返回 `("skipped", manifest)`——两个文件都已在池且完好，契约 D8：跳过由
     四象限判据本身承担，不做任何改动；或 `("committed", 提交后的那份 manifest)`。
@@ -530,8 +584,20 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     _validate_stock_paths(slot, rel_1m, rel_daily)
 
     rels = (rel_1m, rel_daily)
-    by_key = {(f.get("stock_code"), f.get("relative_path")): f for f in manifest["files"]}
-    records_in = [by_key.get((slot.code, rel)) for rel in rels]
+    # D4 第 2 条的触发条件是「账本里有这只股的记录」，不是「账本里有这条
+    # relative_path 的记录」——键必须按 (stock_code, period)，不能按
+    # (stock_code, relative_path)。理由：两条路径怎么从 Slot 解析出来还没定
+    # （契约 D1），若账本里这只股的记录挂在与本次不同的 relative_path 下，
+    # 按路径查找会查不到、把它当成「无记录」而跳过比对，两个 final 落地、
+    # 标记写下，直到 commit_stock 才被 `_validate_files` 拒掉——那时标记与
+    # final 都已经在盘上，正是 D5/D6 要消灭的状态。`_validate_files` 保证
+    # 「池内每只股恰两条记录、period 分别为 1m/daily」，故按 period 查找
+    # 对一只已在池的股至多命中一条，不会有歧义。
+    by_period: dict[str, dict] = {}
+    for f in manifest["files"]:
+        if f.get("stock_code") == slot.code:
+            by_period[f.get("period")] = f
+    records_in = [by_period.get(period) for period in _PERIODS]
 
     verdicts = [classify_target(stg_fd, rel, rec) for rel, rec in zip(rels, records_in)]
     if TARGET_UNTRACKED in verdicts:
@@ -570,7 +636,7 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
         raise
 
     # ── 标记写下之后，只有两条出路（契约 D6）：本函数往下不再 try/except ──
-    _write_inflight_marker(stg_fd, slot)
+    _write_inflight_marker(stg_fd, slot, rel_1m, rel_daily)
 
     for rel, verdict in zip(rels, verdicts):
         if verdict != TARGET_SKIP:
