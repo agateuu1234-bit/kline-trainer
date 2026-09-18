@@ -1,11 +1,14 @@
 # backend/tests/test_qmt_fetch.py
-"""QMT 4b 切片 S4a · Task 1 + Task 2。
+"""QMT 4b 切片 S4a · Task 1 + Task 2 + Task 3。
 
 Task 1：字节预算 + 单文件流式拷贝，绑定契约 D3（源侧叶子非普通文件）与 D7
 （逐块记账、回滚退还）。
 Task 2：幂等四象限判据 `classify_target`，绑定契约 D2（staging 目标非普通文件一律
 拒绝覆盖，符号链接除外）与 D4 第 1 条（「相符」判据含 `S_ISREG`）。
-Task 3（在途标记 + 单股事务编排）不在本文件范围内。
+Task 3：在途标记 + 单股事务编排 `copy_stock`，绑定契约 D1（两条路径的前置校验）、
+D4 第 2 条（任何有记录的格都要比对）、D5（不符即终止，比对早于落地）、
+D6（标记写下后只有两条出路）、D7（`committed_bytes` 累计语义）、
+D8（跳过由四象限承担）。
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ import pytest
 
 import qmt_fetch
 from qmt_fetch import (
+    INFLIGHT,
     PART,
     TARGET_COPY,
     TARGET_RECOPY,
@@ -27,11 +31,23 @@ from qmt_fetch import (
     CopyResult,
     MaxBytesExhausted,
     RunTerminated,
+    SourceChangedMidRun,
     StockCopyFailed,
+    build_inflight_marker,
     classify_target,
     copy_one,
+    copy_stock,
 )
-from qmt_fsroot import PathEscapeError, open_root
+from qmt_fsroot import PathEscapeError, atomic_write_json, open_root
+from qmt_manifest import (
+    MANIFEST_NAME,
+    RecoveryScope,
+    begin_run,
+    commit_stock,
+    read_manifest,
+)
+from qmt_normalize import QmtSchemaError
+from qmt_pool import Slot
 
 
 # ── fixtures ─────────────────────────────────────────────────────
@@ -524,3 +540,473 @@ def test_classify_target_socket_target_is_untracked_no_leak(roots, monkeypatch):
         assert after - before <= 2, f"socket 分支疑似泄漏：调用前 {before} 个，调用后 {after} 个"
     finally:
         sock.close()
+
+
+# ══════════════════════════════════════════════════════════════════
+# Task 3 · 在途标记 + 单股事务编排 `copy_stock`
+# 契约 D1、D4 第 2 条、D5、D6、D7、D8
+# ══════════════════════════════════════════════════════════════════
+
+def _seed_manifest(*, universe_sh=("600000.SH",), committed_bytes=None):
+    """造一份最小合规的 fetch_manifest.json（本节测试的通用起点）。
+
+    形状取契约 §1「证据」栏引用的探针 `seed_manifest()` 同一套必需字段
+    ——这些字段是 `qmt_manifest.validate_manifest` 的形状要求本身决定的，
+    不是可以自由裁剪的测试便利。
+    """
+    export_log_bytes = b"stock,period\n600000.SH,1m\n"
+    export_log_sha = hashlib.sha256(export_log_bytes).hexdigest()
+    if committed_bytes is None:
+        committed_bytes = len(export_log_bytes)
+    manifest = {
+        "manifest_version": 1,
+        "seed": "s4a-task3-test",
+        "source_snapshot": {
+            "export_log_sha256": export_log_sha,
+            "universe": {"SH": list(universe_sh), "SZ": [], "BJ": []},
+        },
+        "source_mount": {"fstype": "smbfs", "device": "//u@h/s",
+                          "source_root_relative": ""},
+        "pool_order": {"SH": [], "SZ": [], "BJ": []},
+        "cursor": {"SH": 0, "SZ": 0, "BJ": 0},
+        "files": [],
+        "staged_export_log": {"relative_path": "export_log.csv",
+                               "bytes": len(export_log_bytes),
+                               "sha256": export_log_sha},
+        "source_verification": "partial",
+        "source_verification_evidence": {"level": "partial", "passes": []},
+        "committed_bytes": committed_bytes,
+    }
+    return manifest, export_log_bytes
+
+
+def _begin_session(stg_fd, stg_path, manifest: dict, export_log_bytes: bytes):
+    """把 manifest + `export_log.csv` 落盘、调用 `begin_run`——`copy_stock`
+    要求调用方已经过 `begin_run` 拿到 `ledger`（本模块不管启动序列，S4b 的
+    范围）。锁纪律不属于 `begin_run`/`commit_stock` 的判据（两者都不读锁），
+    本节测试不取锁，聚焦 `copy_stock` 自身。
+    """
+    atomic_write_json(stg_fd, MANIFEST_NAME, manifest, full_sync=False)
+    (stg_path / "export_log.csv").write_bytes(export_log_bytes)
+    return begin_run(stg_fd)
+
+
+# ── 异常家族：SourceChangedMidRun 是 RunTerminated 第二个成员 ──────
+
+def test_source_changed_mid_run_is_a_run_terminated_family_member():
+    assert issubclass(SourceChangedMidRun, RunTerminated)
+    assert not issubclass(SourceChangedMidRun, StockCopyFailed)
+    assert not issubclass(StockCopyFailed, SourceChangedMidRun)
+    assert not issubclass(SourceChangedMidRun, PathEscapeError)
+    assert not issubclass(PathEscapeError, SourceChangedMidRun)
+
+
+# ── `.inflight.json` 的形状 ──────────────────────────────────────
+
+def test_build_inflight_marker_shape():
+    slot = Slot(code="600000.SH", market="SH", universe_idx=3)
+    assert build_inflight_marker(slot) == {
+        "code": "600000.SH", "market": "SH", "universe_idx": 3
+    }
+
+
+def test_build_inflight_marker_rejects_non_slot():
+    with pytest.raises(TypeError):
+        build_inflight_marker({"code": "600000.SH", "market": "SH", "universe_idx": 0})
+
+
+# ── 证据 1：端到端正路 ──────────────────────────────────────────
+
+def test_copy_stock_happy_path_end_to_end_commits_both_files(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_浦发银行_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_浦发银行_日K线_前复权.csv"
+    data_1m = b"1m-data" * 20
+    data_daily = b"daily-data" * 30
+    _put_source_file(src_path, rel_1m, data_1m)
+    _put_source_file(src_path, rel_daily, data_daily)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert (stg_path / rel_1m).read_bytes() == data_1m
+    assert (stg_path / rel_daily).read_bytes() == data_daily
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert not (stg_path / INFLIGHT).exists()
+
+    stock_files = [f for f in out["files"] if f["stock_code"] == "600000.SH"]
+    assert len(stock_files) == 2
+    assert {f["period"] for f in stock_files} == {"1m", "daily"}
+    assert out["pool_order"]["SH"] == [{"code": "600000.SH", "universe_idx": 0}]
+    assert out["cursor"]["SH"] == 1
+    assert out["committed_bytes"] == len(export_log_bytes) + len(data_1m) + len(data_daily)
+
+    disk = read_manifest(stg_fd)
+    assert disk == out, "commit_stock 必须真落盘，不是只改了内存里那份"
+
+
+# ── 证据 1 的另一半：D8，两个文件都已完好在池 → 跳过，不做任何改动 ──
+
+def test_copy_stock_skips_when_both_files_already_match(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    data_1m = b"already-there-1m"
+    data_daily = b"already-there-daily"
+    _put_source_file(src_path, rel_1m, data_1m)
+    _put_source_file(src_path, rel_daily, data_daily)
+    _put_target_file(stg_path, rel_1m, data_1m)
+    _put_target_file(stg_path, rel_daily, data_daily)
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": rel_1m,
+              "bytes": len(data_1m), "sha256": hashlib.sha256(data_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(data_daily), "sha256": hashlib.sha256(data_daily).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = len(export_log_bytes) + len(data_1m) + len(data_daily)
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "skipped"
+    assert out is manifest
+    assert not (stg_path / INFLIGHT).exists()
+    assert budget.used == manifest["committed_bytes"], "跳过不该动预算"
+
+
+# ── 证据 2：D1 前置校验——次序互换与 code 不符都必须被拒，且拒绝早于标记 ──
+
+def test_copy_stock_rejects_swapped_period_order_before_marker_written(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m")
+    _put_source_file(src_path, rel_daily, b"daily")
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    with pytest.raises(QmtSchemaError):
+        copy_stock(src_fd, stg_fd, slot, rel_daily, rel_1m, manifest,   # 次序互换
+                    ledger=ledger, budget=budget)
+
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert budget.used == manifest["committed_bytes"]
+
+
+def test_copy_stock_rejects_path_whose_filename_code_does_not_match_slot(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600001.SH_other_1分钟K线_前复权.csv"       # 文件名代码与 slot 不符
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    with pytest.raises(QmtSchemaError):
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+
+
+# ── 证据 3：R37-F1 回归钉——daily 缺失时，1m 的 final 不许残留 ──────
+
+def test_copy_stock_daily_missing_leaves_no_orphan_1m_final(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)   # daily 整段目录都没导出过
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "fetch_missing_file"
+
+    assert not (stg_path / rel_1m).exists(), "1m 的 final 不许残留——清理粒度是股不是文件"
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / INFLIGHT).exists()
+    assert budget.used == baseline
+
+
+# ── 证据 4：D5——本地坏 + 源等长换代 → 在写标记之前终止 ─────────────
+
+def test_copy_stock_terminates_before_marker_when_local_corrupt_and_source_swapped(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    original_1m = b"A" * 200
+    swapped_1m = b"B" * 200          # 源等长换代：同尺寸、不同内容
+    corrupt_local_1m = b"Z" * 200    # 本地坏：同尺寸、不同内容（触发 RECOPY 判据）
+    daily_data = b"daily-ok" * 10
+
+    _put_source_file(src_path, rel_1m, swapped_1m)
+    _put_source_file(src_path, rel_daily, daily_data)
+    _put_target_file(stg_path, rel_1m, corrupt_local_1m)
+    _put_target_file(stg_path, rel_daily, daily_data)
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": rel_1m,
+              "bytes": len(original_1m), "sha256": hashlib.sha256(original_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(daily_data), "sha256": hashlib.sha256(daily_data).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = (
+        len(export_log_bytes) + len(original_1m) + len(daily_data))
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    before_disk = (stg_path / MANIFEST_NAME).read_bytes()
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with pytest.raises(SourceChangedMidRun):
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert not (stg_path / INFLIGHT).exists(), "标记未写"
+    assert not (stg_path / (rel_1m + PART)).exists(), ".part 无残留"
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert budget.used == baseline, "退还了本次已扣的账"
+    after_disk = (stg_path / MANIFEST_NAME).read_bytes()
+    assert after_disk == before_disk, "manifest 逐字节未变"
+
+    disk_manifest = read_manifest(stg_fd)
+    assert disk_manifest["cursor"]["SH"] == 1, "cursor 未动"
+
+
+# ── 证据 5：D4 第 2 条——「有记录 × 目标不存在 × 源已换代」单独一档 ──
+
+def test_copy_stock_terminates_when_recorded_absent_target_and_source_changed(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    original_1m = b"A" * 150
+    swapped_1m = b"C" * 90           # 源已换代，长度也不同——不依赖长度巧合
+    daily_data = b"daily-ok" * 5
+
+    _put_source_file(src_path, rel_1m, swapped_1m)
+    _put_source_file(src_path, rel_daily, daily_data)
+    # 刻意不落 1m 的 staging 目标——「目标不存在」那一列，quadrant = TARGET_COPY，
+    # 不是 TARGET_RECOPY：D4 第 2 条要求这一格同样要比对，不能只挂在重拷那一格。
+    _put_target_file(stg_path, rel_daily, daily_data)
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": rel_1m,
+              "bytes": len(original_1m), "sha256": hashlib.sha256(original_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(daily_data), "sha256": hashlib.sha256(daily_data).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = (
+        len(export_log_bytes) + len(original_1m) + len(daily_data))
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    assert classify_target(stg_fd, rel_1m, rec_1m) == TARGET_COPY, \
+        "本测试要落在「目标不存在」那一列，不是重拷那一格"
+
+    with pytest.raises(SourceChangedMidRun):
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists(), "目标本就不存在，也不许被造出来"
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert budget.used == baseline
+
+
+# ── 证据 6：D6——标记写下后每一次 os.replace 时标记都必须在盘上 ──────
+
+def test_copy_stock_marker_present_on_disk_during_each_final_replace(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    target_basenames = {rel_1m.rsplit("/", 1)[-1], rel_daily.rsplit("/", 1)[-1]}
+    seen_marker_present: list[bool] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst, *a, **kw):
+        if dst in target_basenames:
+            seen_marker_present.append((stg_path / INFLIGHT).exists())
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert seen_marker_present == [True, True], (
+        "两次 .part→final 的 os.replace 发生时，在途标记都必须已经在盘上"
+    )
+
+
+# ── 证据 7：耐久——每次 os.replace 之后都要 fsync 其目录 ────────────
+
+def test_copy_stock_fsyncs_directory_after_each_final_replace(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    target_basenames = {rel_1m.rsplit("/", 1)[-1], rel_daily.rsplit("/", 1)[-1]}
+    events: list[tuple[str, object]] = []
+    real_replace = os.replace
+    real_fsync_dir = qmt_fetch.fsync_dir
+
+    def spy_replace(src, dst, *a, **kw):
+        result = real_replace(src, dst, *a, **kw)
+        if dst in target_basenames:
+            events.append(("replace", dst))
+        return result
+
+    def spy_fsync_dir(dir_fd):
+        events.append(("fsync", dir_fd))
+        return real_fsync_dir(dir_fd)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    monkeypatch.setattr(qmt_fetch, "fsync_dir", spy_fsync_dir)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    # 与「标记在场」那条测试同规格地过滤：只看两次 final 替换。标记的创建/删除
+    # 各自的 fsync 走的是 qmt_fsroot 自己模块内的引用，不经过这里的猴子补丁，
+    # 天然不混进来；`replace` 之后紧跟的下一个事件必须就是它自己那次 fsync
+    # ——不是「总共调了几次」，而是「每次替换之后立刻 fsync 它自己的目录」。
+    replace_positions = [i for i, e in enumerate(events) if e[0] == "replace"]
+    assert len(replace_positions) == 2, f"应有两次 final 替换，实测事件 {events}"
+    for i in replace_positions:
+        assert events[i + 1][0] == "fsync", (
+            f"os.replace 之后紧跟的必须是 fsync_dir，实测事件序列 {events}"
+        )
+
+
+# ── 证据 8：D7——committed_bytes = 旧值 + 本次真正写盘字节 ──────────
+
+def test_copy_stock_committed_bytes_is_old_value_plus_actual_bytes_written(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    data_1m = b"m" * 111
+    data_daily = b"d" * 222
+    _put_source_file(src_path, rel_1m, data_1m)
+    _put_source_file(src_path, rel_daily, data_daily)
+
+    manifest, export_log_bytes = _seed_manifest()
+    seed_extra = 5000        # 模拟「此前已有其它股花掉的字节」，不对应任何 files 记录
+    manifest["committed_bytes"] = len(export_log_bytes) + seed_extra
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    old_value = budget.used
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert out["committed_bytes"] == old_value + len(data_1m) + len(data_daily)
+    assert budget.used == out["committed_bytes"]
+
+
+def test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accepted(roots):
+    # D7 崩溃恢复第③档（E10/E11/E12）：qmt_manifest 接受「删这只股的记录、
+    # committed_bytes 原值不动」，拒绝「调小」。崩溃恢复本身是 S4b 的职责；
+    # 本测试直接驱动已合并的 commit_stock + RecoveryScope，钉住 Task 3 选择的
+    # 累计写入量语义（不去碰 committed_bytes）与它兼容。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"m" * 40)
+    _put_source_file(src_path, rel_daily, b"d" * 60)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+    assert status == "committed"
+    committed_bytes_after = out["committed_bytes"]
+
+    recovery = RecoveryScope(stock_code="600000.SH", market="SH", universe_idx=0)
+    payload = dict(out)
+    payload["files"] = [f for f in out["files"] if f["stock_code"] != "600000.SH"]
+    payload["pool_order"] = {mk: [e for e in v if e.get("code") != "600000.SH"]
+                              for mk, v in out["pool_order"].items()}
+    payload["cursor"] = dict(out["cursor"])
+    payload["cursor"]["SH"] = min(out["cursor"]["SH"], 0)
+    # committed_bytes 原值不动（不写调小的值）。
+
+    result = commit_stock(stg_fd, payload, ledger=ledger, recovery=recovery)
+    assert result["committed_bytes"] == committed_bytes_after
+
+
+# ── fd 不泄漏：copy_stock 对多只股连续调用 ──────────────────────
+
+def test_copy_stock_does_not_leak_fds_across_repeated_calls_for_distinct_stocks(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    codes = tuple(f"60000{i}.SH" for i in range(5))
+    manifest, export_log_bytes = _seed_manifest(universe_sh=codes)
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    before = len(os.listdir("/dev/fd"))
+    for idx, code in enumerate(codes):
+        slot = Slot(code=code, market="SH", universe_idx=idx)
+        rel_1m = f"1m/{code}_x_1分钟K线_前复权.csv"
+        rel_daily = f"daily/{code}_x_日K线_前复权.csv"
+        _put_source_file(src_path, rel_1m, f"m{idx}".encode() * 10)
+        _put_source_file(src_path, rel_daily, f"d{idx}".encode() * 10)
+        status, manifest = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                                       ledger=ledger, budget=budget)
+        assert status == "committed"
+    after = len(os.listdir("/dev/fd"))
+    assert after - before <= 2, f"copy_stock 疑似泄漏 fd：调用前 {before} 个，调用后 {after} 个"
