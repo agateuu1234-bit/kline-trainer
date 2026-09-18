@@ -14,9 +14,11 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
 三族互不相交的异常（调用方靠这三族决定「跳过这只股」还是「终止整次运行」）：
   · **候选失败**——`StockCopyFailed`：这一只股这次不行，继续下一只。`reason`
     全集**闭合**（大 spec:492 + 契约 D3：不新增值，账本读侧不校验
-    `failures[].reason`），含 `fetch_missing_file` / `fetch_copy_hash_
-    mismatch`（Task 1）、`untracked_target_file`（Task 2/D2，fix round 2 ·
-    N1 起也覆盖「账本记录挂着与本次调用不同的 `relative_path`」这一档）。
+    `failures[].reason`）共四个，本模块产生其中三个：`fetch_missing_file`
+    / `fetch_copy_hash_mismatch`（Task 1）、`untracked_target_file`
+    （Task 2/D2，fix round 2 · N1 起也覆盖「账本记录挂着与本次调用不同的
+    `relative_path`」这一档）——第四个 `fetch_interrupted_rollback` 由
+    S4b 的崩溃恢复产生，详见 `StockCopyFailed` 类文档。
   · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。两个成员：
     `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
     （契约 D5：落地前比对发现源在本次运行期间变了）。调用方要能用一个
@@ -90,15 +92,23 @@ class StockCopyFailed(Exception):
     `reason` 是给 4c 报告与账本 `failures` 记录读的字面量。**这个全集是
     闭合的**（大 spec:492 + 契约 D3 的取舍：不新增 `reason`，加值要同步改
     4c 报告 schema，而账本读侧不校验 `failures[].reason`，第五个取值会
-    静默流进 manifest、落不进任何一个桶）：`fetch_missing_file`（D3：
-    源侧叶子不是普通文件，或干脆不存在）、`fetch_copy_hash_mismatch`
-    （落地的 `.part` 重算与源哈希不符）、`untracked_target_file`（D2：
-    staging 目标来路不明，拒绝覆盖；fix round 2 · N1 起也覆盖“账本记录
-    挂着与本次调用不同的 `relative_path`”这一档——同属“这只股当前的身份
-    对不上账本”）。**D1 的两条路径校验不产生 `StockCopyFailed`**（fix
-    round 2 · N2）——那是调用方违反前置契约，不是这只股的事实，见
-    `_validate_stock_paths`。本类不做穷尽性校验，只是把调用方传入的字符串
-    原样带上。
+    静默流进 manifest、落不进任何一个桶），**共四个**：`fetch_missing_file`
+    / `fetch_copy_hash_mismatch` / `untracked_target_file` /
+    `fetch_interrupted_rollback`（fix round 3 订正：此前这里漏列了第四个，
+    却又说“第五个取值”——`_validate_stock_paths` 与大 spec:492 都是四个）。
+
+    **本模块只产生其中三个**：`fetch_missing_file`（D3：源侧叶子不是普通
+    文件，或干脆不存在）、`fetch_copy_hash_mismatch`（落地的 `.part` 重算
+    与源哈希不符）、`untracked_target_file`（D2：staging 目标来路不明，
+    拒绝覆盖；fix round 2 · N1 起也覆盖“账本记录挂着与本次调用不同的
+    `relative_path`”这一档——同属“这只股当前的身份对不上账本”）。
+    **第四个 `fetch_interrupted_rollback` 由 S4b 的崩溃恢复产生**（大 spec
+    §4.5：同一 `universe_idx` 的在途标记回滚累计到 3 次才记这一条），
+    不在本模块的范围内。
+
+    **D1 的两条路径校验不产生 `StockCopyFailed`**（fix round 2 · N2）——那
+    是调用方违反前置契约，不是这只股的事实，见 `_validate_stock_paths`。
+    本类不做穷尽性校验，只是把调用方传入的字符串原样带上。
     """
 
     def __init__(self, reason: str, detail: str = ""):
@@ -110,8 +120,9 @@ class StockCopyFailed(Exception):
 class RunTerminated(Exception):
     """终止条件族的公共基类：整次运行必须停（rc≠0），既不是候选失败也不是路径逃逸。
 
-    调用方用一个 `except RunTerminated` 就能接住全族。本片只有 `MaxBytesExhausted`
-    一个成员；Task 3 会补第二个成员（D5：源在本次运行期间换代，比对不符）。
+    调用方用一个 `except RunTerminated` 就能接住全族。两个成员：
+    `MaxBytesExhausted`（`--max-bytes` 预算耗尽）与 `SourceChangedMidRun`
+    （D5：源在本次运行期间换代，比对不符）。
     """
 
 
