@@ -944,6 +944,54 @@ def test_copy_stock_marker_present_on_disk_during_each_final_replace(roots, monk
     )
 
 
+# ── fix round 1 · I2：标记删除之后的 fsync 也要有测试守着 ──────────
+# 大 spec 闭合清单「`.inflight.json` 的创建与删除 → 各自之后 fsync(staging)」
+# ——创建那一半靠 atomic_write_json 内部兜底，删除是 _remove_inflight_marker
+# 自己的代码，此前没有测试专门盯着它。
+
+def test_copy_stock_fsyncs_staging_root_after_marker_deletion(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    events: list[tuple] = []
+    real_unlink = os.unlink
+    real_fsync_dir = qmt_fetch.fsync_dir
+
+    def spy_unlink(path, *a, **kw):
+        if path == INFLIGHT:
+            events.append(("unlink_marker", kw.get("dir_fd")))
+        return real_unlink(path, *a, **kw)
+
+    def spy_fsync_dir(dir_fd):
+        events.append(("fsync", dir_fd))
+        return real_fsync_dir(dir_fd)
+
+    monkeypatch.setattr(os, "unlink", spy_unlink)
+    monkeypatch.setattr(qmt_fetch, "fsync_dir", spy_fsync_dir)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    unlink_positions = [i for i, e in enumerate(events) if e[0] == "unlink_marker"]
+    assert len(unlink_positions) == 1, f"应恰好删一次标记，实测事件 {events}"
+    i = unlink_positions[0]
+    assert i + 1 < len(events) and events[i + 1][0] == "fsync", (
+        f"删标记之后紧跟的必须是 fsync_dir，实测事件序列 {events}"
+    )
+    assert events[i + 1][1] == events[i][1] == stg_fd, (
+        f"fsync 的必须是 staging 根（unlink 用的那个 dir_fd），实测事件序列 {events}"
+    )
+
+
 # ── 证据 7：耐久——每次 os.replace 之后都要 fsync 其目录 ────────────
 
 def test_copy_stock_fsyncs_directory_after_each_final_replace(roots, monkeypatch):
