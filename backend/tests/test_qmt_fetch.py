@@ -959,14 +959,16 @@ def test_copy_stock_fsyncs_directory_after_each_final_replace(roots, monkeypatch
     budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
 
     target_basenames = {rel_1m.rsplit("/", 1)[-1], rel_daily.rsplit("/", 1)[-1]}
-    events: list[tuple[str, object]] = []
+    events: list[tuple] = []
     real_replace = os.replace
     real_fsync_dir = qmt_fetch.fsync_dir
 
     def spy_replace(src, dst, *a, **kw):
         result = real_replace(src, dst, *a, **kw)
         if dst in target_basenames:
-            events.append(("replace", dst))
+            # 记下这次 replace **实际用的那个目录 fd**（src/dst 同目录，
+            # 取 dst_dir_fd 即可），供下面核对 fsync 的是不是同一个。
+            events.append(("replace", dst, kw.get("dst_dir_fd")))
         return result
 
     def spy_fsync_dir(dir_fd):
@@ -983,12 +985,19 @@ def test_copy_stock_fsyncs_directory_after_each_final_replace(roots, monkeypatch
     # 与「标记在场」那条测试同规格地过滤：只看两次 final 替换。标记的创建/删除
     # 各自的 fsync 走的是 qmt_fsroot 自己模块内的引用，不经过这里的猴子补丁，
     # 天然不混进来；`replace` 之后紧跟的下一个事件必须就是它自己那次 fsync
-    # ——不是「总共调了几次」，而是「每次替换之后立刻 fsync 它自己的目录」。
+    # ——不只是「下一个事件是某次 fsync」，还要求**那次 fsync 的 fd 与这次
+    # replace 用的目录 fd 逐一相等**（fix round 1 · I1：此前只查事件类型，
+    # 若把目录换成别的 fd——比如 staging 根——同样能骗过「下一个是 fsync」
+    # 这条判据，而 staging 根的 fsync 并不持久化子目录里那条新的目录项）。
     replace_positions = [i for i, e in enumerate(events) if e[0] == "replace"]
     assert len(replace_positions) == 2, f"应有两次 final 替换，实测事件 {events}"
     for i in replace_positions:
         assert events[i + 1][0] == "fsync", (
             f"os.replace 之后紧跟的必须是 fsync_dir，实测事件序列 {events}"
+        )
+        assert events[i + 1][1] == events[i][2], (
+            "fsync 的必须是 replace 实际用的那个目录 fd，不是别的目录（比如 "
+            f"staging 根）——实测事件序列 {events}"
         )
 
 
