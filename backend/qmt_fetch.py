@@ -528,7 +528,15 @@ def _apply_stock_records(manifest: dict, slot: Slot, records: list[dict],
     """把这只股的两条新记录并入 manifest 的内存副本（不改动传入的 `manifest`）：
     `files` 里原有这只股的记录先摘掉、换成这两条；`pool_order` 若还没有这只股
     的锚点条目则按序追加一条（已在池则不重复追加，契约 D8/E3）；`cursor` 推进
-    到 `universe_idx + 1`（`max` 是防御性写法，不假定调用方严格按序调用）；
+    到 `max(旧值, universe_idx + 1)`。
+
+    ⚠️ **`max()` 不是防御性写法，是承重构件**（fix round 1 · I3 订正此前的
+    误判）：崩溃恢复第③档会把 `cursor` 回退到早于某些已在池的股（契约 D8 末
+    段），重拉那些股走的正是这里——`universe_idx` 届时会**小于**当前
+    `cursor`，若直接赋值成 `universe_idx + 1` 会让 cursor **倒退**，
+    重新打开一批已经在池、且刚被这次重拷证明完好的股，被 `fresh_slots`
+    当成尚未处理的新槽位。同理，pool_order 的去重判据不是「防止偶尔重复」，
+    是重拷（含崩溃恢复后重跑到已在池的股）**必然**撞见的常态路径。
     `committed_bytes` 由调用方传入——契约 D7 的累计写入量语义（`旧值 + 本次
     真正写盘字节`），不是 `sum(files[].bytes) + staged_export_log.bytes` 那种
     「当前占用量」语义（证据 E11：那种语义在崩溃恢复之后会死锁）。

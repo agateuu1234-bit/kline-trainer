@@ -1049,6 +1049,62 @@ def test_copy_stock_fsyncs_directory_after_each_final_replace(roots, monkeypatch
         )
 
 
+# ── fix round 1 · I3：成功重拷（E3）的提交路径此前从未被真正跑到 ───────
+# 记录存在 + 本地目标同尺寸损坏（触发 TARGET_RECOPY）+ 源没变 → 重拷出的字节
+# 与账本记录逐字相同，不触发 D5 终止，走到正常提交。这条路径底下有两处此前
+# 零覆盖：`_apply_stock_records` 的 pool_order 去重判据（不重复追加锚点）与
+# `cursor = max(...)`（不能让 cursor 从一个更靠后的位置倒退）。universe_idx
+# 特意设成**小于**已有 cursor，才是 `max()` 真正起作用（防倒退）的场景——
+# 若 universe_idx 恰好等于「下一个新槽位」，`max()` 与直接赋值给出同一个数，
+# 测试对这两种写法没有判别力。
+
+def test_copy_stock_recopy_does_not_duplicate_pool_entry_or_regress_cursor(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    universe_sh = tuple(f"60000{i}.SH" for i in range(6))
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    content_1m = b"A" * 200
+    content_daily = b"D" * 60
+    corrupt_local_1m = b"Z" * 200      # 本地坏，同尺寸——触发 TARGET_RECOPY
+
+    _put_source_file(src_path, rel_1m, content_1m)          # 源没变
+    _put_source_file(src_path, rel_daily, content_daily)
+    _put_target_file(stg_path, rel_1m, corrupt_local_1m)     # 本地坏
+    _put_target_file(stg_path, rel_daily, content_daily)      # daily 完好 → SKIP
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": rel_1m,
+              "bytes": len(content_1m), "sha256": hashlib.sha256(content_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily", "relative_path": rel_daily,
+                 "bytes": len(content_daily), "sha256": hashlib.sha256(content_daily).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest(universe_sh=universe_sh)
+    manifest["files"] = [rec_1m, rec_daily]
+    # 这只股已经在池里，且 cursor 已经推进到更靠后的位置——模拟「其它股已经
+    # 拉过、游标走在前面」，universe_idx=0 < cursor=5：max() 真正起作用的场景。
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 5
+    old_committed = len(export_log_bytes) + len(content_1m) + len(content_daily)
+    manifest["committed_bytes"] = old_committed
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    assert classify_target(stg_fd, rel_1m, rec_1m) == TARGET_RECOPY
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert (stg_path / rel_1m).read_bytes() == content_1m
+    assert out["pool_order"]["SH"] == [{"code": "600000.SH", "universe_idx": 0}], (
+        "重拷不该在 pool_order 里重复追加这只股的锚点条目"
+    )
+    assert out["cursor"]["SH"] == 5, "重拷不该让 cursor 从 5 倒退到 universe_idx+1=1"
+    assert out["committed_bytes"] == old_committed + len(content_1m), (
+        "重拷即便内容与记录逐字相同，本次真写盘的字节仍要计入累计量（E13）"
+    )
+
+
 # ── 证据 8：D7——committed_bytes = 旧值 + 本次真正写盘字节 ──────────
 
 def test_copy_stock_committed_bytes_is_old_value_plus_actual_bytes_written(roots):
