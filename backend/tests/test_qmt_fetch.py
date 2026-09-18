@@ -439,3 +439,88 @@ def test_classify_target_rejects_non_dict_record(roots):
     src_fd, stg_fd, src_path, stg_path = roots
     with pytest.raises(TypeError):
         classify_target(stg_fd, "1m/whatever.csv", "not-a-dict")
+
+
+# ── fix round 1：目标 fd 不得泄漏（覆盖普通文件 / 目录 / FIFO 三个分支）──
+# `classify_target` 在 ~400 只股的循环里每股最多调两次；三个分支共用同一处
+# `finally: if fd is not None: os.close(fd)`，泄漏会在真实运行里累积到撞上
+# 进程 fd 上限。判据与 `test_qmt_fsroot.py` 的
+# `test_open_under_does_not_leak_intermediate_fds` /
+# `test_parent_fd_under_does_not_leak_intermediate_fds` 同规格：
+# `len(os.listdir("/dev/fd"))` 前后差值须落在 listdir 自身抖动的范围内。
+
+def test_classify_target_does_not_leak_target_fd_across_repeated_calls(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+
+    rel_regular = "1m/600000.SH_regular.csv"
+    data = b"leak-check" * 10
+    _put_target_file(stg_path, rel_regular, data)
+    record_regular = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+    rel_dir = "1m/600000.SH_dir.csv"
+    (stg_path / rel_dir).mkdir(parents=True)
+    record_dir = {"bytes": (stg_path / rel_dir).stat().st_size, "sha256": "0" * 64}
+
+    rel_fifo = "1m/600000.SH_fifo.csv"
+    fifo_path = stg_path / rel_fifo
+    fifo_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(fifo_path))
+    record_fifo = {"bytes": os.stat(str(fifo_path)).st_size, "sha256": "0" * 64}
+
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(50):
+        assert classify_target(stg_fd, rel_regular, record_regular) == TARGET_SKIP
+        assert classify_target(stg_fd, rel_dir, record_dir) == TARGET_UNTRACKED
+        assert classify_target(stg_fd, rel_fifo, record_fifo) == TARGET_UNTRACKED
+    after = len(os.listdir("/dev/fd"))
+    assert after - before <= 2, f"目标 fd 疑似泄漏：调用前 {before} 个，调用后 {after} 个"
+
+
+# ── fix round 1：中间目录分量是符号链接，同样必须整次致命，不得降级 ──
+# 叶子符号链接已有专门钉子（见上）；`parent_fd_under` 走中间分量时同样是
+# 逐段无跟随，中间分量是符号链接会先一步撞 ENOTDIR ⇒ `PathEscapeError`。
+# 这一档目前完全由被合并的 `qmt_fsroot` 原语实现——本测试钉的是
+# `classify_target` 不捕获它、原样传播，若日后有人重实现 `classify_target`
+# 时绕开了那个原语，这里会先变红。
+
+def test_classify_target_symlinked_intermediate_component_escapes_not_untracked(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    outside = stg_path.parent / "outside_1m_component"
+    outside.mkdir()
+    (stg_path / "1m").symlink_to(outside)
+
+    with pytest.raises(PathEscapeError) as ei:
+        classify_target(stg_fd, "1m/600000.SH_via_symlinked_dir.csv", None)
+    assert ei.value.component == "1m"
+    assert ei.value.errno == errno.ENOTDIR
+
+
+# ── fix round 1：socket 目标——唯一 `fd is None` 的分支 ──
+# `open_regular_probe` 对 socket 是「`open()` 本身就失败」，回头 `lstat` 证实
+# 非普通后抛 `NotARegularFileError`；`classify_target` 把它携带的 `st` 取出、
+# `fd` 置 `None`，仍走同一条 `_is_regular(st)` 判据。这是唯一没有真 fd 可关的
+# 分支，行为上与目录/FIFO 最不同，之前没有专门测试覆盖。
+
+def test_classify_target_socket_target_is_untracked_no_leak(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    sub = stg_path / "1m"
+    sub.mkdir(parents=True, exist_ok=True)
+    leaf_name = "600000.SH_sock.csv"
+    rel = f"1m/{leaf_name}"
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # AF_UNIX 路径上限约 104 字节，tmp_path 常超——切进目标目录再用相对名绑定
+    # （与 test_qmt_fetch.py 里源侧 socket 测试、test_qmt_manifest.py 同规格）。
+    monkeypatch.chdir(sub)
+    try:
+        sock.bind(leaf_name)
+        record = {"bytes": os.lstat(leaf_name).st_size, "sha256": "0" * 64}  # 与 lstat 对齐
+
+        before = len(os.listdir("/dev/fd"))
+        verdict = classify_target(stg_fd, rel, record)
+        after = len(os.listdir("/dev/fd"))
+
+        assert verdict == TARGET_UNTRACKED
+        assert after - before <= 2, f"socket 分支疑似泄漏：调用前 {before} 个，调用后 {after} 个"
+    finally:
+        sock.close()
