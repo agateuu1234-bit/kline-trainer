@@ -508,9 +508,13 @@ T1 真值表 208 格重构前后全绿 = 行为一字未变。"
         //       被对抗性评审用双臂变异实证打穿：存在性检查抓不到**多出来的第五个消费方**，
         //       守卫的有效覆盖面塌缩成「仅 Sources/KlineTrainerContracts/UI/ 一个目录」，
         //       而 D120 的第一现场在 `Render/KLineView+Drawing.swift:33`（按 toolType 决定画不画）。
+        //    ⚠️ 这四个文件 = **三处写入闸所在文件**（`TrainingEngine` 的两道 append 门 /
+        //       `DrawingObjectStyleEdit` 的 withStyle 闸 / `DrawingEnums` 的 sanitized）
+        //       **+ 定义处本身**（`DrawingStyleAvailability`，其命中就是 `func` 那一行）。
+        //       ⛔ 别把这个集合读成「四处写入闸」——写入闸是 4 个**调用点**、分布在 3 个文件里。
         #expect(Set(byFile.keys) == ["TrainingEngine.swift", "DrawingObjectStyleEdit.swift",
                                      "DrawingEnums.swift", "DrawingStyleAvailability.swift"],
-                "有效性判据的消费方不再恰好是那四处写入闸：\(byFile)")
+                "有效性判据的出现位置不再恰好是这四个文件（三处写入闸 + 定义处）。多出来的那个很可能是把它当 UI 灰态用了，违反 D120：\(byFile)")
         // ② UI 层零命中 —— 只为给最典型的违规一个可读文案；**覆盖面由 ① 承担**。
         #expect(uiHits.isEmpty, "有效性判据被接到 UI 层，违反 D120：\(uiHits)")
         // ③ 反向自检：两道 append 门**逐个**仍在（⛔ 不能只看该文件命中数非零：
