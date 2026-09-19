@@ -1397,6 +1397,32 @@ def test_copy_one_fifo_at_part_is_untracked_target_file_not_a_hang(roots):
     assert stat.S_ISFIFO(os.lstat(str(part)).st_mode), "来路不明的对象要原样留着"
 
 
+def test_copy_one_fifo_with_a_reader_at_part_opens_but_is_still_untracked(roots):
+    # `_open_part` 的第三条分支：**打开成功、但不是普通文件**。FIFO 只要另一端
+    # 已经挂着读者，`open(O_WRONLY|O_NONBLOCK)` 就**成功**（没有 ENXIO 可挡），
+    # 于是唯一拦得住它的是打开之后那句 `S_ISREG` —— 少了它，接下来整份 CSV
+    # 会被 `os.write` 灌进一根管子里，随后 `os.fsync` 在 FIFO 上抛 EINVAL。
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"source-data" * 10)
+    part = stg_path / (rel + PART)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(part))
+
+    # 读端用 O_NONBLOCK 打开：没有写者也会立刻返回，于是写端此后不再撞 ENXIO。
+    reader_fd = os.open(str(part), os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        budget = ByteBudget(limit=None, used=7)
+        with _deadline():
+            with pytest.raises(StockCopyFailed) as ei:
+                copy_one(src_fd, stg_fd, rel, budget)
+        assert ei.value.reason == "untracked_target_file"
+        assert budget.used == 7, "一个字节都不该扣"
+        assert stat.S_ISFIFO(os.lstat(str(part)).st_mode)
+    finally:
+        os.close(reader_fd)
+
+
 def test_copy_one_directory_at_part_is_untracked_target_file(roots):
     src_fd, stg_fd, src_path, stg_path = roots
     rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
