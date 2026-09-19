@@ -12,10 +12,14 @@ D8（跳过由四象限承担）。
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
+import json
 import os
+import signal
 import socket
+import stat
 
 import pytest
 
@@ -41,6 +45,7 @@ from qmt_fetch import (
 from qmt_fsroot import PathEscapeError, atomic_write_json, open_root
 from qmt_manifest import (
     MANIFEST_NAME,
+    PERIODS,
     RecoveryScope,
     begin_run,
     commit_stock,
@@ -1323,3 +1328,401 @@ def test_copy_stock_does_not_leak_fds_across_repeated_calls_for_distinct_stocks(
         assert status == "committed"
     after = len(os.listdir("/dev/fd"))
     assert after - before <= 2, f"copy_stock 疑似泄漏 fd：调用前 {before} 个，调用后 {after} 个"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 4（整支评审）：五条 finding 的回归钉
+# ══════════════════════════════════════════════════════════════════
+
+@contextlib.contextmanager
+def _deadline(seconds: float = 5.0):
+    """把「挂死」变成一条**会变红**的测试，而不是一次卡住整个套件的运行。
+
+    C1 的变异（拿掉 `.part` 打开点的 `O_NONBLOCK`）不会让任何断言失败——它会让
+    `os.open(O_WRONLY)` **永远**等一个写入方。没有这道闸，「变异必须变红」这条
+    验收条件本身就执行不了：套件只会一直挂着，而「挂着」与「还没跑完」从外面
+    看长得一模一样。`SIGALRM` 的处理函数抛异常时 PEP 475 不重试、原样传播。
+    """
+    def _fire(signum, frame):
+        raise TimeoutError(
+            f"超过 {seconds} 秒仍未返回：疑似阻塞在一个被植入的 FIFO 上"
+        )
+
+    old = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# ── C1：`.part` 与 final 同处一棵可被篡改的 staging 树，纪律必须同规格 ──
+# 此前 `.part` 的两个打开点直接走 `open_under`（只加 `O_NOFOLLOW`），既没有
+# `O_NONBLOCK` 也没有普通文件判据，而 `classify_target` 只看 final、从不看
+# `<rel>.part`。后果：植一个 FIFO 进去 → `os.open(O_WRONLY)` 永久等写入方，
+# 整次运行挂死在 `.staging.lock` 里（比 D2 要防的结局更糟，且不是 fail-closed）；
+# 植一个目录进去 → 裸 `IsADirectoryError`，不属于本模块声明的任何一族。
+
+def test_copy_one_fifo_at_part_is_untracked_target_file_not_a_hang(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"source-data" * 10)
+    part = stg_path / (rel + PART)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(part))
+
+    budget = ByteBudget(limit=None, used=7)
+    with _deadline():
+        with pytest.raises(StockCopyFailed) as ei:
+            copy_one(src_fd, stg_fd, rel, budget)
+    assert ei.value.reason == "untracked_target_file"
+    assert budget.used == 7, "一个字节都不该扣"
+    assert stat.S_ISFIFO(os.lstat(str(part)).st_mode), "来路不明的对象要原样留着"
+
+
+def test_copy_one_directory_at_part_is_untracked_target_file(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"source-data" * 10)
+    part = stg_path / (rel + PART)
+    part.mkdir(parents=True)
+
+    budget = ByteBudget(limit=None, used=7)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert ei.value.reason == "untracked_target_file", (
+        "植进 .part 的目录必须落进已声明的候选失败族，不得逃出一个裸 OSError"
+    )
+    assert not isinstance(ei.value, OSError)
+    assert budget.used == 7
+    assert part.is_dir(), "来路不明的对象要原样留着"
+
+
+def test_copy_one_symlinked_part_escapes_and_is_not_untracked(roots):
+    # `.part` 的叶子是符号链接 ⇒ 逐段无跟随撞 ELOOP ⇒ PathEscapeError（整次致命），
+    # **不得**被降级成「这只股的目标来路不明」——与 D2 对 final 的分界同一条。
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"source-data" * 10)
+    sub = stg_path / "1m"
+    sub.mkdir(parents=True, exist_ok=True)
+    (sub / "elsewhere.bin").write_bytes(b"outside")
+    (stg_path / (rel + PART)).symlink_to(sub / "elsewhere.bin")
+
+    budget = ByteBudget(limit=None)
+    with pytest.raises(PathEscapeError) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+    assert ei.value.errno == errno.ELOOP
+    assert not isinstance(ei.value, StockCopyFailed)
+
+
+def test_copy_stock_fifo_at_part_fails_closed_without_hanging(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    part = stg_path / (rel_1m + PART)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(part))
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with _deadline():
+        with pytest.raises(StockCopyFailed) as ei:
+            copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                        ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert stat.S_ISFIFO(os.lstat(str(part)).st_mode), "来路不明的对象要原样留着"
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+def test_copy_stock_directory_at_part_fails_closed_and_keeps_the_failure_reason(roots):
+    # ⚠️ 判别力所在：失败收尾会对两条 `.part` 各调一次 `_cleanup_part`，而
+    # `os.unlink` 对一个**目录**抛 EPERM（macOS）/ EISDIR（Linux）——若收尾不先
+    # 问一句「那底下是个什么东西」，那个 OSError 会**顶替掉**已经定性好的
+    # StockCopyFailed，把候选失败变成一个不属于任何一族的裸 OSError。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    part = stg_path / (rel_1m + PART)
+    part.mkdir(parents=True)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+    assert not isinstance(ei.value, OSError)
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert part.is_dir(), "来路不明的对象要原样留着"
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+# ── C2：事务层那道 untracked 闸此前零判别力 ──────────────────────
+# `if TARGET_UNTRACKED in verdicts` 改成 `if False and ...` 全套 52 项零红：
+# 三条断言 untracked 的 copy_stock 测试走的全是另一处 raise（relative_path
+# 迁移闸），D2 的覆盖整个只活在 `classify_target` 那一层——而 D2 的验收理由
+# 「只测 FIFO 会全绿，因为 FIFO 的 os.replace **本来就成功**」讲的正是
+# `os.replace`，`classify_target` 根本不调它。
+#
+# 故这两档**必须在 `copy_stock` 这一层**、且必须**目录与 FIFO 各一档**：
+# 闸门被拆掉时，目录那档会一路走到 `os.replace`（标记已写、随后炸出
+# IsADirectoryError，E6 的原始现场），FIFO 那档则 `os.replace` **成功**——
+# 来路不明的对象被静默覆盖、这只股照常提交，正是 D2 存在的理由。
+# 两档都用「无记录」那一格：有记录时落地前比对会先一步拦下（D4 第 2 条），
+# 闸门被拆掉也看不到 os.replace 那一幕，判别力反而被邻居遮住。
+
+def test_copy_stock_rejects_directory_at_final_target(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    (stg_path / rel_1m).mkdir(parents=True)          # final 那个名字底下是个目录
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+    assert (stg_path / rel_1m).is_dir(), "D2：那个对象原样留着，不删不碰"
+    assert not (stg_path / INFLIGHT).exists(), "在途标记一个字节都不许写下"
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+def test_copy_stock_rejects_fifo_at_final_target(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    target = stg_path / rel_1m
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(str(target))                            # FIFO 的 os.replace 本来就成功
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "untracked_target_file"
+    assert stat.S_ISFIFO(os.lstat(str(target)).st_mode), (
+        "D2：那个对象原样留着——它被一次静默的 os.replace 覆盖掉正是本条要防的数据丢失"
+    )
+    assert not (stg_path / INFLIGHT).exists(), "在途标记一个字节都不许写下"
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+# ── I1：删标记与提交之间的**次序**就是这个事务的定义 ──────────────
+# 把 `_remove_inflight_marker(stg_fd)` 挪到 `commit_stock(...)` 之前，此前
+# 全套 52 项零红。而那个次序一旦反过来：标记先没了、提交再失败，两个 final
+# 就是**没有回滚凭据的孤儿**，下一次运行撞「目标存在 × 无记录」把这只股
+# 永久除名（R37-F1）。两条断言分别钉住次序的两半。
+
+def test_copy_stock_removes_marker_only_after_commit_succeeds(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    seen: list[bool] = []
+    real_commit = qmt_fetch.commit_stock
+
+    def spy_commit(stg_fd_, manifest_, *, ledger, recovery=None):
+        seen.append((stg_path / INFLIGHT).exists())
+        return real_commit(stg_fd_, manifest_, ledger=ledger, recovery=recovery)
+
+    monkeypatch.setattr(qmt_fetch, "commit_stock", spy_commit)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert seen == [True], (
+        "commit_stock 执行的那一刻，在途标记必须还在盘上——删标记只能排在"
+        "提交**成功之后**（契约 D6）"
+    )
+    assert not (stg_path / INFLIGHT).exists(), "提交成功之后标记必须被删掉"
+
+
+def test_copy_stock_keeps_marker_when_commit_fails(roots, monkeypatch):
+    # 下一片（S4b）的崩溃恢复整个建立在这一条事实上：提交失败时标记**还在**，
+    # 它是那两个孤儿 final 唯一的回滚凭据（大 spec §4.5:487「只删标记里明写的
+    # 那两条 target 与两条 .part」）。标记没了 = 这只股永久除名。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    def exploding_commit(*args, **kwargs):
+        raise RuntimeError("打桩：提交失败")
+
+    monkeypatch.setattr(qmt_fetch, "commit_stock", exploding_commit)
+
+    with pytest.raises(RuntimeError):
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert (stg_path / INFLIGHT).exists(), (
+        "提交失败时在途标记必须留在盘上——它是两个孤儿 final 唯一的回滚凭据"
+    )
+    # 两个 final 确实已经落地：这正是「标记必须活着」的理由，不是顺带一提。
+    assert (stg_path / rel_1m).exists()
+    assert (stg_path / rel_daily).exists()
+
+
+# ── I2：真正写到盘上的那份标记内容此前从未被看过一眼 ────────────────
+# 形状测试只跑构造函数、在途测试只调 `.exists()`，两条谁也没跨到对面：把写
+# 调用处的 payload 掏空成 `{"code": slot.code}`、或把构造函数两个路径实参对调，
+# 全套 52 项都零红。而一份畸形的标记会让下一片拒绝启动且什么都不删——
+# 一棵永远起不来的 staging。
+
+def test_copy_stock_marker_payload_on_disk_matches_builder(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    target_basenames = {rel_1m.rsplit("/", 1)[-1], rel_daily.rsplit("/", 1)[-1]}
+    captured: list[dict] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst, *a, **kw):
+        # 事务中途——标记已写、第一个 final 还没换过去——把盘上那份读回来。
+        if dst in target_basenames and not captured:
+            captured.append(json.loads((stg_path / INFLIGHT).read_bytes()))
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    assert len(captured) == 1, "事务中途没读到那份标记"
+    on_disk = captured[0]
+    expected = build_inflight_marker(slot, rel_1m, rel_daily)
+
+    started_at = on_disk.pop("started_at", None)
+    assert isinstance(started_at, str) and started_at, (
+        f"盘上那份标记缺少（或写坏了）started_at：{captured[0]!r}"
+    )
+    expected.pop("started_at")
+    assert on_disk == expected, (
+        "真正写到盘上的标记内容必须与 build_inflight_marker 的输出逐字相同"
+        f"（除 started_at 外）——实测盘上是 {on_disk!r}，期望 {expected!r}"
+    )
+
+
+# ── I3：异常分类的穷尽性主张必须**是真的**（裸 OSError 是第三种）──────
+# 模块头此前写「以下**两种**都不折进任何一族」然后列了两种，而 D3 主动要求
+# 第三种：裸 `OSError`（PermissionError / EIO / ENOSPC）既不许折成
+# `fetch_missing_file`，也不被包装成 `RunTerminated`。这条钉住的是「确实如此」
+# 外加本模块给它的那条**位置保证**（逃出来时盘上什么都没落）。
+
+def test_copy_stock_bare_oserror_from_source_escapes_unclassified(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    # staging 里两个子目录都还不存在 ⇒ `classify_target` 在 `parent_fd_under`
+    # 那一步就返回 COPY，根本不调 `open_regular_probe`；于是下面这个桩**只**作用
+    # 在源侧那一次打开上，红起来时归因是唯一的。
+    def denying_probe(dir_fd, name, *, flags, mode=0o600):
+        raise PermissionError(errno.EACCES, "打桩：模拟源文件读不了")
+
+    monkeypatch.setattr(qmt_fetch, "open_regular_probe", denying_probe)
+
+    with pytest.raises(PermissionError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert not isinstance(ei.value, StockCopyFailed), (
+        "契约 D3 明禁把权限错误折成 fetch_missing_file"
+    )
+    assert not isinstance(ei.value, RunTerminated), "本模块也不把它包装成终止条件"
+    assert not isinstance(ei.value, PathEscapeError)
+    # 位置保证：它只可能逃在在途标记写下之前 ⇒ 盘上什么都没落。
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+# ── `_PERIODS` 与 `qmt_manifest.PERIODS` 是同一件事的两份副本 ──────────
+# 分叉的话撞的是 `commit_stock` 里的 `_validate_files`——而那已经在**在途标记
+# 写下、两个 final 落地之后**，正是 D6 要消灭的状态。顺带钉死 D1 的次序字面量。
+
+def test_periods_tuple_agrees_with_qmt_manifest():
+    assert qmt_fetch._PERIODS == PERIODS, (
+        f"qmt_fetch._PERIODS={qmt_fetch._PERIODS!r} 与 qmt_manifest.PERIODS="
+        f"{PERIODS!r} 分叉了"
+    )
+    assert qmt_fetch._PERIODS == ("1m", "daily"), "契约 D1 把次序钉死为 (1m, daily)"

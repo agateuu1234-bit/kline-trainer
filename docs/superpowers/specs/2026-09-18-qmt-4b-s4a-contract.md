@@ -28,7 +28,7 @@
 ## 1. 证据：13 条实测事实
 
 驱动真实 `qmt_fsroot` 与 `qmt_manifest`（⚠️ **`qmt_pool` / `qmt_normalize` 探针并未加载**——工作单用的是裸 dict；故 D1 里 `Slot` 的字段与 D8 里 `fresh_slots` 的区间**是读源码所得，不属于下表的实测事实**），
-脚本在 `.superpowers/sdd/2026-09-18-qmt-4b-s4a/`（`engine.py` / `harness.py` / `q1.py` /
+脚本在 `docs/superpowers/evidence/2026-09-18-qmt-4b-s4a/`（`engine.py` / `harness.py` / `q1.py` /
 `q234.py` / `q2b.py` / `q5.py` / `h1.py` / `h1fix.py` / `h3.py`），**可原地复跑**。
 ⚠️ **复核状态分两档**：**E1–E12 已由两轮独立对抗性评审各自完整重跑、逐条相符**；
 **E13 是第五轮评审之后补跑的，尚未经任何外部复核**（它支撑 D7 里「答否」那条结论）。

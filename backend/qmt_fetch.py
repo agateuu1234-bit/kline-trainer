@@ -17,7 +17,8 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
     `failures[].reason`）共四个，本模块产生其中三个：`fetch_missing_file`
     / `fetch_copy_hash_mismatch`（Task 1）、`untracked_target_file`
     （Task 2/D2，fix round 2 · N1 起也覆盖「账本记录挂着与本次调用不同的
-    `relative_path`」这一档）——第四个 `fetch_interrupted_rollback` 由
+    `relative_path`」这一档，fix round 4 · C1 起还覆盖「`<rel>.part` 那个名字
+    底下被植了非普通文件」这一档）——第四个 `fetch_interrupted_rollback` 由
     S4b 的崩溃恢复产生，详见 `StockCopyFailed` 类文档。
   · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。两个成员：
     `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
@@ -26,15 +27,33 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
   · **路径逃逸**——`qmt_fsroot.PathEscapeError`：信任边界被破坏，本模块不捕获、
     不包装，原样上抛（它不是 `OSError` 的子类，也不属于前两族）。
 
-⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——以下两种都不折进
-任何一族，因为它们是**调用方违反了本函数的前置契约**，不是某只股的事实、
-也不是环境变化（fix round 2 · N2 定案）：
+⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——按 `raise` 语句逐条
+枚举，另有**三种**（fix round 4 · N3 订正：此前这里写“两种”，漏掉了第三种
+裸 `OSError`，而那一种恰恰是 D3 主动要求留下的）。
+
+前两种是**调用方违反了本函数的前置契约**，不是某只股的事实、也不是环境变化
+（fix round 2 · N2 定案）：
   · `bare TypeError`（`slot` 不是 `qmt_pool.Slot`），语义上是“函数签名违反”
     （与 Task 2 `_validate_record` 对坏 `record` 类型抛 `TypeError` 同规格）；
   · `qmt_normalize.QmtSchemaError` / `qmt_fsroot.PathDisciplineError`（契约
     D1：两条路径次序互换、或文件名解析出的代码/周期与 `slot`/次序不符）
     ——这两条路径来自调用方（S4b），出错是它没有满足“两条路径要与 `slot`
     对应、次序钉死”这条前提，不许折成 `failures` 的一个 `reason`。
+
+第三种是**环境事实**：**裸 `OSError`**（源文件读不了 → `PermissionError`；
+SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）。
+契约 D3 **明禁**把它折进 `fetch_missing_file`（“打不开”与“不是普通文件”是两件
+事，`_open_source_leaf` 与 `_open_part` 的窄 `except` 就是这条判据本身，
+各有测试钉着），本模块也**不**把它包装成 `RunTerminated` —— **原样上抛**。
+**本模块对它只给一条保证，而那是位置保证**：它只可能逃在**在途标记写下之前**
+（标记之后那一段另见下一段的位置判据），故它逃出来的那一刻盘上什么都没落——
+两个 `.part` 已删、本次扣的预算已退还、manifest 一个字段没动。
+⚠️ **“跳过这只股”还是“终止整次运行”由 S4b 定，本片不替它选**（交接）：
+无差别 `except OSError` 会把权限错误折成 `fetch_missing_file`（D3 明禁），
+一路裸抛则会让一只股的一个读不了的源文件用 traceback 打死约 2 GiB 的整次运行、
+而不是留下一条可读的停止记录。两条路都有代价，**而定性需要“这是哪一只股、
+已经失败过几次”这类只有续跑循环才有的上下文** ⇒ 必须在 S4b 那一层做，
+**不得回头放宽本模块里那两处 `except` 的宽度**。
 **标记写下之后** `commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`
 （以及任何其它异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是
 **位置**（异常发生在标记写下之后），不是**类型**：调用方（S4b）只要处在
@@ -43,6 +62,7 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import stat
@@ -101,7 +121,9 @@ class StockCopyFailed(Exception):
     文件，或干脆不存在）、`fetch_copy_hash_mismatch`（落地的 `.part` 重算
     与源哈希不符）、`untracked_target_file`（D2：staging 目标来路不明，
     拒绝覆盖；fix round 2 · N1 起也覆盖“账本记录挂着与本次调用不同的
-    `relative_path`”这一档——同属“这只股当前的身份对不上账本”）。
+    `relative_path`”这一档——同属“这只股当前的身份对不上账本”；
+    fix round 4 · C1 起还覆盖 `<rel>.part` 那个名字底下被植了非普通文件
+    ——`.part` 与 final 同处一棵可被篡改的 staging 树，见 `_open_part`）。
     **第四个 `fetch_interrupted_rollback` 由 S4b 的崩溃恢复产生**（大 spec
     §4.5：同一 `universe_idx` 的在途标记回滚累计到 3 次才记这一条），
     不在本模块的范围内。
@@ -241,11 +263,89 @@ def _open_source_leaf(src_fd: int, rel: str):
         os.close(pfd)
 
 
+def _part_is_non_regular(stg_fd: int, rel: str) -> bool:
+    """`<rel>.part` **存在且不是普通文件** → `True`；其余（不存在 / 看不到 /
+    确实是普通文件）一律 `False` —— **不猜**。
+
+    逐段无跟随走到父目录再 `lstat` 叶子（不用 `os.stat(多分量路径)`：那会跟随
+    中间分量的符号链接，正是 `parent_fd_under` 存在的理由）。
+    `_open_part` 与 `_cleanup_part` 共用这一个判据，不各自内联一份。
+    """
+    try:
+        pfd, leaf = parent_fd_under(stg_fd, rel)
+    except OSError:
+        return False
+    try:
+        st = os.stat(leaf + PART, dir_fd=pfd, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        os.close(pfd)
+    return not _is_regular(st)
+
+
+def _open_part(stg_fd: int, rel: str, *, flags: int, create_dirs: bool = False) -> int:
+    """staging 侧 `<rel>.part` 的**唯一**打开点：`O_NONBLOCK` + 普通文件判据
+    （fix round 4 · C1）。
+
+    **`.part` 与 final 同处一棵可被篡改的 staging 树**，D2 给 final 立的那条纪律
+    必须原样覆盖到它：一个被植进 `<rel>.part` 的 FIFO 会让 `os.open(O_WRONLY)`
+    **永久等一个写入方**——整次运行挂死在 `.staging.lock` 里、后续任何一次运行
+    连启动都做不到，比 D2 要防的那个结局更糟，而且不是 fail-closed；植一个目录
+    则给出一个裸 `IsADirectoryError`，不属于本模块声明的任何一族。
+
+    **为什么不直接用 `qmt_fsroot.open_regular_probe`**（这条纪律的登记处，其
+    docstring 写着「三个打开点统一走本函数，避免『同一条纪律只落在其中一处』」）：
+    写侧这一次必须 `create_dirs=True`——staging 的 `1m/` / `daily/` 子目录正是由
+    本模块第一次写 `.part` 时创建的，而 `open_regular_probe` 不转发这个参数，
+    `qmt_fsroot` 在本片是禁改模块。故把同一条纪律在**本模块内收成这一个函数**：
+    两个打开点（写 `.part`、复算重读 `.part`）都只经它。
+
+    **定性 `untracked_target_file`**：D3 的判据是「这只股能不能继续」（不是
+    「影响面多大」），而 `.part` 是 **staging 侧**的对象——来路不明就不许覆盖它、
+    跳过这只股继续下一只，与 D2 对 final 的处置同一族。**不新增第五个 `reason`**
+    （那份全集按大 spec:492 与契约 D3 闭合）。
+    符号链接仍由 `open_under` 逐段无跟随抛 `PathEscapeError`（整次致命），不归本族；
+    `PermissionError` / `EIO` / `ENOSPC` 等其它 `OSError` **原样上抛**，与
+    `_open_source_leaf` 同规格：「打不开」与「不是普通文件」是两件事。
+    """
+    name = rel + PART
+    try:
+        fd = open_under(stg_fd, name, flags=flags | os.O_NONBLOCK,
+                        mode=0o600, create_dirs=create_dirs)
+    except IsADirectoryError as e:
+        raise StockCopyFailed("untracked_target_file", f"{name}: 是一个目录") from e
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        # 打不开 ≠ 打不开的原因猜得到（FIFO 无读者给 `ENXIO`、socket 在 macOS 给
+        # `EOPNOTSUPP`，各平台不同、还会变 —— 判据不枚举 errno）：回头 lstat 问
+        # 文件系统「那底下到底是个什么东西」，与 `_open_regular_probe` 同一套判据。
+        if _part_is_non_regular(stg_fd, rel):
+            raise StockCopyFailed(
+                "untracked_target_file", f"{name}: 存在但不是普通文件（打不开）"
+            ) from e
+        raise
+    try:
+        if not _is_regular(os.fstat(fd)):
+            # 带 `O_NONBLOCK` 时 FIFO（有读者）与目录（只读打开）都会**打开成功**，
+            # 故这条 `S_ISREG` 不是多余的 —— 与 `classify_target` 对 final 的
+            # 判据逐字同规格。
+            raise StockCopyFailed("untracked_target_file", f"{name}: 不是普通文件")
+        cur = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, cur & ~os.O_NONBLOCK)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResult:
     """单文件流式拷贝：读源 → 流式 sha256 → 逐块扣账 → 写 `.part` → `fsync` →
     对落地的 `.part` 重算并与源哈希比对。
 
-    失败时（含 `--max-bytes` 触顶、源读/目的写中途报错、落地复算不符）退还
+    失败时（含 `--max-bytes` 触顶、源读/目的写中途报错、落地复算不符、
+    `<rel>.part` 底下被植了非普通文件——见 `_open_part`）退还
     本次已经扣过的账，再原样上抛。本函数**不**删 `.part`、**不**处理「这只股
     另一个文件怎么办」——那些是 Task 3 单股事务编排的范围，本函数只管它自己
     这一个文件的记账闭合。
@@ -260,10 +360,10 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
 
         charged = 0
         try:
-            dfd = open_under(
-                stg_fd, rel + PART,
+            dfd = _open_part(
+                stg_fd, rel,
                 flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                mode=0o600, create_dirs=True,
+                create_dirs=True,
             )
             try:
                 hasher = hashlib.sha256()
@@ -282,7 +382,7 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
 
             # 对落地的 `.part` 重算并与源哈希比对——不是恒等式：这里重新打开、
             # 重新从磁盘读回，不是复用上面流式算出的那个 hasher。
-            rfd = open_under(stg_fd, rel + PART, flags=os.O_RDONLY)
+            rfd = _open_part(stg_fd, rel, flags=os.O_RDONLY)
             try:
                 verify = hashlib.sha256()
                 while True:
@@ -420,6 +520,10 @@ def classify_target(stg_fd: int, rel: str, record) -> str:
 
 INFLIGHT = ".inflight.json"
 
+# ⚠️ 必须与 `qmt_manifest.PERIODS` 逐字相同：本元组决定 `commit_stock` 收到的
+# 两条记录的 `period` 取值，一旦分叉，撞的是 `_validate_files`——而那已经在
+# **在途标记写下、两个 final 落地之后**，正是 D6 要消灭的状态。
+# 由 `test_periods_tuple_agrees_with_qmt_manifest` 钉住（不靠这行注释自称）。
 _PERIODS = ("1m", "daily")
 
 
@@ -496,7 +600,15 @@ def _cleanup_part(stg_fd: int, rel: str) -> None:
     大 spec 耐久提交协议闭合清单的显式豁免：「失败路径上 `.part` 的删除——
     `.part` 不匹配导入侧的 glob，残留只会在重试时被覆盖或再删一次」——不需要
     随后 `fsync` 其目录（该清单在 S4a 范围内继续生效，契约未覆盖这一条）。
+
+    ⚠️ **删之前先问一次「那名字底下现在是个什么东西」**（fix round 4 · C1）：
+    本函数只在失败收尾路径上被调用，而 `os.unlink` 对一个**目录**会抛
+    `EPERM`（macOS）/ `EISDIR`（Linux）——抛出去就**顶替掉**原来那个已定性的
+    `StockCopyFailed`，把候选失败变成一个不属于任何一族的裸 `OSError`。
+    非普通文件一律**原样留着、不删不碰**，与 D2 对 final 的处置同一条。
     """
+    if _part_is_non_regular(stg_fd, rel):
+        return
     try:
         pfd, leaf = parent_fd_under(stg_fd, rel)
     except FileNotFoundError:
@@ -599,8 +711,9 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     **失败/终止路径（标记写下之前）**：删这只股的两个 `.part`、退还本次已扣的
     预算、原样上抛——既接候选失败（`StockCopyFailed`，`reason` 可能是
     `fetch_missing_file` / `fetch_copy_hash_mismatch` / `untracked_target_file`
-    ——后者现在也覆盖「账本记录挂着与本次调用不同的 `relative_path`」，
-    fix round 2 · N1），也接终止条件（`SourceChangedMidRun` /
+    ——后者现在也覆盖「账本记录挂着与本次调用不同的 `relative_path`」
+    （fix round 2 · N1）与「`<rel>.part` 底下被植了非普通文件」
+    （fix round 4 · C1）），也接终止条件（`SourceChangedMidRun` /
     `MaxBytesExhausted`），两者的清理动作相同，只是调用方（S4b）对它们的后续
     处置不同（前者跳过这只股继续下一只，后者终止整次运行）。
 
