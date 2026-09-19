@@ -1334,6 +1334,22 @@ def test_copy_stock_does_not_leak_fds_across_repeated_calls_for_distinct_stocks(
 # fix round 4（整支评审）：五条 finding 的回归钉
 # ══════════════════════════════════════════════════════════════════
 
+class _DeadlineExceeded(BaseException):
+    """超时信号，**故意不继承 `Exception`，更不继承 `OSError`**。
+
+    ⚠️ 实测踩过：最初这里抛的是 `TimeoutError`，而 `TimeoutError` **是
+    `OSError` 的子类** —— 它从阻塞的 `os.open` 里冒出来，先被 `open_under` 的
+    `except OSError` 接住、原样再抛，再被 `_open_part` 的 `except OSError` 接住，
+    回头 lstat 一看「那确实是个 FIFO」⇒ 变成一个 `StockCopyFailed
+    ("untracked_target_file")` —— **与被测实现正确时的结论一模一样**。
+    于是「拿掉 O_NONBLOCK」这个变异下，两条 FIFO 测试各挂 5 秒**仍然全绿**：
+    我的超时闸自己被洗成了断言期望的那个答案。
+    继承 `BaseException` 之后，沿途所有 `except OSError` / `except Exception`
+    都接不住它；`copy_one` / `copy_stock` 里的 `except BaseException` 只做
+    清理并 `raise`，不改变它的身份。
+    """
+
+
 @contextlib.contextmanager
 def _deadline(seconds: float = 5.0):
     """把「挂死」变成一条**会变红**的测试，而不是一次卡住整个套件的运行。
@@ -1344,17 +1360,17 @@ def _deadline(seconds: float = 5.0):
     看长得一模一样。`SIGALRM` 的处理函数抛异常时 PEP 475 不重试、原样传播。
     """
     def _fire(signum, frame):
-        raise TimeoutError(
+        raise _DeadlineExceeded(
             f"超过 {seconds} 秒仍未返回：疑似阻塞在一个被植入的 FIFO 上"
         )
 
-    old = signal.signal(signal.SIGALRM, _fire)
+    previous = signal.signal(signal.SIGALRM, _fire)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
+        signal.signal(signal.SIGALRM, previous)
 
 
 # ── C1：`.part` 与 final 同处一棵可被篡改的 staging 树，纪律必须同规格 ──
