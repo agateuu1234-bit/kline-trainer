@@ -1768,3 +1768,158 @@ def test_periods_tuple_agrees_with_qmt_manifest():
         f"{PERIODS!r} 分叉了"
     )
     assert qmt_fetch._PERIODS == ("1m", "daily"), "契约 D1 把次序钉死为 (1m, daily)"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 5（整支评审收尾）：两条 finding 的回归钉
+# ══════════════════════════════════════════════════════════════════
+
+# ── A：`_open_part` 的窄 `except` 纪律此前零覆盖 ──────────────────
+# 模块头把「`_open_source_leaf` 与 `_open_part` 的窄 `except` 就是这条判据
+# 本身，各有测试钉着」当规则写着，而**源侧那条有、staging 侧那条没有**：把
+# `_open_part` 里的 `if _part_is_non_regular(stg_fd, rel):` 改成 `if True:`
+# ——即「`.part` 打不开就一律当成篡改」，正是那条规则明禁的放宽——本模块 65 项
+# 全绿、全套 1570 项全绿。放宽之后的实测后果：`ENOSPC`（staging 写满）/
+# `EACCES`（权限）/ `EIO`（SMB 断线）三种基础设施故障全部变成
+# `StockCopyFailed("untracked_target_file")`，被当成「有人篡改了 staging」
+# 记进 failures 的那个桶、这只股被跳过——正是 D3 在源侧禁掉的那种混淆，
+# 原样在 staging 侧复发。
+#
+# 打桩挂在 `.part` 的**打开点**上（`qmt_fetch.open_under` 在本模块里只有
+# `_open_part` 一个消费者，归因唯一），与源侧那条测试同一套做法。
+# ⚠️ 注入的信号**故意**是裸 `OSError`：被测代码正确时它原样逃出来，被测代码
+# 放宽时它变成 `StockCopyFailed` —— 两个结局可区分，信号不会被洗成期望答案。
+
+@pytest.mark.parametrize("err_code, what", [
+    (errno.ENOSPC, "staging 写满"),
+    (errno.EACCES, "权限不足"),
+    (errno.EIO, "SMB 断线"),
+])
+def test_open_part_bare_oserror_escapes_and_is_not_called_tampering(
+        roots, monkeypatch, err_code, what):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    # 子目录先建好：这样 `_part_is_non_regular` 会真的走到 `os.stat` 那一步
+    # 并如实答「那底下什么都没有」，而不是在 `parent_fd_under` 就抄近路。
+    (stg_path / "1m").mkdir()
+    (stg_path / "daily").mkdir()
+    assert not (stg_path / (rel_1m + PART)).exists(), (
+        "前提：那个名字底下确实什么都没有——否则本档变成在测「确实是篡改」"
+    )
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    def exploding_open_under(root_fd, relpath, *, flags, mode=0o600, create_dirs=False):
+        assert relpath.endswith(PART), (
+            f"本桩只该作用在 `.part` 的打开点上，却收到 {relpath!r}"
+        )
+        raise OSError(err_code, f"打桩：{what}")
+
+    monkeypatch.setattr(qmt_fetch, "open_under", exploding_open_under)
+
+    with pytest.raises(OSError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert ei.value.errno == err_code
+    assert not isinstance(ei.value, StockCopyFailed), (
+        f"{what} 是基础设施故障，不是「有人往 staging 里植了东西」——"
+        "把它折成 untracked_target_file 会让这只股被记进篡改那个桶（D3 在源侧"
+        "禁掉的正是这种混淆），而 `_open_part` 的窄 except 就是这条判据本身"
+    )
+    assert not isinstance(ei.value, RunTerminated), "本模块也不把它包装成终止条件"
+    assert not isinstance(ei.value, PathEscapeError)
+    # 位置保证（标记写下之前那一段）：盘上什么都没落。
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert not (stg_path / (rel_1m + PART)).exists()
+    assert not (stg_path / (rel_daily + PART)).exists()
+    assert budget.used == baseline
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+# ── B：失败收尾对 `.part` 的类型闸，两个方向此前都没有测试 ────────────
+# `_part_is_non_regular` 走 `lstat` ⇒ **符号链接也算非普通** ⇒ `_cleanup_part`
+# 把它原样留着。这个行为是**故意保留**的（fail-closed：别人植进来的对象本工具
+# 一律不动手），理由与它同 D2 的分界写在 `_cleanup_part` 的 docstring 里。
+# 但此前它是**意外**成立的：两个方向都没有测试，谁都可以把它悄悄改掉。
+# 变异 `if False:`（闸拆掉）→ 下面第一条红；变异 `if True:`（一律不删）
+# → 下面第二条红。
+
+def test_cleanup_keeps_a_planted_symlink_at_part(roots):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    sub = stg_path / "1m"
+    sub.mkdir()
+    (sub / "elsewhere.bin").write_bytes(b"outside")
+    part_1m = stg_path / (rel_1m + PART)
+    part_1m.symlink_to(sub / "elsewhere.bin")
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    # 打开那一刻就撞 ELOOP ⇒ 整次致命（不是候选失败）——这一段是既有纪律。
+    with pytest.raises(PathEscapeError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.errno == errno.ELOOP
+
+    # 本档钉的是**收尾**那一半：别人植进来的对象，失败收尾一律不动手。
+    assert part_1m.is_symlink(), (
+        "植进 <rel>.part 的符号链接必须原样留着——本工具不替篡改者把证据顺手"
+        "删掉，也不 unlink 一个可能指向 staging 树外的名字（fail-closed）"
+    )
+    assert (sub / "elsewhere.bin").read_bytes() == b"outside", "链接指向的对象也没被碰"
+
+
+def test_cleanup_still_removes_an_ordinary_part_on_the_failure_path(roots, monkeypatch):
+    # ⚠️ 与 `test_copy_stock_daily_missing_leaves_no_orphan_1m_final` 不重复：
+    # 那一条只断言收尾之后 `.part` 不在，**没有证明它曾经在过**——`.part` 压根
+    # 没被写出来时它一样绿。本档用一个中途探针先把「它真的在盘上」钉死，
+    # 于是「收尾把它删了」这句话才有判别力。
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)   # daily 的源整段没导出过
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    part_1m = stg_path / (rel_1m + PART)
+    midway: list[bool] = []
+    real_open_source_leaf = qmt_fetch._open_source_leaf
+
+    def spy_open_source_leaf(src_fd_, rel):
+        if rel == rel_daily:
+            midway.append(part_1m.is_file())
+        return real_open_source_leaf(src_fd_, rel)
+
+    monkeypatch.setattr(qmt_fetch, "_open_source_leaf", spy_open_source_leaf)
+
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+    assert ei.value.reason == "fetch_missing_file"
+
+    assert midway == [True], (
+        "前提不成立：1m 的 .part 在事务中途根本没落到盘上，下面那条断言是恒真的"
+    )
+    assert not part_1m.exists() and not part_1m.is_symlink(), (
+        "普通 .part 是本工具自己写下的残留——收尾必须删掉它。"
+        "符号链接那一档的豁免只收窄「被篡改」那一格，不是把整条删除规则关掉"
+    )

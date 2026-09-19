@@ -28,8 +28,11 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
     不包装，原样上抛（它不是 `OSError` 的子类，也不属于前两族）。
 
 ⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——按 `raise` 语句逐条
-枚举，另有**三种**（fix round 4 · N3 订正：此前这里写“两种”，漏掉了第三种
-裸 `OSError`，而那一种恰恰是 D3 主动要求留下的）。
+枚举，另有**四种**（fix round 4 · N3 订正：此前这里写“两种”，漏掉了第三种
+裸 `OSError`，而那一种恰恰是 D3 主动要求留下的；fix round 5 · Minor 1 再订正：
+此前写“三种”，漏掉了第四种 `ByteBudget.refund` 的裸 `ValueError`
+——本仓的判据是「穷尽性主张必须**按字面量枚举后逐条定性**」，
+“跑不到”是**定性**，不是**不列**的理由）。
 
 前两种是**调用方违反了本函数的前置契约**，不是某只股的事实、也不是环境变化
 （fix round 2 · N2 定案）：
@@ -45,15 +48,32 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 契约 D3 **明禁**把它折进 `fetch_missing_file`（“打不开”与“不是普通文件”是两件
 事，`_open_source_leaf` 与 `_open_part` 的窄 `except` 就是这条判据本身，
 各有测试钉着），本模块也**不**把它包装成 `RunTerminated` —— **原样上抛**。
-**本模块对它只给一条保证，而那是位置保证**：它只可能逃在**在途标记写下之前**
-（标记之后那一段另见下一段的位置判据），故它逃出来的那一刻盘上什么都没落——
+**本模块对它只给一条保证，而那是有前提的位置保证**（fix round 5 · Minor 2
+订正：此前这句写成“它**只可能**逃在在途标记写下之前”，**那是假的**——
+两次 `os.replace`、`commit_stock`、删标记这三处同样可能逃出裸 `OSError`，
+结论靠紧跟其后的括号才救回来，而那句话单独拿出来就是错的）：
+**逃在在途标记写下之前**的那些裸 `OSError`，逃出来的那一刻盘上什么都没落——
 两个 `.part` 已删、本次扣的预算已退还、manifest 一个字段没动。
+**标记写下之后逃出的裸 `OSError` 不在这条保证之内**，按下一段的**位置**判据
+处置（调用方在那一段接到任何异常都必须按整次运行终止，不必检查类型）。
 ⚠️ **“跳过这只股”还是“终止整次运行”由 S4b 定，本片不替它选**（交接）：
 无差别 `except OSError` 会把权限错误折成 `fetch_missing_file`（D3 明禁），
 一路裸抛则会让一只股的一个读不了的源文件用 traceback 打死约 2 GiB 的整次运行、
 而不是留下一条可读的停止记录。两条路都有代价，**而定性需要“这是哪一只股、
 已经失败过几次”这类只有续跑循环才有的上下文** ⇒ 必须在 S4b 那一层做，
-**不得回头放宽本模块里那两处 `except` 的宽度**。
+**不得回头放宽本模块里那两处 `except` 的宽度**（这条纪律两侧**各有一条**
+测试钉着：源侧 `test_copy_stock_bare_oserror_from_source_escapes_unclassified`、
+staging 侧 `test_open_part_bare_oserror_escapes_and_is_not_called_tampering`）。
+
+第四种是**本模块自身不变量的自查**：`ByteBudget.refund` 的裸 `ValueError`
+（“退还超过已扣”）。**定性：在本模块自己的调用路径上不可达**——`copy_one`
+只退它这一趟**逐块累加**出来的 `charged`，`copy_stock` 只退 `written` 里那些
+已经成功扣过账、且此前没被退过的字节，两者恒 `<= budget.used`。它只可能在
+调用方把同一个 `ByteBudget` 跨事务复用、或中途把 `used` 改小时触发，那与裸
+`TypeError` 同族（调用方违反前置契约），不是这只股的事实、也不是环境变化。
+**列出它不是因为它会发生，而是因为“按 `raise` 语句逐条枚举”这句主张必须
+逐字为真**。
+
 **标记写下之后** `commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`
 （以及任何其它异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是
 **位置**（异常发生在标记写下之后），不是**类型**：调用方（S4b）只要处在
@@ -606,6 +626,28 @@ def _cleanup_part(stg_fd: int, rel: str) -> None:
     `EPERM`（macOS）/ `EISDIR`（Linux）——抛出去就**顶替掉**原来那个已定性的
     `StockCopyFailed`，把候选失败变成一个不属于任何一族的裸 `OSError`。
     非普通文件一律**原样留着、不删不碰**，与 D2 对 final 的处置同一条。
+
+    ⚠️⚠️ **符号链接被这道闸一起挡住是【故意的】，不是照抄判据的副作用**
+    （fix round 5 · B）：`_part_is_non_regular` 走的是 `lstat`，所以
+    `<rel>.part` 那个名字底下被植的**符号链接**也算「非普通」⇒ 一样留着不删。
+    **这不与契约 §2 D2 的「非普通文件不含符号链接」冲突**，因为两者裁的**不是
+    同一个决定**：D2 管的是**覆盖裁决**（这个对象能不能被当成一次正常的重拷
+    目标覆盖掉），它把符号链接排除在外，是因为符号链接在**打开**那一刻就已经
+    由 `open_under` 逐段 `O_NOFOLLOW` 撞 `ELOOP` 变成 `PathEscapeError`
+    （整次致命），不许被降级成「这只股的目标来路不明」；本函数管的是**失败
+    收尾时删不删**——对象、时机、后果都不同，D2 的排除条款管不到这里。
+    **取舍已定案**：别人植进来的对象，本工具一律不动手——不替攻击者把证据
+    顺手删掉，也不 `unlink` 一个可能指向 staging 树外的名字（fail-closed）。
+    **代价明写**：同一处植入会让**后续每一次运行都死在同一个
+    `PathEscapeError` 上，直到有人去看一眼**——一次信任边界破坏就该有人处理，
+    不该被下一次运行悄悄抹平。
+
+    ⚠️ **由此，大 spec §4.5 步骤 1「失败即删掉这只股的两个 `.part`」在 S4a
+    范围内被收窄，且只收窄「被篡改」那一档**：`.part` 是普通文件（本工具自己
+    写下的残留）时照删不误，只有那个名字底下是非普通对象时才留着不碰。
+    **两个方向各有一条测试钉着**（`test_cleanup_keeps_a_planted_symlink_at_part`
+    / `test_cleanup_still_removes_an_ordinary_part_on_the_failure_path`）——
+    此前两个方向都没有测试，正是这条语义能被悄悄改掉的原因。
     """
     if _part_is_non_regular(stg_fd, rel):
         return
