@@ -303,6 +303,10 @@ D7 取累计语义是**唯一跑得通**的选择（E11/E12），但它的代价
     ⚠️ **它不要求新增 `stopped_reason` 取值**：与 D5 同规格，`copy_stock` 在这条路上 **manifest 一个字段都不写**（有测试逐字节比对钉着）。S4b 只需 `except RunTerminated` 接住它、rc≠0，与 D5 的终止走同一条出路。
     ⚠️ **它不新增第五个 failure `reason`**：它不是 `StockCopyFailed`，`failures` 的那份闭合全集一个字没动。
     原异常挂在 `.original` 与 `__cause__` 上，回滚里失败的那些项挂在 `.errors` 上并逐条 `add_note` 到原异常 —— S4b 报告要写「为什么停」时取这两处，不要去解析异常文本。
+    ⚠️⚠️ **一个必须查 `.errors` 才看得见的档**：`<rel>.part` 的**某个路径分量**被换成符号链接时，回滚里的 `_cleanup_part` 自己会抛 `PathEscapeError`。
+    它被 `_rollback_all` 收进 `.errors`（**刻意不原样上抛**——上抛就成了「清理异常顶替原异常」，正是本条要消灭的东西），于是调用方接到的是 `RollbackIncomplete` 而不是一次路径逃逸。
+    **两者都必须终止整次运行，所以停不停机不受影响**；但 `stopped_reason` 取值会差一个：⇒ **S4b 在终止时必须先扫一遍 `.errors`，其中出现 `PathEscapeError` 就按 `staging_path_escape` 记（并配形状合规的 `fetch_fatal_error`），而不是当成一次普通的回滚未完成。**
+    ⛔ S4a **没有**为这一档配测试（本轮范围只到三处收尾路径的独立执行），S4b 补测试时须把它算进去。
 13. **S5**：`committed_bytes` 进读侧必需键（D7），与其他需要 bump `manifest_version` 的改动合并，只 bump 一次。
 14. **S5**：D5 的持久防线是「补拉前置复校」与「pilot 三方相等校验」，改动它们前须知道这一点。
 15. **独立 PR**：R1。
