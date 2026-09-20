@@ -62,7 +62,10 @@ def _iter_files():
         if not d.is_dir():
             raise AssertionError(f"作用域目录不存在：{d} —— 是不是被改名/移走了？")
         for q in sorted(d.rglob("*")):
-            if q.is_file() and q.suffix in _SUFFIXES and "__pycache__" not in q.parts:
+            # ⚠️ `Dockerfile` 没有后缀，但 PR-2 容器化之后它**是真的可执行路径**
+            #    （一句 `RUN psql -c "INSERT INTO training_sets (…)"` 就在视野之外）。
+            if q.is_file() and (q.suffix in _SUFFIXES or q.name.startswith("Dockerfile")) \
+                    and "__pycache__" not in q.parts:
                 if q.resolve() != _SELF:
                     yield q
 
@@ -112,7 +115,16 @@ def _column_names(cols: str) -> set[str]:
     ⚠️ 要吃得下生产语句那种 Python 拼接后**残留引号**的列清单
        （`… end_datetime, "\n        "schema_version, …`）。
     """
-    cols = re.sub(r"--[^\n]*", "", cols)          # 剥 SQL 行注释
+    # ⛔ **块注释必须先剥**（Task 3 评审阻断项）：只剥 `--` 会让两个方向同时坏掉 ——
+    #   · **假通过（危险方向）**：`… content_hash /*, schema_version */` 是**真漏写**，
+    #     但块注释里那个逗号会被 `_top_split` 切一刀，切出的 ` schema_version */`
+    #     被下面的 `re.match` 从头认成**真列名** ⇒ 守卫**放行**；
+    #   · **误报**：`(stock_code, /* 第2代 */ schema_version, …)` 本来合规，但该段以 `/`
+    #     开头、`re.match` 不匹配 ⇒ **真列名整个丢失** ⇒ 守卫报缺。误报会把人推向
+    #     「干脆把它排除掉」，而那正是把缺口原样留下的路径。
+    #   ⭐ 两个方向各由变异 M4i / M4j 钉住。
+    cols = re.sub(r"/\*.*?\*/", "", cols, flags=re.S)   # 先剥 SQL 块注释
+    cols = re.sub(r"--[^\n]*", "", cols)          # 再剥 SQL 行注释
     names = set()
     for part in _top_split(cols):
         part = part.strip().strip('"').strip()
@@ -158,6 +170,7 @@ def _classify(text: str, a: int, b: int):
 def test_every_executable_insert_carries_schema_version():
     """每一条真 `INSERT INTO training_sets` 的列清单里都必须有 `schema_version`。"""
     missing, positional, unknown, checked = [], [], [], 0
+    per_dir = {d: 0 for d in _SCOPE_DIRS}
 
     for q in _iter_files():
         try:
@@ -178,6 +191,10 @@ def test_every_executable_insert_carries_schema_version():
                 unknown.append(where)
             else:
                 checked += 1
+                for _d in _SCOPE_DIRS:
+                    if q.is_relative_to(_d):
+                        per_dir[_d] += 1
+                        break
                 if "schema_version" not in _column_names(cols):
                     missing.append(f"{where}  列清单={cols.strip()[:120]}")
 
@@ -201,7 +218,19 @@ def test_every_executable_insert_carries_schema_version():
     # ⛔ **三类问题必须一次全报，不能用三条 assert 串起来**：只要前一条炸了，
     #    后面的就永远执行不到 —— 而 `missing` 才是本守卫的**招牌判据**。
     #    本仓成文教训：「断言顺序导致招牌判据从未执行」。
+    # ⛔ **逐目录锚点**（Task 3 评审「重要 2」）：`checked >= 2` 是**存在性**判据，
+    #    表达不了穷尽性 —— 真实树是 12 条，掉到 2 条它才响。实测**单 token 编辑**即可绕过：
+    #    从 `_SUFFIXES` 里只拿掉 `".yml"`，`.github/workflows` 整个目录**静默退出视野**，
+    #    `checked` 仍 >= 2 ⇒ 守卫绿；此时再真删掉一个列名，它**照样绿**。
+    #    ⇒ 改成**每个作用域目录各自至少要有 1 条**，让「整个子树消失」这件事必须响。
+    #    ⭐ 由变异 M4k 钉住。
+    blind = [d.relative_to(REPO_ROOT).as_posix() for d, n in per_dir.items() if n == 0]
+
     problems = []
+    if blind:
+        problems.append(
+            "【某个作用域目录一条语句都没解析到】它多半被后缀白名单/改名悄悄移出了视野，"
+            "而守卫会照样报「全都合规」：\n  " + "\n  ".join(blind))
     if gen_seen < 1:
         problems.append(
             "【生产语句脱离视野】`backend/generate_training_sets.py` 里一条都认不出 "
