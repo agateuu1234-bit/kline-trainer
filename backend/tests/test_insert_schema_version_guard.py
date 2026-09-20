@@ -193,20 +193,27 @@ def _column_names(cols: str) -> set[str]:
     cols = _mask_sql_comments(cols)
     names = set()
     for part in _top_split(cols):
-        part = part.strip().strip('"').strip()
-        # ⛔ **必须整段匹配（`fullmatch`），不能只匹配前缀**（第二轮定向复评「重要」）：
+        part = part.strip()
+        # ⛔ **区分两种引号**（第三轮定向复评「重要」—— 控制者上一版写下
+        #    「这两件事直接冲突、必须二选一」，复评**实测证明该理由不成立**）：
+        #    · **成对包裹整段**的 `"…"` ⇒ 真·SQL **引号标识符**：逐字、大小写敏感、
+        #      内部空格有意义。`"schema_version "` / `"Schema_Version"` 在 PG 眼里
+        #      都是**另一个列**（pglast 核实），必须判「不含」。
+        #    · **孤零零一个**引号 ⇒ 多半是 **Python 相邻字面量拼接**留下的噪声
+        #      （生产语句是 `… end_datetime, "\n        "schema_version, …`），
+        #      它不是 SQL 语法的一部分，抹掉即可。
+        #    ⇒ 两者**形状不同**，可以同时照顾到。实测生产语句解析出的 7 个列名
+        #      与改动前**逐字相同** —— 不存在「必须二选一」。
+        if len(part) >= 2 and part[0] == '"' and part[-1] == '"':
+            names.add(part[1:-1])
+            continue
+        # ⛔ **必须整段匹配（`fullmatch`），不能只匹配前缀**（第二轮定向复评）：
         #    `re.match` 只要开头像标识符就收下，于是 `schema_version★` 被当成
         #    `schema_version` ⇒ **假通过**（pglast 实测该列真名是 `schema_version★`）。
-        #    ⚠️ 已知且**接受**的残留：`"schema_version "`（双引号 + 尾随空格）在 PG 眼里
-        #    是**另一个列**，本守卫仍判「含」。修它要按 SQL 的**引号标识符语义**处理
-        #    （引号内逐字、空格有意义），而那会与下面这行「剥掉引号」的处理**直接冲突** ——
-        #    生产语句是 Python 相邻字面量拼出来的，列清单里混着 **Python 的引号**
-        #    （`… end_datetime, "\n        "schema_version, …`），不剥就认不出真列名。
-        #    ⇒ 两害相权：保住**唯一真写生产库那条**的识别，放过这个 PG 会**响亮报错**
-        #    （`column "schema_version " does not exist`）、不会静默插入的形态。
-        m = re.fullmatch(r'"?([A-Za-z_][\w$]*)"?\s*', part)
+        bare = part.replace('"', " ").strip()
+        m = re.fullmatch(r"([A-Za-z_][\w$]*)\s*", bare)
         if m:
-            names.add(m.group(1).lower())
+            names.add(m.group(1).lower())      # 裸标识符：PG 会折叠成小写
     return names
 
 
@@ -287,7 +294,69 @@ def _scan(files, root):
     return missing, positional, unknown, checked, per_cell
 
 
-def test_scan_actually_reports_violations(tmp_path):
+def _enforce(files, root):
+    """扫一批文件 → 组装问题清单 → **抛出**。整条链路**只有这一份代码**。
+
+    ⛔ **为什么把组装与最终 `assert` 也收进来**（Task 3 第三轮定向复评「重要」）：
+       前两轮各修一次，同一类腐化**每次只是往调用栈上层挪一层**又原样复现 ——
+       第 1 轮拔掉 `missing.append`、第 2 轮拔掉 `_scan` 外面的组装。实测三种写法
+       （`missing = []` 局部丢弃 / `if missing:` 短路成 `if False:` /
+       `assert not problems` 改成 `assert True`）**叠加真缺陷注入后全部 `3 passed`**。
+       ⇒ 再补第 4 层测试只会把边界又推高一层。**解法是把层数塌掉**：让
+       `test_enforce_actually_raises_on_violations` 走的就是这一个函数，
+       于是「组装/抛出被短路」会**同时**让那条合成自测变红。
+
+    ⚠️ **锚点类判据只在【真实仓树】上成立**（合成小树当然没有生产语句、没有格子），
+       故用 `root == REPO_ROOT` 自己判断 —— ⛔ 不做成参数，免得被一个
+       `anchors=False` 悄悄关掉。
+    """
+    real = (root == REPO_ROOT)
+    missing, positional, unknown, checked, per_cell = _scan(files, root)
+
+    problems = []
+    if real:
+        # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
+        if checked < 2:
+            problems.append(
+                f"【解析不到列清单】只解析到 {checked} 条 —— 作用域或括号配平坏了，"
+                "⛔ 这不是「全都合规」。")
+        blind = [f"{d}  下的 {sfx} 文件" for (d, sfx), n in per_cell.items() if n == 0]
+        if blind:
+            problems.append(
+                "【有一类文件一条语句都没解析到】它多半被后缀白名单/改名悄悄移出了视野，"
+                "而守卫会照样报「全都合规」：\n  " + "\n  ".join(blind))
+        gen_src = (REPO_ROOT / "backend" / "generate_training_sets.py").read_text(encoding="utf-8")
+        gen_seen = sum(1 for m in _HEAD.finditer(gen_src)
+                       if _classify(gen_src, m.start(), m.end())[0] == "cols")
+        if gen_seen < 1:
+            problems.append(
+                "【生产语句脱离视野】`backend/generate_training_sets.py` 里一条都认不出 "
+                "`INSERT INTO training_sets` 的列清单 —— 唯一真正写生产库的那条语句本守卫"
+                "已经看不见了（多半是 SQL 被重构成变量拼接 / f-string / 搬去了别处）。"
+                "⛔ 这不是「它没问题」，是「守卫看不见它了」。")
+
+    # ⛔ **各类问题必须一次全报，不能用多条 assert 串起来**：只要前一条炸了，
+    #    后面的就永远执行不到 —— 而 `missing` 才是本守卫的**招牌判据**。
+    #    本仓成文教训：「断言顺序导致招牌判据从未执行」。
+    if unknown:
+        problems.append(
+            "【认不出的形状】必须由人来定性（是真语句就补 `schema_version` 并把该形状加进判据；"
+            "是提及就说明理由）：\n  " + "\n  ".join(unknown))
+    if positional:
+        problems.append(
+            "【不写列清单、按位置插入】**本守卫不接受这种写法**，必须改成显式列清单：\n  "
+            + "\n  ".join(positional))
+    if missing:
+        problems.append(
+            "【列清单里没有 `schema_version`】PostgreSQL 会用 `DEFAULT 1` **静默**把行标成第 1 代，"
+            "而所有闸门照样绿：\n  " + "\n  ".join(missing))
+
+    assert not problems, (
+        f"`INSERT INTO training_sets` 守卫发现 {len(problems)} 类问题：\n\n"
+        + "\n\n".join(problems))
+
+
+def test_enforce_actually_raises_on_violations(tmp_path):
     """⭐ 证明**上报这条线**本身没坏 —— 拿一棵**合成的小树**喂给同一份 `_scan`。
 
     为什么必须单独有这一条（Task 3 第二轮定向复评「重要」）：上一版在文档里写
@@ -308,80 +377,36 @@ def test_scan_actually_reports_violations(tmp_path):
         q.write_text(body, encoding="utf-8")
         files.append(q)
 
-    missing, positional, unknown, checked, _cells = _scan(files, tmp_path)
+    import pytest
 
-    assert checked == 2, f"应解析到 2 条列清单（bad + good），实为 {checked}"
-    assert [w.split(" ", 1)[0] for w in missing] == ["bad.sql:1"], \
-        f"⛔ 真漏写没被记录 —— 上报线断了：{missing}"
-    assert positional == ["nocols.sql:1"], f"⛔ 按位置插入没被记录：{positional}"
-    assert unknown == ["weird.sql:1"], f"⛔ 未知形状没被记录：{unknown}"
+    with pytest.raises(AssertionError) as excinfo:
+        _enforce(files, tmp_path)
+    msg = str(excinfo.value)
+
+    # ⛔ 逐条钉住：三类问题**各自**都必须被组装进报文并抛出来。
+    #    少任何一条，说明从「判出违规」到「最终抛出」这条链路上有一段被短路了。
+    for need in ("bad.sql:1", "nocols.sql:1", "weird.sql:1",
+                 "列清单里没有", "不写列清单、按位置插入", "认不出的形状"):
+        assert need in msg, f"⛔ 报文里缺「{need}」—— 上报/组装/抛出这条链路被短路了：\n{msg}"
+    # 合规那条**不得**被报进来（否则是误报方向坏了）
+    assert "good.sql" not in msg, f"⛔ 合规语句被误报了：\n{msg}"
 
 
 def test_every_executable_insert_carries_schema_version():
-    """每一条真 `INSERT INTO training_sets` 的列清单里都必须有 `schema_version`。"""
-    missing, positional, unknown, checked, per_cell = _scan(_iter_files(), REPO_ROOT)
+    """每一条真 `INSERT INTO training_sets` 的列清单里都必须有 `schema_version`。
 
-    # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
-    assert checked >= 2, f"只解析到 {checked} 条列清单 —— 作用域或括号配平坏了"
+    ⚠️ **本函数刻意只有一行** —— 判据、组装、抛出全在 `_enforce` 里，与合成自测
+       `test_enforce_actually_raises_on_violations` **共用同一份代码**。
+       ⛔ 这是三轮定向复评逼出来的形状：此前每修一次，「上报/组装/抛出被短路」
+       这一类腐化就往调用栈上层挪一层再出现一次。塌成一条路径之后，那条链路上
+       **任何一段**被短路，合成自测都会变红。
+    ⛔ **仍然接不住的、不可再降的残留**：有人把下面这一行本身删掉/改掉
+       （例如换成 `pass`）。仓内守卫无法自证 —— 本仓成文教训「仓内守卫可被同一个
+       PR 改掉、本仓没有信任根」。⇒ 这一层只能靠**人看 diff**，但「整个测试体
+       被删空」在 review 里远比「一个 `if` 被改成 `if False`」显眼。
+    """
 
-    # ⭐ **锚点加固**（整支评审 R4-M1）：宽守卫有一条**结构性**静默通道 ——
-    #    把 SQL 头抽成模块常量（`_INSERT_HEAD = "INSERT INTO training_sets"` 这种**寻常重构**）
-    #    之后，列清单解析不出来、而表名两侧恰好是引号 ⇒ 落进「提及」**被静默跳过**；
-    #    此时再把 `schema_version` 删掉，守卫**仍然绿**，连 M0 那组变异也一并变成恒真。
-    # ⇒ 本断言要求：**生产文件里必须至少有 1 条被认出来的 `INSERT`**，认不出就响。
-    # ⚠️ **它接得住什么、接不住什么**（R5-M3 实测后订正 —— ⛔ 上一版写〔废〕「不依赖形状判据」是**假的**）：
-    #    · 接得住：SQL 被重构成变量拼接 / f-string / 搬去别的文件 ⇒ `gen_seen` 掉到 0 ⇒ 响；
-    #    · ⛔ 接不住：**判据本身被改坏**（退回子串 / 退回旧判定顺序 / 去掉双引号支持）——
-    #      实测这三种下 `gen_seen` 仍为 1、一声不吭。它用的就是 `_HEAD`/`_classify`，
-    #      是同一判据的**回声**，不是独立第二来源。判据被改坏由变异 M0/M4c–M4f 负责发现。
-    gen_src = (REPO_ROOT / "backend" / "generate_training_sets.py").read_text(encoding="utf-8")
-    gen_seen = sum(1 for m in _HEAD.finditer(gen_src)
-                   if _classify(gen_src, m.start(), m.end())[0] == "cols")
-
-    # ⛔ **三类问题必须一次全报，不能用三条 assert 串起来**：只要前一条炸了，
-    #    后面的就永远执行不到 —— 而 `missing` 才是本守卫的**招牌判据**。
-    #    本仓成文教训：「断言顺序导致招牌判据从未执行」。
-    # ⛔ **逐（目录, 后缀）格子锚点**（Task 3 评审「重要 2」+ 定向复评「重要」）：
-    #    `checked >= 2` 是**存在性**判据，表达不了穷尽性 —— 真实树 12 条，掉到 2 条才响。
-    #    实测**单 token 编辑**即可绕过：从 `_SUFFIXES` 拿掉 `".yml"`，`.github/workflows`
-    #    整个目录**静默退出视野**，`checked` 仍 >= 2 ⇒ 绿；再真删一个列名**照样绿**。
-    #    ⛔ 而**逐【目录】锚点还不够**（定向复评实测）：`backend/` 由 `.py` + `.sh` 两种
-    #    后缀共同撑着，单独拿掉 `".sh"` ⇒ `rehearse.sh` 那 3 条静默消失，而 `backend/`
-    #    靠 `.py` 那条仍 > 0 ⇒ 锚点**不响**。`.github/workflows` 当初被抓到，只因它
-    #    **恰好是单后缀目录** —— 判别力是撞来的，不是设计出来的。
-    #    ⇒ 锚点必须钉到**（目录, 后缀）格子**这一层，见 `_EXPECTED_CELLS`。
-    #    ⚠️ 代价：日后某格子合理归零（例如 rehearse.sh 退役）会让守卫**响亮报错**，
-    #    需要人把该格子从清单里删掉 —— 这是有意选的**吵闹方向**，好过静默漏扫。
-    #    ⭐ 由变异 M4k（去 `.yml`）与 M4o（去 `.sh`）各自钉住。
-    blind = [f"{d}  下的 {sfx} 文件" for (d, sfx), n in per_cell.items() if n == 0]
-
-    problems = []
-    if blind:
-        problems.append(
-            "【有一类文件一条语句都没解析到】它多半被后缀白名单/改名悄悄移出了视野，"
-            "而守卫会照样报「全都合规」：\n  " + "\n  ".join(blind))
-    if gen_seen < 1:
-        problems.append(
-            "【生产语句脱离视野】`backend/generate_training_sets.py` 里一条都认不出 "
-            "`INSERT INTO training_sets` 的列清单 —— 唯一真正写生产库的那条语句本守卫已经看不见了"
-            "（多半是 SQL 被重构成变量拼接 / f-string / 搬去了别处）。"
-            "⛔ 这不是「它没问题」，是「守卫看不见它了」。")
-    if unknown:
-        problems.append(
-            "【认不出的形状】必须由人来定性（是真语句就补 `schema_version` 并把该形状加进判据；"
-            "是提及就说明理由）：\n  " + "\n  ".join(unknown))
-    if positional:
-        problems.append(
-            "【不写列清单、按位置插入】**本守卫不接受这种写法**，必须改成显式列清单：\n  "
-            + "\n  ".join(positional))
-    if missing:
-        problems.append(
-            "【列清单里没有 `schema_version`】PostgreSQL 会用 `DEFAULT 1` **静默**把行标成第 1 代，"
-            "而所有闸门照样绿：\n  " + "\n  ".join(missing))
-
-    assert not problems, (
-        f"`INSERT INTO training_sets` 守卫发现 {len(problems)} 类问题：\n\n"
-        + "\n\n".join(problems))
+    _enforce(_iter_files(), REPO_ROOT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,6 +453,9 @@ _DIFFERENTIAL_CASES = (
     "INSERT INTO training_sets (stock_code, schema_version, file_path) SELECT a,b,c FROM x",
     "INSERT INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3) "
     "ON CONFLICT (stock_code) DO UPDATE SET schema_version = 2",
+    # 引号标识符：PG 眼里是**另一个列**（逐字、大小写敏感、内部空格有意义）
+    'INSERT INTO training_sets (stock_code, "schema_version ", file_path) VALUES (1,2,3)',
+    'INSERT INTO training_sets (stock_code, "Schema_Version", file_path) VALUES (1,2,3)',
     # 标识符边界：`★` 不是 `\w`，前缀匹配会把它当成 `schema_version` ⇒ 假通过
     "INSERT INTO training_sets (stock_code, schema_version★, file_path) VALUES (1,2,3)",
     "INSERT INTO training_sets (stock_code, schema_version中文, file_path) VALUES (1,2,3)",
