@@ -306,34 +306,46 @@ def _enforce(files, root):
        `test_enforce_actually_raises_on_violations` 走的就是这一个函数，
        于是「组装/抛出被短路」会**同时**让那条合成自测变红。
 
-    ⚠️ **锚点类判据只在【真实仓树】上成立**（合成小树当然没有生产语句、没有格子），
-       故用 `root == REPO_ROOT` 自己判断 —— ⛔ 不做成参数，免得被一个
-       `anchors=False` 悄悄关掉。
+    ⛔ **一条判据都不许带开关**（第四轮定向复评「重要」）：上一版用
+       `real = (root == REPO_ROOT)` 决定要不要跑锚点类判据，结果**改一个实参就能关掉** ——
+       实测把调用处的 `REPO_ROOT` 换成 `REPO_ROOT.parent`（祖先路径，不崩、`real` 静默
+       变 `False`），再叠加「`_SUFFIXES` 去掉 `.sh` + 真删 `rehearse.sh` 一处字段」⇒ **全绿**。
+       而我当时还写下「这种改动远比 `if` 被改成 `if False` 显眼」—— **那句话是错的**，
+       它在 diff 里只是换了一个词。
+       ⇒ 现在**全部无条件执行**：`root` 只参与**显示文字**（`where` 的路径前缀），
+       **不参与任何判决**。于是「改实参」这条路**由构造消失** —— 改了也不影响判定。
+       ⚠️ 合成小树跑的时候，格子锚点当然全为 0 ⇒ 会**额外**报一条「有一类文件…」，
+       这不碍事：合成自测本来就期待它**抛异常**，且该条对那次运行**确实成立**。
+       ⭐ 反过来这还让合成自测**顺带钉住**了 `blind` 与 `checked` 这两条分支。
     """
-    real = (root == REPO_ROOT)
     missing, positional, unknown, checked, per_cell = _scan(files, root)
 
     problems = []
-    if real:
-        # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
-        if checked < 2:
-            problems.append(
-                f"【解析不到列清单】只解析到 {checked} 条 —— 作用域或括号配平坏了，"
-                "⛔ 这不是「全都合规」。")
-        blind = [f"{d}  下的 {sfx} 文件" for (d, sfx), n in per_cell.items() if n == 0]
-        if blind:
-            problems.append(
-                "【有一类文件一条语句都没解析到】它多半被后缀白名单/改名悄悄移出了视野，"
-                "而守卫会照样报「全都合规」：\n  " + "\n  ".join(blind))
-        gen_src = (REPO_ROOT / "backend" / "generate_training_sets.py").read_text(encoding="utf-8")
-        gen_seen = sum(1 for m in _HEAD.finditer(gen_src)
-                       if _classify(gen_src, m.start(), m.end())[0] == "cols")
-        if gen_seen < 1:
-            problems.append(
-                "【生产语句脱离视野】`backend/generate_training_sets.py` 里一条都认不出 "
-                "`INSERT INTO training_sets` 的列清单 —— 唯一真正写生产库的那条语句本守卫"
-                "已经看不见了（多半是 SQL 被重构成变量拼接 / f-string / 搬去了别处）。"
-                "⛔ 这不是「它没问题」，是「守卫看不见它了」。")
+    # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
+    if checked < 2:
+        problems.append(
+            f"【解析不到列清单】只解析到 {checked} 条 —— 作用域或括号配平坏了，"
+            "⛔ 这不是「全都合规」。")
+    blind = [f"{d}  下的 {sfx} 文件" for (d, sfx), n in per_cell.items() if n == 0]
+    if blind:
+        problems.append(
+            "【有一类文件一条语句都没解析到】它多半被后缀白名单/改名悄悄移出了视野，"
+            "而守卫会照样报「全都合规」：\n  " + "\n  ".join(blind))
+    # ⚠️ **本片唯一一条【没有常驻测试钉住】的分支**，如实写明，⛔ 不含糊带过：
+    #    合成小树造不出「真实生产文件里的语句脱离视野」这个场景（它读的是真文件），
+    #    所以只有变异 **M4w**（把生产 SQL 头抽成变量）能证伪它。
+    #    ⭐ 但**已实测量过这个残留有多大**：把本分支短路成 `if False:` 再施加 M4w ⇒
+    #    守卫**仍然红**，由格子锚点接住（`backend/.py` 那一格掉到 0）。
+    #    ⇒ 短路它**不会造成静默放行**，只会丢掉一条**更精确的报错信息**。
+    gen_src = (REPO_ROOT / "backend" / "generate_training_sets.py").read_text(encoding="utf-8")
+    gen_seen = sum(1 for m in _HEAD.finditer(gen_src)
+                   if _classify(gen_src, m.start(), m.end())[0] == "cols")
+    if gen_seen < 1:
+        problems.append(
+            "【生产语句脱离视野】`backend/generate_training_sets.py` 里一条都认不出 "
+            "`INSERT INTO training_sets` 的列清单 —— 唯一真正写生产库的那条语句本守卫"
+            "已经看不见了（多半是 SQL 被重构成变量拼接 / f-string / 搬去了别处）。"
+            "⛔ 这不是「它没问题」，是「守卫看不见它了」。")
 
     # ⛔ **各类问题必须一次全报，不能用多条 assert 串起来**：只要前一条炸了，
     #    后面的就永远执行不到 —— 而 `missing` 才是本守卫的**招牌判据**。
@@ -386,10 +398,20 @@ def test_enforce_actually_raises_on_violations(tmp_path):
     # ⛔ 逐条钉住：三类问题**各自**都必须被组装进报文并抛出来。
     #    少任何一条，说明从「判出违规」到「最终抛出」这条链路上有一段被短路了。
     for need in ("bad.sql:1", "nocols.sql:1", "weird.sql:1",
-                 "列清单里没有", "不写列清单、按位置插入", "认不出的形状"):
+                 "列清单里没有", "不写列清单、按位置插入", "认不出的形状",
+                 # ⭐ 锚点判据无条件执行之后，合成树（格子全为 0）会**顺带**报这一条 ——
+                 #    于是这条断言把 `if blind:` 那个分支也一并钉住了。
+                 "有一类文件一条语句都没解析到"):
         assert need in msg, f"⛔ 报文里缺「{need}」—— 上报/组装/抛出这条链路被短路了：\n{msg}"
     # 合规那条**不得**被报进来（否则是误报方向坏了）
     assert "good.sql" not in msg, f"⛔ 合规语句被误报了：\n{msg}"
+
+    # ⭐ 空输入 ⇒ 必须报【解析不到列清单】，⛔ 不能报成「全都合规」。
+    #    这条钉住 `if checked < 2:` 那个分支（本仓成文教训：报 0 违反必须先证明能报非 0）。
+    with pytest.raises(AssertionError) as empty_exc:
+        _enforce([], tmp_path)
+    assert "解析不到列清单" in str(empty_exc.value), \
+        f"⛔ 空输入没触发防空转：\n{empty_exc.value}"
 
 
 def test_every_executable_insert_carries_schema_version():
@@ -400,10 +422,14 @@ def test_every_executable_insert_carries_schema_version():
        ⛔ 这是三轮定向复评逼出来的形状：此前每修一次，「上报/组装/抛出被短路」
        这一类腐化就往调用栈上层挪一层再出现一次。塌成一条路径之后，那条链路上
        **任何一段**被短路，合成自测都会变红。
-    ⛔ **仍然接不住的、不可再降的残留**：有人把下面这一行本身删掉/改掉
-       （例如换成 `pass`）。仓内守卫无法自证 —— 本仓成文教训「仓内守卫可被同一个
-       PR 改掉、本仓没有信任根」。⇒ 这一层只能靠**人看 diff**，但「整个测试体
-       被删空」在 review 里远比「一个 `if` 被改成 `if False`」显眼。
+    ⛔ **仍然接不住的残留 —— 精确表述**（⚠️ 上一版在这里写的话**被实测证伪过两次**，
+       所以这一版只写实测过的）：把下面这一行**整个删掉/换成 `pass`**。
+       仓内守卫无法自证（本仓成文教训「仓内守卫可被同一个 PR 改掉、本仓没有信任根」），
+       只能靠**人看 diff**。
+       ⛔ **不再声称「这比改一个 `if` 显眼」** —— 第四轮定向复评实测打脸：
+       把实参 `REPO_ROOT` 换成 `REPO_ROOT.parent` 同样能造成静默失效，而它在 diff 里
+       只是换了一个词，一点也不显眼。⇒ 那条路已由「**判据不带任何开关**」在构造上关死
+       （`root` 只参与显示文字、不参与判决），不再依赖「显眼不显眼」这种主观判断。
     """
 
     _enforce(_iter_files(), REPO_ROOT)
