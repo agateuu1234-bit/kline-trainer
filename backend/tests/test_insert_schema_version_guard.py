@@ -194,7 +194,17 @@ def _column_names(cols: str) -> set[str]:
     names = set()
     for part in _top_split(cols):
         part = part.strip().strip('"').strip()
-        m = re.match(r'"?([A-Za-z_][\w$]*)"?', part)
+        # ⛔ **必须整段匹配（`fullmatch`），不能只匹配前缀**（第二轮定向复评「重要」）：
+        #    `re.match` 只要开头像标识符就收下，于是 `schema_version★` 被当成
+        #    `schema_version` ⇒ **假通过**（pglast 实测该列真名是 `schema_version★`）。
+        #    ⚠️ 已知且**接受**的残留：`"schema_version "`（双引号 + 尾随空格）在 PG 眼里
+        #    是**另一个列**，本守卫仍判「含」。修它要按 SQL 的**引号标识符语义**处理
+        #    （引号内逐字、空格有意义），而那会与下面这行「剥掉引号」的处理**直接冲突** ——
+        #    生产语句是 Python 相邻字面量拼出来的，列清单里混着 **Python 的引号**
+        #    （`… end_datetime, "\n        "schema_version, …`），不剥就认不出真列名。
+        #    ⇒ 两害相权：保住**唯一真写生产库那条**的识别，放过这个 PG 会**响亮报错**
+        #    （`column "schema_version " does not exist`）、不会静默插入的形态。
+        m = re.fullmatch(r'"?([A-Za-z_][\w$]*)"?\s*', part)
         if m:
             names.add(m.group(1).lower())
     return names
@@ -233,12 +243,21 @@ def _classify(text: str, a: int, b: int):
     return ("unknown", None)
 
 
-def test_every_executable_insert_carries_schema_version():
-    """每一条真 `INSERT INTO training_sets` 的列清单里都必须有 `schema_version`。"""
+def _scan(files, root):
+    """扫一批文件，返回 `(missing, positional, unknown, checked, per_cell)`。
+
+    ⛔ **这份代码必须被【真实扫描】与【合成自测】共用** —— 否则
+       「**上报动作被整个拔掉**」这一类腐化**无人可挡**：变异 M4f 的发现机制
+       自己也要经过这条上报线，会**一起失效**。
+       实测（Task 3 第二轮定向复评）：把下面 `missing.append(...)` 整行换成
+       `pass`，再注入一条**真漏写**，主测试与差分测试**双双 `2 passed`**。
+       ⇒ 那一类腐化在上一版里**没有任何东西钉着**，而文档却声称 M4f 管得了。
+       现在由 `test_scan_actually_reports_violations` 单独钉住。
+    """
     missing, positional, unknown, checked = [], [], [], 0
     per_cell = {c: 0 for c in _EXPECTED_CELLS}
 
-    for q in _iter_files():
+    for q in files:
         try:
             text = q.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as e:
@@ -246,7 +265,7 @@ def test_every_executable_insert_carries_schema_version():
             raise AssertionError(f"作用域内的文件读不了，无法判定：{q} —— {e}") from e
 
         for m in _HEAD.finditer(text):
-            rel = q.relative_to(REPO_ROOT).as_posix()
+            rel = q.relative_to(root).as_posix()
             where = f"{rel}:{text.count(chr(10), 0, m.start()) + 1}"
             kind, cols = _classify(text, m.start(), m.end())
             if kind == "mention":
@@ -265,6 +284,42 @@ def test_every_executable_insert_carries_schema_version():
                         break
                 if "schema_version" not in _column_names(cols):
                     missing.append(f"{where}  列清单={cols.strip()[:120]}")
+    return missing, positional, unknown, checked, per_cell
+
+
+def test_scan_actually_reports_violations(tmp_path):
+    """⭐ 证明**上报这条线**本身没坏 —— 拿一棵**合成的小树**喂给同一份 `_scan`。
+
+    为什么必须单独有这一条（Task 3 第二轮定向复评「重要」）：上一版在文档里写
+    「装配线被改坏由变异 M4f 负责」，**这是过度承诺**。M4f 靠的正是这条上报线，
+    线断了它自己也不响 —— 实测双双变绿。⇒ 本测试把
+    「**判据判出违规 ⇒ 必须被记录并抛出**」这件事**单独**钉住，
+    三条上报动作（`missing` / `positional` / `unknown`）**各自**都断不得。
+    """
+    cases = {
+        "bad.sql": "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2);\n",
+        "good.sql": "INSERT INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3);\n",
+        "nocols.sql": "INSERT INTO training_sets VALUES (1,2);\n",
+        "weird.sql": "INSERT INTO training_sets WITH c AS (SELECT 1) SELECT 1;\n",
+    }
+    files = []
+    for name, body in cases.items():
+        q = tmp_path / name
+        q.write_text(body, encoding="utf-8")
+        files.append(q)
+
+    missing, positional, unknown, checked, _cells = _scan(files, tmp_path)
+
+    assert checked == 2, f"应解析到 2 条列清单（bad + good），实为 {checked}"
+    assert [w.split(" ", 1)[0] for w in missing] == ["bad.sql:1"], \
+        f"⛔ 真漏写没被记录 —— 上报线断了：{missing}"
+    assert positional == ["nocols.sql:1"], f"⛔ 按位置插入没被记录：{positional}"
+    assert unknown == ["weird.sql:1"], f"⛔ 未知形状没被记录：{unknown}"
+
+
+def test_every_executable_insert_carries_schema_version():
+    """每一条真 `INSERT INTO training_sets` 的列清单里都必须有 `schema_version`。"""
+    missing, positional, unknown, checked, per_cell = _scan(_iter_files(), REPO_ROOT)
 
     # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
     assert checked >= 2, f"只解析到 {checked} 条列清单 —— 作用域或括号配平坏了"
@@ -373,6 +428,9 @@ _DIFFERENTIAL_CASES = (
     "INSERT INTO training_sets (stock_code, schema_version, file_path) SELECT a,b,c FROM x",
     "INSERT INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3) "
     "ON CONFLICT (stock_code) DO UPDATE SET schema_version = 2",
+    # 标识符边界：`★` 不是 `\w`，前缀匹配会把它当成 `schema_version` ⇒ 假通过
+    "INSERT INTO training_sets (stock_code, schema_version★, file_path) VALUES (1,2,3)",
+    "INSERT INTO training_sets (stock_code, schema_version中文, file_path) VALUES (1,2,3)",
     # 真漏写 —— 必须报（含子串陷阱）
     "INSERT INTO training_sets (stock_code, old_schema_version, file_path) VALUES (1,2,3)",
     "INSERT INTO training_sets (stock_code, schema_version_legacy, file_path) VALUES (1,2,3)",
@@ -393,10 +451,14 @@ def test_guard_agrees_with_real_postgres_parser():
        · **接得住**：`_HEAD` / `_classify` / `_column_names` 这一层被改坏 ——
          实测把注释处理退回「非贪婪正则」「完全不剥」「配平时不屏蔽」三种旧形态，
          本测试**逐条变红**并直接打印出是【假通过·危险】还是【误报】。
-       · ⛔ **接不住**：**上面那条主测试自己的装配线**被改坏。例如把主测试里的
-         `"schema_version" not in _column_names(cols)` 退回裸子串 `not in cols`，
-         本测试**照样绿** —— 因为它自己直接调 `_column_names`，根本不走那一行。
-         ⇒ 那一层由变异 **M4f**（注入 `old_schema_version`）负责证伪，两者**不可互相替代**。
+       · ⛔ **接不住**：**`_scan` 那条装配线**被改坏 —— 本测试自己直接调
+         `_column_names`，根本不走 `_scan`。分两种，**由不同的东西钉住**：
+           ① 判据被换成裸子串（`not in cols`）⇒ 由变异 **M4f**（注入
+              `old_schema_version`）证伪；
+           ② ⛔ **上报动作被整个拔掉**（`missing.append(...)` → `pass`）⇒ **M4f 也
+              一起失效**（它的发现机制走的就是这条线；实测注入真漏写后双双变绿）
+              ⇒ 由 `test_scan_actually_reports_violations` 用**合成小树**证伪。
+         ⚠️ 上一版把 ② 也算在 M4f 头上，是**过度承诺**（第二轮定向复评实测打回）。
     """
     import pglast
 
