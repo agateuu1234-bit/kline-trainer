@@ -20,19 +20,26 @@ Plan: docs/superpowers/plans/2026-09-19-qmt-4b-s4a-impl.md
     `relative_path`」这一档，fix round 4 · C1 起还覆盖「`<rel>.part` 那个名字
     底下被植了非普通文件」这一档）——第四个 `fetch_interrupted_rollback` 由
     S4b 的崩溃恢复产生，详见 `StockCopyFailed` 类文档。
-  · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。两个成员：
-    `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
-    （契约 D5：落地前比对发现源在本次运行期间变了）。调用方要能用一个
-    `except RunTerminated` 接住全族，且不会被它接住候选失败或路径逃逸。
+  · **终止条件**——`RunTerminated` 及其子类：整次运行必须停（rc≠0）。**三个成员**
+    （fix round 7 起是三个）：`MaxBytesExhausted`（`--max-bytes` 预算耗尽）、
+    `SourceChangedMidRun`（契约 D5：落地前比对发现源在本次运行期间变了）、
+    `RollbackIncomplete`（失败收尾的回滚自己有项目没做完 —— staging 侧
+    `EIO`/`EACCES` 是**这棵树**的事实、不是这只股的事实，与 R87-F1 给
+    `source_path_escape` 的定性同族）。调用方要能用一个 `except RunTerminated`
+    接住全族，且不会被它接住候选失败或路径逃逸。
   · **路径逃逸**——`qmt_fsroot.PathEscapeError`：信任边界被破坏，本模块不捕获、
     不包装，原样上抛（它不是 `OSError` 的子类，也不属于前两族）。
 
 ⚠️ **以上三族不是 `copy_stock` 唯一可能逃出的异常类型**——按 `raise` 语句逐条
-枚举，另有**四种**（fix round 4 · N3 订正：此前这里写“两种”，漏掉了第三种
-裸 `OSError`，而那一种恰恰是 D3 主动要求留下的；fix round 5 · Minor 1 再订正：
-此前写“三种”，漏掉了第四种 `ByteBudget.refund` 的裸 `ValueError`
-——本仓的判据是「穷尽性主张必须**按字面量枚举后逐条定性**」，
-“跑不到”是**定性**，不是**不列**的理由）。
+枚举，另有**三种**（fix round 4 · N3 订正：此前这里写“两种”，漏掉了第三种
+裸 `OSError`，而那一种恰恰是 D3 主动要求留下的；fix round 5 · Minor 1 再订正成
+“四种”，把 `ByteBudget.refund` 的裸 `ValueError` 补进来；**fix round 7 改回
+“三种”**，理由不是“跑不到所以不列”，而是**那条 `raise` 语句现在已经逃不出去了**：
+`budget.refund` 在本模块里只剩 `_rollback_all` 这一个调用点，而那里对
+`Exception` 逐项兜住，它只会以 `RollbackIncomplete.errors` 的一员、或
+`original.__notes__` 的一条出现——本仓的判据是「穷尽性主张必须**按字面量枚举后
+逐条定性**」，故此处的依据是逐条重数过 `refund(` 与 `_cleanup_part(` 的调用点各
+只剩一个，不是概念推断）。
 
 前两种是**调用方违反了本函数的前置契约**，不是某只股的事实、也不是环境变化
 （fix round 2 · N2 定案）：
@@ -55,6 +62,11 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 结论靠紧跟其后的括号才救回来，而那句话单独拿出来就是错的）：
 **逃在在途标记【发布】之前**的那些裸 `OSError`，逃出来的那一刻盘上什么都没落——
 两个 `.part` 已删、本次扣的预算已退还、manifest 一个字段没动。
+⚠️ **fix round 7 起这句话是无条件为真的，而在此之前它是假的**：此前回滚顺着写，
+删 `.part` 撞 `EIO` 会让「另一个 `.part` 也删掉」「退账」双双落空，而逃出来的
+仍然是一个裸 `OSError`（还是清理那个，不是原来那个）。现在回滚逐项独立执行，
+**只要有任何一项没做完，逃出来的就不再是裸 `OSError`、而是
+`RollbackIncomplete`（终止条件族）** ⇒ 见到裸 `OSError` 就等于回滚做完了。
 **这条保证包含写标记这一步自己在发布之前炸掉的那一档**（fix round 6 · N1：
 此前它是个例外，而那正是评审 [medium] 的洞——`.part` 与预算双漏）。
 **标记发布之后逃出的裸 `OSError` 不在这条保证之内**，按下一段的**位置**判据
@@ -68,14 +80,14 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 测试钉着：源侧 `test_copy_stock_bare_oserror_from_source_escapes_unclassified`、
 staging 侧 `test_open_part_bare_oserror_escapes_and_is_not_called_tampering`）。
 
-第四种是**本模块自身不变量的自查**：`ByteBudget.refund` 的裸 `ValueError`
-（“退还超过已扣”）。**定性：在本模块自己的调用路径上不可达**——`copy_one`
-只退它这一趟**逐块累加**出来的 `charged`，`copy_stock` 只退 `written` 里那些
-已经成功扣过账、且此前没被退过的字节，两者恒 `<= budget.used`。它只可能在
-调用方把同一个 `ByteBudget` 跨事务复用、或中途把 `used` 改小时触发，那与裸
-`TypeError` 同族（调用方违反前置契约），不是这只股的事实、也不是环境变化。
-**列出它不是因为它会发生，而是因为“按 `raise` 语句逐条枚举”这句主张必须
-逐字为真**。
+（fix round 5 · Minor 1 曾在此列出**第四种**：`ByteBudget.refund` 的裸
+`ValueError`“退还超过已扣”。**fix round 7 起它逃不出本模块了**——`refund` 的
+调用点在本模块里只剩 `_rollback_all` 一个，那里逐项 `except Exception`，于是它
+只会成为 `RollbackIncomplete.errors` 的一员、或挂在原异常 `__notes__` 上的一条
+诊断。它原来的定性照旧成立：本模块自己的调用路径上不可达——`copy_one` 只退它
+这一趟**逐块累加**出来的 `charged`，`copy_stock` 只退 `written` 里那些已经成功
+扣过账、且此前没被退过的字节，两者恒 `<= budget.used`；只有调用方把同一个
+`ByteBudget` 跨事务复用、或中途把 `used` 改小才触发得了。）
 
 **标记写下之后** `commit_stock` 可能抛出的 `qmt_manifest.ManifestInvalidError`
 （以及任何其它异常）**不要求属于 `RunTerminated`**——契约 D6 的判据是
@@ -94,6 +106,7 @@ from typing import NamedTuple
 
 from qmt_fsroot import (
     NotARegularFileError,
+    PathEscapeError,
     atomic_write_json,
     fsync_dir,
     open_regular_probe,
@@ -110,6 +123,7 @@ __all__ = [
     "RunTerminated",
     "MaxBytesExhausted",
     "SourceChangedMidRun",
+    "RollbackIncomplete",
     "ByteBudget",
     "PART",
     "CopyResult",
@@ -165,9 +179,11 @@ class StockCopyFailed(Exception):
 class RunTerminated(Exception):
     """终止条件族的公共基类：整次运行必须停（rc≠0），既不是候选失败也不是路径逃逸。
 
-    调用方用一个 `except RunTerminated` 就能接住全族。两个成员：
-    `MaxBytesExhausted`（`--max-bytes` 预算耗尽）与 `SourceChangedMidRun`
-    （D5：源在本次运行期间换代，比对不符）。
+    调用方用一个 `except RunTerminated` 就能接住全族。**三个成员**：
+    `MaxBytesExhausted`（`--max-bytes` 预算耗尽）、`SourceChangedMidRun`
+    （D5：源在本次运行期间换代，比对不符）、`RollbackIncomplete`
+    （fix round 7：失败收尾的回滚自己有项目没做完 —— 盘面/账面已经对不上，
+    且对不上的方式本模块并不知道）。
     """
 
 
@@ -189,6 +205,48 @@ class SourceChangedMidRun(RunTerminated):
     旧 sha —— 一次静默的代次混合，正是 D6 要消灭的状态。`copy_stock` 在
     落地任何东西之前就做这个比对。
     """
+
+
+class RollbackIncomplete(RunTerminated):
+    """终止条件族第三个成员（fix round 7 · 评审 [medium]）：**回滚自己没做完**。
+
+    触发条件：某条失败收尾路径上，回滚的某一项（删 `.part` / 退还预算）自己抛了
+    异常，**且在途的那个原异常本身还不是终止信号**（不是 `RunTerminated`、不是
+    `PathEscapeError`、也不是 `KeyboardInterrupt` 那类非 `Exception` 的
+    `BaseException`）。
+
+    **为什么定性成终止条件，而不是把原异常原样放出去**：回滚的每一项都动 staging
+    树或本次预算，任一项失败都意味着**盘面与账面已经对不上，而对不上的方式本函数
+    并不知道**（`.part` 残留、或某一笔已扣的账退不回去）。`_cleanup_part` 抛出的
+    `EIO`/`EACCES` 是 **staging 这个文件系统**的事实，不是这只股的事实——同一棵树上
+    **后面每一只股都会撞到同一件事**。这与大 spec R87-F1 把 `source_path_escape`
+    定性成「终止条件而非候选失败」（理由正是「同一目录下的所有股都受影响」）是
+    **同一条判据的第五次应用**，也是契约 D5 复述的那一句：
+    **「环境不对」不能记成「这个候选不行」**。
+    反过来把原异常原样放出去，调用方（S4b）就会按「跳过这只股」继续跑，
+    带着一棵它以为干净、实际并不干净的 staging 树。
+
+    **不新增第五个 `reason`**：本类不是 `StockCopyFailed`，`failures` 里不会出现
+    新取值（大 spec:492 + 契约 D3 的那份全集一个字没动）。
+    **也不削弱 D6**：本类只可能在**在途标记发布之前**的那些收尾路径上抛出；
+    标记一经发布，本模块不再做任何清理，也就没有「回滚」可言。
+
+    携带两样东西，**两样都不顶替原异常**：
+      · `original` —— 在途的那个原异常本身，同时经 `raise ... from` 挂在
+        `__cause__` 上；
+      · `errors` —— 回滚里失败的**全部**项（不是第一项），并逐条以 `add_note`
+        挂到 `original` 上，于是无论调用方打印的是哪一个，诊断都在。
+    """
+
+    def __init__(self, original: BaseException,
+                 errors: tuple[BaseException, ...]):
+        self.original = original
+        self.errors = errors
+        detail = "；".join(f"{type(e).__name__}: {e}" for e in errors)
+        super().__init__(
+            f"回滚未做完（{len(errors)} 项失败：{detail}）；"
+            f"在途的原异常是 {type(original).__name__}: {original}"
+        )
 
 
 class ByteBudget:
@@ -474,7 +532,12 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
 
     失败时（含 `--max-bytes` 触顶、源读/目的写中途报错、复算不符、`<rel>.part`
     底下被植了非普通文件——见 `_open_part`）**先删掉自己那个临时文件**，再退还
-    本次已经扣过的账，然后原样上抛。本函数**不**删 `<rel>.part`（那是别人或
+    本次已经扣过的账，然后原样上抛。
+    ⚠️ **这两步各自独立执行、互不吃掉**（fix round 7 · 评审 [medium]，走
+    `_rollback_all` / `_settle_rollback`）：删临时文件自己撞 `EIO`/`EACCES` 时，
+    退账照做，原异常照旧是逃出去的那一个；而回滚只要有一项没做完，逃出去的就是
+    `RollbackIncomplete`（终止条件族）而不是那个清理异常——一条清理故障绝不许
+    伪装成这只股的候选失败。本函数**不**删 `<rel>.part`（那是别人或
     上一次运行的残留，归 Task 3 收尾的 `_cleanup_part`）、**不**处理「这只股
     另一个文件怎么办」——那些是 Task 3 单股事务编排的范围，本函数只管它自己
     这一个文件的记账闭合。
@@ -535,12 +598,13 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
             if verify.hexdigest() != digest:
                 raise StockCopyFailed("fetch_copy_hash_mismatch", rel)
             _publish_part(stg_fd, rel, suffix)
-        except BaseException:
+        except BaseException as exc:
             # 只删自己那个临时文件（`<rel>.part` 原样留着）；共用 Task 3 收尾那
             # 一个删除点，不在这里内联第二份「删之前先问类型」的判据。
-            _cleanup_part(stg_fd, tmp)
-            if charged:
-                budget.refund(charged)
+            # ⚠️ 删与退**各自独立执行、互不吃掉**（fix round 7 · 评审 [medium]）：
+            # 此前这里顺着写，删临时文件撞 `EIO` 会连退账一起跳过，还把原异常顶替掉。
+            _settle_rollback(exc, _rollback_all(
+                stg_fd, (tmp,), (charged,) if charged else (), budget))
             raise
     finally:
         os.close(sfd)
@@ -753,9 +817,14 @@ def _cleanup_part(stg_fd: int, name: str) -> None:
 
     ⚠️ **删之前先问一次「那名字底下现在是个什么东西」**（fix round 4 · C1）：
     本函数只在失败收尾路径上被调用，而 `os.unlink` 对一个**目录**会抛
-    `EPERM`（macOS）/ `EISDIR`（Linux）——抛出去就**顶替掉**原来那个已定性的
-    `StockCopyFailed`，把候选失败变成一个不属于任何一族的裸 `OSError`。
+    `EPERM`（macOS）/ `EISDIR`（Linux）。
     非普通文件一律**原样留着、不删不碰**，与 D2 对 final 的处置同一条。
+    ⚠️ **fix round 7 起这道闸挡的东西变了，但它更要留着**：外层 `_rollback_all`
+    现在会兜住本函数抛出的异常，所以它不再会**顶替掉**原异常（那是当初写下这道闸
+    的理由）；可一旦被兜住，回滚就算「不完整」，`_settle_rollback` 会把一次本来
+    只是 `untracked_target_file` 的**候选失败升级成整次运行终止**。
+    也就是说：没有这道闸，「`.part` 底下被植了一个目录」这种完全在预期内、
+    D2 明写该按候选失败处置的情形，会被一路升级成停机。
 
     ⚠️⚠️ **符号链接被这道闸一起挡住是【故意的】，不是照抄判据的副作用**
     （fix round 5 · B）：`_part_is_non_regular` 走的是 `lstat`，所以
@@ -792,6 +861,69 @@ def _cleanup_part(stg_fd: int, name: str) -> None:
             pass
     finally:
         os.close(pfd)
+
+
+def _rollback_all(stg_fd: int, part_names, refunds, budget: ByteBudget):
+    """失败收尾的**唯一**执行点：把回滚拆成互相独立的若干项，**逐项执行、逐项兜住
+    异常**，返回失败明细 `[(这一项叫什么, 异常), ...]`（空列表＝回滚完整）。
+
+    ⚠️ **为什么不能顺着写成一串语句**（fix round 7 · 评审 [medium]，三处同型）：
+    顺着写时第一项一旦抛异常，后面每一项都**不会执行**——另一个 `.part` 不删、
+    本次扣的账不退——而且那个清理异常还会**顶替掉**在途的原异常。实测后果：一个
+    意思是「终止整次运行」的 `SourceChangedMidRun` 会变成一个裸 `OSError` 逃出去，
+    而本模块自己的调用方契约又允许把裸 `OSError` 当候选失败处置 ⇒ 一条**必须停机**
+    的信号被降级成「这一只股失败了」，正是本片从头在防的那次混淆；同时那笔没退的账
+    会喂出一次**假的** `--max-bytes` 触顶（已登记残留 R1 那条「一次基础设施故障被
+    记成一次正常结束」）。
+
+    **删在前、退在后**（契约 D7：「在回滚删掉 `.part` 之后按实际写出的字节数退还」）
+    ——本函数保留这个次序，只是不再让前面一项的失败吃掉后面的项。
+
+    捕获宽度是 `Exception` 而不是 `BaseException`：`KeyboardInterrupt` / `SystemExit`
+    不是「这一项回滚失败了」，不许被收进明细当成诊断顺手咽下去。
+    """
+    errors: list[tuple[str, BaseException]] = []
+    for name in part_names:
+        try:
+            _cleanup_part(stg_fd, name)
+        except Exception as e:
+            errors.append((f"删 {name}", e))
+    for n in refunds:
+        try:
+            budget.refund(n)
+        except Exception as e:
+            errors.append((f"退还 {n} 字节", e))
+    return errors
+
+
+def _settle_rollback(original: BaseException, errors) -> None:
+    """回滚做完之后的收口：挂诊断，必要时把原异常**升级**成终止信号。三支：
+
+      · **回滚完整**（`errors` 空）⇒ 什么都不做，调用方紧跟的裸 `raise` 把原异常
+        原样抛出去——与本次改动之前逐字同结局。
+      · **回滚不完整、而原异常本来就已经必须终止整次运行** ⇒ **只挂诊断，绝不换掉
+        它的类型**：`RunTerminated` 的族籍、以及 `PathEscapeError` 的「本模块不捕获、
+        不包装、原样上抛」都是调用方的判据，换掉就是本次评审要消灭的那种顶替。
+        `KeyboardInterrupt` 那类非 `Exception` 的 `BaseException` 同样原样放行
+        （把一次中断换成别的类型等于吃掉它）。
+      · **回滚不完整、且原异常不是终止信号** ⇒ 抛 `RollbackIncomplete`
+        （`raise ... from original`）：盘面/账面已经对不上，不许让调用方按
+        「跳过这只股」继续跑。原异常挂在 `.original` 与 `__cause__` 上，一个字没丢。
+
+    ⚠️ **诊断挂在 `original` 上而不是只挂在新异常上**（`add_note`，Python 3.11+）：
+    第二支根本不造新异常，若只挂新异常上那一支的诊断就没了；挂在 `original` 上则
+    三支通吃，且 `RollbackIncomplete.errors` 仍然结构化地拿得到同一批异常对象。
+    """
+    if not errors:
+        return
+    for label, e in errors:
+        original.add_note(f"回滚未完成：{label} 失败——{type(e).__name__}: {e}")
+    if isinstance(original, (RunTerminated, PathEscapeError)):
+        return
+    if not isinstance(original, Exception):
+        return
+    raise RollbackIncomplete(
+        original, tuple(e for _label, e in errors)) from original
 
 
 def _replace_part_to_final(stg_fd: int, rel: str) -> None:
@@ -922,6 +1054,20 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     三者的清理动作相同，只是调用方（S4b）对它们的后续处置不同（第一种跳过这只股
     继续下一只，后两种终止整次运行）。
 
+    ⚠️ **回滚自己失败那一档**（fix round 7 · 评审 [medium]）：两条 `.part` 的删除
+    与两笔退账是**四件互相独立的事**，走 `_rollback_all` 逐项执行、逐项兜住异常，
+    再由 `_settle_rollback` 收口——
+      · 回滚完整 ⇒ 原异常原样上抛（与改动前逐字同结局）；
+      · 回滚不完整、而原异常本来就是终止信号（`RunTerminated` / `PathEscapeError`）
+        ⇒ **类型一个字不换**，清理诊断以 `add_note` 挂上去；
+      · 回滚不完整、原异常还不是终止信号（`StockCopyFailed` / 裸 `OSError`）
+        ⇒ 抛 `RollbackIncomplete`（终止条件族，`.original` + `__cause__` 保留原异常）。
+    此前这里顺着写：第一条 `.part` 撞 `EIO` 会让第二条不删、两笔账都不退，而那个
+    清理 `OSError` 还会**顶替掉**在途的原异常 —— 于是一个意思是「终止整次运行」的
+    `SourceChangedMidRun` 会以裸 `OSError` 的样子到达调用方，而本模块自己的契约
+    又允许把裸 `OSError` 当候选失败处置 ⇒ **必须停机的信号被降级成「这一只股失败
+    了」**，正是本片从头在防的那次混淆。
+
     **标记一经发布，本函数不再对任何异常做任何处置**（契约 D6：只有「提交
     成功 + 删标记」与「终止整次运行」两条出路；接住异常继续下一只股这条路
     不存在，S4a 只负责抛，S4b 负责收）。⚠️ **分界是「发布有没有发生」，不是
@@ -1011,11 +1157,13 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
             new_records.append({"stock_code": slot.code, "period": period,
                                  "relative_path": rel, "bytes": result.n_bytes,
                                  "sha256": result.sha256})
-    except BaseException:
-        for rel in rels:
-            _cleanup_part(stg_fd, rel + PART)
-        for n in written.values():
-            budget.refund(n)
+    except BaseException as exc:
+        # ⚠️ 两条 `.part` 的删除与两笔退账**互相独立**（fix round 7 · 评审 [medium]）：
+        # 任一项失败都不得跳过其余项，也不得顶替掉在途的原异常——此前这里顺着写，
+        # 第一条 `.part` 撞 `EIO` 就会让第二条不删、两笔账都不退，而那个 `OSError`
+        # 还会把一个 `SourceChangedMidRun`（必须停机）伪装成一次普通的单股失败。
+        _settle_rollback(exc, _rollback_all(
+            stg_fd, [rel + PART for rel in rels], list(written.values()), budget))
         raise
 
     # ── 写在途标记：**这一步自己也可能失败，而 D6 的分界是「发布有没有发生」**
@@ -1032,13 +1180,14 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     #     标记原样留在盘上当回滚凭据，原样上抛，由 S4b 终止整次运行。
     try:
         _write_inflight_marker(stg_fd, slot, rel_1m, rel_daily)
-    except BaseException:
+    except BaseException as exc:
         if _inflight_marker_on_disk(stg_fd):
             raise
-        for rel in rels:
-            _cleanup_part(stg_fd, rel + PART)
-        for n in written.values():
-            budget.refund(n)
+        # 与上面那条标记前失败路径**逐字同规格**，含「回滚自己失败」这一档
+        # （fix round 7 · 评审 [medium]）：逐项独立、诊断不顶替原异常、
+        # 回滚不完整则升级成终止信号。
+        _settle_rollback(exc, _rollback_all(
+            stg_fd, [rel + PART for rel in rels], list(written.values()), budget))
         raise
 
     # ── 标记写下之后，只有两条出路（契约 D6）：本函数往下不再 try/except ──

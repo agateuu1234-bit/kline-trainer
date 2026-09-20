@@ -35,6 +35,7 @@ from qmt_fetch import (
     ByteBudget,
     CopyResult,
     MaxBytesExhausted,
+    RollbackIncomplete,
     RunTerminated,
     SourceChangedMidRun,
     StockCopyFailed,
@@ -2125,3 +2126,277 @@ def test_copy_stock_keeps_everything_when_fsync_fails_after_marker_publication(
     assert not (stg_path / rel_1m).exists(), "还没走到两次 final 替换"
     assert not (stg_path / rel_daily).exists()
     assert read_manifest(stg_fd) == manifest, "提交还没发生，manifest 一个字段没动"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 7（评审 [medium]，阻断）：**回滚自己失败**时，清理异常顶替掉原异常
+# ══════════════════════════════════════════════════════════════════
+# 三处收尾路径（`copy_one` 的临时文件、`copy_stock` 的主回滚、写标记失败那一支）
+# 此前都是「顺着写成一串语句」：
+#     _cleanup_part(A); _cleanup_part(B); refund(x); refund(y)
+# 第一项一抛异常，后面每一项都不执行，而那个清理异常还会**顶替掉**在途的原异常。
+# 后果有两层，都是本片从头在防的东西：
+#   ① 一个意思是「终止整次运行」的 `SourceChangedMidRun` 会变成一个裸 `OSError`
+#      到达调用方，而本模块自己的契约又允许把裸 `OSError` 当候选失败处置
+#      ⇒ **必须停机的信号被降级成「这一只股失败了」**；
+#   ② 没退的那笔账永久占着 `--max-bytes` ⇒ 一次**假的**配额触顶（残留 R1 那条
+#      「一次基础设施故障被记成一次正常结束」）。
+#
+# ⚠️ **这三档的判别力挂在哪里，必须说准**：注入的是 `OSError`，而被测代码整段
+# 工作就是处理 `OSError` —— 若只断言「抛了个 `OSError`」，改对改错**输出一模一样**。
+# 故每一档都按三条**改对改错必然分叉**的判据断言：
+#   (a) 逃出来的那个异常**是什么族**（修好之后：原终止信号原样、或 `RollbackIncomplete`；
+#       改坏之后：清理那个裸 `OSError`）；
+#   (b) 另一项清理**有没有被尝试过**（`seen` 按次序记下每一个命中的 leaf）；
+#   (c) 预算**退没退**（`budget.used` 回没回到 baseline）。
+
+
+def _explode_unlink_on(monkeypatch, predicate, err_code, note):
+    """把 `os.unlink` 换成：命中 `predicate(leaf)` 的抛指定 errno，其余原样放行。
+
+    返回的列表按调用次序记下**每一个命中**的 leaf —— 「另一项到底有没有被尝试过」
+    这句断言的判别力全在它身上（顺着写的旧代码里，第二项根本不会被调到）。
+    """
+    seen: list[str] = []
+    real_unlink = os.unlink
+
+    def spy(path, *args, **kwargs):
+        if isinstance(path, str) and predicate(path):
+            seen.append(path)
+            raise OSError(err_code, note)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", spy)
+    return seen
+
+
+def test_rollback_incomplete_is_the_third_run_terminated_family_member():
+    assert issubclass(RollbackIncomplete, RunTerminated)
+    assert not issubclass(RollbackIncomplete, StockCopyFailed)
+    assert not issubclass(RollbackIncomplete, OSError), (
+        "它必须**不是** OSError —— 调用方区分「清理故障原样逃出来」与「本模块判定"
+        "回滚没做完」靠的就是这一条"
+    )
+    assert not issubclass(RollbackIncomplete, PathEscapeError)
+
+
+# ── 收尾路径 ①：`copy_one` 删自己那个临时文件时失败 ──────────────
+
+def test_copy_one_still_refunds_and_terminates_when_temp_cleanup_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"payload" * 20
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None, used=0)
+
+    # 在途的原异常：拷到一半 SMB 断线。**裸 `OSError`**，按本模块契约既不属于
+    # 候选失败也不属于终止条件 ⇒ 正是「回滚不完整就必须升级」那一支的输入。
+    boom = OSError(errno.EIO, "打桩：拷到一半 SMB 断线")
+
+    def exploding_write_all(fd, payload):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "_write_all", exploding_write_all)
+    seen = _explode_unlink_on(
+        monkeypatch,
+        lambda leaf: leaf.endswith(".tmp") and PART in leaf,
+        errno.EACCES, "打桩：删临时文件撞 EACCES")
+
+    with pytest.raises(RunTerminated) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    # (b) 前提：删除确实被尝试过一次且确实失败了，否则下面全是恒真断言。
+    assert len(seen) == 1 and seen[0].endswith(".tmp"), (
+        f"前提不成立：临时文件的删除压根没被调到，实测 {seen}")
+    leftovers = [p.name for p in (stg_path / "1m").iterdir()
+                 if p.name.endswith(".tmp")]
+    assert len(leftovers) == 1, (
+        f"前提不成立：注入没生效，临时文件还是被删掉了（实测 {leftovers}）"
+        "——那样「回滚不完整」这个前提根本不成立")
+
+    # (a) 逃出来的不是那个清理异常，而是本模块明确定性的终止信号。
+    exc = ei.value
+    assert isinstance(exc, RollbackIncomplete)
+    assert not isinstance(exc, OSError), "清理的 EACCES 不许原样逃出来顶替原异常"
+    assert exc.original is boom, "在途的那个原异常必须原封不动地留在 `.original` 上"
+    assert exc.__cause__ is boom
+    assert [e.errno for e in exc.errors] == [errno.EACCES], \
+        "回滚里失败的那一项必须被结构化地交出来，不是被悄悄咽掉"
+    assert any("回滚未完成" in n for n in boom.__notes__), \
+        "诊断也要挂在原异常上——调用方打印哪一个都看得见"
+
+    # (c) 删除失败**不得**吃掉退账：这一趟逐块扣的账必须回到起点。
+    assert budget.used == 0, (
+        "删临时文件失败连退账一起跳过 ⇒ 这笔字节永久占着 --max-bytes ⇒ "
+        "后面撞一次**假的**配额触顶（残留 R1 的喂料口）")
+
+
+# ── 收尾路径 ②a：主回滚失败，而在途的原异常**本来就是终止信号** ──
+# 本档钉的正是评审那句话的字面意思：一个「终止整次运行」的信号绝不许被清理
+# 异常换成别的东西。改坏之后逃出来的是 `OSError`，`pytest.raises` 当场红。
+
+def test_copy_stock_keeps_the_terminate_signal_when_both_part_cleanups_fail(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+
+    data_1m = b"1m-unchanged" * 8
+    old_daily = b"daily-old" * 7
+    new_daily = b"daily-NEW-generation" * 5     # 源在本次运行期间换代了
+    _put_source_file(src_path, rel_1m, data_1m)
+    _put_source_file(src_path, rel_daily, new_daily)
+    # 两个 staging 目标都不存在 ⇒ 两格都是 TARGET_COPY ⇒ 两个 `.part` 都会落盘，
+    # 「另一项有没有被尝试」才有得测（只落一个 `.part` 的话那句断言是恒真的）。
+
+    rec_1m = {"stock_code": "600000.SH", "period": "1m", "relative_path": rel_1m,
+              "bytes": len(data_1m), "sha256": hashlib.sha256(data_1m).hexdigest()}
+    rec_daily = {"stock_code": "600000.SH", "period": "daily",
+                 "relative_path": rel_daily, "bytes": len(old_daily),
+                 "sha256": hashlib.sha256(old_daily).hexdigest()}
+    manifest, export_log_bytes = _seed_manifest()
+    manifest["files"] = [rec_1m, rec_daily]
+    manifest["pool_order"]["SH"] = [{"code": "600000.SH", "universe_idx": 0}]
+    manifest["cursor"]["SH"] = 1
+    manifest["committed_bytes"] = (
+        len(export_log_bytes) + len(data_1m) + len(old_daily))
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    assert classify_target(stg_fd, rel_1m, rec_1m) == TARGET_COPY
+    assert classify_target(stg_fd, rel_daily, rec_daily) == TARGET_COPY
+
+    seen = _explode_unlink_on(
+        monkeypatch, lambda leaf: leaf.endswith(PART),
+        errno.EIO, "打桩：删 .part 撞 EIO")
+
+    with pytest.raises(SourceChangedMidRun) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    exc = ei.value
+    # (a) 类型一个字不换：D5 的终止信号不许被一条清理故障洗成别的东西。
+    assert not isinstance(exc, OSError), (
+        "清理的 EIO 顶替掉 SourceChangedMidRun ⇒ 一条**必须停机**的信号会以裸 "
+        "`OSError` 的样子到达 S4b，而本模块的契约允许把裸 `OSError` 当候选失败处置"
+        "⇒ 这只股被跳过、整次运行接着跑")
+    assert not isinstance(exc, StockCopyFailed)
+    # (b) 两条 `.part` 各被尝试过一次——第一条失败不得让第二条不执行。
+    assert len(seen) == 2, f"两条 `.part` 必须各被尝试删一次，实测 {seen}"
+    assert seen[0].endswith(PART) and seen[1].endswith(PART)
+    assert (stg_path / (rel_1m + PART)).is_file()
+    assert (stg_path / (rel_daily + PART)).is_file(), \
+        "前提不成立：注入没生效（.part 还是被删掉了）"
+    # (c) 两笔退账照做。
+    assert budget.used == baseline, "清理失败不得吃掉退账"
+    assert len(getattr(exc, "__notes__", [])) == 2, (
+        f"两项清理失败都要留下诊断，不许静默咽掉，实测 {getattr(exc, '__notes__', [])}")
+
+    assert not (stg_path / INFLIGHT).exists()
+    assert read_manifest(stg_fd) == manifest, "D5：manifest 一个字段都不该动"
+
+
+# ── 收尾路径 ②b：主回滚失败，而在途的原异常是一次**候选失败** ────
+# 本档钉的是第二个决定：回滚没做完时**不许**把原异常原样放出去当候选失败
+# ——staging 侧的 EIO 是这棵树的事实，后面每一只股都会撞到。
+
+def test_copy_stock_escalates_a_candidate_failure_when_rollback_is_incomplete(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)   # daily 的源整段没导出过
+
+    # 上一次运行崩在半路留下的 daily `.part`（合法状态）：让「第二项清理」确实
+    # 有活可干，于是「第一项失败不得跳过第二项」这句断言不是恒真的。
+    (stg_path / "daily").mkdir()
+    (stg_path / (rel_daily + PART)).write_bytes(b"stale part")
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    seen = _explode_unlink_on(
+        monkeypatch, lambda leaf: leaf.endswith(PART),
+        errno.EIO, "打桩：删 .part 撞 EIO")
+
+    with pytest.raises(RunTerminated) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    exc = ei.value
+    assert isinstance(exc, RollbackIncomplete)
+    assert not isinstance(exc, StockCopyFailed), (
+        "盘面/账面已经对不上（而且对不上的方式本模块并不知道）⇒ 不许让 S4b 按"
+        "「跳过这只股」继续跑")
+    assert not isinstance(exc, OSError), "也不是把清理那个 EIO 原样放出去"
+    assert isinstance(exc.original, StockCopyFailed)
+    assert exc.original.reason == "fetch_missing_file", \
+        "原来那条候选失败的定性必须原封不动地留着，不是被换掉"
+    assert exc.__cause__ is exc.original
+    assert len(seen) == 2, f"两条 `.part` 必须各被尝试删一次，实测 {seen}"
+    assert [e.errno for e in exc.errors] == [errno.EIO, errno.EIO]
+    assert budget.used == baseline, "清理失败不得吃掉退账"
+
+
+# ── 收尾路径 ③：写在途标记在**发布之前**失败，而回滚自己也失败 ────
+
+def test_copy_stock_marker_write_failure_still_reconciles_when_cleanup_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    part_1m = stg_path / (rel_1m + PART)
+    part_daily = stg_path / (rel_daily + PART)
+    at_blast: list[tuple] = []
+    real_open_under = qmt_fsroot.open_under
+
+    def exploding_open_under(root_fd, relpath, *, flags, mode=0o600, create_dirs=False):
+        # 标记的临时文件在这一句被创建，发布用的 `os.replace` 排在它之后
+        # ⇒ 这里炸 = **发布之前**炸 ⇒ 走的是清理那一支，不是 D6 那一支。
+        if relpath.startswith(INFLIGHT):
+            at_blast.append((part_1m.is_file(), part_daily.is_file(),
+                             (stg_path / INFLIGHT).exists()))
+            raise OSError(errno.ENOSPC, "打桩：写标记的临时文件时 staging 满了")
+        return real_open_under(root_fd, relpath, flags=flags, mode=mode,
+                               create_dirs=create_dirs)
+
+    monkeypatch.setattr(qmt_fsroot, "open_under", exploding_open_under)
+    # 只拦 `.part`；标记自己那个 `.inflight.json.<pid>.<hex>.tmp` 不在射程内。
+    seen = _explode_unlink_on(
+        monkeypatch, lambda leaf: leaf.endswith(PART),
+        errno.EIO, "打桩：删 .part 撞 EIO")
+
+    with pytest.raises(RunTerminated) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert at_blast == [(True, True, False)], (
+        "前提不成立：炸的那一刻两个 `.part` 必须真的在盘上、标记必须**还没**发布"
+        f"——否则本档测的不是这一支。实测 {at_blast}")
+
+    exc = ei.value
+    assert isinstance(exc, RollbackIncomplete)
+    assert not isinstance(exc, OSError), "清理的 EIO 不许原样逃出来顶替 ENOSPC"
+    assert exc.original.errno == errno.ENOSPC, \
+        "在途的原异常是写标记那次 ENOSPC，不是清理那次 EIO"
+    assert len(seen) == 2, f"两条 `.part` 必须各被尝试删一次，实测 {seen}"
+    assert budget.used == baseline, (
+        "退账被清理失败吃掉 ⇒ 调用方后面会撞一次**假的** `--max-bytes` 触顶")
+    assert not (stg_path / INFLIGHT).exists(), "发布确实没发生"
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
