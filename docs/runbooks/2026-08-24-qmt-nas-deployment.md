@@ -610,7 +610,7 @@ ssh $NAS "docker exec kline-trainer-api-1 sh -c 'ls /data/training-sets && (touc
 **NAS-A.1** 插入一条临时行：
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c \"INSERT INTO training_sets(stock_code,stock_name,start_datetime,end_datetime,file_path,content_hash) VALUES('SMOKE-A','SMOKE-A',0,0,'/data/training-sets/none-a.zip','deadbeef') RETURNING id;\""
+ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c \"INSERT INTO training_sets(stock_code,stock_name,start_datetime,end_datetime,schema_version,file_path,content_hash) VALUES('SMOKE-A','SMOKE-A',0,0,1,'/data/training-sets/none-a.zip','deadbeef') RETURNING id;\""
 ```
 
 - ✅ 记下返回的 `id`（下面叫 `A_ID`）
@@ -642,7 +642,7 @@ ssh $NAS "curl -s --max-time 10 'http://127.0.0.1:8010/training-sets/meta?count=
 **NAS-B.1** 再插一条临时行：
 
 ```
-ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c \"INSERT INTO training_sets(stock_code,stock_name,start_datetime,end_datetime,file_path,content_hash) VALUES('SMOKE-B','SMOKE-B',0,0,'/data/training-sets/none-b.zip','deadbeef') RETURNING id;\""
+ssh $NAS "docker exec kline-trainer-db-1 psql -U kline -d kline_trainer -c \"INSERT INTO training_sets(stock_code,stock_name,start_datetime,end_datetime,schema_version,file_path,content_hash) VALUES('SMOKE-B','SMOKE-B',0,0,1,'/data/training-sets/none-b.zip','deadbeef') RETURNING id;\""
 ```
 
 - ✅ 记下 `B_ID`
