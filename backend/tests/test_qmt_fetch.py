@@ -24,6 +24,7 @@ import stat
 import pytest
 
 import qmt_fetch
+import qmt_fsroot
 from qmt_fetch import (
     INFLIGHT,
     PART,
@@ -1923,3 +1924,204 @@ def test_cleanup_still_removes_an_ordinary_part_on_the_failure_path(roots, monke
         "普通 .part 是本工具自己写下的残留——收尾必须删掉它。"
         "符号链接那一档的豁免只收窄「被篡改」那一格，不是把整条删除规则关掉"
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 6 · C1（评审 [high]）：`<rel>.part` 底下被植一个**硬链接**
+# ══════════════════════════════════════════════════════════════════
+# 硬链接是本模块所有既有检查的共同盲点：它**不是**符号链接（`O_NOFOLLOW` 管不到
+# 它），而且它**就是**一个普通文件（`lstat`/`fstat` 的 `S_ISREG` 都答 True）——
+# 于是 `_probe_part` 之前的那套判据一条都不会拦它，而旧写法的 `O_TRUNC` 会在
+# 任何校验、任何回滚之前就把它指向的那个 **staging 树外**的文件清空。
+# 解法与 `qmt_fsroot._atomic_write_bytes` 同规格：只写自己 `O_CREAT|O_EXCL` 刚
+# 造出来的 inode，再 `os.replace` 发布——`replace` 换目录项、不碰目标 inode。
+
+def test_copy_one_hard_linked_part_leaves_the_linked_file_byte_identical(roots, tmp_path):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"source-data" * 10
+    _put_source_file(src_path, rel, data)
+
+    outside = tmp_path / "outside.bin"          # ← staging 树**外面**的一个文件
+    victim = b"v" * 145
+    outside.write_bytes(victim)
+    part = stg_path / (rel + PART)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    os.link(str(outside), str(part))            # 植一个硬链接（不是符号链接）
+
+    # 前提逐条钉死：否则本档测的就不是「硬链接」这件事。
+    assert not part.is_symlink(), "前提：这不是符号链接，O_NOFOLLOW 对它无效"
+    assert stat.S_ISREG(os.lstat(str(part)).st_mode), (
+        "前提：硬链接**就是**一个普通文件——本模块的 S_ISREG 判据对它一律放行"
+    )
+    assert os.lstat(str(part)).st_ino == os.stat(str(outside)).st_ino, (
+        "前提：两个名字指向同一个 inode，截断其中一个就是截断另一个"
+    )
+    assert len(data) != len(victim), (
+        "前提：拷来的字节数与受害文件原本的字节数不同——否则「长度没变」这条"
+        "断言碰巧也能通过一次真正的覆盖"
+    )
+
+    budget = ByteBudget(limit=None)
+    result = copy_one(src_fd, stg_fd, rel, budget)
+
+    assert outside.read_bytes() == victim, (
+        "staging 树外面的那个文件必须逐字节不变——它被 O_TRUNC 清空正是本档要防的"
+        "静默数据丢失（实测过：`copy_one` **正常返回**，而那个文件已经变成拷来的内容）"
+    )
+    assert os.lstat(str(part)).st_ino != os.stat(str(outside)).st_ino, (
+        "`.part` 必须是一个**新 inode**（发布换的是目录项），而不是沿用被植进来的那个"
+    )
+    # 正路那一半同时也要成立：这只股照常拷完，不是靠「拒绝服务」换来的安全。
+    assert result.n_bytes == len(data)
+    assert result.sha256 == hashlib.sha256(data).hexdigest()
+    assert part.read_bytes() == data
+    assert budget.used == len(data)
+
+
+def test_copy_one_publishes_over_an_ordinary_leftover_part(roots):
+    # 「上一次运行崩在半路留下一个普通 `.part`」是**本 spec 自己产得出的合法
+    # 状态**（大 spec §4.5：失败即删两个 `.part`，而 SIGKILL / 断电根本走不到
+    # 那一步）。修法必须盖掉它、继续把这只股拷完，**不得**把它变成一次失败——
+    # 否则一次断电会让这只股此后每次重跑都死在同一处。
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"fresh-source" * 7
+    _put_source_file(src_path, rel, data)
+    part = stg_path / (rel + PART)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"half-written leftover from a killed run")
+    stale_ino = os.lstat(str(part)).st_ino
+
+    budget = ByteBudget(limit=None)
+    result = copy_one(src_fd, stg_fd, rel, budget)
+
+    assert result.n_bytes == len(data)
+    assert part.read_bytes() == data, "残留的半截 `.part` 必须被本次拷贝盖掉"
+    assert os.lstat(str(part)).st_ino != stale_ino, (
+        "盖法是「发布一个新 inode」，不是「截断旧的那个」"
+    )
+    # 临时文件不留残骸：发布成功之后那个名字必须已经不在了。
+    leftovers = [p.name for p in part.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"发布成功之后不该留下临时文件，实测 {leftovers}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 6 · N1（评审 [medium]）：写在途标记这一步自己失败
+# ══════════════════════════════════════════════════════════════════
+# `_write_inflight_marker` 此前裸在回滚处置之外，于是 `atomic_write_json` 在
+# **发布之前**失败（`ENOSPC`……）会同时漏掉两件事：两个已拷好的 `.part` 留在
+# 盘上，本次扣的账也不退——什么都没提交、也没有任何恢复凭据，而预算被永久
+# 占着（R1 那条「假的 --max-bytes 触顶」的喂料口）。
+# 分界是**发布有没有发生**，不是「写标记那个函数返回了没有」：
+#   · 发布之前炸 → 与其它标记前失败路径逐字同规格地清理（下面第一档）；
+#   · 发布**之后**炸（紧跟的那次 `fsync(staging)`）→ D6 接管，一个字节都不清、
+#     一分钱都不退（下面第二档，钉的是**不得过度清理**那一半）。
+# 两档合起来才有判别力：只有第一档时，「一律清理」也能全绿。
+
+def test_copy_stock_rolls_back_when_marker_write_fails_before_publication(roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 10)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    part_1m = stg_path / (rel_1m + PART)
+    part_daily = stg_path / (rel_daily + PART)
+    seen: list[tuple] = []
+    real_open_under = qmt_fsroot.open_under
+
+    def exploding_open_under(root_fd, relpath, *, flags, mode=0o600, create_dirs=False):
+        # 标记的临时文件就是在这一句被创建的（`_atomic_write_bytes`：唯一名 +
+        # O_EXCL），而发布用的 `os.replace` 排在它之后 ⇒ 这里炸 = 发布之前炸。
+        # ⚠️ 注入的是**裸 `OSError`**：被测代码正确/错误时它都原样逃出来，
+        # 两个结局的差别全在盘面与预算上，信号不会被洗成期望答案。
+        if relpath.startswith(INFLIGHT):
+            seen.append((part_1m.is_file(), part_daily.is_file(),
+                         (stg_path / INFLIGHT).exists()))
+            raise OSError(errno.ENOSPC, "打桩：写标记的临时文件时 staging 满了")
+        return real_open_under(root_fd, relpath, flags=flags, mode=mode,
+                               create_dirs=create_dirs)
+
+    monkeypatch.setattr(qmt_fsroot, "open_under", exploding_open_under)
+
+    with pytest.raises(OSError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert ei.value.errno == errno.ENOSPC
+    assert not isinstance(ei.value, StockCopyFailed), "基础设施故障不折成候选失败"
+    assert not isinstance(ei.value, RunTerminated), "也不包装成终止条件"
+    assert seen == [(True, True, False)], (
+        "前提不成立：炸的那一刻两个 `.part` 必须真的在盘上、标记必须**还没**发布"
+        f"——否则下面几条断言是恒真的。实测 {seen}"
+    )
+    # 与其它「标记发布之前」的失败路径逐字同规格：盘上什么都没落、预算退干净。
+    assert not part_1m.exists(), "发布没发生 ⇒ 两个 `.part` 必须删掉"
+    assert not part_daily.exists(), "发布没发生 ⇒ 两个 `.part` 必须删掉"
+    assert budget.used == baseline, (
+        "发布没发生 ⇒ 本次扣的账必须退还——不退会让调用方在后面撞上一次**假的**"
+        "`--max-bytes` 触顶，而那按大 spec §5 是「干净的配额停止」⇒ pilot 放行"
+    )
+    assert not (stg_path / INFLIGHT).exists()
+    assert not (stg_path / rel_1m).exists()
+    assert not (stg_path / rel_daily).exists()
+    assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+def test_copy_stock_keeps_everything_when_fsync_fails_after_marker_publication(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    data_1m = b"1m-data" * 10
+    data_daily = b"daily-data" * 10
+    _put_source_file(src_path, rel_1m, data_1m)
+    _put_source_file(src_path, rel_daily, data_daily)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+    baseline = budget.used
+
+    part_1m = stg_path / (rel_1m + PART)
+    part_daily = stg_path / (rel_daily + PART)
+    seen: list[tuple] = []
+
+    def exploding_fsync_dir(dir_fd):
+        # `_atomic_write_bytes` 的最后一句，**排在 `os.replace` 之后**且不在它
+        # 那个 `except BaseException` 的作用域里 ⇒ 这里炸 = 标记已经发布。
+        seen.append((part_1m.is_file(), part_daily.is_file(),
+                     (stg_path / INFLIGHT).exists()))
+        raise OSError(errno.EIO, "打桩：发布之后那次 fsync(staging) 撞 EIO")
+
+    monkeypatch.setattr(qmt_fsroot, "fsync_dir", exploding_fsync_dir)
+
+    with pytest.raises(OSError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert ei.value.errno == errno.EIO
+    assert seen == [(True, True, True)], (
+        "前提不成立：炸的那一刻标记必须**已经**在盘上（发布已经发生）、两个 "
+        f"`.part` 也在——否则本档测的不是「发布之后」那一支。实测 {seen}"
+    )
+    # D6：一经发布，只有「提交成功 + 删标记」与「终止整次运行」两条出路。
+    # 本函数在这一支里**不得**清理任何东西——那份标记是授权回滚的唯一凭据，
+    # 它明写的两条 `.part` 必须还在，S4b 的崩溃恢复才回滚得了。
+    assert (stg_path / INFLIGHT).exists(), "已发布的恢复凭据必须原样留在盘上"
+    assert part_1m.is_file(), "标记里明写的 `.part` 不许被顺手删掉"
+    assert part_daily.is_file(), "标记里明写的 `.part` 不许被顺手删掉"
+    assert budget.used == baseline + len(data_1m) + len(data_daily), (
+        "已发布 ⇒ 不退账：这两份字节此刻仍然占着盘，退了账面就与盘面对不上"
+    )
+    assert not (stg_path / rel_1m).exists(), "还没走到两次 final 替换"
+    assert not (stg_path / rel_daily).exists()
+    assert read_manifest(stg_fd) == manifest, "提交还没发生，manifest 一个字段没动"

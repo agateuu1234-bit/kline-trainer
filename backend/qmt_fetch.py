@@ -51,10 +51,13 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 **本模块对它只给一条保证，而那是有前提的位置保证**（fix round 5 · Minor 2
 订正：此前这句写成“它**只可能**逃在在途标记写下之前”，**那是假的**——
 两次 `os.replace`、`commit_stock`、删标记这三处同样可能逃出裸 `OSError`，
+再加上写标记时**发布之后**那次 `fsync(staging)`（fix round 6 · N1 补第四处），
 结论靠紧跟其后的括号才救回来，而那句话单独拿出来就是错的）：
-**逃在在途标记写下之前**的那些裸 `OSError`，逃出来的那一刻盘上什么都没落——
+**逃在在途标记【发布】之前**的那些裸 `OSError`，逃出来的那一刻盘上什么都没落——
 两个 `.part` 已删、本次扣的预算已退还、manifest 一个字段没动。
-**标记写下之后逃出的裸 `OSError` 不在这条保证之内**，按下一段的**位置**判据
+**这条保证包含写标记这一步自己在发布之前炸掉的那一档**（fix round 6 · N1：
+此前它是个例外，而那正是评审 [medium] 的洞——`.part` 与预算双漏）。
+**标记发布之后逃出的裸 `OSError` 不在这条保证之内**，按下一段的**位置**判据
 处置（调用方在那一段接到任何异常都必须按整次运行终止，不必检查类型）。
 ⚠️ **“跳过这只股”还是“终止整次运行”由 S4b 定，本片不替它选**（交接）：
 无差别 `except OSError` 会把权限错误折成 `fetch_missing_file`（D3 明禁），
@@ -283,20 +286,25 @@ def _open_source_leaf(src_fd: int, rel: str):
         os.close(pfd)
 
 
-def _part_is_non_regular(stg_fd: int, rel: str) -> bool:
-    """`<rel>.part` **存在且不是普通文件** → `True`；其余（不存在 / 看不到 /
-    确实是普通文件）一律 `False` —— **不猜**。
+def _part_is_non_regular(stg_fd: int, name: str) -> bool:
+    """staging 内 `name` 这个名字底下 **存在且不是普通文件** → `True`；其余
+    （不存在 / 看不到 / 确实是普通文件）一律 `False` —— **不猜**。
+
+    `name` 是**完整**的 staging 内相对名（`<rel>.part`，或 fix round 6 · C1 起
+    写侧那个 `<rel>.part.<pid>.<随机>.tmp` 临时名）——**不是** `rel`：判据要问的
+    是「我下一步要动的那个名字底下是什么」，把 `.part` 拼接藏在函数里会让临时名
+    那个消费者拿到**另一个名字**的答案。
 
     逐段无跟随走到父目录再 `lstat` 叶子（不用 `os.stat(多分量路径)`：那会跟随
     中间分量的符号链接，正是 `parent_fd_under` 存在的理由）。
     `_open_part` 与 `_cleanup_part` 共用这一个判据，不各自内联一份。
     """
     try:
-        pfd, leaf = parent_fd_under(stg_fd, rel)
+        pfd, leaf = parent_fd_under(stg_fd, name)
     except OSError:
         return False
     try:
-        st = os.stat(leaf + PART, dir_fd=pfd, follow_symlinks=False)
+        st = os.stat(leaf, dir_fd=pfd, follow_symlinks=False)
     except OSError:
         return False
     finally:
@@ -304,22 +312,24 @@ def _part_is_non_regular(stg_fd: int, rel: str) -> bool:
     return not _is_regular(st)
 
 
-def _open_part(stg_fd: int, rel: str, *, flags: int, create_dirs: bool = False) -> int:
-    """staging 侧 `<rel>.part` 的**唯一**打开点：`O_NONBLOCK` + 普通文件判据
-    （fix round 4 · C1）。
+def _open_part(stg_fd: int, name: str, *, flags: int, create_dirs: bool = False) -> int:
+    """staging 侧 `.part` 一族名字的**唯一**打开点：`O_NONBLOCK` + 普通文件判据
+    （fix round 4 · C1）。`name` 是**完整**的 staging 内相对名——`<rel>.part`
+    本身，或 fix round 6 · C1 起写侧那个 `<rel>.part.<pid>.<随机>.tmp` 临时名。
 
     **`.part` 与 final 同处一棵可被篡改的 staging 树**，D2 给 final 立的那条纪律
-    必须原样覆盖到它：一个被植进 `<rel>.part` 的 FIFO 会让 `os.open(O_WRONLY)`
-    **永久等一个写入方**——整次运行挂死在 `.staging.lock` 里、后续任何一次运行
-    连启动都做不到，比 D2 要防的那个结局更糟，而且不是 fail-closed；植一个目录
-    则给出一个裸 `IsADirectoryError`，不属于本模块声明的任何一族。
+    必须原样覆盖到它：一个被植进 `<rel>.part` 的 FIFO 会让不带 `O_NONBLOCK` 的
+    `os.open()` **永久等对端**（写端等读者、读端等写者，两个方向都一样）——整次
+    运行挂死在 `.staging.lock` 里、后续任何一次运行连启动都做不到，比 D2 要防的
+    那个结局更糟，而且不是 fail-closed。
 
     **为什么不直接用 `qmt_fsroot.open_regular_probe`**（这条纪律的登记处，其
     docstring 写着「三个打开点统一走本函数，避免『同一条纪律只落在其中一处』」）：
     写侧这一次必须 `create_dirs=True`——staging 的 `1m/` / `daily/` 子目录正是由
-    本模块第一次写 `.part` 时创建的，而 `open_regular_probe` 不转发这个参数，
+    本模块第一次写临时文件时创建的，而 `open_regular_probe` 不转发这个参数，
     `qmt_fsroot` 在本片是禁改模块。故把同一条纪律在**本模块内收成这一个函数**：
-    两个打开点（写 `.part`、复算重读 `.part`）都只经它。
+    三个打开点（发布前探一次 `<rel>.part`、造临时文件、复算重读临时文件）
+    都只经它。
 
     **定性 `untracked_target_file`**：D3 的判据是「这只股能不能继续」（不是
     「影响面多大」），而 `.part` 是 **staging 侧**的对象——来路不明就不许覆盖它、
@@ -328,20 +338,26 @@ def _open_part(stg_fd: int, rel: str, *, flags: int, create_dirs: bool = False) 
     符号链接仍由 `open_under` 逐段无跟随抛 `PathEscapeError`（整次致命），不归本族；
     `PermissionError` / `EIO` / `ENOSPC` 等其它 `OSError` **原样上抛**，与
     `_open_source_leaf` 同规格：「打不开」与「不是普通文件」是两件事。
+
+    ⚠️ **没有 `except IsADirectoryError`**（fix round 6 · C1 删掉）：那一条只在
+    写侧直接 `O_WRONLY` 打开 `<rel>.part` 时可达，而写侧改成「造临时文件 + 发布」
+    之后，目录只会被**只读探测**撞见——`O_RDONLY` 打开一个目录是**成功**的
+    （与 `classify_target` 对 final 的那条判据同一套现象），于是它落在下面那句
+    `S_ISREG` 上，`reason` 一个字不变。留着一条永不执行的 `except` 等于在代码里
+    写一句假话。两条既有测试钉着这个结局（`test_copy_one_directory_at_part_is_
+    untracked_target_file` / `test_copy_stock_directory_at_part_fails_closed_
+    and_keeps_the_failure_reason`）。
     """
-    name = rel + PART
     try:
         fd = open_under(stg_fd, name, flags=flags | os.O_NONBLOCK,
                         mode=0o600, create_dirs=create_dirs)
-    except IsADirectoryError as e:
-        raise StockCopyFailed("untracked_target_file", f"{name}: 是一个目录") from e
     except FileNotFoundError:
         raise
     except OSError as e:
         # 打不开 ≠ 打不开的原因猜得到（FIFO 无读者给 `ENXIO`、socket 在 macOS 给
         # `EOPNOTSUPP`，各平台不同、还会变 —— 判据不枚举 errno）：回头 lstat 问
         # 文件系统「那底下到底是个什么东西」，与 `_open_regular_probe` 同一套判据。
-        if _part_is_non_regular(stg_fd, rel):
+        if _part_is_non_regular(stg_fd, name):
             raise StockCopyFailed(
                 "untracked_target_file", f"{name}: 存在但不是普通文件（打不开）"
             ) from e
@@ -360,15 +376,116 @@ def _open_part(stg_fd: int, rel: str, *, flags: int, create_dirs: bool = False) 
         raise
 
 
-def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResult:
-    """单文件流式拷贝：读源 → 流式 sha256 → 逐块扣账 → 写 `.part` → `fsync` →
-    对落地的 `.part` 重算并与源哈希比对。
+def _probe_part(stg_fd: int, rel: str) -> None:
+    """写之前问一次「`<rel>.part` 那个名字底下**现在**是什么东西」（fix round 6 · C1）。
 
-    失败时（含 `--max-bytes` 触顶、源读/目的写中途报错、落地复算不符、
-    `<rel>.part` 底下被植了非普通文件——见 `_open_part`）退还
-    本次已经扣过的账，再原样上抛。本函数**不**删 `.part`、**不**处理「这只股
+    写侧不再直接打开 `<rel>.part`（见 `copy_one`），于是「被植进来的非普通对象
+    必须撞 `untracked_target_file`、符号链接必须撞 `PathEscapeError`」这条既有
+    纪律没有了**顺带**的落点——本函数就是它现在唯一的落点，判据原样走
+    `_open_part`（同一套 `O_NONBLOCK` + `S_ISREG`，不另立一份）：
+
+      · 符号链接 → `open_under` 逐段无跟随撞 `ELOOP` → `PathEscapeError`（整次致命）；
+      · FIFO / 目录 / socket → `StockCopyFailed("untracked_target_file")`；
+      · **普通文件**（上一次运行崩在半路留下的 `.part`）→ 正路，什么都不做：
+        这是本 spec 自己产得出的合法状态，不得把它变成一次失败，随后那次发布
+        用 `os.replace` **换目录项**盖掉它（不截断它的 inode）；
+      · 那底下什么都没有 → `FileNotFoundError` → 正路。
+
+    ⚠️ 只读打开一下就关掉：本函数只问类型，不持有它。
+
+    ⚠️ **一处明写的行为变化**：那底下若是一个**读不了**的普通文件（比如被植了一个
+    `0o200` 的文件），本函数撞 `EACCES` ⇒ 裸 `OSError` 上抛；改动前的 `O_WRONLY`
+    打开会成功、然后把它**截断重写**。本工具自己写下的 `.part` 一律 `0o600`，
+    故这一档只可能是外来对象——按本模块既有纪律（「打不开」原样上抛、别人植进来的
+    对象一律不动手）这是正确的那一侧，不是回归。
+    """
+    try:
+        fd = _open_part(stg_fd, rel + PART, flags=os.O_RDONLY)
+    except FileNotFoundError:
+        return
+    os.close(fd)
+
+
+def _new_part_suffix() -> str:
+    """临时文件名的后缀：`.<pid>.<12 位随机十六进制>.tmp`。
+
+    与 `qmt_fsroot._atomic_write_bytes` 逐条同规格（那里是本仓这条纪律的登记处）：
+    **带 pid 与随机后缀**，故崩溃留下的旧临时文件不会被静默复用，也不可能被外人
+    预先猜到名字占住。
+    """
+    return f".{os.getpid()}.{os.urandom(6).hex()}.tmp"
+
+
+def _publish_part(stg_fd: int, rel: str, suffix: str) -> None:
+    """把写好、且已复算过的临时文件发布成 `<rel>.part`：一次 `os.replace`。
+
+    **`replace` 换的是目录项，不碰任何既存 inode 的字节**——这正是 fix round 6 · C1
+    的全部要害（见 `copy_one`）。
+
+    **没有随后的 `fsync(目录)`，而这是按大 spec 耐久提交协议闭合清单的入选判据
+    算出来的，不是漏了**（该清单在 S4a 范围内继续生效，契约 §5 未覆盖它）：
+    判据是「一个命名空间改动进本清单，当且仅当**它的丢失会改变后续运行的判断**」，
+    而 `.part` 这个名字的**得失都不改变任何后续判断**——它不匹配导入侧的 glob、
+    不进四象限判据（那一条只看 final）、崩溃恢复只按在途标记里明写的路径去
+    `unlink` 且容忍不存在。清单里「失败路径上 `.part` 的删除」已经按同一条理由
+    **显式豁免**；本次发布是同一个名字的**创建**，与豁免那一条同族。
+    ⚠️ 还有一条更硬的理由：改动前的写法（`O_CREAT` 直接造出 `<rel>.part`）本身
+    就是一次没有目录 `fsync` 的命名空间改动，本次改动**没有新增**任何一条目录项
+    ——盘上的净效果仍然只是「出现一个叫 `<rel>.part` 的目录项」，只是造法换了。
+
+    ⚠️ **已登记的残留窗口**：`_probe_part` 与这一句 `os.replace` 之间，别人仍然
+    可以往 `<rel>.part` 上植东西，而 `replace` 会把它连名字一起换掉（POSIX 的
+    `rename` 恒覆盖；`RENAME_NOREPLACE` / `RENAME_EXCL` 是平台私有、Python 不暴露，
+    而且**合法的残留 `.part` 本来就必须被盖掉**，不覆盖这条路走不通）。
+    **这个窗口里丢不了 staging 树外面的数据**——被换掉的只是那个目录项本身：
+    FIFO / socket 不存数据，符号链接被 `replace` 换掉时**不跟随**、它指向的对象
+    一个字节没动。相比改动前「`O_TRUNC` 直接清空硬链接对面的外部文件」，
+    这是同一条时间线上严格更小的后果。
+    """
+    pfd, leaf = parent_fd_under(stg_fd, rel)
+    try:
+        os.replace(leaf + PART + suffix, leaf + PART,
+                   src_dir_fd=pfd, dst_dir_fd=pfd)
+    finally:
+        os.close(pfd)
+
+
+def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResult:
+    """单文件流式拷贝：读源 → 流式 sha256 → 逐块扣账 → 写**一个全新 inode** →
+    `fsync` → 对落地的那份重算并与源哈希比对 → `os.replace` 发布成 `<rel>.part`。
+
+    ⚠️⚠️ **为什么不直接 `O_TRUNC` 写 `<rel>.part`**（fix round 6 · C1，评审
+    [high]，本机复现）：`O_NOFOLLOW` 挡符号链接、`S_ISREG` 挡 FIFO/目录/socket，
+    **两者都挡不住硬链接**——一个被植在 `<rel>.part` 上、指向 staging 树**外面**
+    某个可写文件的硬链接，`lstat` 与 `fstat` 都如实回答「这是个普通文件」，
+    于是本模块所有既有检查**全部通过**，而 `O_TRUNC` 在任何校验、任何回滚之前
+    就已经把那个外部文件清空了（实测：145 字节的外部文件在 `copy_one` **正常
+    返回**之后变成本次拷来的内容）。`st_nlink == 1` 这类检查与随后的截断之间
+    必然存在窗口，**反复加检查关不掉它**。
+    解法与 `qmt_fsroot._atomic_write_bytes`（本仓这条纪律的登记处，它为同一个
+    威胁栽过三次：R3 / R5 / R8）**逐条相同**：**只写自己用 `O_CREAT|O_EXCL` 刚
+    创建出来的 inode**，再 `os.replace` 发布——`replace` 换的是目录项、不碰目标
+    inode 的字节，外部硬链接保有自己的数据。
+
+    **发布之前先 `_probe_part` 探一次** `<rel>.part`：写侧不再打开那个名字，
+    既有的「非普通对象一律 `untracked_target_file`、符号链接一律整次致命」纪律
+    因此改由它承担（理由见 `_probe_part`）。**上一次运行崩在半路留下的普通
+    `.part` 是合法状态，照常被发布盖掉，不是失败。**
+
+    失败时（含 `--max-bytes` 触顶、源读/目的写中途报错、复算不符、`<rel>.part`
+    底下被植了非普通文件——见 `_open_part`）**先删掉自己那个临时文件**，再退还
+    本次已经扣过的账，然后原样上抛。本函数**不**删 `<rel>.part`（那是别人或
+    上一次运行的残留，归 Task 3 收尾的 `_cleanup_part`）、**不**处理「这只股
     另一个文件怎么办」——那些是 Task 3 单股事务编排的范围，本函数只管它自己
     这一个文件的记账闭合。
+
+    ⚠️ **已登记的代价**：进程被 `SIGKILL` / 断电打断在「临时文件已创建、尚未
+    发布」之间时，盘上会留下一个 `<rel>.part.<pid>.<随机>.tmp`，而崩溃恢复
+    （S4b）按大 spec §4.5:487「只删标记里明写的那两条 target 与两条 `.part`，
+    不做任何模式匹配式清扫」**不会**清理它。这与 `qmt_fsroot` 对自己那些临时
+    文件接受的代价逐字相同（「崩溃留下的旧临时文件不会被静默复用」——它换来的
+    正是「绝不截断既存 inode」），且改动前同一个窗口留下的是一个半截 `.part`，
+    不是零残留。
 
     返回：成功时 `CopyResult(n_bytes=本次真正写盘的字节数, sha256=源内容哈希)`。
     """
@@ -379,10 +496,13 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
         budget.precheck(st.st_size)
 
         charged = 0
+        suffix = _new_part_suffix()
+        tmp = rel + PART + suffix
         try:
+            _probe_part(stg_fd, rel)
             dfd = _open_part(
-                stg_fd, rel,
-                flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                stg_fd, tmp,
+                flags=os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 create_dirs=True,
             )
             try:
@@ -400,9 +520,9 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
                 os.close(dfd)
             digest = hasher.hexdigest()
 
-            # 对落地的 `.part` 重算并与源哈希比对——不是恒等式：这里重新打开、
+            # 对落地的那份重算并与源哈希比对——不是恒等式：这里重新打开、
             # 重新从磁盘读回，不是复用上面流式算出的那个 hasher。
-            rfd = _open_part(stg_fd, rel, flags=os.O_RDONLY)
+            rfd = _open_part(stg_fd, tmp, flags=os.O_RDONLY)
             try:
                 verify = hashlib.sha256()
                 while True:
@@ -414,7 +534,11 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
                 os.close(rfd)
             if verify.hexdigest() != digest:
                 raise StockCopyFailed("fetch_copy_hash_mismatch", rel)
+            _publish_part(stg_fd, rel, suffix)
         except BaseException:
+            # 只删自己那个临时文件（`<rel>.part` 原样留着）；共用 Task 3 收尾那
+            # 一个删除点，不在这里内联第二份「删之前先问类型」的判据。
+            _cleanup_part(stg_fd, tmp)
             if charged:
                 budget.refund(charged)
             raise
@@ -614,8 +738,14 @@ def _validate_stock_paths(slot: Slot, rel_1m: str, rel_daily: str) -> None:
             )
 
 
-def _cleanup_part(stg_fd: int, rel: str) -> None:
-    """删这只股这一个文件的 `.part` 残留，容忍不存在。
+def _cleanup_part(stg_fd: int, name: str) -> None:
+    """删 staging 内 `name` 这个名字底下的 `.part` 一族残留，容忍不存在。
+
+    `name` 是**完整**的 staging 内相对名（fix round 6 · C1 起有两类消费者：
+    事务收尾传 `<rel>.part`，`copy_one` 的失败路径传它自己那个
+    `<rel>.part.<pid>.<随机>.tmp` 临时名）——**不是** `rel`：下面那道类型闸问的
+    必须是「我马上要 `unlink` 的**那个**名字」，把 `.part` 拼接藏在函数里会让
+    临时名那个消费者拿着**另一个名字**的答案去删自己的文件。
 
     大 spec 耐久提交协议闭合清单的显式豁免：「失败路径上 `.part` 的删除——
     `.part` 不匹配导入侧的 glob，残留只会在重试时被覆盖或再删一次」——不需要
@@ -649,15 +779,15 @@ def _cleanup_part(stg_fd: int, rel: str) -> None:
     / `test_cleanup_still_removes_an_ordinary_part_on_the_failure_path`）——
     此前两个方向都没有测试，正是这条语义能被悄悄改掉的原因。
     """
-    if _part_is_non_regular(stg_fd, rel):
+    if _part_is_non_regular(stg_fd, name):
         return
     try:
-        pfd, leaf = parent_fd_under(stg_fd, rel)
+        pfd, leaf = parent_fd_under(stg_fd, name)
     except FileNotFoundError:
         return
     try:
         try:
-            os.unlink(leaf + PART, dir_fd=pfd)
+            os.unlink(leaf, dir_fd=pfd)
         except FileNotFoundError:
             pass
     finally:
@@ -686,6 +816,37 @@ def _write_inflight_marker(stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str)
     两者都不是本函数）。
     """
     atomic_write_json(stg_fd, INFLIGHT, build_inflight_marker(slot, rel_1m, rel_daily))
+
+
+def _inflight_marker_on_disk(stg_fd: int) -> bool:
+    """`.inflight.json` 那个名字底下**现在有没有东西**（fix round 6 · N1）。
+
+    **用途只有一个**：`_write_inflight_marker` 抛异常之后，回答「**发布到底有没有
+    发生过**」——契约 D6 的分界不是「写标记这个函数返回了没有」，而是「盘上有没有
+    那份标记」。`qmt_fsroot._atomic_write_bytes` 的发布动作是 `os.replace(tmp,
+    name)`：
+      · 在它**之前**炸（`lstat` 守卫拒绝、临时文件 `open`/`write`/`fsync` 撞
+        `ENOSPC`、`os.replace` 本身失败）⇒ 临时文件已被它自己 `unlink` 掉，
+        那个名字底下**什么都没有** ⇒ 标记没发布；
+      · 在它**之后**炸（紧跟的那次 `fsync(staging)` 撞 `EIO`）⇒ 目录项已经在了
+        ⇒ 标记**已发布**，D6 从这一刻起接管。
+
+    ⚠️ **`follow_symlinks=False`，且「看不清就算有」**：这道判据只用来决定「要不要
+    动手清理」，而清理是**破坏性**的。两种含糊情形一律答 `True`（保守偏向 D6，
+    宁可漏退一次预算，也不删掉一份可能还在授权回滚的凭据）：
+      · 那底下是个非普通对象（符号链接/目录/…）——`atomic_write_json` 的 `lstat`
+        守卫会因此拒绝写入，标记确实没发布，但这是一次**信任边界被动过**的现场，
+        整次运行无论如何都要停，不该由本函数顺手把两个 `.part` 删掉；
+      · `os.stat` 自己报了个 `FileNotFoundError` 以外的错（权限/`EIO`）——
+        **看不清 ≠ 不存在**。
+    """
+    try:
+        os.stat(INFLIGHT, dir_fd=stg_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _remove_inflight_marker(stg_fd: int) -> None:
@@ -750,20 +911,26 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     解析出的代码/周期与 `slot`/次序不符 → `qmt_normalize.QmtSchemaError` /
     `qmt_fsroot.PathDisciplineError`。
 
-    **失败/终止路径（标记写下之前）**：删这只股的两个 `.part`、退还本次已扣的
+    **失败/终止路径（标记发布之前）**：删这只股的两个 `.part`、退还本次已扣的
     预算、原样上抛——既接候选失败（`StockCopyFailed`，`reason` 可能是
     `fetch_missing_file` / `fetch_copy_hash_mismatch` / `untracked_target_file`
     ——后者现在也覆盖「账本记录挂着与本次调用不同的 `relative_path`」
     （fix round 2 · N1）与「`<rel>.part` 底下被植了非普通文件」
     （fix round 4 · C1）），也接终止条件（`SourceChangedMidRun` /
-    `MaxBytesExhausted`），两者的清理动作相同，只是调用方（S4b）对它们的后续
-    处置不同（前者跳过这只股继续下一只，后者终止整次运行）。
+    `MaxBytesExhausted`），也接**写标记这一步自己在发布之前炸出来的裸 `OSError`**
+    （fix round 6 · N1：`ENOSPC` 之类，此前这一档既漏删 `.part` 又漏退预算），
+    三者的清理动作相同，只是调用方（S4b）对它们的后续处置不同（第一种跳过这只股
+    继续下一只，后两种终止整次运行）。
 
-    **标记写下之后，本函数不再捕获任何异常**（契约 D6：一经写下，只有「提交
+    **标记一经发布，本函数不再对任何异常做任何处置**（契约 D6：只有「提交
     成功 + 删标记」与「终止整次运行」两条出路；接住异常继续下一只股这条路
-    不存在，S4a 只负责抛，S4b 负责收）。⚠️ 这一段可能逃出的异常**不限于**
+    不存在，S4a 只负责抛，S4b 负责收）。⚠️ **分界是「发布有没有发生」，不是
+    「写标记那个函数返回了没有」**（fix round 6 · N1）：`atomic_write_json` 在
+    `os.replace` **之后**的那次 `fsync(staging)` 上炸时，标记**已经**在盘上，
+    本函数此时一个字节都不清理、一分钱都不退，原样上抛——判据见
+    `_inflight_marker_on_disk`。⚠️ 这一段可能逃出的异常**不限于**
     `RunTerminated`——`commit_stock` 可能抛出 `qmt_manifest.ManifestInvalidError`
-    等其它类型。契约 D6 的判据是**位置**（标记已经写下），不是**类型**：
+    等其它类型。契约 D6 的判据是**位置**（标记已经发布），不是**类型**：
     调用方在这一段捕到任何异常都必须按整次运行终止处理，不必检查它的类型。
 
     返回 `("skipped", manifest)`——两个文件都已在池且完好，契约 D8：跳过由
@@ -846,13 +1013,35 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
                                  "sha256": result.sha256})
     except BaseException:
         for rel in rels:
-            _cleanup_part(stg_fd, rel)
+            _cleanup_part(stg_fd, rel + PART)
+        for n in written.values():
+            budget.refund(n)
+        raise
+
+    # ── 写在途标记：**这一步自己也可能失败，而 D6 的分界是「发布有没有发生」**
+    # （fix round 6 · N1，评审 [medium]）。此前这一行裸在回滚处置之外，于是
+    # `atomic_write_json` 在**发布之前**失败（创建/写临时文件时撞 `ENOSPC`……）
+    # 会同时漏掉两件事：两个已经拷好的 `.part` 留在盘上，本次扣的账也不退
+    # ——什么都没提交、也没有任何恢复凭据，而预算被永久占着 ⇒ 调用方接住这个
+    # 裸 `OSError` 继续跑下去就可能撞上一次**假的** `--max-bytes` 触顶
+    # （正是已登记残留 R1 那条「一次基础设施故障被记成一次正常结束」的喂料口）。
+    # 处置按**位置**分两支，与本函数其余部分同一条判据：
+    #   · 发布**没**发生 ⇒ 与上面那些标记前失败路径**逐字同规格**：删两个 `.part`、
+    #     退还本次已扣的账、原样上抛（盘上什么都没落、manifest 一个字段没动）；
+    #   · 发布**已经**发生 ⇒ D6 从那一刻起接管：**一个字节都不清理、一分钱都不退**，
+    #     标记原样留在盘上当回滚凭据，原样上抛，由 S4b 终止整次运行。
+    try:
+        _write_inflight_marker(stg_fd, slot, rel_1m, rel_daily)
+    except BaseException:
+        if _inflight_marker_on_disk(stg_fd):
+            raise
+        for rel in rels:
+            _cleanup_part(stg_fd, rel + PART)
         for n in written.values():
             budget.refund(n)
         raise
 
     # ── 标记写下之后，只有两条出路（契约 D6）：本函数往下不再 try/except ──
-    _write_inflight_marker(stg_fd, slot, rel_1m, rel_daily)
 
     for rel, verdict in zip(rels, verdicts):
         if verdict != TARGET_SKIP:
