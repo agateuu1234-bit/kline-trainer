@@ -397,12 +397,28 @@ def test_enforce_actually_raises_on_violations(tmp_path):
 
     # ⛔ 逐条钉住：三类问题**各自**都必须被组装进报文并抛出来。
     #    少任何一条，说明从「判出违规」到「最终抛出」这条链路上有一段被短路了。
-    for need in ("bad.sql:1", "nocols.sql:1", "weird.sql:1",
-                 "列清单里没有", "不写列清单、按位置插入", "认不出的形状",
-                 # ⭐ 锚点判据无条件执行之后，合成树（格子全为 0）会**顺带**报这一条 ——
-                 #    于是这条断言把 `if blind:` 那个分支也一并钉住了。
-                 "有一类文件一条语句都没解析到"):
-        assert need in msg, f"⛔ 报文里缺「{need}」—— 上报/组装/抛出这条链路被短路了：\n{msg}"
+    # ⛔ **必须断言「哪个文件落进哪一类」，不能只断言两者都出现过**
+    #    （控制者第五轮自查）：只查「字样在不在」的话，把 `_scan` 的返回值
+    #    `missing` 与 `positional` **对调**（一次看起来无害的重构）⇒ 两个字样
+    #    都还在、断言照样通过，只是**归错了类别**。实测那样改之后本测试仍绿。
+    #    ⇒ 改成按「类别标题之后紧跟的那一段」逐条核对归属。
+    def _block(title):
+        i = msg.index(title)
+        j = min([msg.index(t, i + 1) for t in _TITLES if t in msg[i + 1:]] or [len(msg)])
+        return msg[i:j]
+
+    _TITLES = ("【列清单里没有", "【不写列清单、按位置插入", "【认不出的形状",
+               "【有一类文件一条语句都没解析到", "【解析不到列清单", "【生产语句脱离视野")
+    for title, want in (("【列清单里没有", "bad.sql:1"),
+                        ("【不写列清单、按位置插入", "nocols.sql:1"),
+                        ("【认不出的形状", "weird.sql:1")):
+        assert title in msg, f"⛔ 报文里缺类别「{title}」—— 上报/组装/抛出这条链路被短路了：\n{msg}"
+        assert want in _block(title), \
+            f"⛔ 「{want}」没落进「{title}」这一类（多半是 `_scan` 的返回值错位了）：\n{msg}"
+    # ⭐ 锚点判据无条件执行之后，合成树（格子全为 0）会**顺带**报这一条 ——
+    #    于是这条断言把 `if blind:` 那个分支也一并钉住了。
+    assert "有一类文件一条语句都没解析到" in msg, \
+        f"⛔ 格子锚点没响 —— `if blind:` 那个分支被短路了：\n{msg}"
     # 合规那条**不得**被报进来（否则是误报方向坏了）
     assert "good.sql" not in msg, f"⛔ 合规语句被误报了：\n{msg}"
 
