@@ -20,10 +20,51 @@ FROZEN_DDL = REPO_ROOT / "backend" / "sql" / "training_set_schema_v1.sql"
 
 
 def _statements(sql: str) -> list[str]:
-    """归一化成语句列表：剥行注释 → 按 `;` 切 → 把连续空白压成单个空格 → 丢掉空段。"""
+    r"""归一化成语句列表：剥行注释 → 按 `;` 切 → **把排版差异彻底抹平** → 丢掉空段。
+
+    ⛔ **紧贴标点的空白也必须抹掉**（控制者复核 Task 4 时实测发现）：
+       只做 `re.sub(r"\s+", " ", …)` 的话，一次**纯排版**改动就会被报成「漂移」——
+       实测把 `CREATE TABLE meta ( … )` 的多列挤成一行：
+         原文  `CREATE TABLE meta ( stock_code TEXT NOT NULL, … NOT NULL )`
+         压行后 `CREATE TABLE meta (stock_code TEXT NOT NULL, … NOT NULL)`
+       连续空白被压成一个空格，但 `( ` 与 ` )` 这两处**空格还在**，于是两串不相等 ⇒ **误报**。
+       ⭐ 误报正是这条守卫最怕的东西：本文件开头就写着「开局就红的守卫＝发放宽许可证」，
+       而一条**会因为别人重排版就变红**的守卫，迟早被人放宽或删掉。
+    ⚠️ 只在**这两份 DDL 里没有任何字符串字面量**（实测：冻结文件零引号、生成器内嵌段
+       零引号）的前提下才可以这么抹 —— 有字面量时去空格会改变语义。
+       日后若 DDL 里出现 `DEFAULT 'x y'` 这类写法，**必须回来改这里**。
+    """
     sql = re.sub(r"--[^\n]*", "", sql)
-    parts = [re.sub(r"\s+", " ", p).strip() for p in sql.split(";")]
+    parts = []
+    for p in sql.split(";"):
+        p = re.sub(r"\s+", " ", p).strip()
+        p = re.sub(r"\s*([(),])\s*", r"\1", p)     # 抹掉紧贴 ( ) , 的空白
+        parts.append(p)
     return [p for p in parts if p]
+
+
+def test_statements_ignores_pure_formatting():
+    """⭐ 证明归一化**真的**把排版差异抹平了 —— ⛔ 不靠「我记得跑过一次变异」。
+
+    这条自测是控制者复核时补的：原版归一化对「括号旁边的空格」敏感，一次纯排版
+    改动就会误报。本测试用**手写的等价对**把这件事钉死，日后谁把归一化改回去都会红。
+    """
+    a = """
+    CREATE TABLE meta (
+        stock_code TEXT NOT NULL,
+        stock_name TEXT NOT NULL
+    );
+    CREATE INDEX idx_x ON meta(stock_code);
+    """
+    b = "CREATE TABLE meta (stock_code TEXT NOT NULL, stock_name TEXT NOT NULL);\n" \
+        "CREATE INDEX idx_x ON meta( stock_code );"
+    assert _statements(a) == _statements(b), (
+        "纯排版差异被当成了漂移：\n"
+        f"  a = {_statements(a)}\n  b = {_statements(b)}")
+
+    # ⛔ 防恒真：真改一个列名必须**不**相等（否则上面那条等式毫无判别力）
+    c = b.replace("stock_name", "stock_name_x")
+    assert _statements(b) != _statements(c), "改了列名却仍判相等 —— 归一化抹过头了"
 
 
 def _embedded_ddl() -> str:
