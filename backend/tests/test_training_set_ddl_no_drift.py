@@ -43,6 +43,34 @@ def _statements(sql: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def test_normalisation_premise_no_string_literals():
+    """⭐ 把归一化赖以成立的**前提**从「文档承诺」变成「机械可查」。
+
+    ⛔ **为什么必须有这一条**（Task 4 评审「重要」，控制者已复现）：
+       `_statements` 会无条件抹掉紧贴 `(` `)` `,` 的空白，**不区分该空白是否在
+       字符串字面量内部**。于是两个**不同**的默认值会被判成相同：
+         `DEFAULT 'x( y'` vs `DEFAULT 'x(y'`   → 归一化后**相等** ❌
+         `DEFAULT 'a, b'` vs `DEFAULT 'a,b'`   → 归一化后**相等** ❌
+       这是**假通过**方向（真的不同却判相同），⛔ 比误报危险得多。
+    ⭐ 今天挡住它的**只有一个前提**：两份 DDL 里**零个字符串字面量**（实测各 0 个单引号）。
+       而上一版把这个前提**只写在注释里** —— 本仓成文教训：**写「必须 X」之前，
+       先核实机制兑现得了吗**。⇒ 本测试就是那个机制：前提一旦破，**立刻响**，
+       而不是等到某天真漂移了却静默放行。
+    """
+    frozen = FROZEN_DDL.read_text(encoding="utf-8")
+    embedded = _embedded_ddl()
+    offenders = [(name, text.count("'")) for name, text in
+                 (("冻结文件 training_set_schema_v1.sql", frozen),
+                  ("生成器内嵌 _TRAINING_SET_DDL", embedded))
+                 if "'" in text]
+    assert not offenders, (
+        "DDL 里出现了**字符串字面量**（单引号），而本守卫的归一化会抹掉紧贴 `( ) ,` 的空白、"
+        "**不区分是否在字面量内部** ⇒ 两个不同的默认值可能被判成相同（**假通过**）。\n"
+        f"  出现处：{offenders}\n"
+        "⛔ 修法：把 `_statements` 改成**先切出字符串字面量、比较时不动它们内部**，"
+        "改完再把这条前提检查一并更新。⛔ 不要简单地删掉本测试。")
+
+
 def test_statements_ignores_pure_formatting():
     """⭐ 证明归一化**真的**把排版差异抹平了 —— ⛔ 不靠「我记得跑过一次变异」。
 
