@@ -1092,6 +1092,9 @@ def test_copy_stock_marker_present_on_disk_during_each_final_replace(roots, monk
 # 大 spec 闭合清单「`.inflight.json` 的创建与删除 → 各自之后 fsync(staging)」
 # ——创建那一半靠 atomic_write_json 内部兜底，删除是 _remove_inflight_marker
 # 自己的代码，此前没有测试专门盯着它。
+# ⚠️ fix round 10 起**只有删除那一半**还是普通 `fsync_dir`：创建那一半升成了
+# `full_sync=True`（两道 `full_fsync`，见本文件末尾 fix round 10 那一节与契约
+# §4 第 17 条）。本条测的是**删除**那一半，未受影响。
 
 def test_copy_stock_fsyncs_staging_root_after_marker_deletion(roots, monkeypatch):
     src_fd, stg_fd, src_path, stg_path = roots
@@ -2096,14 +2099,23 @@ def test_copy_stock_keeps_everything_when_fsync_fails_after_marker_publication(
     part_daily = stg_path / (rel_daily + PART)
     seen: list[tuple] = []
 
-    def exploding_fsync_dir(dir_fd):
-        # `_atomic_write_bytes` 的最后一句，**排在 `os.replace` 之后**且不在它
-        # 那个 `except BaseException` 的作用域里 ⇒ 这里炸 = 标记已经发布。
+    real_full_fsync = qmt_fsroot.full_fsync
+
+    def exploding_full_fsync(fd):
+        # fix round 10 起标记走 `full_sync=True`，`_atomic_write_bytes` 最后一句
+        # 因此是 `full_fsync(dir_fd)` 而不再是 `fsync_dir(dir_fd)`（注入点必须跟着
+        # 换，否则这条测试会静默退化成「什么都没注入、copy_stock 正常跑完」）。
+        # 同一个 `full_fsync` 在这条路径上被调两次：先是**临时文件内容**那次
+        # （排在 `os.replace` **之前**），再是**目录项**那次（排在它**之后**）。
+        # 本档要的是后者，故按 fd 指向的对象类型分流——排在 `os.replace` 之后且
+        # 不在它那个 `except BaseException` 的作用域里 ⇒ 这里炸 = 标记已经发布。
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            return real_full_fsync(fd)
         seen.append((part_1m.is_file(), part_daily.is_file(),
                      (stg_path / INFLIGHT).exists()))
-        raise OSError(errno.EIO, "打桩：发布之后那次 fsync(staging) 撞 EIO")
+        raise OSError(errno.EIO, "打桩：发布之后那次 full_fsync(staging) 撞 EIO")
 
-    monkeypatch.setattr(qmt_fsroot, "fsync_dir", exploding_fsync_dir)
+    monkeypatch.setattr(qmt_fsroot, "full_fsync", exploding_full_fsync)
 
     with pytest.raises(OSError) as ei:
         copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
@@ -2928,3 +2940,134 @@ def test_rollback_lets_keyboard_interrupt_escape_when_refunding_fails(
         "退账失败被计入了回滚诊断，说明中断被更宽的判据接住、当成了"
         "「这一项没退成」而不是原样放行")
     assert budget.used == len(data), "已扣的账没退是中断打断整段收尾的已知代价"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 10 · codex R7 [high]：在途标记自己的耐久屏障
+# ══════════════════════════════════════════════════════════════════
+#
+# 在途标记是契约 D6 的**唯一授权凭据**——它授权崩溃恢复去删那两条 final 与两条
+# `.part`。此前它用 `atomic_write_json` 的默认 `full_sync=False`（普通 `fsync`），
+# 于是**凭据的耐久等级低于它要授权去删的那些东西**：本平台 `man 2 fsync` 明写
+# `fsync` 既不保证断电耐久、也不保证写序，「先写标记、再两次 `.part → final`」这个
+# **代码次序**因此不等于**落盘次序**。一次断电可以让某条 final 的目录项已持久、而
+# `.inflight.json` 还不在盘上 ⇒ 恢复流程手里没有凭据 ⇒ 那条孤儿 final 撞四象限
+# 「目标存在 × 无记录」被判 `untracked_target_file`、这只股被永久除名。
+#
+# ⚠️ **这是耐久性推理，不是断电实测**（评审自陈如此，本仓也做不了断电实测）。
+# 能被测试钉住的是**次序**与**传下去的参数**，下面两条各钉一半：
+#   · 次序：标记那两道 `full_fsync`（内容 + 目录项）必须**都**排在第一次
+#     `.part → final` 的 `os.replace` 之前；
+#   · 参数：判据放在 **`qmt_fsroot` 的接口层面**（`atomic_write_json` 收到的
+#     `full_sync`），**不是**「有没有调 `fcntl`」——`full_fsync` 在没有
+#     `F_FULLFSYNC` 的平台（CI 的 Linux）退回 `os.fsync`，按 `fcntl` 判会让这条
+#     判据在 CI 上恒假、在 Mac 上恒真，两边各自失去判别力。
+# 两条在 macOS 与 Linux 上都真跑，不带任何 `skipif`。
+
+def test_marker_full_fsync_barrier_precedes_first_part_to_final_replace(
+        roots, monkeypatch):
+    """次序：第一次 `.part → final` 的 `os.replace` 发生之前，标记的**内容**与
+    **目录项**两道 `full_fsync` 都必须已经发生（且目录项那道下在 staging 根上）。"""
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    target_basenames = {rel_1m.rsplit("/", 1)[-1], rel_daily.rsplit("/", 1)[-1]}
+    events: list[tuple] = []
+    real_replace = os.replace
+    real_full_fsync = qmt_fsroot.full_fsync
+
+    def spy_full_fsync(fd):
+        # 内容那道下在临时文件上、目录项那道下在目录上——按 fd 指向的对象类型
+        # 分流，比数调用次数更贴住「内容与目录项两处」这句判据本身。
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        events.append(("full_fsync_dir" if is_dir else "full_fsync_file", fd))
+        return real_full_fsync(fd)
+
+    def spy_replace(src, dst, *a, **kw):
+        result = real_replace(src, dst, *a, **kw)
+        if dst == INFLIGHT:
+            events.append(("replace_marker", kw.get("dst_dir_fd")))
+        elif dst in target_basenames:
+            events.append(("replace_final", kw.get("dst_dir_fd")))
+        return result
+
+    monkeypatch.setattr(qmt_fsroot, "full_fsync", spy_full_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    kinds = [e[0] for e in events]
+    assert kinds.count("replace_final") == 2, f"应有两次 final 替换，实测 {events}"
+    first_final = kinds.index("replace_final")
+    prefix = kinds[:first_final]
+
+    # ⚠️ 判据是**相对次序**，不是「全程调过 full_sync」：后者连 `commit_stock`
+    # 自己那两次屏障都能满足，而那两次排在两次 final 替换**之后**，对本条要防的
+    # 那个断电窗口一点用都没有。故只看第一次 final 替换**之前**那一段。
+    assert prefix.count("full_fsync_file") == 1, (
+        "第一次 `.part → final` 之前，标记**内容**那道 `full_fsync` 必须已经下过"
+        f"（且恰好一次）——实测那一段是 {prefix}，完整事件 {events}"
+    )
+    assert prefix.count("full_fsync_dir") == 1, (
+        "第一次 `.part → final` 之前，标记**目录项**那道 `full_fsync` 必须已经下过"
+        f"（且恰好一次）——实测那一段是 {prefix}，完整事件 {events}"
+    )
+    assert (prefix.index("full_fsync_file")
+            < prefix.index("replace_marker")
+            < prefix.index("full_fsync_dir")), (
+        "三者的内部次序必须是「内容屏障 → 发布 → 目录项屏障」——只给临时文件下"
+        f"屏障而改名只走普通 fsync 等于把耐久漏在最后一步。实测 {prefix}"
+    )
+    assert events[prefix.index("full_fsync_dir")][1] == stg_fd, (
+        "目录项那道屏障必须下在 staging 根（标记所在目录）上，不是别的目录"
+        f"——实测事件 {events}"
+    )
+
+
+def test_write_inflight_marker_asks_fsroot_for_full_sync(roots, monkeypatch):
+    """参数：`_write_inflight_marker` 这条路径上，`full_sync=True` 真的传到了
+    `qmt_fsroot.atomic_write_json` 的接口上（漏传、或传 `False`，本条都红）。"""
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_1m, b"1m-data" * 5)
+    _put_source_file(src_path, rel_daily, b"daily-data" * 5)
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    calls: list[tuple] = []
+    real_atomic_write_json = qmt_fetch.atomic_write_json
+
+    def spy_atomic_write_json(dir_fd, name, payload, **kw):
+        calls.append((dir_fd, name, dict(kw)))
+        return real_atomic_write_json(dir_fd, name, payload, **kw)
+
+    monkeypatch.setattr(qmt_fetch, "atomic_write_json", spy_atomic_write_json)
+
+    status, out = copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                              ledger=ledger, budget=budget)
+
+    assert status == "committed"
+    marker_calls = [c for c in calls if c[1] == INFLIGHT]
+    assert len(marker_calls) == 1, f"标记应恰好写一次，实测 {calls}"
+    assert marker_calls[0][0] == stg_fd, "标记必须写在 staging 根的 fd 下"
+    # `full_sync` 是 `atomic_write_json` 的**仅限关键字**参数，故漏传时它根本不在
+    # `kw` 里、`.get` 返回 `None`，与传 `False` 一样红——这正是要的判别力。
+    assert marker_calls[0][2].get("full_sync") is True, (
+        "在途标记必须以 `full_sync=True` 写下：它是契约 D6 的唯一授权凭据，"
+        "耐久等级不得低于它要授权去删的那两条 final。实测这次调用的关键字参数是 "
+        f"{marker_calls[0][2]!r}"
+    )

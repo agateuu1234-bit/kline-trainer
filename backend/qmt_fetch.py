@@ -58,7 +58,9 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 **本模块对它只给一条保证，而那是有前提的位置保证**（fix round 5 · Minor 2
 订正：此前这句写成“它**只可能**逃在在途标记写下之前”，**那是假的**——
 两次 `os.replace`、`commit_stock`、删标记这三处同样可能逃出裸 `OSError`，
-再加上写标记时**发布之后**那次 `fsync(staging)`（fix round 6 · N1 补第四处），
+再加上写标记时**发布之后**那次 `full_fsync(staging)`（fix round 6 · N1 补第四处；
+fix round 10 起标记走 `full_sync=True`，那一次由 `fsync` 升成 `full_fsync`，
+**位置一个字没变**——仍在 `os.replace` 之后），
 结论靠紧跟其后的括号才救回来，而那句话单独拿出来就是错的）：
 **逃在在途标记【发布】之前**的那些裸 `OSError`，逃出来的那一刻盘上什么都没落——
 两个 `.part` 已删、本次扣的预算已退还、manifest 一个字段没动。
@@ -1046,13 +1048,39 @@ def _replace_part_to_final(stg_fd: int, rel: str) -> None:
 
 
 def _write_inflight_marker(stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str) -> None:
-    """写在途标记：tmp → `fsync`(文件) → `os.replace` → `fsync`(staging 根)，
-    经 `qmt_fsroot.atomic_write_json` 的既有原子写路径（`full_sync` 取默认的
-    `False`——大 spec 闭合清单只给 `.inflight.json` 的创建/删除记了普通
-    `fsync`，`F_FULLFSYNC` 只用在 manifest 提交与 O2-F1 那道顺序屏障，
-    两者都不是本函数）。
+    """写在途标记：tmp → `full_fsync`(文件) → `os.replace` → `full_fsync`(staging 根)，
+    经 `qmt_fsroot.atomic_write_json` 的既有原子写路径，**`full_sync=True`**
+    （fix round 10 · codex R7 [high]）。
+
+    ⚠️ **此前这里传的是默认的 `full_sync=False`，理由写着「大 spec 闭合清单只给
+    `.inflight.json` 的创建/删除记了普通 `fsync`」——本轮推翻的正是那条理由本身。**
+    标记是契约 D6 的**唯一授权凭据**：它授权崩溃恢复去删那两条 final 与两条 `.part`。
+    而它此前的耐久等级**低于它要授权去删的那些东西** —— 本平台 `man 2 fsync` 明写
+    `fsync` 既不保证断电耐久、也不保证写序（原文见 `qmt_fsroot.full_fsync`），
+    于是「先写标记、再两次 `.part → final`」这个**代码次序**并不等于**落盘次序**：
+    一次断电完全可以让某条 final 的目录项已经持久、而 `.inflight.json` 还没到盘上
+    ⇒ 下次启动时恢复流程**手里没有凭据**，那条孤儿 final 撞四象限「目标存在 ×
+    manifest 无记录」被判 `untracked_target_file`，这只股**被永久除名**
+    —— 而消灭这个状态正是按股事务存在的全部理由（大 spec §4.5 R37-F1）。
+    **授权在最需要它的那一刻可能根本不存在。**
+
+    ⚠️ **这与大 spec 自己的 O2-F1（[high]）是同一条推理，只是用在另一端**：
+    O2-F1 要求「回滚删两条 final 必须**先**耐久，才允许删标记」，理由是
+    **凭据必须比它授权的动作后消失**；本条是同一条推理的创建端 ——
+    **凭据必须比它授权的动作先出现**。大 spec 把它用在了删除端，创建端漏了。
+    （⚠️ 这是**耐久性推理**，不是一次真断电实测；本仓做不了断电实测。
+    可被测试钉住的那一半是**次序**：标记那两次 `full_fsync` 必须都排在第一次
+    `.part → final` 的 `os.replace` 之前，见 `tests/test_qmt_fetch.py` fix round 10。）
+
+    `full_sync=True` 一个调用就覆盖**内容与目录项两处**（`qmt_fsroot._atomic_write_bytes`
+    写明：`full_sync=True` 时 `os.replace` 之后的目录项也走 `full_fsync`），
+    不需要改 `qmt_fsroot`——它是那里的既有参数。
+    ⚠️ **代价**：`F_FULLFSYNC` 会 drain 整个设备队列，每只股因此多一次；
+    本片一只股原本只有 `commit_stock` 那一次，现在是两次（定性见契约 D6）。
     """
-    atomic_write_json(stg_fd, INFLIGHT, build_inflight_marker(slot, rel_1m, rel_daily))
+    atomic_write_json(stg_fd, INFLIGHT,
+                      build_inflight_marker(slot, rel_1m, rel_daily),
+                      full_sync=True)
 
 
 def _inflight_marker_on_disk(stg_fd: int) -> bool:
@@ -1062,10 +1090,10 @@ def _inflight_marker_on_disk(stg_fd: int) -> bool:
     发生过**」——契约 D6 的分界不是「写标记这个函数返回了没有」，而是「盘上有没有
     那份标记」。`qmt_fsroot._atomic_write_bytes` 的发布动作是 `os.replace(tmp,
     name)`：
-      · 在它**之前**炸（`lstat` 守卫拒绝、临时文件 `open`/`write`/`fsync` 撞
+      · 在它**之前**炸（`lstat` 守卫拒绝、临时文件 `open`/`write`/`full_fsync` 撞
         `ENOSPC`、`os.replace` 本身失败）⇒ 临时文件已被它自己 `unlink` 掉，
         那个名字底下**什么都没有** ⇒ 标记没发布；
-      · 在它**之后**炸（紧跟的那次 `fsync(staging)` 撞 `EIO`）⇒ 目录项已经在了
+      · 在它**之后**炸（紧跟的那次 `full_fsync(staging)` 撞 `EIO`）⇒ 目录项已经在了
         ⇒ 标记**已发布**，D6 从这一刻起接管。
 
     ⚠️ **`follow_symlinks=False`，且「看不清就算有」**：这道判据只用来决定「要不要
@@ -1177,7 +1205,7 @@ def copy_stock(src_fd: int, stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str
     成功 + 删标记」与「终止整次运行」两条出路；接住异常继续下一只股这条路
     不存在，S4a 只负责抛，S4b 负责收）。⚠️ **分界是「发布有没有发生」，不是
     「写标记那个函数返回了没有」**（fix round 6 · N1）：`atomic_write_json` 在
-    `os.replace` **之后**的那次 `fsync(staging)` 上炸时，标记**已经**在盘上，
+    `os.replace` **之后**的那次 `full_fsync(staging)` 上炸时，标记**已经**在盘上，
     本函数此时一个字节都不清理、一分钱都不退，原样上抛——判据见
     `_inflight_marker_on_disk`。⚠️ 这一段可能逃出的异常**不限于**
     `RunTerminated`——`commit_stock` 可能抛出 `qmt_manifest.ManifestInvalidError`
