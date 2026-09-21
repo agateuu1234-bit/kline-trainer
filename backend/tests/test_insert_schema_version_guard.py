@@ -566,7 +566,7 @@ def test_guard_agrees_with_real_postgres_parser():
               `old_schema_version`）证伪；
            ② ⛔ **上报动作被整个拔掉**（`missing.append(...)` → `pass`）⇒ **M4f 也
               一起失效**（它的发现机制走的就是这条线；实测注入真漏写后双双变绿）
-              ⇒ 由 `test_scan_actually_reports_violations` 用**合成小树**证伪。
+              ⇒ 由 `test_enforce_actually_raises_on_violations` 用**合成小树**证伪。
          ⚠️ 上一版把 ② 也算在 M4f 头上，是**过度承诺**（第二轮定向复评实测打回）。
     """
     import pglast
