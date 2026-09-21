@@ -3071,3 +3071,76 @@ def test_write_inflight_marker_asks_fsroot_for_full_sync(roots, monkeypatch):
         "耐久等级不得低于它要授权去删的那两条 final。实测这次调用的关键字参数是 "
         f"{marker_calls[0][2]!r}"
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 11 · codex R9 [medium]：评审点名的那条回归
+# ══════════════════════════════════════════════════════════════════
+#
+# 评审原话：「The new close protection starts after `parent_fd_under` returns.
+# That helper closes intermediate descriptors in an unguarded finally block:
+# if a nested component triggers PathEscapeError and closing an earlier
+# directory fails, OSError replaces the fatal exception. … This call propagates
+# that OSError, allowing the documented caller policy to skip the stock instead
+# of terminating on a breached trust boundary.」
+#
+# 本条把那条完整链路钉住：源侧一条**嵌套**相对路径的第 2 个分量是符号链接
+# ⇒ `parent_fd_under` 逐段无跟随撞 `ELOOP` 抛 `PathEscapeError`，与此同时
+# 第 1 个中间目录描述符的关闭撞 `EIO` ⇒ 断言到达 `copy_stock` **调用方**的
+# 仍然是 `PathEscapeError`，不是裸 `OSError`、也不是 `StockCopyFailed`。
+
+def test_copy_stock_keeps_path_escape_when_an_intermediate_close_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    slot = Slot(code="600000.SH", market="SH", universe_idx=0)
+    # ⚠️ 必须是**两级**目录：只有一级时 `parent_fd_under` 还没攒下任何中间
+    # 描述符就抛了逃逸，收尾路径上根本没有可失败的关闭 —— 那样这条测试恒绿。
+    rel_1m = "a/b/600000.SH_x_1分钟K线_前复权.csv"
+    rel_daily = "daily/600000.SH_x_日K线_前复权.csv"
+    _put_source_file(src_path, rel_daily, b"daily-data" * 10)
+    (src_path / "a").mkdir()
+    (src_path / "a" / "b").symlink_to(src_path / "a")     # 第 2 个分量被换成符号链接
+
+    manifest, export_log_bytes = _seed_manifest()
+    ledger = _begin_session(stg_fd, stg_path, manifest, export_log_bytes)
+    budget = ByteBudget(limit=None, used=manifest["committed_bytes"])
+
+    # 只在**逃逸信号已经在途**时才注入：staging 侧那次 `parent_fd_under` 撞的是
+    # `ENOENT`（目录还没建），也走同一个 `_raise_walk_error`，按 fd 号或按次序挑
+    # 都会打偏。
+    escaped = {"on": False}
+    real_raise = qmt_fsroot._raise_walk_error
+
+    def spy_raise(*a, **kw):
+        try:
+            real_raise(*a, **kw)
+        except PathEscapeError:
+            escaped["on"] = True
+            raise
+
+    monkeypatch.setattr(qmt_fsroot, "_raise_walk_error", spy_raise)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: escaped["on"],
+        errno.EIO, "打桩：关中间目录描述符撞 EIO")
+
+    with pytest.raises(PathEscapeError) as ei:
+        copy_stock(src_fd, stg_fd, slot, rel_1m, rel_daily, manifest,
+                    ledger=ledger, budget=budget)
+
+    assert seen, "前提不成立：逃逸信号在途时压根没发生过关闭，注入没生效"
+    exc = ei.value
+    assert exc.component == "b", (
+        f"前提不成立：撞的不是嵌套分量 `b`，实测 {exc.component!r}")
+    # ⚠️ 中间分量是「指向目录的符号链接」时，`O_DIRECTORY|O_NOFOLLOW` 给的错误码
+    # **随平台而异**（本机 macOS 实测 `ENOTDIR`，Linux 给 `ELOOP`）——`_raise_walk_error`
+    # 两者都认作逃逸，断言就不得钉死其中一个，否则 Linux CI 上必红。
+    assert exc.errno in (errno.ELOOP, errno.ENOTDIR)
+    assert not isinstance(exc, OSError), (
+        "关中间目录描述符那次 EIO 顶替掉了 `PathEscapeError` ⇒ 一次信任边界被"
+        "绕过会以裸 `OSError` 的样子到达 S4b，而契约 §4 第 10 条允许 S4b 把裸 "
+        "`OSError` 当候选失败跳过这只股 ⇒ 必须停机被降级成跳过")
+    assert not isinstance(exc, StockCopyFailed), (
+        "路径逃逸被折成了候选失败 —— 它在本仓的地位是「不捕获、不包装、原样上抛」")
+    assert "关描述符失败" in "\n".join(getattr(exc, "__notes__", [])), (
+        "关闭失败必须以 `add_note` 诊断的形式留在在途异常上（契约 §4 第 16 条："
+        "S4b 写停机报告时除了 `.errors` 还得看 `__notes__`），而不是消失")

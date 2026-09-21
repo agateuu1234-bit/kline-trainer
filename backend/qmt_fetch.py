@@ -343,6 +343,13 @@ def _is_regular(st: os.stat_result) -> bool:
 def _close_or_note(fd: int, pending: BaseException | None) -> None:
     """关一个描述符——**关闭失败绝不顶替在途的那个异常**（fix round 8 · 评审 [medium]）。
 
+    ⚠️ **`qmt_fsroot` 里有一份同规格的等价物 `qmt_fsroot._close_or_note`**
+    （fix round 11 · codex R9 的 [medium]：`parent_fd_under` / `open_under` 收尾时
+    关中间目录描述符失败，会把在途的 `PathEscapeError` 顶替成裸 `OSError`）。
+    **两处刻意并存、合并不了**：依赖方向是本模块 → `qmt_fsroot`（它是地基），
+    它反过来 import 本模块会成环。**本处是这条判据的登记处**，那边继承本处的理由；
+    改本处的语义（尤其是捕获宽度）必须同时改那边，两边各有测试钉着。
+
     `pending` 是**此刻正在展开的那个异常**，由调用处**显式**交进来
     （`_CloseFd.__exit__` 的第二个形参，或 `except ... as e` 里的那个 `e`）：
 
@@ -379,6 +386,9 @@ def _close_or_note(fd: int, pending: BaseException | None) -> None:
 
 class _CloseFd:
     """`with _CloseFd(fd):` —— 离开这段时关掉 `fd`，判据走 `_close_or_note`。
+
+    ⚠️ 同名等价物 `qmt_fsroot._CloseFd`（及处理一组描述符的 `qmt_fsroot._CloseFds`）
+    并存于地基模块，理由见 `_close_or_note` 的第一段。
 
     取代本模块此前那十处 `try: ... finally: os.close(fd)`（fix round 8）：
     `finally` 里的关闭失败会**顶替掉**正在展开的那个异常，而本模块整套调用方契约

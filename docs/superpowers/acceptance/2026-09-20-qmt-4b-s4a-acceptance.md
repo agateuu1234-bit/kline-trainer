@@ -21,7 +21,7 @@
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | B1 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend"' 'git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD' '../.venv/bin/python -m pytest tests/ -q -rs 2>&1 | tail -6' > /tmp/s4a_b1.sh` | 没有任何输出（安静就是成功） | 没报错 = 通过 |
-| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1596 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1596 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
+| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1611 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1611 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
 | B3 | 看 B2 输出**最上面**两行 | 第一行是 `qmt-4b-s4a`，第二行的编号与 A1 打印的一致 | 一致 = 通过；不一致说明跑的不是这棵树 = 不通过 |
 
 ## 第三节 · 三条核心行为各跑一条命令
@@ -42,7 +42,26 @@
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | D1 | 粘贴并回车：`grep -c "argparse" "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend/qmt_fetch.py"` | 打印 **`0`** | 是 0 = 通过；不是 0 说明有人顺手做了命令行，这一片不该有 = 不通过 |
-| D2 | 粘贴并回车：`cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a" && git diff --stat main -- backend/qmt_fsroot.py backend/qmt_manifest.py backend/qmt_pool.py backend/qmt_ingest.py backend/qmt_normalize.py` | **没有任何输出** | 没输出 = 通过（这五个已有模块一个字节都没被改动）；有输出 = 不通过 |
+| D2 | 粘贴并回车：`cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a" && git diff --stat main -- backend/qmt_manifest.py backend/qmt_pool.py backend/qmt_ingest.py backend/qmt_normalize.py` | **没有任何输出** | 没输出 = 通过（这四个已有模块一个字节都没被改动）；有输出 = 不通过 |
+| D3 | 粘贴并回车：`cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a" && git diff --stat main -- backend/qmt_fsroot.py` | 打印**两行**，第二行是 `1 file changed, 174 insertions(+), 59 deletions(-)`（新增约 **170** 行、删除约 **60** 行） | 数量级对得上（±15 行以内）= 通过；**没有任何输出** = 不通过（说明该改的压根没改进去） |
+| D4 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a"' 'git diff -w main -- backend/qmt_fsroot.py > /tmp/s4a_fsroot.diff' 'grep "^-[^-]" /tmp/s4a_fsroot.diff > /tmp/s4a_removed.txt' 'echo "一、删掉的行数："; wc -l < /tmp/s4a_removed.txt' 'echo "二、其中带业务调用的行数："; grep -c "os.open\|os.mkdir\|os.replace\|flock\|fsync" /tmp/s4a_removed.txt' 'echo "（检查结束）"' > /tmp/s4a_d4.sh` | 没有任何输出（安静就是成功） | 没报错 = 通过 |
+| D5 | 粘贴并回车：`bash /tmp/s4a_d4.sh` | 「一、」下面是 **`33`**（本次一共删掉 33 行旧代码）；「二、」下面是 **`0`** | 第一个数在 28~38 之间**且**第二个数是 0 = 通过；第二个数不是 0 = 不通过 |
+
+**D3/D4/D5 在验证什么（大白话）**：
+`qmt_fsroot.py` 是这一片原本**说好不动**的五个老模块之一。这一轮**破例动了它**，
+是你（user，2026-09-21）明确拍板的：官方评审查出，工具在「收尾、关闭文件」这一步
+若失败，会把一条**「有人动了手脚、必须立刻停机」的警报**换成一条**「这只股读不了、跳过就行」
+的普通报错** —— 于是本该停机的运行会一路跑下去。
+
+- **D3** 让你看到：它**确实**被改了，改动量约 170 行新增 / 60 行删除
+  （新增多是因为新写了一小段带说明的公共「关闭」工具，并把理由写在旁边）；
+- **D4 + D5** 一起让你看到：**被删掉的 33 行全部是「收尾语句」**——
+  `os.close(...)`（关文件）、`finally:` / `try:` / `except`（收尾块的框架）这几类，
+  **一行都没碰**真正干活的那些调用（开文件 `os.open`、建目录 `os.mkdir`、
+  改名 `os.replace`、上锁 `flock`、刷盘 `fsync`）。
+  也就是说：**这一轮没有改变这个模块做什么，只改变了它收尾时不再把警报顶掉。**
+  ⚠️ D5 那条检查的判别力已实测：往被删的行里故意混进一行 `os.replace(...)`，它会打印 `1`
+  而不是 `0` —— 所以打印 `0` 是一条真结论，不是「它根本不会报数」。
 
 ## 第五节 · 你需要知道的两件事（不用操作）
 

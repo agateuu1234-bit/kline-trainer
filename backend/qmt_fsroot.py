@@ -189,6 +189,123 @@ def _raise_walk_error(relative_path: str, component: str, exc: OSError):
     raise exc
 
 
+# ── 关描述符：收尾动作**绝不顶替在途的那个异常**（fix round 11 · codex R9 [medium]）──
+#
+# ⚠️ **这是 `qmt_fetch._close_or_note` / `qmt_fetch._CloseFd` 的等价物，两处刻意
+# 并存、不合并**：依赖方向是 `qmt_fetch` → `qmt_fsroot`（本模块是地基），
+# 本模块反过来 import 它会成环。语义与那边**同规格**，完整理由写在那边的
+# docstring 里，此处继承、不重新发明一套。
+
+
+def _close_or_note(fd: int, pending: BaseException | None) -> None:
+    """关一个描述符——**关闭失败绝不顶替在途的那个异常**。
+
+    与 `qmt_fetch._close_or_note` 是同一条判据的两份实现（**那边是登记处**，
+    「为什么显式传 `pending` 而不用 `sys.exc_info()`」等完整理由在那边）。
+    两处并存不是疏忽：`qmt_fetch` import 本模块，本模块是地基，反过来 import
+    会成环 —— 合并成一处做不到。
+
+    `pending` 是**此刻正在展开的那个异常**，由调用处**显式**交进来
+    （`_CloseFd` / `_CloseFds` 的 `__exit__` 第二个形参，或 `except ... as e`
+    里的那个 `e`）：
+
+      · `pending is None`（没有异常在途）⇒ 关闭失败**原样上抛**。它这时不是收尾
+        动作，而是这条路径自己的结果。
+      · `pending is not None` ⇒ 只把失败挂成 `pending` 的一条 `add_note` 诊断，
+        `pending` 继续原样展开，**类型与身份一个字不换**。
+
+    **本模块要保住的是哪几类信号**（它们全靠**异常类型**被调用方分流）：
+    `PathEscapeError`（逐段无跟随撞到非目录分量 ⇒ 信任边界被绕过）、
+    `BoundaryError`（目录/inode 被调包）、`LockDisciplineError`（锁目录项被换掉
+    ⇒ 脑裂）、`MarkerInvalidError`（这个目录不属于本工具）。一次 `os.close` 的
+    `EIO` 把其中任何一个换成裸 `OSError`，`qmt_fetch` 契约 §4 第 10 条就允许
+    调用方把它当「这一只股不行」跳过 ⇒ **必须停机的信号被降级成跳过一个候选**。
+
+    捕获宽度是 `Exception` 而不是 `BaseException`，与 `qmt_fetch` 同规格：
+    `KeyboardInterrupt` / `SystemExit` 不是「这次关闭失败了」，不许被当成诊断咽掉。
+
+    ⚠️ **已登记的代价**：关闭失败被挂成诊断之后，那个描述符可能没被回收
+    （POSIX 对 `close()` 失败后描述符的归属不作保证）。与 `qmt_fetch` 为同一条
+    判据接受的代价逐字相同，登记在 S4a 契约 §3b T6。
+    """
+    try:
+        os.close(fd)
+    except Exception as e:
+        if pending is None:
+            raise
+        pending.add_note(f"关描述符失败（fd={fd}）——{type(e).__name__}: {e}")
+
+
+def _close_all_or_note(fds: list[int], pending: BaseException | None) -> None:
+    """关一组描述符：**每一个都要被尝试关到**，第一个失败不吃掉后面的。
+
+    判据本身仍是 `_close_or_note`（不另抄一份），本函数只多做一件事——逐项独立
+    执行。此前 `open_under` / `parent_fd_under` 的 `for fd in opened: os.close(fd)`
+    里，第一个 `os.close` 抛出会让**后面那些中间目录描述符一个都关不上**
+    （走一条 `a/b/c/leaf` 会攒下 3 个）。
+
+    `pending is None` 时**只上抛第一个**失败，其余以 `add_note` 挂在它上面——
+    抛后面那个就等于自己犯了本函数正在修的那个错（拿收尾的结果顶替先发生的结果）。
+    `KeyboardInterrupt` / `SystemExit` 由 `_close_or_note` 原样放行，会**当场**
+    打断本循环、剩下的描述符不再关：中断不是「这一项失败了」（与
+    `qmt_fetch._rollback_all` 对中断的处置同规格，代价同样已登记）。
+    """
+    first: Exception | None = None
+    for fd in fds:
+        try:
+            _close_or_note(fd, pending)
+        except Exception as e:
+            if first is None:
+                first = e
+            else:
+                first.add_note(f"关描述符失败（fd={fd}）——{type(e).__name__}: {e}")
+    if first is not None:
+        raise first
+
+
+class _CloseFd:
+    """`with _CloseFd(fd):` —— 离开这段时关掉 `fd`，判据走 `_close_or_note`。
+
+    与 `qmt_fetch._CloseFd` 同规格（那边是登记处），并存的理由见 `_close_or_note`。
+    取代本模块此前那些 `try: ... finally: os.close(fd)`：`finally` **拿不到**在途
+    异常，只能盲目地关，关失败就把它顶替掉。
+    """
+
+    __slots__ = ("_fd",)
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def __enter__(self) -> int:
+        return self._fd
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _close_or_note(self._fd, exc)
+        return False
+
+
+class _CloseFds:
+    """`with _CloseFds() as opened:` —— 把逐段走时攒下的中间描述符登记进 `opened`，
+    离开这段时**逐个独立**关掉，判据走 `_close_all_or_note`。
+
+    `open_under` / `parent_fd_under` 专用：它们攒下的描述符**个数随路径深度变化**，
+    而 `finally` 既拿不到在途异常、又会让第一个关闭失败吃掉后面的——两条漏法在
+    同一个 `finally` 里各自可达。
+    """
+
+    __slots__ = ("_fds",)
+
+    def __init__(self) -> None:
+        self._fds: list[int] = []
+
+    def __enter__(self) -> list[int]:
+        return self._fds
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _close_all_or_note(self._fds, exc)
+        return False
+
+
 def _assert_freshly_created(dir_fd: int, abs_path: str) -> None:
     """`mkdir` 与随后的 `open` 是**两次按名字的独立查找**——中间那道缝无法用 POSIX 关掉
     （没有「建目录并直接拿到 fd」的原子原语）。本检查**不关闭竞态，只把伤害限死**：
@@ -259,6 +376,9 @@ def _open_root_impl(abs_path: str, *, create_leaf: bool):
                 )
             except OSError as e:
                 _raise_walk_error(abs_path, d, e)
+            # ⚠️ 这一句**故意**是裸 `os.close`（fix round 11 的穷尽定性）：它排在
+            # `os.open` 成功**之后**，而上面那个 `except` 分支调的 `_raise_walk_error`
+            # 两条路都 `raise` ⇒ 执行到这里**不可能有异常在途**，顶替不了任何东西。
             os.close(fd)
             fd = nxt
         if create_leaf:
@@ -278,14 +398,14 @@ def _open_root_impl(abs_path: str, *, create_leaf: bool):
                 _raise_walk_error(abs_path, leaf, e)
             try:
                 _assert_freshly_created(nxt, abs_path)
-            except BaseException:
-                os.close(nxt)
+            except BaseException as e:
+                _close_or_note(nxt, e)
                 raise
             os.fsync(fd)          # 父目录耐久（R45-F2）
             return nxt, fd, leaf  # fd 作为 parent_fd 交给调用方
         return fd, None, None
-    except BaseException:
-        os.close(fd)
+    except BaseException as e:
+        _close_or_note(fd, e)
         raise
 
 
@@ -316,6 +436,10 @@ def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
     """
     fd, parent_fd, _leaf = _open_root_impl(abs_path, create_leaf=create_leaf)
     if parent_fd is not None:
+        # ⚠️ 这一句同样**故意**是裸 `os.close`（fix round 11 的穷尽定性）：它排在
+        # `_open_root_impl` **返回之后**，不在任何 `try` 的异常展开路径上
+        # （实现体抛异常时根本走不到这里）⇒ 没有在途异常可顶替；它也是这条
+        # 路径上唯一的收尾项，吃不掉任何后续收尾。
         os.close(parent_fd)
     return fd
 
@@ -340,8 +464,7 @@ def open_under(root_fd: int, relpath: str, *, flags: int, mode: int = 0o600,
     """
     *dirs, leaf = _split_rel(relpath)
     cur = root_fd
-    opened: list[int] = []
-    try:
+    with _CloseFds() as opened:
         for d in dirs:
             if create_dirs:
                 try:
@@ -362,9 +485,6 @@ def open_under(root_fd: int, relpath: str, *, flags: int, mode: int = 0o600,
             return os.open(leaf, flags | os.O_NOFOLLOW, mode, dir_fd=cur)
         except OSError as e:
             _raise_walk_error(relpath, leaf, e)
-    finally:
-        for fd in opened:
-            os.close(fd)
 
 
 def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
@@ -378,7 +498,9 @@ def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
 
     与 `open_under` 同规格三条（O4-F14）：
       ① 分量规则相同（拒空分量 / `.` / `..`，逐段 `O_DIRECTORY|O_NOFOLLOW`）；
-      ② 中间 fd 在 `finally` 里关掉，**返回的 `parent_fd` 归调用方、用完必须关**
+      ② 中间 fd 由 `_CloseFds` 逐个独立关掉（fix round 11 起不再是裸 `finally`——
+         那会让在途的 `PathEscapeError` 被一次关闭失败顶替掉，也会让第一个关闭
+         失败吃掉后面那些），**返回的 `parent_fd` 归调用方、用完必须关**
          ——每股泄漏 3~4 个 fd 会让「staging 已被 rename 掉」这类分叉检查
          拿着陈旧 fd 继续成立；
       ③ 恢复路径上撞逃逸的处置由调用方决定（S4：不删任何文件、保留 `.inflight.json`、
@@ -389,8 +511,7 @@ def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
     """
     *dirs, leaf = _split_rel(relpath)
     cur = root_fd
-    opened: list[int] = []
-    try:
+    with _CloseFds() as opened:
         for d in dirs:
             try:
                 nxt = os.open(
@@ -401,9 +522,6 @@ def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
             opened.append(nxt)
             cur = nxt
         return os.dup(cur), leaf
-    finally:
-        for fd in opened:
-            os.close(fd)
 
 
 def fsync_dir(dir_fd: int) -> None:
@@ -476,8 +594,8 @@ def _open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600
             cur = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, cur & ~os.O_NONBLOCK)
         return fd, st
-    except BaseException:
-        os.close(fd)
+    except BaseException as e:
+        _close_or_note(fd, e)
         raise
 
 
@@ -616,8 +734,8 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
             "tool": tool, "pid": os.getpid(), "hostname": socket.gethostname(),
         })
         return lock_fd
-    except BaseException:
-        os.close(lock_fd)
+    except BaseException as e:
+        _close_or_note(lock_fd, e)
         raise
 
 
@@ -659,7 +777,7 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         raise LockDisciplineError(
             f"锁文件 {lock_name!r} 存在但是一个目录——拒绝启动。"
         ) from e
-    try:
+    with _CloseFd(lock_fd):
         if not stat.S_ISREG(lock_st.st_mode):
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
@@ -670,8 +788,6 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
             return "busy"
         fcntl.flock(lock_fd, fcntl.LOCK_UN)     # 取得后立即释放，不写任何内容
         return "stale"
-    finally:
-        os.close(lock_fd)
 
 
 def encode_json(payload: dict) -> bytes:
@@ -730,14 +846,12 @@ def _atomic_write_bytes(dir_fd: int, name: str, data: bytes, *,
         flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o600,
     )
     try:
-        try:
+        with _CloseFd(fd):
             _write_all(fd, data)
             if full_sync:
                 full_fsync(fd)
             else:
                 os.fsync(fd)
-        finally:
-            os.close(fd)
         # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
         os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
@@ -840,7 +954,7 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
         raise MarkerInvalidError(f"归属标记 {marker_name!r} 不存在") from e
     except IsADirectoryError as e:
         raise MarkerInvalidError(f"归属标记 {marker_name!r} 是一个目录") from e
-    try:
+    with _CloseFd(fd):
         if not stat.S_ISREG(st.st_mode):
             # FIFO / 设备 / socket：**先探类型再读**，否则 O_RDONLY 会挂死在 FIFO 上
             raise MarkerInvalidError(
@@ -868,8 +982,6 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
                 )
             chunks.append(chunk)
         raw = b"".join(chunks)
-    finally:
-        os.close(fd)
     try:
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
@@ -957,38 +1069,41 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
 
     dir_fd, parent_fd, leaf = _open_root_impl(abs_path, create_leaf=True)
     lock_fd = None
-    try:
-        lock_fd = acquire_lock(dir_fd, lock_name, tool=tool)
-        # 取锁是串行化点：此刻拿**留住的父目录 fd** 反查一次，
-        # 把「open 之后、发布归属之前」那道缝彻底关掉（R1-codex-high）
-        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="取锁之后")
-        write_owner_marker(dir_fd, marker_name, marker_payload)
-        # ⚠️ 发布**之后**必须再复核一次（R2-codex-high）：写标记这一串
-        # （tmp → fsync → replace → fsync 目录）**不是原子的**，「写之前复核」
-        # 挡不住「复核之后、写完之前」被调包 —— 那会让标记落到一个可能已被 unlink
-        # 的旧 inode 上，而 abs_path 指向别处，正是 O2-F9 那个最坏结局：
-        # **工具以 rc=0 宣称就绪，而操作者按路径去看什么都没有**。
-        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="发布归属之后")
-        # 写侧读侧配对闭合：刚发布的标记必须当场能被读侧接受。
-        # 有了上面的发布前自检，这一步在实践中不该失败；它失败即说明现场
-        # **超出本工具的理解范围**，按本仓纪律 fail-closed 并把出路交给人。
+    # ⚠️ 三个关闭点全部走 `_close_or_note`（fix round 11 · codex R9 [medium]）：
+    # 此前 `except BaseException: os.close(lock_fd); os.close(dir_fd)` 里，第一个
+    # 关闭失败会让第二个**和 `raise` 本身**都不执行，而 `finally: os.close(parent_fd)`
+    # 的失败会顶替掉在途的 `BoundaryError`（发布之后目录被换掉，信任边界）。
+    with _CloseFd(parent_fd):
         try:
-            verify_owner_marker(dir_fd, marker_name, expect_tool=tool,
-                                self_field=self_field, self_value=normalized)
-        except MarkerInvalidError as e:
-            raise MarkerInvalidError(
-                f"刚发布的归属标记无法通过读侧校验（{e}）——现场超出本工具的理解范围。"
-                f"请先列出 {abs_path} 的内容核对，确认无用后手工清理："
-                f"`rm -f {abs_path}/{marker_name} {abs_path}/{lock_name} "
-                f"&& rmdir {abs_path}`"
-            ) from e
-    except BaseException:
-        if lock_fd is not None:
-            os.close(lock_fd)
-        os.close(dir_fd)
-        raise
-    finally:
-        os.close(parent_fd)
+            lock_fd = acquire_lock(dir_fd, lock_name, tool=tool)
+            # 取锁是串行化点：此刻拿**留住的父目录 fd** 反查一次，
+            # 把「open 之后、发布归属之前」那道缝彻底关掉（R1-codex-high）
+            _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="取锁之后")
+            write_owner_marker(dir_fd, marker_name, marker_payload)
+            # ⚠️ 发布**之后**必须再复核一次（R2-codex-high）：写标记这一串
+            # （tmp → fsync → replace → fsync 目录）**不是原子的**，「写之前复核」
+            # 挡不住「复核之后、写完之前」被调包 —— 那会让标记落到一个可能已被 unlink
+            # 的旧 inode 上，而 abs_path 指向别处，正是 O2-F9 那个最坏结局：
+            # **工具以 rc=0 宣称就绪，而操作者按路径去看什么都没有**。
+            _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="发布归属之后")
+            # 写侧读侧配对闭合：刚发布的标记必须当场能被读侧接受。
+            # 有了上面的发布前自检，这一步在实践中不该失败；它失败即说明现场
+            # **超出本工具的理解范围**，按本仓纪律 fail-closed 并把出路交给人。
+            try:
+                verify_owner_marker(dir_fd, marker_name, expect_tool=tool,
+                                    self_field=self_field, self_value=normalized)
+            except MarkerInvalidError as e:
+                raise MarkerInvalidError(
+                    f"刚发布的归属标记无法通过读侧校验（{e}）——现场超出本工具的理解范围。"
+                    f"请先列出 {abs_path} 的内容核对，确认无用后手工清理："
+                    f"`rm -f {abs_path}/{marker_name} {abs_path}/{lock_name} "
+                    f"&& rmdir {abs_path}`"
+                ) from e
+        except BaseException as e:
+            if lock_fd is not None:
+                _close_or_note(lock_fd, e)
+            _close_or_note(dir_fd, e)
+            raise
     return dir_fd, lock_fd
 
 
