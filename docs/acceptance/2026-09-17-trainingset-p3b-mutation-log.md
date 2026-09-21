@@ -567,6 +567,74 @@ E           backend  下的 .py 文件
 
 # 守卫②（`test_training_set_ddl_no_drift.py`）—— M5 ~ M9
 
+### M4x —— ⭐⭐ 把扫描循环截断成「每个文件只看第 1 条命中」（整支最终评审「重要 1」）
+
+**改了什么**：两处，各命中 1 次（**已先数过锚点，不是空转**）：
+- `backend/tests/test_insert_schema_version_guard.py`：`for m in _HEAD.finditer(text):` → `for m in list(_HEAD.finditer(text))[:1]:`
+- `backend/sql/migrations/0004_qmt_price_double_and_coverage/rehearse.sh`：把 `schema_version, file_path, content_hash,` 改成 `file_path, content_hash,`（**真漏写**，落在该文件第 2 条语句）
+
+**为什么要有这一组**：此前守卫①所有防掏空判据都是「**至少一条**」形状（`checked >= 2`、每个格子 ≥1、`gen_seen >= 1`）。它们挡得住「**整类文件退出视野**」，⛔ **挡不住「同一个文件里少看几条」**。
+
+**原样输出 —— 加守恒等式【之前】**：
+
+```
+【对照组】只注入真漏写、不截断        ⇒ 1 failed
+【注入 + 截断】                      ⇒ 3 passed      ← 守卫、合成自测、差分测试【三条全绿】
+```
+
+**原样输出 —— 加守恒等式【之后】**：
+
+```
+E       AssertionError: `INSERT INTO training_sets` 守卫发现 1 类问题：
+E         
+E         【有命中却没被判过】表头匹配到了，却没落进任何一类 —— 说明**发现端**被掏空了（例如扫描循环被截断）。⛔ 此时「全都合规」这个结论不成立：
+E           backend/sql/migrations/0004_qmt_price_double_and_coverage/rehearse.sh：表头命中 3 条，却只有 1 条被判过
+E           backend/tests/test_b2_reconnect_integration.py：表头命中 2 条，却只有 1 条被判过
+E           docs/runbooks/2026-08-24-qmt-nas-deployment.md：表头命中 2 条，却只有 1 条被判过
+E           .github/workflows/schema-smoke.yml：表头命中 5 条，却只有 1 条被判过
+1 failed in 0.07s
+```
+
+**结论**：守恒等式（每个文件的**表头命中总数** == 落进四个桶的条数之和）把这一族关死，且**逐个文件点名**命中几条、判过几条。
+⚠️ `expected_hits` 用 `findall` 做**独立的第二次扫描**（⛔ 不复用 `finditer`）—— 两个来源互不依赖，一处编辑才改不掉两边；`mention` **也要计数**，否则等式自己就对不上。
+
+---
+
+### M4y / M4z —— 另两种截断形态（证明钉住的是一整族，不是那一个写法）
+
+**改了什么**：同 M4x，只把截断方式换成 `[:-1]`（丢掉最后一条）与 `[::2]`（每隔一条）。
+
+**原样输出**：
+
+```
+[:-1] 丢掉最后一条        ⇒ 2 failed, 1 passed in 0.09s
+[::2] 每隔一条            ⇒ 2 failed, 1 passed in 0.09s
+```
+
+**结论**：两种都红。⭐ 另外**合成自测也红了**（`2 failed` 里有它）—— 因为本轮同时给它加了一个「**同一文件放两条语句**」的用例；此前全部合成用例都是「一个文件一条」，对截断**完全无感**。
+
+---
+
+### M10 —— 守卫②前提检查：四种引号形态各注入一次（整支最终评审「重要 2」）
+
+**改了什么**：往冻结文件 `training_set_schema_v1.sql` 的 `ma66 REAL,` 处，分别注入四种带引号的词法形态（**每次都先确认变异真的落盘**）。
+
+**为什么要有这一组**：守卫②的归一化会无条件抹掉紧贴 `( ) ,` 的空白，**不区分是否在引号内部**。挡住这个的**只有**「两份 DDL 零引号」这个前提。而上一版的前提检查**只认单引号** —— SQLite 有 **4 种**形态（`'…'` / `"…"` / `` `…` `` / `[…]`），四种各构造一对（只差逗号/括号旁的空格）实测**归一化后全部判等、前提检查全部放行**。
+
+**原样输出**：
+
+```
+单引号 '…'     落盘=True ⇒ 1 failed in 0.02s
+双引号 "…"     落盘=True ⇒ 1 failed in 0.02s
+反引号 `…`     落盘=True ⇒ 1 failed in 0.02s
+方括号 […]     落盘=True ⇒ 1 failed in 0.02s
+```
+
+**结论**：四种**各自**都能让前提检查变红 ⇒ 这条「前提一破立刻响」的检查现在覆盖 4/4，而不是 1/4。
+⭐ 本仓成文教训：**穷尽性必须按字面量枚举后逐条定性**。
+
+---
+
 ### M5 —— 冻结文件 `CREATE TABLE meta` 纯排版压成一行（不改任何列名/类型/约束）
 
 **改了什么**：`backend/sql/training_set_schema_v1.sql` 里 `CREATE TABLE meta (…)` 从「一列一行」压缩成一行，逗号、括号旁的空白全部去掉，但**不改动任何列名、类型、约束**。
