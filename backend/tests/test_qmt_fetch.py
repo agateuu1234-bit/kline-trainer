@@ -2763,3 +2763,168 @@ def test_open_part_keeps_untracked_reason_when_its_close_fails(
     assert not isinstance(ei.value, OSError)
     assert budget.used == 7
     assert part.is_dir(), "来路不明的对象要原样留着"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 9：把「捕获宽度」这个刻意决定钉住
+# ══════════════════════════════════════════════════════════════════
+#
+# `_close_or_note` 关描述符、`_rollback_all` 删项、`_rollback_all` 退账项——
+# 这三处 `except Exception as e:` 此前只在 docstring 里写着理由（`KeyboardInterrupt`
+# / `SystemExit` 不是「这一项失败了」，不许被收进明细或挂成诊断顺手咽掉），把
+# 宽度悄悄改成 `except BaseException` 之后全套测试原样通过——这个决定只活在散文里。
+#
+# 本节给每一处各配一条测试，注入 `KeyboardInterrupt`（真实场景：长时间运行时用户
+# 按 Ctrl-C），钉住「非 `Exception` 的 `BaseException` 必须原样逃出去，不许被记进
+# 诊断、不许被收进 `RollbackIncomplete.errors`」。
+#
+# 三条测试的判别力互斥：同一次调用里，三处 `except` 里**恰好有一处**真的接到一个
+# 正在传播的异常——另外两处这一趟根本没轮到执行（要么没有异常在途，要么循环已经
+# 被这次中断打断、还没轮到那一行），所以把其中一处放宽成 `except BaseException`
+# 不会牵动另外两条测试的结论；下面每条测试都用一句「另一半确实先正常做完了」的
+# 前提断言把这一点钉住，而不是靠推断。
+
+def test_close_or_note_lets_keyboard_interrupt_escape_when_closing_source_fails(
+        roots, monkeypatch):
+    """钉 `_close_or_note` 那一处（紧跟 `os.close(fd)`）：源描述符关闭时抛
+    `KeyboardInterrupt`，正在展开的 `MaxBytesExhausted` 不许被顶替，中断本身
+    不许被 `_close_or_note` 当成诊断记到 `__notes__` 上。"""
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_growing.csv"
+    _put_source_file(src_path, rel, b"w" * 64)
+    _growing_source_read(monkeypatch, blocks=3, chunk=64)
+
+    budget = ByteBudget(limit=100)      # 64 过 precheck；累计到 128 时 charge 拒
+    holder = _capture_source_fd(monkeypatch)
+
+    real_close = os.close
+    seen: list[int] = []
+    armed = {"on": True}
+
+    def spy_close(fd):
+        if armed["on"] and fd == holder.get("sfd"):
+            armed["on"] = False
+            seen.append(fd)
+            real_close(fd)
+            raise KeyboardInterrupt()
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "close", spy_close)
+
+    with pytest.raises(KeyboardInterrupt) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert seen == [holder["sfd"]], f"前提不成立：注入没打在源描述符上，实测 {seen}"
+
+    exc = ei.value
+    # (a) 逃出来的就是那个中断本身，没有被换成别的族籍。
+    assert not isinstance(exc, Exception), (
+        "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+    # (b) 没有被当成诊断记下来：一旦被 `except BaseException` 接住，会转手
+    #     `pending.add_note(...)`，而不是原样放行。
+    assert not any("关描述符失败" in n for n in getattr(exc, "__notes__", [])), (
+        "中断被记进了诊断，说明关闭失败那一格把它当成「这次关闭失败了」顺手"
+        "咽掉，而不是原样放行")
+    # (c) `_close_or_note` 只是不吃中断，不代表 `copy_one` 外层的收尾也被跳过：
+    #     已扣的字节仍然要退、已创建的临时文件仍然要清。
+    assert budget.used == 0, "已扣的那一块字节应当退还"
+    assert not (stg_path / (rel + PART)).exists()
+    assert [p.name for p in (stg_path / "1m").iterdir()] == [], "临时文件也不该留下"
+
+
+def test_rollback_lets_keyboard_interrupt_escape_when_deleting_a_part_fails(
+        roots, monkeypatch):
+    """钉 `_rollback_all` 删项那一处（紧跟 `_cleanup_part(stg_fd, name)`）：
+    删 `.tmp` 抛 `KeyboardInterrupt` 时，在途的原异常（一次裸 `OSError`）不许
+    被升级成 `RollbackIncomplete`——中断必须原样逃出去，当场打断这个 for 循环，
+    退账那一半因此这一趟根本没轮到执行（已登记代价，不是本档要防的事）。"""
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"payload" * 20
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None, used=0)
+    boom = OSError(errno.EIO, "打桩：拷到一半 SMB 断线")
+
+    def exploding_write_all(fd, payload):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "_write_all", exploding_write_all)
+
+    real_unlink = os.unlink
+    seen: list[str] = []
+
+    def spy_unlink(path, *args, **kwargs):
+        if isinstance(path, str) and path.endswith(".tmp") and PART in path:
+            seen.append(path)
+            raise KeyboardInterrupt()
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", spy_unlink)
+
+    with pytest.raises(KeyboardInterrupt) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    # 前提：删除确实被尝试过一次、且注入确实生效（临时文件还在盘上）。
+    assert len(seen) == 1 and seen[0].endswith(".tmp"), (
+        f"前提不成立：临时文件的删除压根没被调到，实测 {seen}")
+    leftovers = [p.name for p in (stg_path / "1m").iterdir()
+                 if p.name.endswith(".tmp")]
+    assert len(leftovers) == 1, (
+        f"前提不成立：注入没生效，临时文件还是被删掉了（实测 {leftovers}）")
+
+    exc = ei.value
+    assert not isinstance(exc, Exception), (
+        "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+    assert not getattr(boom, "__notes__", []), (
+        "删除那一项失败被计入了回滚诊断，说明中断被更宽的判据接住、当成了"
+        "「这一项没删成」而不是原样放行")
+    # 中断当场打断了 `_rollback_all` 的第一个 for 循环，退账那半这一趟根本没
+    # 轮到执行——已扣的账没退是已知代价，不是判据缺陷；这也是「退账那一处
+    # 这一趟根本没执行到」的证据，证明本条与下一条测的不是同一处。
+    assert budget.used == len(data), "已扣的账没退是中断打断整段收尾的已知代价"
+
+
+def test_rollback_lets_keyboard_interrupt_escape_when_refunding_fails(
+        roots, monkeypatch):
+    """钉 `_rollback_all` 退账项那一处（紧跟 `budget.refund(n)`）：删除那一半
+    先正常完成，`budget.refund` 才抛 `KeyboardInterrupt`——同一个原异常、同一个
+    函数，命中的是循环体的**另一半**，与上一条测试互斥地各命中一处，证明两条
+    不是同一条判据的两份拷贝。"""
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"payload" * 20
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None, used=0)
+    boom = OSError(errno.EIO, "打桩：拷到一半 SMB 断线")
+
+    def exploding_write_all(fd, payload):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "_write_all", exploding_write_all)
+
+    seen: list[int] = []
+
+    def exploding_refund(n):
+        seen.append(n)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(budget, "refund", exploding_refund)
+
+    with pytest.raises(KeyboardInterrupt) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert seen, "前提不成立：退账压根没被调到"
+    # 删除那一半确实先正常完成——否则「另一项到底有没有被尝试过」这句判别力
+    # 就是恒真的，测的也不是「退账这一格单独被放宽」这件事。
+    assert [p.name for p in (stg_path / "1m").iterdir()] == [], (
+        "前提不成立：临时文件删除没有先正常完成")
+
+    exc = ei.value
+    assert not isinstance(exc, Exception), (
+        "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+    assert not getattr(boom, "__notes__", []), (
+        "退账失败被计入了回滚诊断，说明中断被更宽的判据接住、当成了"
+        "「这一项没退成」而不是原样放行")
+    assert budget.used == len(data), "已扣的账没退是中断打断整段收尾的已知代价"
