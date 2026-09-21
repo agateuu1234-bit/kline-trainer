@@ -961,19 +961,87 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
 
 - [ ] **Step 1: 在既有端到端测试里追加断言**
 
-在 `ChartContainerViewDrawingSessionTests.swift` 的 `D41/D55 端到端…` 那条测试里，最后一个 `#expect(before != after, ...)` **之后**追加：
+**⛔⛔ 不得对整张 bitmap 做「有没有近黑/近白像素」的判断**（codex plan-R2-medium，**已核实为真，且比 finding 说的更糟**）：
+
+| 实测事实 | 值 | 后果 |
+|---|---|---|
+| `KLineView.draw` 调 `drawAxisLabels` | `KLineView.swift:116` | 轴标签进入 `litPixels(of:)` 的取样范围 |
+| 暗色主题文字色 `AppColorTokens.text` | `AppColorRGBA(white: 0.92)` | 0.92 > 0.88 ⇒ 命中「近白」判据 |
+| `AppColorTokens.macdDIF` | `AppColorRGBA(white: 1.0)` | **纯白**，更直接命中 |
+| 暗色背景 `AppColorTokens.background` | `(0.10, 0.10, 0.12)` | 蓝通道与 `< 0.12` **擦边**，抗锯齿一抖就翻 |
+
+⇒ 整图判据**双重失效**：负向断言在暗色下**恒假**（正确实现也红），正向断言**恒真**（没画节点也绿）。
+
+**改为受控点对比**，且不依赖绝对亮度、靠「橙 → ink」的**转变**。在
+`ChartContainerViewDrawingSessionTests.swift` 的 `D41/D55 端到端…` 那条测试里，
+最后一个 `#expect(before != after, ...)` **之后**追加：
 
 ```swift
-        // P1c 第 2 片 Task 5：选中的线必须**同时**画出节点。节点是自适应纯 ink（日黑 / 夜白），
-        // 与线的 colorToken（本例是出厂橙）和选中蓝都可区分。
-        // ⚠️ 不假设测试环境的 scheme（同上面那段注释），故两套 ink 都认。
-        #expect(after.contains { px in
-            (px.r < 0.12 && px.g < 0.12 && px.b < 0.12) || (px.r > 0.88 && px.g > 0.88 && px.b > 0.88)
-        }, "选中后必须出现节点像素（纯黑或纯白实心圆）—— P1c 第 2 片")
-        #expect(!before.contains { px in
-            (px.r < 0.12 && px.g < 0.12 && px.b < 0.12) || (px.r > 0.88 && px.g > 0.88 && px.b > 0.88)
-        }, "⭐ 未选中时不得有节点像素 —— 否则上面那条可能是被别的东西撞上的")
+        // P1c 第 2 片 Task 5：只看**锚点投影的那一个点**，不看整张图 ——
+        // 整图会把轴标签（暗色 0.92）与 MACD DIF（纯白 1.0）误判成节点（codex plan-R2）。
+        // renderState.viewport 就是这一帧真正渲染用过的视口（PR-4 已钉死它与实际渲染逐字相等）。
+        let mp = CoordinateMapper(viewport: upperV.renderState.viewport, displayScale: 1)
+        let anchor0 = engine.drawings[0].anchors[0]
+        let ax = Int(mp.indexToX(anchor0.candleIndex)), ay = Int(mp.priceToY(anchor0.price))
+        let beforeAtAnchor = Self.pixelAt(upperV, x: ax, y: ay, rebuildWith: upperC, bounds: bounds,
+                                          select: nil, engine: engine)
+        let afterAtAnchor  = Self.pixelAt(upperV, x: ax, y: ay, rebuildWith: upperC, bounds: bounds,
+                                          select: engine.drawings[0].id, engine: engine)
+        // 出厂橙昼夜同值（`DrawingColorResolver.swift:10` 逐字：legacy 默认，昼夜同）⇒ 只需一套
+        let orange = DrawingColorResolver.resolve(.orange, scheme: .light)
+        func isOrange(_ px: Px?) -> Bool {
+            guard let px else { return false }
+            return abs(px.r - CGFloat(orange.red)) < 0.06 && abs(px.g - CGFloat(orange.green)) < 0.06
+                && abs(px.b - CGFloat(orange.blue)) < 0.06
+        }
+        // ink 判据收紧到 0.06 / 0.94：⛔ 不能用 0.12 —— 暗色背景蓝通道正好是 0.12，会擦边翻转
+        func isInk(_ px: Px?) -> Bool {
+            guard let px else { return false }
+            return (px.r < 0.06 && px.g < 0.06 && px.b < 0.06)
+                || (px.r > 0.94 && px.g > 0.94 && px.b > 0.94)
+        }
+        #expect(isOrange(beforeAtAnchor),
+                "前提：未选中时锚点处画的是线自己的橙色（否则下面「变成 ink」的断言无从谈起）")
+        #expect(isInk(afterAtAnchor), "选中后锚点处必须被节点覆盖成 ink（纯黑或纯白）")
+        #expect(!isOrange(afterAtAnchor), "选中后该点不得还是橙色 —— 那说明节点没画上去")
 ```
+
+并在该文件的 `litPixels(of:)` 旁边新增辅助（与它同思路，但**保留坐标**）：
+
+```swift
+    /// 取 `view` 在指定选中态下渲染后、某个**精确像素**的颜色（反 premultiplied）。
+    /// 与 `litPixels(of:)` 同一条渲染链（renderState → drawDrawings → tool.render），
+    /// 区别只在于**保留坐标**，因而不会把别处的轴标签 / 指标线误当成节点。
+    @MainActor
+    private static func pixelAt(_ view: KLineView, x: Int, y: Int,
+                                rebuildWith coordinator: ChartContainerView.Coordinator,
+                                bounds: CGRect, select id: DrawingID?,
+                                engine: TrainingEngine) -> Px? {
+        engine.drawingSession.setSelectedDrawingIDForTesting(id)
+        coordinator.rebuildRenderState(bounds: bounds)
+        let w = Int(view.bounds.width), h = Int(view.bounds.height)
+        guard x >= 0, x < w, y >= 0, y < h else { return nil }
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        UIGraphicsPushContext(ctx)
+        view.draw(view.bounds)
+        UIGraphicsPopContext()
+        let i = (y * w + x) * 4
+        let a = CGFloat(data[i+3]) / 255
+        guard a > 0.3 else { return nil }
+        return Px(r: CGFloat(data[i])/255/a, g: CGFloat(data[i+1])/255/a, b: CGFloat(data[i+2])/255/a)
+    }
+```
+
+⚠️ **实施时先确认 `setSelectedDrawingIDForTesting` 这类入口是否已存在**（`git grep -n 'ForTesting' -- 'ios/Contracts/Sources'`）。
+若不存在，**⛔ 不要为测试新增生产 API** —— 改为复用本测试既有的
+`upperC.handleDrawingTapForTesting(at: p)` 走真实命中路径来切换选中态，`select:` 参数随之去掉。
+
+**⚠️ 显式两主题由 host 层承担**：Task 4 的 `realNodeIsInkFilledCircle` 已对 `.light` / `.dark`
+各断言一次节点颜色。本条端到端验的是**接线通没通**，不重复验颜色 —— 因为测试环境的 scheme
+不由本测试决定（该文件既有注释已说明）。
 
 - [ ] **Step 1b: 补 N1 —— 两条同价位重合的线，只有被选中的那条画节点**
 
@@ -1031,7 +1099,10 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
     }
 ```
 
-**⚠️ 实施后必做的变异**：把第二遍的节点绘制**挪回循环内**（`tool.render` 之后）⇒
+**⚠️ 实施后必做的变异（两条）**：
+① **注释掉第二遍的节点绘制** ⇒ 端到端那条的 `isInk(afterAtAnchor)` **必须变红**
+（codex plan-R2 明确要求验证这一条 —— 它是「正向断言有没有判别力」的唯一证明）。
+② 把第二遍的节点绘制**挪回循环内**（`tool.render` 之后）⇒
 `onlySelectedLineDrawsNodes` 的 **① 选中首位**那一档必须变红、② 那一档仍绿。
 若两档都绿，说明这条测试没真的测到叠加顺序。
 
@@ -1264,7 +1335,7 @@ Expected: 全绿。⚠️ 若报 `selectionRGBA` 未定义，说明还有引用�
         }, "选中后线必须仍是它自己的颜色（D108 取消变蓝）")
 ```
 
-Step 1 追加的两条节点断言**保持不变**（它们现在是这条测试的主断言）。
+Step 1 追加的**受控点**断言（`isOrange(before)` / `isInk(after)` / `!isOrange(after)`）**保持不变** —— 它们现在是这条测试的主断言。
 ⚠️ `#expect(before != after, ...)` **保留** —— 选中前后画面仍然必须不同（现在的差异来自节点而不是线色）。
 
 - [ ] **Step 7: 重新生成 Catalyst 基线（⛔ 不得手打测试名）**
