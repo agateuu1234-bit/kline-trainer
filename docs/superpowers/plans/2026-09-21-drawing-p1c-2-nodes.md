@@ -984,15 +984,11 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
 追加到 `DrawDrawingsDispatchTests.swift` 的 `dispatchNoSelectionHighlightsNothing()` 之后：
 
 ```swift
-    @Test("N1：两条同价位重合的线 —— 只有被选中的那条画节点")
+    @Test("N1：两条同价位重合的线 —— 只有被选中的那条画节点（选中项在数组首/尾各验一次）")
     func onlySelectedLineDrawsNodes() {
-        let view = makeViewFixture()
         let mapper = makeMapperFixture()        // frame 320×200, candleStep 8, price 100...200, scale 1
-        let w = 320, h = 200
-        var data = [UInt8](repeating: 0, count: w * h * 4)
-        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let yLine = Int(mapper.priceToY(150))   // 100
+        let xA = Int(mapper.indexToX(10)), xB = Int(mapper.indexToX(30))   // 80 / 240
         // 同价位 ⇒ 两条线的 y 相同、视觉上完全重合；锚点落在不同 K 线上 ⇒ 节点 x 可分辨
         let a = DrawingObject(id: "A", toolType: .horizontal,
                               anchors: [DrawingAnchor(period: .m60, candleIndex: 10, price: 150)],
@@ -1000,25 +996,44 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
         let b = DrawingObject(id: "B", toolType: .horizontal,
                               anchors: [DrawingAnchor(period: .m60, candleIndex: 30, price: 150)],
                               isExtended: false, panelPosition: 0)
-        view.drawDrawings(ctx: ctx, mapper: mapper, drawings: [a, b], period: .m60,
-                          scheme: .light, selectedDrawingID: "A",
-                          tools: [.horizontal: HorizontalLineTool()])
-        let snap = data                          // 先快照，避免与 CGContext 的 inout 访问重叠
-        // 节点是纯黑 ink；线是出厂橙 ⇒ 用「纯黑」把节点从线里区分出来
-        func isInk(_ x: Int, _ y: Int) -> Bool {
-            let i = (y * w + x) * 4
-            let al = CGFloat(snap[i+3]) / 255
-            guard al > 0.5 else { return false }
-            return CGFloat(snap[i])/255/al < 0.12 && CGFloat(snap[i+1])/255/al < 0.12
-                && CGFloat(snap[i+2])/255/al < 0.12
+
+        /// 渲染一次，返回「A 的锚点处 / B 的锚点处」是否有纯黑 ink（= 节点）。
+        /// 线是出厂橙、节点是纯黑 ⇒ 用纯黑把节点从线里区分出来。
+        func inkAt(selecting id: DrawingID) -> (atA: Bool, atB: Bool) {
+            let w = 320, h = 200
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            makeViewFixture().drawDrawings(ctx: ctx, mapper: mapper, drawings: [a, b], period: .m60,
+                                           scheme: .light, selectedDrawingID: id,
+                                           tools: [.horizontal: HorizontalLineTool()])
+            let snap = data                      // 先快照，避免与 CGContext 的 inout 访问重叠
+            func isInk(_ x: Int) -> Bool {
+                let i = (yLine * w + x) * 4
+                let al = CGFloat(snap[i+3]) / 255
+                guard al > 0.5 else { return false }
+                return CGFloat(snap[i])/255/al < 0.12 && CGFloat(snap[i+1])/255/al < 0.12
+                    && CGFloat(snap[i+2])/255/al < 0.12
+            }
+            return (isInk(xA), isInk(xB))
         }
-        let yLine = Int(mapper.priceToY(150))    // 100
-        #expect(isInk(Int(mapper.indexToX(10)), yLine),
-                "被选中的 A 必须在它自己的锚点上画出节点（否则下面那条恒真）")
-        #expect(!isInk(Int(mapper.indexToX(30)), yLine),
-                "⭐ 未选中的 B 不得有节点 —— 哪怕它与 A 同价位、视觉上完全重合")
+
+        // ① 选中数组【首位】—— ⭐ 这一档是关键：若节点画在逐条循环内，
+        //    后画的 B 的橙色描边会盖掉 A 节点的中心，本条当场红（codex plan-R1）
+        let first = inkAt(selecting: "A")
+        #expect(first.atA, "选中数组首位时它的节点必须仍在 —— 不得被后画的重合线盖掉")
+        #expect(!first.atB, "未选中的 B 不得有节点 —— 哪怕它与 A 同价位、视觉上完全重合")
+        // ② 选中数组【末位】—— 与 ① 对照：只测这一档抓不到覆盖问题
+        let last = inkAt(selecting: "B")
+        #expect(last.atB, "选中数组末位时必须有节点")
+        #expect(!last.atA, "未选中的 A 不得有节点")
     }
 ```
+
+**⚠️ 实施后必做的变异**：把第二遍的节点绘制**挪回循环内**（`tool.render` 之后）⇒
+`onlySelectedLineDrawsNodes` 的 **① 选中首位**那一档必须变红、② 那一档仍绿。
+若两档都绿，说明这条测试没真的测到叠加顺序。
 
 - [ ] **Step 2: 跑 Catalyst，确认新断言失败（节点还没接线）**
 
@@ -1032,22 +1047,46 @@ Expected: `D41/D55 端到端…` FAIL，消息含「选中后必须出现节点�
 
 - [ ] **Step 3: 接线**
 
-`KLineView+Drawing.swift` 的 `tool.render(...)` 调用**之后**、价格标签那段 `if drawing.toolType == .horizontal` **之前**，插入：
+**⛔⛔ 节点必须画成第二遍，不能插在逐条循环里**（codex plan-R1-medium，**已核实为真**）：
+
+> 把节点插在循环内 `tool.render` 之后，则**后画的线会盖掉先画那条的节点**。实测构造：同价位的
+> `[A, B]` 两条线、选中 A —— 先画 A 的线与黑节点，再画 B 的线；B 横贯全屏且 y 与 A 相同，
+> 其橙色描边正好覆盖 A 节点的**中心**（节点直径 7pt、线宽 1.5pt）。
+> ⚠️ **这不只是测试问题**：取消变蓝后节点是**唯一的图内选中反馈**，被盖住等于没有。
+
+`KLineView+Drawing.swift` 的 `drawDrawings` 改成两遍。① 在 `for drawing in drawings {` **之前**插入：
 
 ```swift
-            // P1c 第 2 片（D121）：选中态节点。**工具无关** —— 决策全在 `DrawingNodeGeometry`，
-            // 绘制全在 `DrawingNodeRenderer`，本层只负责问一次「这条线画不画得出来」并转发。
-            // ⛔ 不得在此写死任何 `toolType`（那正是下面标签分支的问题，第 1 片交接为 Q10）。
-            // D125：裁剪只作用于节点与代理标记 —— `DrawingNodeRenderer.draw` 内部自带
-            // saveGState/clip/restoreGState，故上面 `tool.render` 画的线**一点不受影响**。
-            if drawing.id == selectedDrawingID {
-                let marks = DrawingNodeGeometry.marks(
-                    for: drawing, mapper: mapper,
-                    isVisible: tool.isVisible(drawing: drawing, mapper: mapper))
-                DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
-                                         clipTo: mapper.viewport.mainChartFrame)
-            }
+        // P1c 第 2 片（D121）：选中态节点要**叠加在所有线与标签之上**，故先记下来、循环后再画。
+        // ⛔ 不得画在循环内 —— 后画的重合线会盖掉它的中心（codex plan-R1 实证）。
+        var selectedForNodes: (tool: any DrawingTool, drawing: DrawingObject)?
 ```
+
+② 在循环内 `tool.render(...)` 调用**之后**插入一行（**只记录，不绘制**）：
+
+```swift
+            if drawing.id == selectedDrawingID { selectedForNodes = (tool, drawing) }
+```
+
+③ 在 `for` 循环的右花括号 `}` **之后**、函数结束之前，插入第二遍：
+
+```swift
+        // 第二遍：选中态的节点与代理标记，叠加在所有线与标签之上。
+        // **工具无关** —— 决策全在 `DrawingNodeGeometry`，绘制全在 `DrawingNodeRenderer`，
+        // 本层只负责问一次「这条线画不画得出来」并转发。
+        // ⛔ 不得在此写死任何 `toolType`（那正是上面标签分支的问题，第 1 片交接为 Q10）。
+        // D125：裁剪只作用于节点与代理标记 —— `DrawingNodeRenderer.draw` 内部自带
+        // saveGState/clip/restoreGState，故循环里 `tool.render` 画的线**一点不受影响**。
+        if let sel = selectedForNodes {
+            let marks = DrawingNodeGeometry.marks(
+                for: sel.drawing, mapper: mapper,
+                isVisible: sel.tool.isVisible(drawing: sel.drawing, mapper: mapper))
+            DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
+                                     clipTo: mapper.viewport.mainChartFrame)
+        }
+```
+
+⚠️ 若 `drawings` 里出现重复 id（`injectDrawingsForTesting` 可造），循环会让**最后一条**胜出 —— 与数组序即 z-order 的既有约定一致（后画的在上）。
 
 - [ ] **Step 4: 跑 Catalyst，确认通过**
 
