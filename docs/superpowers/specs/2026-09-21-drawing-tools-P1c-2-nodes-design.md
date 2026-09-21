@@ -539,12 +539,15 @@ git grep -nE '^\| *[0-9]+ *\|' -- \
 
 ### 8.4 Catalyst 基线的精确改动（最小集）
 
-按 D121 的落点，本片渲染断言绝大多数落 host（F9）。**Catalyst UIKit 基线（`.github/scripts/catalyst-uikit-baseline.txt`，78 行）的改动只有一处**：
+按 D121 的落点，本片渲染断言绝大多数落 host（F9）。**Catalyst UIKit 基线（`.github/scripts/catalyst-uikit-baseline.txt`，78 行 → 79 行）共两处改动**：
 
-| 基线行 | 现文字 | 处置 |
+| 基线行 | 内容 | 处置 |
 |---|---|---|
-| 第 **29** 行 | `D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）` | **随 A7 改名同步** |
+| 第 **29** 行 | `D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）` | **改名**（随 A7 翻转） |
+| **新增 1 行** | N1 的 `两条同价位重合的线 —— 只有被选中的那条画节点` | **新增** |
 | 第 **8** / **31** 行 | `D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true` / `D41 跨面板…高亮必须消失` | ⛔ **不动**（B8 / B12，不受推翻） |
+
+**⚠️ N1 为什么必须是 UIKit-gated、不能落 host**（本 spec 上一稿漏写，plan 自检时补）：N1 的「**非**选中态零节点」要分辨的是**两条线之间**谁该有节点，而「谁被选中」的门控写在 dispatch 的 `if drawing.id == selectedDrawingID` 上 —— 决策层的 `marks()` 根本不认识选中。⇒ 只有 dispatch 层测得了，而 `drawDrawings` 整个在 `#if canImport(UIKit)` 内。
 
 **⛔ 手段要求（第 1 片交接，原样有效）**：基线**必须用 `.github/scripts/uikit-expected-tests.py` 重新生成**，⛔ 不得手打测试名。取数用 CI 同款 `-only-testing:KlineTrainerContractsTests`，喂闸门的日志**必须冷构建**（`mktemp -d` 的专属 `-derivedDataPath`；⛔ 绝不删全局 DerivedData —— 本仓实测有 28 个 worktree）。
 
