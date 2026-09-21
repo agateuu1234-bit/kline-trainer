@@ -133,10 +133,10 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 
 ## 四、已知残留
 
-> ### ⛔ 首要残留：**本 PR 未经 codex 评审，由 user override 收口**
+> ### ✅ 治理闸门已补上（2026-09-19）；合并当时是 override 收口
 >
-> CLAUDE.md 的治理条款要求所有 PR 过 `codex:adversarial-review`。本 PR **没有**。
-> 经过与代价如实记在这里：
+> CLAUDE.md 要求所有 PR 过 `codex:adversarial-review`。**合并时没有**（override），
+> **合并后补跑并取得了 approve**。经过如实记在这里：
 >
 > - **codex 通道**：code-R1..R4 四轮都给了 `needs-attention` 并被逐条修掉；
 >   第 5 轮（HEAD `1234386`）**撞到账号额度上限**（提示恢复时间 2026-09-19），
@@ -147,16 +147,29 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 >   rebase 到 main `d0d4643` 后 1499 —— 条数随仓库演进会变，**不是判据**），判定
 >   **可执行产物（工作流 / builder / verifier / 应用脚本 / fixtures / 守卫测试）零缺陷**；
 >   三轮共 7 条 Major **全部落在散文**（措辞缺前提、文档改坏、编号撞号）。
-> - **但这个通道写不了 attest 账本** ⇒ **不兑现 CLAUDE.md 那道闸门**。
+> - **但这个通道写不了 attest 账本** ⇒ 它**兑现不了** CLAUDE.md 那道闸门
+>   （闸门后来由 9/19 补跑的 codex approve 兑现，见下）。
 > - **收敛判断**：第 3 轮时本仓「该不该换做法」的三条指标**全中**
 >   （①归因率 0%→50%→**100%** ②Major 数 2→2→**3**，一轮都没降 ③三轮 7 条全落在两个家族）。
 >   评审员独立判「**该换做法，不要再开一轮**」。据此做了一次**结构性去重**
 >   （删 plan 里那个会照抄出事的代码块、立一条全文约定替代逐句补条件、残留编号去撞号）
 >   而不是再开 R4。
-> - **user 决策**：override 收口（2026-09-15）。⇒ 账本里有一条 override 记录，**没有 approve**。
+> - **user 决策**：override 收口（2026-09-15），据此合并 PR #191。
+> - **补跑（2026-09-19，额度恢复后）**：对交付态 `365e56c`（base `d0d4643`）跑
+>   `codex-attest.sh --scope branch-diff`，**verdict = `approve`**，账本已写入
+>   （`head_sha=365e56c8…`、`base_sha=d0d4643…`、reviewer `codex/v1.0.3`，
+>   **无 `override` 字段、无 `focus` 窄化**）。该 head 的内容树与落在 main 的
+>   squash 提交 `b0c5961` **逐字相同**，所以这条 approve 覆盖的正是 main 上的内容。
 >
-> **这条残留意味着什么**：代码侧的信心来自 Opus 通道三轮 + 本地 24 组变异 + 全部闸门，
-> 不来自 codex。若你希望补上那道门，9/19 之后可以对这条分支（或合并后的 main）补跑一轮。
+> ⚠️ **这条 approve 的覆盖面要打折，别当成「codex 验过全部」**：它自己的摘要写着
+> *Workflow guard tests could not run because PyYAML is unavailable* —— 它的沙箱用系统
+> `python3`，而 pyyaml 只在仓库 venv 里。所以它实际做的是**通读整个 diff + 跑 15 个
+> builder 测试**；**那 6 条守卫判据、1499 条后端套件、24 组变异，它一个都没跑**。
+> 那部分的证据来自别处，且都成立：本地 6 条判据全绿 + 24 组变异全中、
+> 真实 CI `1499 passed`、以及 **A8 在真 PR #192 上实证阻断**（见 §五）。
+>
+> ⇒ 治理记录成立；但若要让 codex 的 approve 名副其实，需要让它的沙箱能 import yaml
+> （给系统 `python3` 装 pyyaml）后重跑。**本次判断不值得**——那部分已有三重独立证据。
 
 - **F-A**：canonical 清单**无人守** —— `verify-required-checks.sh` 没有任何 workflow 在跑。
 - **F-B**：`branch-protection-config-self-check` 是**永不失败**的橡皮图章（只打印警告 + 无条件退出成功；且读旧版 API，实测本仓恒 404）。
@@ -166,3 +179,25 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 - **F-E（Opus R2 挖出，非本次引入）**：`integration_id` 漂移修复那条判据，**测试盖不住**。把 builder 的 `c["integration_id"] = …` 改成 `c.setdefault(…)`，`test_build_payload.py` 仍 0 failed —— 因为唯一的漂移样本 `ruleset-anysource.json` 里是**整个键缺失**，`setdefault` 恰好也能补上。换成 `integration_id: null` 或 `integration_id: 99999`（别的 app）两种真实漂移形状，好坏 builder 就分得开了。这条「防伪造同名 status」是该脚本的立身之本。**不阻断的理由**：`verify-required-checks.sh --mode assert` 独立拦得住（该档实测绿），且 live ruleset 6 条全是 15368、当前无漂移。**补法很便宜**：给 fixtures 加一条 `integration_id: 99999` 的样本。本次不做，是因为它不属本 PR 的改动面，而本 PR 已经三轮栽在「改动面写了三遍、每次漏改一两处」上。
 - **F-F（Opus R2 挖出，非本次引入）**：往 canonical 清单里混进一条**没有任何 job 会产出**的 context（例如打错字的 `backend pytest (ful suite)`），必需门里的 pin 测试**全绿**；唯一会红的是 `test_build_payload.py`，而它**没有任何 CI 在跑**（即 F-C）。应用之后其后果是**全仓 PR 死锁**。spec §3.2.1 的口径是诚实的（只声称「在这一个常量上补掉一角」），但这条风险值得单独记着。
 - **F-G（Opus R2 量化）**：本次把 `test_build_payload.py` 四个循环改成遍历 `REQUIRED_CONTEXTS` 之后，「清单被整体缩短」那两档变异的红数从 4 降到 2（循环跟着少转一圈，两条行为断言变空转）。**检出没有丢** —— `test_required_contexts_constant` / `test_list_contexts_cli` 两条列表相等断言仍然红，`run-all.sh` 照样 `SOME FAILED`；换来的是「builder 唯独漏掉新项」那一档从 **0 → 2**，而那才是本次真正要防的形状。spec §5.2 的 M3 行已按「红的是哪一条」订正。
+
+## 五、执行记录（2026-09-15 ~ 09-19，逐条带证据）
+
+| # | 结果 | 证据 |
+|---|---|---|
+| A1–A5 | ✅ | 干跑 diff 只新增 8 行、零删除零修改；`enforcement`/绕过名单/`pull_request` 规则逐字未变，`required_approving_review_count` 仍为 **0** |
+| A2b | ✅ `6 passed` | 守卫判据 3 → 6 条 |
+| **A0** | ✅ | 三个在途 PR 全含 #180。**#179 原本会被卡死**（它的检查列表里根本没有 `backend pytest (full suite)`，只有 7 项），`gh pr update-branch 179` 后变 8 项，且挂了 18 天的 `acceptance` 红**自己变绿**（纯属 base 太旧） |
+| A6 | ✅ | 必需检查 **6 → 8** 项，`verify-required-checks.sh --mode assert` 退出码 0 |
+| A7 | ✅ | #179 / #188 的检查列表里该项标 Required |
+| A7b | ✅ | `/tmp/apply-art/rollback-payload.json` 存在（1226 字节、7 条 context）。⛔ **该回滚路径仍未实跑演练** |
+| A7d / A7e | ✅ | 插 `defaults.run.shell: bash {0}` → 判据红且报「与被批准的结构不一致」；只改注释 → 仍全绿 |
+| A8pre | ✅ | run 块原样抽出跑：干净树两种 shell 均 exit 0；塞一个必红测试后两种 shell 均 exit 1 |
+| **A8** | ✅ **通过** | PR #192（2026-09-17，看完即关）：`gh pr checks --required` 列出 8 项且该项在内 → **唯独它 fail、其余 7 项 pass** → GitHub `mergeStateStatus=BLOCKED` → 归因 `test_a8_required_check_proof.py:6: AssertionError` / `1 failed, 1505 passed` / `FAIL: 1 个 failed —— CI 拒绝静默 skip，也拒绝红着报绿`（**正是本次加固那段运行块打的**） |
+
+⇒ **PR #180 记下的残留 F5「后端测试全红也不阻止合并」到此闭合。**
+
+⚠️ **应用当晚 ruleset 被写了两次**（23:13 与 23:15），非本脚本单次行为：
+23:13 那次只加了 `iOS app build-for-running on macos-15`，经复核是**另一个会话在尚未包含
+本 PR 的检出里跑了同一个应用脚本**（那一版 canonical 清单只有两项）。拿合并前那版 builder
+对当时快照复跑，结果逐字吻合。**无害** —— 该 builder 的循环只增不删，先后顺序不影响终态；
+但若将来改成「会删多余项」，旧检出跑一次就会删掉新加的必需检查。
