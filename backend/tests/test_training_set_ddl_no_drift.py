@@ -59,12 +59,20 @@ def test_normalisation_premise_no_string_literals():
     """
     frozen = FROZEN_DDL.read_text(encoding="utf-8")
     embedded = _embedded_ddl()
-    offenders = [(name, text.count("'")) for name, text in
+    # ⛔ **四种引号形态都要认**（整支最终评审「重要 2」）：上一版只认单引号 `'`，
+    #    而 SQLite 有 **4 种**带引号的词法形态 —— `'…'` / `"…"` / `` `…` `` / `[…]`。
+    #    实测四种各构造一对（只差「逗号/括号旁的空格」），**归一化后全部判等、而前提
+    #    检查全部放行** ⇒ 这条检查存在的全部意义是「前提一破立刻响」，它当时只覆盖 1/4。
+    #    ⭐ 本仓成文教训：「穷尽性必须按字面量枚举后逐条定性」。
+    _QUOTE_FORMS = ("'", '"', "`", "[")
+    offenders = [(name, [ch for ch in _QUOTE_FORMS if ch in text])
+                 for name, text in
                  (("冻结文件 training_set_schema_v1.sql", frozen),
                   ("生成器内嵌 _TRAINING_SET_DDL", embedded))
-                 if "'" in text]
+                 if any(ch in text for ch in _QUOTE_FORMS)]
     assert not offenders, (
-        "DDL 里出现了**字符串字面量**（单引号），而本守卫的归一化会抹掉紧贴 `( ) ,` 的空白、"
+        "DDL 里出现了**带引号的词法形态**（`\'…\'` / `\"…\"` / 反引号 / `[…]` 四种之一），"
+        "而本守卫的归一化会抹掉紧贴 `( ) ,` 的空白、"
         "**不区分是否在字面量内部** ⇒ 两个不同的默认值可能被判成相同（**假通过**）。\n"
         f"  出现处：{offenders}\n"
         "⛔ 修法：把 `_statements` 改成**先切出字符串字面量、比较时不动它们内部**，"

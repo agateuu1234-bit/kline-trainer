@@ -63,7 +63,13 @@ _EXPECTED_CELLS = (
 _HEAD = re.compile(r'INSERT\s+INTO\s+(?:"?[A-Za-z_][\w$]*"?\s*\.\s*)?"?training_sets"?\b', re.I)
 _NO_COLS = re.compile(r"\s*(VALUES|SELECT|DEFAULT|OVERRIDING)\b", re.I)
 _ALIAS = re.compile(r"\s*(?:AS\s+)?(?!VALUES\b|SELECT\b|DEFAULT\b|OVERRIDING\b)[A-Za-z_]\w*", re.I)
-# ⭐ 允许跨过 Python 相邻字符串字面量拼接的引号 / 反斜杠 / 加号 —— 生产语句正是这种写法
+# ⭐ 允许跨过**引号标识符表名的闭合引号**（`INSERT INTO "training_sets" (…)` —— `_HEAD`
+#    的 `\b` 会把匹配尾停在那个 `"` **之前**，不跨过去就找不到左括号），以及 Python
+#    相邻字面量拼接留下的缝隙。
+# ⚠️ 上一版这里写「生产语句正是这种写法」是**错的**（整支最终评审「次要 2」实测）：
+#    生产语句 `"INSERT INTO training_sets (stock_code, …"` 的左括号只是**紧跟一个空格**，
+#    拼接缝在列清单**内部**（由 `_column_names` 剥孤引号处理），根本不经过这个字符类。
+#    实测把本正则收窄成 `\s*\(` ⇒ 主判据**仍绿**，红的是差分测试里那条引号表名用例。
 _OPEN_PAREN = re.compile(r"[\s\"'\\+,)]*\(")
 _QUOTES = "\"'`"
 
@@ -245,7 +251,10 @@ def _classify(text: str, a: int, b: int):
     # 试不成 SQL，才看是不是被引号/反引号整体包住的**提及**
     before = text[a - 1] if a > 0 else ""
     after = text[b] if b < len(text) else ""
-    if before in _QUOTES and after in _QUOTES:
+    # ⛔ `before`/`after` 必须先判非空：Python 里 `"" in "\"'`"` 是 **True**
+    #    （空串是任意串的子串）⇒ 语句恰好顶在文件首/尾时那一侧恒判「是引号」，
+    #    本该报【认不出的形状】的会被**静默跳过**（整支最终评审「次要 3」）。
+    if before and after and before in _QUOTES and after in _QUOTES:
         return ("mention", None)
     return ("unknown", None)
 
@@ -259,10 +268,11 @@ def _scan(files, root):
        实测（Task 3 第二轮定向复评）：把下面 `missing.append(...)` 整行换成
        `pass`，再注入一条**真漏写**，主测试与差分测试**双双 `2 passed`**。
        ⇒ 那一类腐化在上一版里**没有任何东西钉着**，而文档却声称 M4f 管得了。
-       现在由 `test_scan_actually_reports_violations` 单独钉住。
+       现在由 `test_enforce_actually_raises_on_violations` 单独钉住。
     """
     missing, positional, unknown, checked = [], [], [], 0
     per_cell = {c: 0 for c in _EXPECTED_CELLS}
+    lost = []
 
     for q in files:
         try:
@@ -271,10 +281,23 @@ def _scan(files, root):
             # ⛔ 不把「读不了」混进「不是目标」：读不了必须**响**。
             raise AssertionError(f"作用域内的文件读不了，无法判定：{q} —— {e}") from e
 
+        rel = q.relative_to(root).as_posix()
+        # ⛔ **守恒等式，不是存在式**（整支最终评审「重要 1」）：
+        #    此前所有防掏空判据都是「**至少一条**」形状（`checked >= 2`、每个格子 >= 1、
+        #    `gen_seen >= 1`）—— 它们挡得住「整类文件退出视野」，**挡不住「同一个文件里
+        #    少看几条」**。实测：把下面那行循环改成 `for m in list(_HEAD.finditer(text))[:1]:`
+        #    （一处单点编辑），再往 `rehearse.sh` 第 2 条语句里真删掉 `schema_version` ⇒
+        #    守卫、合成自测、差分测试**三条全绿**（对照组：只注入真漏写 ⇒ 红）。
+        #    ⭐ 本仓成文教训：「『这几个各自存在』抓不到『多出来的第五个』⇒ 用集合等式」。
+        # ⚠️ `expected_hits` 必须是**独立的第二次扫描**（故意用 `findall`，⛔ 不复用下面的
+        #    `finditer` 结果）—— 两个来源互不依赖，一处编辑才改不掉两边。
+        expected_hits = len(_HEAD.findall(text))
+        bucketed = 0
+
         for m in _HEAD.finditer(text):
-            rel = q.relative_to(root).as_posix()
             where = f"{rel}:{text.count(chr(10), 0, m.start()) + 1}"
             kind, cols = _classify(text, m.start(), m.end())
+            bucketed += 1          # ⛔ 四类**都要**计数，含「提及」—— 否则等式对不上
             if kind == "mention":
                 continue
             if kind == "nocols":
@@ -291,7 +314,10 @@ def _scan(files, root):
                         break
                 if "schema_version" not in _column_names(cols):
                     missing.append(f"{where}  列清单={cols.strip()[:120]}")
-    return missing, positional, unknown, checked, per_cell
+
+        if bucketed != expected_hits:
+            lost.append(f"{rel}：表头命中 {expected_hits} 条，却只有 {bucketed} 条被判过")
+    return missing, positional, unknown, checked, per_cell, lost
 
 
 def _enforce(files, root):
@@ -318,9 +344,16 @@ def _enforce(files, root):
        这不碍事：合成自测本来就期待它**抛异常**，且该条对那次运行**确实成立**。
        ⭐ 反过来这还让合成自测**顺带钉住**了 `blind` 与 `checked` 这两条分支。
     """
-    missing, positional, unknown, checked, per_cell = _scan(files, root)
+    missing, positional, unknown, checked, per_cell, lost = _scan(files, root)
 
     problems = []
+    # ⛔ **守恒等式排在最前**（整支最终评审「重要 1」）：它报的是「**发现端**被掏空了」——
+    #    有命中却没被判过。这种时候后面那些判据的「全都合规」都是**没有意义的**。
+    if lost:
+        problems.append(
+            "【有命中却没被判过】表头匹配到了，却没落进任何一类 —— 说明**发现端**被掏空了"
+            "（例如扫描循环被截断）。⛔ 此时「全都合规」这个结论不成立：\n  "
+            + "\n  ".join(lost))
     # ⛔ 防空转：一条列清单都没解析到 ⇒ 作用域或解析坏了，而不是「全都合规」。
     if checked < 2:
         problems.append(
@@ -381,6 +414,11 @@ def test_enforce_actually_raises_on_violations(tmp_path):
         "bad.sql": "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2);\n",
         "good.sql": "INSERT INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3);\n",
         "nocols.sql": "INSERT INTO training_sets VALUES (1,2);\n",
+        # ⭐ **同一个文件里放两条**（整支最终评审「重要 1」）：此前所有合成用例都是
+        #    「一个文件一条」，于是「每个文件只看第 1 条命中」这种截断**对合成自测完全无感**。
+        #    第 1 条合规、第 2 条真漏写 ⇒ 截断一发生，第 2 条就消失，本测试立刻红。
+        "two.sql": ("INSERT INTO training_sets (stock_code, schema_version) VALUES (1,2);\n"
+                    "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2);\n"),
         "weird.sql": "INSERT INTO training_sets WITH c AS (SELECT 1) SELECT 1;\n",
     }
     files = []
@@ -410,6 +448,7 @@ def test_enforce_actually_raises_on_violations(tmp_path):
     _TITLES = ("【列清单里没有", "【不写列清单、按位置插入", "【认不出的形状",
                "【有一类文件一条语句都没解析到", "【解析不到列清单", "【生产语句脱离视野")
     for title, want in (("【列清单里没有", "bad.sql:1"),
+                        ("【列清单里没有", "two.sql:2"),
                         ("【不写列清单、按位置插入", "nocols.sql:1"),
                         ("【认不出的形状", "weird.sql:1")):
         assert title in msg, f"⛔ 报文里缺类别「{title}」—— 上报/组装/抛出这条链路被短路了：\n{msg}"
