@@ -21,7 +21,7 @@
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | B1 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend"' 'git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD' '../.venv/bin/python -m pytest tests/ -q -rs 2>&1 | tail -6' > /tmp/s4a_b1.sh` | 没有任何输出（安静就是成功） | 没报错 = 通过 |
-| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1594 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1594 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
+| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1596 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1596 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
 | B3 | 看 B2 输出**最上面**两行 | 第一行是 `qmt-4b-s4a`，第二行的编号与 A1 打印的一致 | 一致 = 通过；不一致说明跑的不是这棵树 = 不通过 |
 
 ## 第三节 · 三条核心行为各跑一条命令
