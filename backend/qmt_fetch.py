@@ -69,6 +69,26 @@ SMB 拷到一半断线 → `OSError(EIO)`；staging 写满 → `ENOSPC`……）
 `RollbackIncomplete`（终止条件族）** ⇒ 见到裸 `OSError` 就等于回滚做完了。
 **这条保证包含写标记这一步自己在发布之前炸掉的那一档**（fix round 6 · N1：
 此前它是个例外，而那正是评审 [medium] 的洞——`.part` 与预算双漏）。
+⚠️ **fix round 8 起它还包含「关描述符自己失败」那一档**（codex R5 的 [medium]）：
+`os.close` **也是收尾动作**，而此前本模块的 12 个关闭点全裸在 `finally:` 里，
+两种漏法各自可达 ——
+  · `copy_one` 关**源**描述符那一句还在失败收尾的 `except` **外面**：拷贝成功、
+    发布之后它抛 `OSError` ⇒ 本函数**永远不返回** ⇒ `copy_stock` 不会把这个文件
+    记进 `written` ⇒ 外层回滚删得掉 `.part` 却**退不回这一趟的字节**（评审隔离
+    故障注入实测：三个已扣字节留在账上）；
+  · 任何一处 `finally` 里的关闭失败都会**顶替掉**正在展开的那个异常 ⇒
+    `MaxBytesExhausted` / `PathEscapeError` / `StockCopyFailed` 变成裸 `OSError`，
+    而本模块自己的契约又允许调用方把裸 `OSError` 当候选失败处置 ⇒ **必须停机的
+    信号被降级成「这一只股不行」**（与 fix round 7 那条判据同一个形态的复发）。
+⇒ **本模块此后只有一个关闭判据**：`_close_or_note`（`with _CloseFd(fd):` 是它的
+外壳）。有异常在途 ⇒ 只挂 `add_note` 诊断、**在途异常的类型一个字不换**；没有
+异常在途 ⇒ 原样上抛，而那时它落在失败收尾里，退账与清理照常执行。
+全模块只剩**两处**裸 `os.close`：`_close_or_note` 自己那一句（**它就是判据本身**），
+以及 `_probe_part` 探完类型就关那一句（它排在 `try` 之外、`_open_part` 已经返回
+⇒ 执行到那里**不可能有异常在途**，顶替不了任何东西）。
+⚠️ 代价登记在契约 §3b T5：展开途中的关闭失败被挂成诊断之后，那个描述符可能
+没被回收。**S4b 读侧的一条**：这类失败**不进** `RollbackIncomplete.errors`
+（它不让盘面/账面对不上），只在 `__notes__` 上——见契约 §4 第 16 条。
 **标记发布之后逃出的裸 `OSError` 不在这条保证之内**，按下一段的**位置**判据
 处置（调用方在那一段接到任何异常都必须按整次运行终止，不必检查类型）。
 ⚠️ **“跳过这只股”还是“终止整次运行”由 S4b 定，本片不替它选**（交接）：
@@ -318,6 +338,71 @@ def _is_regular(st: os.stat_result) -> bool:
     return stat.S_ISREG(st.st_mode)
 
 
+def _close_or_note(fd: int, pending: BaseException | None) -> None:
+    """关一个描述符——**关闭失败绝不顶替在途的那个异常**（fix round 8 · 评审 [medium]）。
+
+    `pending` 是**此刻正在展开的那个异常**，由调用处**显式**交进来
+    （`_CloseFd.__exit__` 的第二个形参，或 `except ... as e` 里的那个 `e`）：
+
+      · `pending is None`（没有异常在途）⇒ 关闭失败**原样上抛**。它这时不是收尾
+        动作，而是这条路径自己的结果——写侧描述符关不上意味着数据可能根本没落盘，
+        咽掉它就是报一次假的成功。
+      · `pending is not None` ⇒ 只把失败挂成 `pending` 的一条 `add_note` 诊断，
+        `pending` 继续原样展开。**这正是本轮要消灭的那件事**：本模块的三族判据
+        （候选失败 / 终止条件 / 路径逃逸）全靠**异常类型**，一次 `os.close` 的
+        `EIO` 把 `MaxBytesExhausted` 或 `PathEscapeError` 换成裸 `OSError`，
+        就等于把「必须停机」降级成「这一只股不行」（§4 第 10 条允许调用方
+        这样处置裸 `OSError`）。
+
+    ⚠️ **为什么不用 `sys.exc_info()` 自动判断「有没有异常在途」**：那拿到的是
+    **整条调用栈**上正在被处理的异常，包括调用方（S4b）在自己的 `except` 块里调
+    `copy_stock` 这种情形 ⇒ 本模块的关闭行为会取决于「谁在什么上下文里调它」，
+    而不是本函数这一帧的事实。`__exit__` 的第二个形参就是这一帧的事实。
+
+    捕获宽度是 `Exception` 而不是 `BaseException`，与 `_rollback_all` 同规格：
+    `KeyboardInterrupt` / `SystemExit` 不是「这次关闭失败了」，不许被当成诊断咽掉。
+
+    ⚠️ **已登记的代价**：关闭失败被挂成诊断之后，那个描述符可能没被回收
+    （POSIX 对 `close()` 失败后描述符的归属不作保证）。本模块选它，是因为另一侧
+    的代价——顶替掉一个终止信号——是**评审实测过的阻断级后果**，而漏一个描述符
+    只在同一棵树反复报错时才累积得起来，且那时整次运行本来就该停。
+    """
+    try:
+        os.close(fd)
+    except Exception as e:
+        if pending is None:
+            raise
+        pending.add_note(f"关描述符失败（fd={fd}）——{type(e).__name__}: {e}")
+
+
+class _CloseFd:
+    """`with _CloseFd(fd):` —— 离开这段时关掉 `fd`，判据走 `_close_or_note`。
+
+    取代本模块此前那十处 `try: ... finally: os.close(fd)`（fix round 8）：
+    `finally` 里的关闭失败会**顶替掉**正在展开的那个异常，而本模块整套调用方契约
+    都挂在异常类型上。评审点名的是 `copy_one` 关源描述符那一处，但**按判据穷尽
+    本模块**之后同型的 `finally` 共十处 ⇒ 收成**一个**判据、一处实现，不留第二份
+    内联副本（「同一条判据只落在其中一处」是本模块自己反复申明的纪律）。
+
+    `fd=None` 表示「这一档没有描述符要关」。它只服务 `classify_target` 里
+    `open()` 本身失败（`NotARegularFileError`）那一格：那一格拿不到描述符，却必须
+    继续走同一条 `_is_regular(st)` 判据，不许在那里另抄一份「非普通 ⇒ untracked」。
+    """
+
+    __slots__ = ("_fd",)
+
+    def __init__(self, fd: int | None) -> None:
+        self._fd = fd
+
+    def __enter__(self) -> int | None:
+        return self._fd
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self._fd is not None:
+            _close_or_note(self._fd, exc)
+        return False
+
+
 def _open_source_leaf(src_fd: int, rel: str):
     """打开源侧叶子，交出 `(fd, st)`；D3 的类型判据由调用方对 `st` 自查 `S_ISREG`。
 
@@ -334,14 +419,13 @@ def _open_source_leaf(src_fd: int, rel: str):
         # 整段目录都不存在（比如这个 period 从没导出过），与「目录在、叶子不在」
         # 是同一件事对调用方而言——都是「这只股这次没有可用源文件」。
         raise StockCopyFailed("fetch_missing_file", f"{rel}: {e}") from e
-    try:
-        return open_regular_probe(pfd, leaf, flags=os.O_RDONLY)
-    except FileNotFoundError as e:
-        raise StockCopyFailed("fetch_missing_file", f"{rel}: {e}") from e
-    except NotARegularFileError as e:
-        raise StockCopyFailed("fetch_missing_file", f"{rel}: {e}") from e
-    finally:
-        os.close(pfd)
+    with _CloseFd(pfd):
+        try:
+            return open_regular_probe(pfd, leaf, flags=os.O_RDONLY)
+        except FileNotFoundError as e:
+            raise StockCopyFailed("fetch_missing_file", f"{rel}: {e}") from e
+        except NotARegularFileError as e:
+            raise StockCopyFailed("fetch_missing_file", f"{rel}: {e}") from e
 
 
 def _part_is_non_regular(stg_fd: int, name: str) -> bool:
@@ -361,12 +445,11 @@ def _part_is_non_regular(stg_fd: int, name: str) -> bool:
         pfd, leaf = parent_fd_under(stg_fd, name)
     except OSError:
         return False
-    try:
-        st = os.stat(leaf, dir_fd=pfd, follow_symlinks=False)
-    except OSError:
-        return False
-    finally:
-        os.close(pfd)
+    with _CloseFd(pfd):
+        try:
+            st = os.stat(leaf, dir_fd=pfd, follow_symlinks=False)
+        except OSError:
+            return False
     return not _is_regular(st)
 
 
@@ -429,8 +512,11 @@ def _open_part(stg_fd: int, name: str, *, flags: int, create_dirs: bool = False)
         cur = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, cur & ~os.O_NONBLOCK)
         return fd
-    except BaseException:
-        os.close(fd)
+    except BaseException as e:
+        # 在途的可能是上面那条 `S_ISREG` 抛出的 `StockCopyFailed
+        # ("untracked_target_file")`——一次**有明确定性**的候选失败；关闭失败把它
+        # 换成裸 `OSError`，这只股就丢掉了自己的 `reason`（fix round 8）。
+        _close_or_note(fd, e)
         raise
 
 
@@ -461,6 +547,10 @@ def _probe_part(stg_fd: int, rel: str) -> None:
         fd = _open_part(stg_fd, rel + PART, flags=os.O_RDONLY)
     except FileNotFoundError:
         return
+    # ⚠️ 这一句**故意**是裸 `os.close`，不走 `_CloseFd`（fix round 8 的穷尽定性）：
+    # 它排在 `try` 之外、`_open_part` 已经返回，执行到这里**不可能有异常在途**
+    # ⇒ 顶替不了任何东西；它自己失败就是这条路径自己的结果，原样上抛正确，
+    # 而那时它落在 `copy_one` 的失败收尾里，退账与清理照常。
     os.close(fd)
 
 
@@ -501,11 +591,9 @@ def _publish_part(stg_fd: int, rel: str, suffix: str) -> None:
     这是同一条时间线上严格更小的后果。
     """
     pfd, leaf = parent_fd_under(stg_fd, rel)
-    try:
+    with _CloseFd(pfd):
         os.replace(leaf + PART + suffix, leaf + PART,
                    src_dir_fd=pfd, dst_dir_fd=pfd)
-    finally:
-        os.close(pfd)
 
 
 def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResult:
@@ -537,10 +625,19 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
     `_rollback_all` / `_settle_rollback`）：删临时文件自己撞 `EIO`/`EACCES` 时，
     退账照做，原异常照旧是逃出去的那一个；而回滚只要有一项没做完，逃出去的就是
     `RollbackIncomplete`（终止条件族）而不是那个清理异常——一条清理故障绝不许
-    伪装成这只股的候选失败。本函数**不**删 `<rel>.part`（那是别人或
-    上一次运行的残留，归 Task 3 收尾的 `_cleanup_part`）、**不**处理「这只股
-    另一个文件怎么办」——那些是 Task 3 单股事务编排的范围，本函数只管它自己
-    这一个文件的记账闭合。
+    伪装成这只股的候选失败。本函数**不**处理「这只股另一个文件怎么办」
+    ——那是 Task 3 单股事务编排的范围，本函数只管它自己这一个文件的记账闭合。
+    ⚠️ **fix round 8 起，「本函数不删 `<rel>.part`」这句话收窄了一格**（此前写的
+    是无条件不删，理由是「那是别人或上一次运行的残留」）：**从准备发布那一刻起**
+    `<rel>.part` 这个名字底下可能已经是本函数自己刚发布的那一份，而本函数分辨
+    不了发布到底发生没有（见下面 `parts` 那一段）⇒ 这一档的失败要把它一起清掉，
+    否则就是「已发布的落地物漏清 + 这一趟的字节漏退」。删除仍然只经
+    `_cleanup_part` 那一个点，非普通对象照旧原样留着不碰。
+
+    ⚠️ **关源描述符也在事务边界之内**（fix round 8 · 评审 [medium]）：它失败时
+    若有异常在途，只挂诊断、**绝不换掉在途异常的类型**；若没有异常在途（拷贝
+    成功、已发布），它自己那个裸 `OSError` 走的是同一条失败收尾——退账 + 清掉
+    刚发布的 `.part`，于是「逃出来的那一刻盘上什么都没落」这条保证继续成立。
 
     ⚠️ **已登记的代价**：进程被 `SIGKILL` / 断电打断在「临时文件已创建、尚未
     发布」之间时，盘上会留下一个 `<rel>.part.<pid>.<随机>.tmp`，而崩溃恢复
@@ -553,22 +650,35 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
     返回：成功时 `CopyResult(n_bytes=本次真正写盘的字节数, sha256=源内容哈希)`。
     """
     sfd, st = _open_source_leaf(src_fd, rel)
+    charged = 0
+    parts: tuple[str, ...] = ()
     try:
-        if not _is_regular(st):
-            raise StockCopyFailed("fetch_missing_file", f"{rel}: 不是普通文件")
-        budget.precheck(st.st_size)
+        # ⚠️ **关源描述符在事务边界之内**（fix round 8 · 评审 [medium]）。此前
+        # 它裸在一个 `finally:` 里、在下面这个 `except` **外面**，于是两档都漏：
+        #   (a) 拷贝成功、发布之后它自己抛 `OSError` ⇒ 本函数**永远不返回**
+        #       ⇒ `copy_stock` 不会把这个文件记进 `written` ⇒ 外层回滚删得掉
+        #       `.part` 却**退不回这一趟的字节**（评审隔离故障注入实测：三个
+        #       已扣的字节留在账上）；
+        #   (b) `MaxBytesExhausted` 展开途中它抛 `OSError` ⇒ 那个**终止信号被
+        #       顶替成裸 `OSError`**，而 §4 第 10 条允许调用方把裸 `OSError` 当
+        #       候选失败处置 ⇒ 必须停机的信号被降级成「这一只股不行」。
+        # `_CloseFd` 把两档都收口：有异常在途只挂诊断（不换类型），没有异常在途
+        # 则原样上抛——而那时它落在下面这个 `except` 里，退账与清理照常执行。
+        with _CloseFd(sfd):
+            if not _is_regular(st):
+                raise StockCopyFailed("fetch_missing_file", f"{rel}: 不是普通文件")
+            budget.precheck(st.st_size)
 
-        charged = 0
-        suffix = _new_part_suffix()
-        tmp = rel + PART + suffix
-        try:
+            suffix = _new_part_suffix()
+            tmp = rel + PART + suffix
+            parts = (tmp,)
             _probe_part(stg_fd, rel)
             dfd = _open_part(
                 stg_fd, tmp,
                 flags=os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 create_dirs=True,
             )
-            try:
+            with _CloseFd(dfd):
                 hasher = hashlib.sha256()
                 while True:
                     chunk = os.read(sfd, _CHUNK)
@@ -579,35 +689,39 @@ def copy_one(src_fd: int, stg_fd: int, rel: str, budget: ByteBudget) -> CopyResu
                     _write_all(dfd, chunk)
                     hasher.update(chunk)
                 os.fsync(dfd)
-            finally:
-                os.close(dfd)
             digest = hasher.hexdigest()
 
             # 对落地的那份重算并与源哈希比对——不是恒等式：这里重新打开、
             # 重新从磁盘读回，不是复用上面流式算出的那个 hasher。
             rfd = _open_part(stg_fd, tmp, flags=os.O_RDONLY)
-            try:
+            with _CloseFd(rfd):
                 verify = hashlib.sha256()
                 while True:
                     chunk = os.read(rfd, _CHUNK)
                     if not chunk:
                         break
                     verify.update(chunk)
-            finally:
-                os.close(rfd)
             if verify.hexdigest() != digest:
                 raise StockCopyFailed("fetch_copy_hash_mismatch", rel)
+            # ⚠️ 从**下一句之前**起，回滚要清的名字多一个 `<rel>.part`：发布一旦
+            # 发生，本函数自己造出来的那份东西就叫这个名字，而「发布到底发生了
+            # 没有」本函数**分辨不了**——`_publish_part` 在 `os.replace` 成功之后
+            # 关目录描述符那一步同样可能失败，抛出来的只是一个裸 `OSError`。
+            # `_cleanup_part` 容忍不存在、且不碰非普通对象，故在「发布没发生」
+            # 那一档多列这个名字，至多是删掉一份**上一次运行崩在半路留下的陈旧
+            # `.part`**——而那正是 `copy_stock` 的主回滚在同一条失败路径上本来
+            # 就会做的事（登记在契约 §3b T4）。
+            parts = (tmp, rel + PART)
             _publish_part(stg_fd, rel, suffix)
-        except BaseException as exc:
-            # 只删自己那个临时文件（`<rel>.part` 原样留着）；共用 Task 3 收尾那
-            # 一个删除点，不在这里内联第二份「删之前先问类型」的判据。
-            # ⚠️ 删与退**各自独立执行、互不吃掉**（fix round 7 · 评审 [medium]）：
-            # 此前这里顺着写，删临时文件撞 `EIO` 会连退账一起跳过，还把原异常顶替掉。
-            _settle_rollback(exc, _rollback_all(
-                stg_fd, (tmp,), (charged,) if charged else (), budget))
-            raise
-    finally:
-        os.close(sfd)
+    except BaseException as exc:
+        # 只删**自己造出来**的那些名字（`<rel>.part` 仅在「发布可能已经发生」
+        # 之后才进这个名单，见上）；共用 Task 3 收尾那一个删除点，不在这里内联
+        # 第二份「删之前先问类型」的判据。
+        # ⚠️ 删与退**各自独立执行、互不吃掉**（fix round 7 · 评审 [medium]）：
+        # 此前这里顺着写，删临时文件撞 `EIO` 会连退账一起跳过，还把原异常顶替掉。
+        _settle_rollback(exc, _rollback_all(
+            stg_fd, parts, (charged,) if charged else (), budget))
+        raise
 
     return CopyResult(n_bytes=charged, sha256=digest)
 
@@ -701,17 +815,15 @@ def classify_target(stg_fd: int, rel: str, record) -> str:
         pfd, leaf = parent_fd_under(stg_fd, rel)
     except FileNotFoundError:
         return TARGET_COPY
-    try:
+    with _CloseFd(pfd):
         try:
             fd, st = open_regular_probe(pfd, leaf, flags=os.O_RDONLY)
         except FileNotFoundError:
             return TARGET_COPY
         except NotARegularFileError as e:
             fd, st = None, e.st
-    finally:
-        os.close(pfd)
 
-    try:
+    with _CloseFd(fd):
         if not _is_regular(st):
             return TARGET_UNTRACKED
         if record is None:
@@ -719,9 +831,6 @@ def classify_target(stg_fd: int, rel: str, record) -> str:
         if st.st_size != record["bytes"]:
             return TARGET_RECOPY
         return TARGET_SKIP if _hash_target(fd) == record["sha256"] else TARGET_RECOPY
-    finally:
-        if fd is not None:
-            os.close(fd)
 
 
 # ── Task 3：在途标记 + 单股事务编排（契约 D1、D4 第 2 条、D5、D6、D8）──
@@ -854,13 +963,11 @@ def _cleanup_part(stg_fd: int, name: str) -> None:
         pfd, leaf = parent_fd_under(stg_fd, name)
     except FileNotFoundError:
         return
-    try:
+    with _CloseFd(pfd):
         try:
             os.unlink(leaf, dir_fd=pfd)
         except FileNotFoundError:
             pass
-    finally:
-        os.close(pfd)
 
 
 def _rollback_all(stg_fd: int, part_names, refunds, budget: ByteBudget):
@@ -933,11 +1040,9 @@ def _replace_part_to_final(stg_fd: int, rel: str) -> None:
     与 `dst_dir_fd` 是同一个 `pfd`，只需一次 `fsync`。
     """
     pfd, leaf = parent_fd_under(stg_fd, rel)
-    try:
+    with _CloseFd(pfd):
         os.replace(leaf + PART, leaf, src_dir_fd=pfd, dst_dir_fd=pfd)
         fsync_dir(pfd)
-    finally:
-        os.close(pfd)
 
 
 def _write_inflight_marker(stg_fd: int, slot: Slot, rel_1m: str, rel_daily: str) -> None:

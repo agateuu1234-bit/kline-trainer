@@ -2400,3 +2400,366 @@ def test_copy_stock_marker_write_failure_still_reconciles_when_cleanup_fails(
         "退账被清理失败吃掉 ⇒ 调用方后面会撞一次**假的** `--max-bytes` 触顶")
     assert not (stg_path / INFLIGHT).exists(), "发布确实没发生"
     assert read_manifest(stg_fd) == manifest, "manifest 一个字段都不该动"
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 8 · codex R5 [medium]：**关描述符也是收尾动作**
+# ══════════════════════════════════════════════════════════════════
+#
+# 评审点名的是 `copy_one` 里关**源**描述符那一句（它此前裸在 `finally:` 里、
+# 在失败收尾的 `except` **外面**），但这是 fix round 7 那条判据的**复发**
+# ——「收尾动作抛的异常顶替在途原异常 / 吃掉后续收尾项」——所以本轮按判据穷尽
+# 本模块：12 个关闭点、10 个 `finally:` 块逐个定性，同型的一并收进
+# `_close_or_note` 这一个判据（`_CloseFd` 是它的 `with` 外壳）。
+#
+# 两条判别力都必须说准（注入的是 `OSError`，而被测代码整段工作就是处理
+# `OSError`，只断言「抛了个 OSError」改对改错输出一模一样）：
+#   · **有异常在途** ⇒ 关闭失败只挂 `add_note` 诊断，在途那个异常**类型一个字不换**
+#     ⇒ 断言逃出来的是 `MaxBytesExhausted` / `PathEscapeError` /
+#       `StockCopyFailed(reason=...)` 本身，且 `not isinstance(exc, OSError)`；
+#   · **没有异常在途** ⇒ 关闭失败**原样上抛**，并落进失败收尾
+#     ⇒ 断言退账做了（`budget.used` 回到 baseline）、已发布的 `.part` 清掉了。
+
+
+def _explode_close_on(monkeypatch, pick, err_code, note, on_fire=None):
+    """把 `os.close` 换成：命中 `pick(fd)` 的那一个**先真关掉、再抛**指定 errno，
+    其余原样放行；命中一次后自动解除武装（描述符号会被后面的 `open` 复用）。
+
+    **「先真关掉」是刻意的**：真实世界里 `close()` 报错（回写撞 `EIO`、`ENOSPC`）
+    之后描述符通常已经被回收；测试若不关，泄漏的 fd 会污染同进程后面的用例。
+    返回的列表按次序记下每一次命中——「注入到底有没有生效」这句**前提断言**全靠它，
+    没有它，下面那些「逃出来的是原异常」就可能是恒真的（压根没注入成功）。
+    """
+    seen: list[int] = []
+    real_close = os.close
+    armed = {"on": True}
+
+    def spy(fd):
+        if armed["on"] and pick(fd):
+            armed["on"] = False
+            seen.append(fd)
+            if on_fire is not None:
+                on_fire()
+            real_close(fd)
+            raise OSError(err_code, note)
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "close", spy)
+    return seen
+
+
+def _capture_source_fd(monkeypatch) -> dict:
+    """记下 `_open_source_leaf` 交出来的那个源描述符（`copy_one` 的 `sfd`）。"""
+    holder: dict = {}
+    real = qmt_fetch._open_source_leaf
+
+    def spy(src_fd, rel):
+        fd, st = real(src_fd, rel)
+        holder["sfd"] = fd
+        return fd, st
+
+    monkeypatch.setattr(qmt_fetch, "_open_source_leaf", spy)
+    return holder
+
+
+def _growing_source_read(monkeypatch, blocks: int, chunk: int):
+    """让 `os.read` 比 `stat` 量到的多读出几块——`budget.charge` 因此会在**拷到
+    一半**时抛 `MaxBytesExhausted`（与既有的
+    `test_copy_one_charge_enforces_independently_of_precheck` 同一个桩）。
+    """
+    monkeypatch.setattr(qmt_fetch, "_CHUNK", chunk)
+    real_read = os.read
+    n = {"i": 0}
+
+    def growing(fd, size):
+        n["i"] += 1
+        if n["i"] <= blocks:
+            return b"g" * chunk
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", growing)
+
+
+# ── 点名那一处 ①：拷贝成功、**发布之后**关源描述符失败 ────────────
+# 契约 §3b T4 钉死的收口是「退账 + 清掉自己刚发布的那份 `.part`」，不是
+# 「把落地物留下、把字节数交给调用方」。本测试钉的就是这个选择。
+
+def test_copy_one_refunds_and_cleans_its_part_when_closing_source_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"payload" * 20)
+
+    budget = ByteBudget(limit=None, used=17)
+    baseline = budget.used
+
+    holder = _capture_source_fd(monkeypatch)
+    at_blast: list[bool] = []
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == holder.get("sfd"),
+        errno.EIO, "打桩：关源描述符时撞 EIO",
+        on_fire=lambda: at_blast.append((stg_path / (rel + PART)).is_file()))
+
+    with pytest.raises(OSError) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    # 前提 ①：注入确实打在源描述符上，且恰好一次。
+    assert seen == [holder["sfd"]], f"前提不成立：注入没打在源描述符上，实测 {seen}"
+    # 前提 ②：炸的那一刻**发布已经发生**——否则测的不是评审点名的那一档。
+    assert at_blast == [True], (
+        f"前提不成立：关源描述符时 `{rel}{PART}` 还没在盘上，实测 {at_blast}")
+
+    exc = ei.value
+    # (a) 族籍：它是**裸 `OSError`**（§4 第 10 条：处置由 S4b 选），不是本模块
+    #     的三族之一——本轮不许顺手把它改成别的东西。
+    assert exc.errno == errno.EIO
+    assert not isinstance(exc, StockCopyFailed)
+    assert not isinstance(exc, RunTerminated)
+    # (b) 退账做了：改坏之后 `copy_one` 永远不返回 ⇒ `copy_stock` 不会把这个文件
+    #     记进 `written` ⇒ 这 140 字节永久占着 `--max-bytes`（残留 R1 的喂料口）。
+    assert budget.used == baseline, (
+        f"关源失败吃掉了退账：baseline={baseline}，实测 {budget.used}")
+    # (c) 自己刚发布的那份落地物清掉了——「逃出来的那一刻盘上什么都没落」。
+    assert not (stg_path / (rel + PART)).exists(), \
+        "已发布的 `.part` 漏清：调用方既拿不到字节数，盘上却留着东西"
+    assert [p.name for p in (stg_path / "1m").iterdir()] == [], \
+        "临时文件也不该留下"
+
+
+# ── 点名那一处 ②：`MaxBytesExhausted` 展开途中关源描述符失败 ──────
+
+def test_copy_one_keeps_max_bytes_exhausted_when_closing_source_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_growing.csv"
+    _put_source_file(src_path, rel, b"w" * 64)
+    _growing_source_read(monkeypatch, blocks=3, chunk=64)
+
+    budget = ByteBudget(limit=100)      # 64 过 precheck；累计到 128 时 charge 拒
+    holder = _capture_source_fd(monkeypatch)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == holder.get("sfd"),
+        errno.EIO, "打桩：关源描述符时撞 EIO")
+
+    with pytest.raises(RunTerminated) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert seen == [holder["sfd"]], f"前提不成立：注入没打在源描述符上，实测 {seen}"
+
+    exc = ei.value
+    assert isinstance(exc, MaxBytesExhausted), (
+        "关源描述符那次 EIO 顶替掉了 `MaxBytesExhausted` ⇒ 一条**必须停机**的信号"
+        "以裸 `OSError` 的样子到达 S4b，而 §4 第 10 条允许它把裸 `OSError` 当候选"
+        "失败处置 ⇒ 这只股被跳过、整次运行接着跑")
+    assert not isinstance(exc, OSError)
+    assert not isinstance(exc, StockCopyFailed)
+    assert any("关描述符失败" in n for n in getattr(exc, "__notes__", [])), \
+        "关闭失败必须留下诊断，不许静默咽掉"
+    assert budget.used == 0, "已扣的那一块仍要退还"
+    assert not (stg_path / (rel + PART)).exists()
+
+
+# ── 同一判据，`copy_one` 里的**写侧**描述符（`dfd`）───────────────
+# 它比源描述符更容易在真实环境里关失败（关的时候才回写，SMB/NFS 上撞 EIO/ENOSPC）。
+
+def test_copy_one_keeps_max_bytes_exhausted_when_closing_dest_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_growing.csv"
+    _put_source_file(src_path, rel, b"w" * 64)
+    _growing_source_read(monkeypatch, blocks=3, chunk=64)
+
+    dest: dict = {}
+    real_open_part = qmt_fetch._open_part
+
+    def spy_open_part(stg, name, *, flags, create_dirs=False):
+        fd = real_open_part(stg, name, flags=flags, create_dirs=create_dirs)
+        if flags & os.O_CREAT:
+            dest["dfd"] = fd
+        return fd
+
+    monkeypatch.setattr(qmt_fetch, "_open_part", spy_open_part)
+    budget = ByteBudget(limit=100)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == dest.get("dfd"),
+        errno.EIO, "打桩：关写侧描述符时回写撞 EIO")
+
+    with pytest.raises(RunTerminated) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert seen == [dest["dfd"]], f"前提不成立：注入没打在写侧描述符上，实测 {seen}"
+    exc = ei.value
+    assert isinstance(exc, MaxBytesExhausted), \
+        "关写侧描述符那次 EIO 顶替掉了 `MaxBytesExhausted`（同上，停机信号被降级）"
+    assert not isinstance(exc, OSError)
+    assert budget.used == 0
+    assert not (stg_path / (rel + PART)).exists()
+
+
+# ── 同一判据：`_publish_part` 在 `os.replace` **成功之后**关目录描述符失败 ──
+# 这一档是「漏记账 / 漏清理」那一格：发布已经发生，而 `copy_one` 只收到一个裸
+# `OSError`，分辨不了发布到底发生没有 ⇒ 回滚名单必须从**准备发布那一刻起**
+# 就把 `<rel>.part` 算进去（契约 §3b T4）。
+
+def test_copy_one_cleans_up_when_publish_succeeds_but_its_close_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"payload" * 20)
+
+    budget = ByteBudget(limit=None, used=17)
+    baseline = budget.used
+
+    real_replace = os.replace
+    real_close = os.close
+    armed = {"on": False}
+    at_blast: list[bool] = []
+
+    def spy_replace(a, b, *args, **kwargs):
+        out = real_replace(a, b, *args, **kwargs)
+        armed["on"] = True      # 发布已经发生：紧跟的那次关闭就是 `_publish_part` 的
+        return out
+
+    def spy_close(fd):
+        if armed["on"]:
+            armed["on"] = False
+            at_blast.append((stg_path / (rel + PART)).is_file())
+            real_close(fd)
+            raise OSError(errno.EIO, "打桩：发布成功之后关目录描述符撞 EIO")
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    monkeypatch.setattr(os, "close", spy_close)
+
+    with pytest.raises(OSError) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert at_blast == [True], (
+        f"前提不成立：注入没打在「发布已经发生」之后，实测 {at_blast}")
+    exc = ei.value
+    assert exc.errno == errno.EIO
+    assert not isinstance(exc, StockCopyFailed)
+    assert not isinstance(exc, RunTerminated)
+    assert budget.used == baseline, "发布已发生而调用方拿不到字节数 ⇒ 必须退账"
+    assert not (stg_path / (rel + PART)).exists(), \
+        "已发布的 `.part` 漏清：`copy_one` 分辨不了发布发生没有，就必须两个名字都清"
+
+
+# ── 同一判据：`_open_source_leaf` 关父目录描述符 —— 顶替 `PathEscapeError` ──
+# 这是最严重的一格：一次**信任边界被破坏**（整次致命、不属于任何一族）被换成
+# 裸 `OSError`，而裸 `OSError` 的处置 §4 第 10 条允许 S4b 当候选失败跳过。
+
+def test_open_source_leaf_keeps_path_escape_when_closing_parent_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"payload" * 20)
+
+    parents: dict = {}
+    real_parent_fd_under = qmt_fetch.parent_fd_under
+
+    def spy_parent(root_fd, relpath, **kwargs):
+        pfd, leaf = real_parent_fd_under(root_fd, relpath, **kwargs)
+        parents["pfd"] = pfd
+        return pfd, leaf
+
+    monkeypatch.setattr(qmt_fetch, "parent_fd_under", spy_parent)
+
+    boom = PathEscapeError(relative_path=rel, component="1m",
+                            errno=errno.ELOOP)
+
+    def escaping_probe(pfd, leaf, *, flags):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "open_regular_probe", escaping_probe)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == parents.get("pfd"),
+        errno.EIO, "打桩：关源侧父目录描述符撞 EIO")
+
+    with pytest.raises(PathEscapeError) as ei:
+        copy_one(src_fd, stg_fd, rel, ByteBudget(limit=None))
+
+    assert seen == [parents["pfd"]], f"前提不成立：注入没生效，实测 {seen}"
+    assert ei.value is boom, (
+        "关父目录那次 EIO 顶替掉了 `PathEscapeError` ⇒ 一次信任边界破坏会以裸 "
+        "`OSError` 的样子到达 S4b，被当成「这只股不行」跳过")
+    assert not isinstance(ei.value, OSError)
+
+
+# ── 同一判据：`classify_target` 关父目录描述符 —— 顶替 `PathEscapeError` ──
+# `classify_target` 的 docstring 明写「符号链接**绝不会**被归进 `TARGET_UNTRACKED`，
+# 一次符号链接就是一次信任边界破坏，必须整次运行终止」。
+
+def test_classify_target_keeps_path_escape_when_closing_parent_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    (stg_path / "1m").mkdir()
+
+    parents: dict = {}
+    real_parent_fd_under = qmt_fetch.parent_fd_under
+
+    def spy_parent(root_fd, relpath, **kwargs):
+        pfd, leaf = real_parent_fd_under(root_fd, relpath, **kwargs)
+        parents["pfd"] = pfd
+        return pfd, leaf
+
+    monkeypatch.setattr(qmt_fetch, "parent_fd_under", spy_parent)
+
+    boom = PathEscapeError(relative_path=rel, component="1m",
+                            errno=errno.ELOOP)
+
+    def escaping_probe(pfd, leaf, *, flags):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "open_regular_probe", escaping_probe)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == parents.get("pfd"),
+        errno.EIO, "打桩：关 staging 父目录描述符撞 EIO")
+
+    with pytest.raises(PathEscapeError) as ei:
+        classify_target(stg_fd, rel, None)
+
+    assert seen == [parents["pfd"]], f"前提不成立：注入没生效，实测 {seen}"
+    assert ei.value is boom, (
+        "关父目录那次 EIO 顶替掉了 `PathEscapeError` ⇒ 一次信任边界破坏被降级")
+    assert not isinstance(ei.value, OSError)
+
+
+# ── 同一判据：`_open_part` 的失败关闭 —— 顶替 `untracked_target_file` ────
+# 这一格丢的不是族籍而是**定性**：本该记进 `failures[].reason` 的
+# `untracked_target_file` 变成一个无定性的裸 `OSError`。
+
+def test_open_part_keeps_untracked_reason_when_its_close_fails(
+        roots, monkeypatch):
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    _put_source_file(src_path, rel, b"payload" * 20)
+    part = stg_path / (rel + PART)
+    part.mkdir(parents=True)        # 目录：`O_RDONLY` 打开**成功**、`S_ISREG` 为假
+
+    opened: dict = {}
+    real_open_under = qmt_fetch.open_under
+
+    def spy_open_under(root_fd, relpath, *, flags, mode=0o600, create_dirs=False):
+        fd = real_open_under(root_fd, relpath, flags=flags, mode=mode,
+                             create_dirs=create_dirs)
+        opened["fd"] = fd
+        return fd
+
+    monkeypatch.setattr(qmt_fetch, "open_under", spy_open_under)
+    seen = _explode_close_on(
+        monkeypatch, lambda fd: fd == opened.get("fd"),
+        errno.EIO, "打桩：关那个目录描述符撞 EIO")
+
+    budget = ByteBudget(limit=None, used=7)
+    with pytest.raises(StockCopyFailed) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert seen == [opened["fd"]], f"前提不成立：注入没生效，实测 {seen}"
+    assert ei.value.reason == "untracked_target_file", (
+        "关闭失败顶替掉了那条候选失败 ⇒ 这只股丢掉了自己的 `reason`，"
+        "落不进 4c 报告 schema 的任何一个桶")
+    assert not isinstance(ei.value, OSError)
+    assert budget.used == 7
+    assert part.is_dir(), "来路不明的对象要原样留着"
