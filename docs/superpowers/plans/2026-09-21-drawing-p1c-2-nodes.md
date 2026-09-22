@@ -186,7 +186,7 @@ git commit -m "P1c-2 Task1：DrawingTool 加 isVisible（D131 的结构前提，
 - Consumes: `DrawingTool.isVisible`（Task 1）—— 以 `isVisible: Bool` 参数形式传入，**本类型自己不认识任何具体工具**。
 - Produces:
   - `DrawingNodeGeometry.NodeMark`（`.real(index:at:)` / `.proxy(index:at:pointingLeft:)`，`Equatable`）
-  - `DrawingNodeGeometry.marks(for:mapper:isVisible:) -> [NodeMark]`
+  - `DrawingNodeGeometry.marks(for:mapper:isVisible:maxAnchors:) -> [NodeMark]`
   - `DrawingNodeGeometry.toolsWithNodes: Set<DrawingToolType>`
   - `DrawingNodeGeometry.visualDiameter: CGFloat`（7）、`hitRadius: CGFloat`（11）
   - Task 3 用命中、Task 4 用绘制、Task 5 用接线。
@@ -229,7 +229,10 @@ struct DrawingNodeGeometryTests {
                 "P1c 第 2 片表里只应有水平线一行（D122）")
     }
 
-    @Test("T1：三态互斥且穷尽 —— 任给输入恰好命中一种，且三种都出现过")
+    /// ⚠️ D132 后语义上是**四态**；对**单锚**工具，「线不可见」与「该锚点自身画不出」
+    /// 两态都表现为空数组，故这里可观察到的仍是三种。第四态（锚点自身画不出）
+    /// 由 `malformedAnchorsProduceNoPhantomNodes` 的 ③④ 档单独覆盖。
+    @Test("T1：结果互斥且穷尽 —— 任给输入恰好命中一种，且每种都出现过")
     func threeOutcomesAreMutuallyExclusiveAndExhaustive() {
         let m = Self.mapper()
         var seenNone = false, seenReal = false, seenProxy = false
@@ -239,7 +242,7 @@ struct DrawingNodeGeometryTests {
             for price in [15.0, 25.0] {           // 15 在区间内、25 在区间外（线不可见）
                 for vis in [true, false] {
                     let marks = DrawingNodeGeometry.marks(for: Self.line(idx: idx, price: price),
-                                                          mapper: m, isVisible: vis)
+                                                          mapper: m, isVisible: vis, maxAnchors: 1)
                     let isNone  = marks.isEmpty
                     var isReal = false, isProxy = false
                     if marks.count == 1 {
@@ -263,7 +266,7 @@ struct DrawingNodeGeometryTests {
     func realNodeEqualsAnchorProjection() {
         let m = Self.mapper()
         let d = Self.line(idx: 5)
-        let marks = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true)
+        let marks = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1)
         #expect(marks.count == d.anchors.count, "节点个数必须等于锚点个数（否则下面逐个比较恒真）")
         guard case let .real(i, p) = marks[0] else {
             Issue.record("屏内锚点必须产生真节点，实得 \(marks[0])"); return
@@ -277,14 +280,14 @@ struct DrawingNodeGeometryTests {
     func offscreenAnchorNeverBecomesRealNode() {
         let m = Self.mapper()
         for idx in [-50, -1, 81, 500] {     // x = -500, -10, 810, 5000，全在 [0,800] 之外
-            let marks = DrawingNodeGeometry.marks(for: Self.line(idx: idx), mapper: m, isVisible: true)
+            let marks = DrawingNodeGeometry.marks(for: Self.line(idx: idx), mapper: m, isVisible: true, maxAnchors: 1)
             #expect(marks.count == 1, "线可见时必须产生恰好一个记号：idx=\(idx)")
             if case .real = marks[0] {
                 Issue.record("idx=\(idx)：出屏锚点被画成了真节点 —— 真节点被挪到了不属于它的 K 线上（D123 硬约束破坏）")
             }
         }
         // 正向对照：屏内锚点确实产生真节点 ⇒ 证明上面不是因为恒不产生 .real 而绿
-        let inside = DrawingNodeGeometry.marks(for: Self.line(idx: 5), mapper: m, isVisible: true)
+        let inside = DrawingNodeGeometry.marks(for: Self.line(idx: 5), mapper: m, isVisible: true, maxAnchors: 1)
         if case .real = inside[0] {} else { Issue.record("正向对照失败：屏内锚点必须是真节点") }
     }
 
@@ -294,13 +297,13 @@ struct DrawingNodeGeometryTests {
         let frame = m.viewport.mainChartFrame
         // 左外
         guard case let .proxy(li, lp, lLeft) = DrawingNodeGeometry.marks(
-            for: Self.line(idx: -50), mapper: m, isVisible: true)[0] else {
+            for: Self.line(idx: -50), mapper: m, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("左外锚点必须产生代理标记"); return
         }
         #expect(li == 0); #expect(lp.x == frame.minX, "左外必须贴左边框"); #expect(lLeft == true, "左外必须朝左")
         // 右外
         guard case let .proxy(ri, rp, rLeft) = DrawingNodeGeometry.marks(
-            for: Self.line(idx: 500), mapper: m, isVisible: true)[0] else {
+            for: Self.line(idx: 500), mapper: m, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("右外锚点必须产生代理标记"); return
         }
         #expect(ri == 0); #expect(rp.x == frame.maxX, "右外必须贴右边框"); #expect(rLeft == false, "右外必须朝右")
@@ -312,11 +315,11 @@ struct DrawingNodeGeometryTests {
     func invisibleLineDrawsNothing() {
         let m = Self.mapper()
         for idx in [5, -50, 500] {
-            #expect(DrawingNodeGeometry.marks(for: Self.line(idx: idx), mapper: m, isVisible: false).isEmpty,
+            #expect(DrawingNodeGeometry.marks(for: Self.line(idx: idx), mapper: m, isVisible: false, maxAnchors: 1).isEmpty,
                     "不可见时必须一个记号都不产生：idx=\(idx)")
         }
         // 正向对照：同样的输入在可见时产生记号 ⇒ 证明不是因为函数恒返空而绿
-        #expect(!DrawingNodeGeometry.marks(for: Self.line(idx: 5), mapper: m, isVisible: true).isEmpty)
+        #expect(!DrawingNodeGeometry.marks(for: Self.line(idx: 5), mapper: m, isVisible: true, maxAnchors: 1).isEmpty)
     }
 
     @Test("登记表之外的工具不产生任何节点（本片只登记水平线）")
@@ -325,7 +328,7 @@ struct DrawingNodeGeometryTests {
         let trend = DrawingObject(toolType: .trend,
                                   anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
                                   isExtended: false, panelPosition: 0)
-        #expect(DrawingNodeGeometry.marks(for: trend, mapper: m, isVisible: true).isEmpty,
+        #expect(DrawingNodeGeometry.marks(for: trend, mapper: m, isVisible: true, maxAnchors: 1).isEmpty,
                 ".trend 未登记，不得产生节点")
     }
 
@@ -334,8 +337,8 @@ struct DrawingNodeGeometryTests {
         let d = Self.line(idx: 20)
         // ① 平移：startIndex 0 → 10，锚点 x 必须真的左移 100pt
         let m0 = Self.mapper(startIndex: 0), m1 = Self.mapper(startIndex: 10)
-        guard case let .real(_, p0) = DrawingNodeGeometry.marks(for: d, mapper: m0, isVisible: true)[0],
-              case let .real(_, p1) = DrawingNodeGeometry.marks(for: d, mapper: m1, isVisible: true)[0] else {
+        guard case let .real(_, p0) = DrawingNodeGeometry.marks(for: d, mapper: m0, isVisible: true, maxAnchors: 1)[0],
+              case let .real(_, p1) = DrawingNodeGeometry.marks(for: d, mapper: m1, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("两档都必须是真节点"); return
         }
         #expect(p0.x != p1.x, "⭐ 平移后节点 x 必须真的变了，否则下面的等式可能因为节点被写死而恒真")
@@ -348,7 +351,7 @@ struct DrawingNodeGeometryTests {
             geometry: ChartGeometry(candleStep: 5, candleWidth: 3, gap: 2),
             priceRange: PriceRange(min: 10, max: 20),
             mainChartFrame: CGRect(x: 0, y: 0, width: 800, height: 360)), displayScale: 2.0)
-        guard case let .real(_, pz) = DrawingNodeGeometry.marks(for: d, mapper: mZoom, isVisible: true)[0] else {
+        guard case let .real(_, pz) = DrawingNodeGeometry.marks(for: d, mapper: mZoom, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("缩放档必须是真节点"); return
         }
         #expect(pz.x == mZoom.indexToX(20) && pz.x != p0.x, "缩放后节点 x 必须跟着新的 candleStep 走")
@@ -364,12 +367,12 @@ struct DrawingNodeGeometryTests {
         #expect(tool.isVisible(drawing: rayOut, mapper: m) == false,
                 "前提：.ray 锚点超右缘时 lineXRange 返 nil ⇒ 线不可见")
         #expect(DrawingNodeGeometry.marks(for: rayOut, mapper: m,
-                                          isVisible: tool.isVisible(drawing: rayOut, mapper: m)).isEmpty,
+                                          isVisible: tool.isVisible(drawing: rayOut, mapper: m), maxAnchors: 1).isEmpty,
                 "线都不画了，节点与代理标记也一个都不许有")
         // 正向对照：同一条 .ray 锚点在框内 ⇒ 线可见且有真节点 ⇒ 证明上面不是恒空
         let rayIn = Self.line(idx: 5, sub: .ray)
         #expect(tool.isVisible(drawing: rayIn, mapper: m) == true)
-        guard case .real = DrawingNodeGeometry.marks(for: rayIn, mapper: m, isVisible: true)[0] else {
+        guard case .real = DrawingNodeGeometry.marks(for: rayIn, mapper: m, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("正向对照：框内 .ray 必须有真节点"); return
         }
     }
@@ -382,7 +385,7 @@ struct DrawingNodeGeometryTests {
             let d = DrawingObject(toolType: .horizontal,
                                   anchors: [DrawingAnchor(period: .m3, candleIndex: idx, price: 15)],
                                   isExtended: false, panelPosition: 0)
-            let marks = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true)   // ⛔ 不得 trap
+            let marks = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1)   // ⛔ 不得 trap
             #expect(marks.count == 1, "极端 candleIndex 仍须产出恰好一个记号：idx=\(idx)")
             guard case let .proxy(_, _, left) = marks[0] else {
                 Issue.record("idx=\(idx)：极端锚点必须按「极远处」产出代理标记，实得 \(marks[0])"); return
@@ -390,10 +393,64 @@ struct DrawingNodeGeometryTests {
             #expect(left == expectLeft, "Int.min 应朝左、Int.max 应朝右：idx=\(idx) 实得 pointingLeft=\(left)")
         }
         // ⭐ 正向对照：普通 candleIndex 仍产出真节点 ⇒ 证明不是靠「一律返回代理标记」蒙混
-        let normal = DrawingNodeGeometry.marks(for: Self.line(idx: 15), mapper: m, isVisible: true)
+        let normal = DrawingNodeGeometry.marks(for: Self.line(idx: 15), mapper: m, isVisible: true, maxAnchors: 1)
         guard case .real = normal[0] else {
             Issue.record("正向对照：普通锚点必须仍是真节点"); return
         }
+    }
+
+    @Test("⭐T12：畸形持久化数据不得产出幽灵节点（锚点数 / price 有限性，D132）")
+    func malformedAnchorsProduceNoPhantomNodes() {
+        let m = Self.mapper()
+        /// 造一条**畸形**水平线：解码层对 anchors 数组长度零校验，故两个锚点是可从磁盘进来的。
+        func twoAnchorLine(secondPrice: Double) -> DrawingObject {
+            DrawingObject(toolType: .horizontal,
+                          anchors: [DrawingAnchor(period: .m3, candleIndex: 5,  price: 15),
+                                    DrawingAnchor(period: .m3, candleIndex: 40, price: secondPrice)],
+                          isExtended: false, panelPosition: 0)
+        }
+        // ① 第二锚价位【在图内】(12，区间 10...20) —— 若不截断，它会在一个不相干的价位上冒出第二个节点
+        let inChart = twoAnchorLine(secondPrice: 12)
+        let m1 = DrawingNodeGeometry.marks(for: inChart, mapper: m, isVisible: true, maxAnchors: 1)
+        #expect(m1.count == 1, "水平线只消费 anchors.first ⇒ 必须只产生 1 个记号，实得 \(m1.count)")
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(40), y: m.priceToY(12)),
+                                                drawing: inChart, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == nil,
+                "第二锚处必须【点不中】—— 它根本不该存在")
+        // ② 第二锚价位【在图外】(999) —— 渲染会被裁掉，若命中侧仍认它就直接违反 D131
+        let offChart = twoAnchorLine(secondPrice: 999)
+        let m2 = DrawingNodeGeometry.marks(for: offChart, mapper: m, isVisible: true, maxAnchors: 1)
+        #expect(m2.count == 1, "实得 \(m2.count)")
+        if case let .real(i, _) = m2[0] { #expect(i == 0, "留下的必须是第 0 个锚点") }
+        // ③ price 为 NaN / ±Inf —— 解码零校验，可从磁盘进来
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let d = DrawingObject(toolType: .horizontal,
+                                  anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: bad)],
+                                  isExtended: false, panelPosition: 0)
+            #expect(DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1).isEmpty,
+                    "price=\(bad) 的锚点画不出来 ⇒ 不得产生任何记号")
+            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: 180),
+                                                    drawing: d, mapper: m,
+                                                    isVisible: true, maxAnchors: 1) == nil,
+                    "price=\(bad) 的锚点也必须点不中")
+        }
+        // ④ 锚点 y 在图外（price 25 超出 10...20）→ 不产生记号
+        let offY = DrawingObject(toolType: .horizontal,
+                                 anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 25)],
+                                 isExtended: false, panelPosition: 0)
+        #expect(DrawingNodeGeometry.marks(for: offY, mapper: m, isVisible: true, maxAnchors: 1).isEmpty)
+        // ⭐ 正向对照（⛔ 不可省）：把畸形部分换成正常值，记号数与命中结果【随之改变】
+        //    没有这一条，上面所有「== 1」「isEmpty」都可能只是函数恒返固定结果
+        let healthy = Self.line(idx: 5)
+        let mh = DrawingNodeGeometry.marks(for: healthy, mapper: m, isVisible: true, maxAnchors: 1)
+        #expect(mh.count == 1)
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
+                                                drawing: healthy, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == 0,
+                "正常线必须点得中 ⇒ 证明上面那些 nil 不是因为函数恒返 nil")
+        // ⑤ maxAnchors 真的在起作用：同一条畸形线放开到 2 ⇒ 记号数变成 2
+        #expect(DrawingNodeGeometry.marks(for: inChart, mapper: m, isVisible: true, maxAnchors: 2).count == 2,
+                "⭐ 证明截断是 maxAnchors 在管，而不是函数恒返 1 个")
     }
 }
 ```
@@ -447,13 +504,25 @@ public enum DrawingNodeGeometry {
 
     /// 三选一决策（§3.3 那张表）。⛔ **真节点的 x 绝不 clamp** —— 恒等于 `indexToX(candleIndex)`。
     /// 「锚点绑定的 K 线永不改变」是持久化不变量；把节点画在不属于它的 K 线上会让拖动语义失真（D123）。
+    /// `maxAnchors`：该工具**真正消费**的锚点数上界，调用方从 `DrawingTool.requiredAnchors.upperBound` 取。
+    /// ⛔ 本函数仍**不认识任何具体工具** —— 它只收一个数字，与 `isVisible: Bool` 同构（D132 第 1 条）。
     public static func marks(for drawing: DrawingObject, mapper: CoordinateMapper,
-                             isVisible: Bool) -> [NodeMark] {
+                             isVisible: Bool, maxAnchors: Int) -> [NodeMark] {
         guard isVisible, toolsWithNodes.contains(drawing.toolType) else { return [] }
         let frame = mapper.viewport.mainChartFrame
         let startIndex = mapper.viewport.startIndex
-        return drawing.anchors.enumerated().map { (i, anchor) -> NodeMark in
+        // D132 第 1 条：只投影该工具**真正消费**的那几个锚点。`anchors` 数组长度解码时零校验
+        // （`RecordRepositoryImpl` 的 `LossyAnchor`），而 `HorizontalLineTool` 的渲染与可见性
+        // 三处全部只用 `anchors.first`（`:19` / `:51` / `:74`）⇒ 不截断就会在多出来的锚点上长出
+        // 「渲染画不出、命中却认」的幽灵节点，直接违反 D131。
+        return drawing.anchors.prefix(max(0, maxAnchors)).enumerated().compactMap { (i, anchor) -> NodeMark? in
+            // D132 第 2 条：锚点自身画不出来就不产生任何记号。
+            // ⚠️ `price` 的有限性解码时零校验 —— 仓内 K 线（`DefaultTrainingSetReader.swift:97-100`）
+            //    与设置项（`SettingsDAOImpl.swift:38`）都查 isFinite，唯独画线锚点不查。
+            // ⚠️ NaN 的任何比较都是 false，下面的范围 guard 本已挡得住；isFinite 仍**显式写出**，
+            //    ⛔ 不得依赖那个隐式性质（D132 的可读性要求）。
             let y = mapper.priceToY(anchor.price)
+            guard y.isFinite, y >= frame.minY, y <= frame.maxY else { return nil }
             // ⛔⛔ 溢出保护（evaluation R3-high）：`indexToX` 内部是 `index - viewport.startIndex` 的
             // **Int 减法**（`Geometry.swift:139`），Swift 对 Int 溢出是 **trap（崩溃）**。
             // 而 `candleIndex` 从磁盘解码时**零范围校验**（`RecordRepositoryImpl.swift:227-230`）⇒
@@ -468,6 +537,7 @@ public enum DrawingNodeGeometry {
                               pointingLeft: left)
             }
             let x = mapper.indexToX(anchor.candleIndex)      // ⛔ 不 clamp（T4 钉死）
+            guard x.isFinite else { return nil }            // 视口自身若带非有限值，同样不产生记号
             if x < frame.minX { return .proxy(index: i, at: CGPoint(x: frame.minX, y: y), pointingLeft: true) }
             if x > frame.maxX { return .proxy(index: i, at: CGPoint(x: frame.maxX, y: y), pointingLeft: false) }
             return .real(index: i, at: CGPoint(x: x, y: y))
@@ -482,7 +552,7 @@ public enum DrawingNodeGeometry {
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -12
 ```
 
-Expected: 10 个测试全 PASS
+Expected: 11 个测试全 PASS
 
 - [ ] **Step 5: 变异验证 —— 证明 T4 真的守得住**
 
@@ -508,6 +578,20 @@ cd ios/Contracts && swift test --filter extremeCandleIndexDoesNotTrap 2>&1 | tai
 Expected: **`extremeCandleIndexDoesNotTrap` 崩溃 / 变红**（Swift 的 Int 溢出是 trap，表现为该用例 crash 而非普通失败）。
 
 ```bash
+cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+# 变异③：拿掉锚数截断（投影 anchors 全部元素）
+perl -pi -e 's/drawing\.anchors\.prefix\(max\(0, maxAnchors\)\)\.enumerated\(\)/drawing.anchors.enumerated()/' \
+  ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+cd ios/Contracts && swift test --filter malformedAnchorsProduceNoPhantomNodes 2>&1 | grep -E '✘|Issue' | head
+# Expected: 该测试的 ①② 档变红（幽灵节点出现）
+
+cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+# 变异④：拿掉 y 的有限性 / 范围守卫
+perl -pi -e 's/            guard y\.isFinite, y >= frame\.minY, y <= frame\.maxY else \{ return nil \}\n//' \
+  ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+cd ios/Contracts && swift test --filter 'malformedAnchorsProduceNoPhantomNodes|threeOutcomes' 2>&1 | grep -E '✘|Issue' | head
+# Expected: T12 的 ③④ 档变红
+
 cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift   # ⛔ 不用 git checkout
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -3   # 确认复原后全绿
 ```
@@ -536,7 +620,7 @@ offscreenAnchorNeverBecomesRealNode 变红。"
 - Consumes: `marks(for:mapper:isVisible:)`、`hitRadius`（Task 2）
 - Produces:
   - 内层 `nearestNode(to:among:radius:) -> Int?`（收 `[(index: Int, at: CGPoint)]`，返回**原下标**）
-  - 外层 `hitTestNode(point:drawing:mapper:isVisible:) -> Int?`
+  - 外层 `hitTestNode(point:drawing:mapper:isVisible:maxAnchors:) -> Int?`
   - 第 3 片消费外层；⛔ 本片不接任何手势。
 
 **两层的分工（D131 的第 ② 条结果要求）**：内层只做「最近距离选择」，不认识视口，因此可以**直接喂两个靠得很近的坐标** ⇒ 水平线只有 1 个锚点也能测 N7；外层负责**用与渲染共用的判据筛出可见真实节点**，T5 / T8 / T9 验的就是这一层。⛔ 内层测试不得冒充外层测试。
@@ -594,7 +678,7 @@ offscreenAnchorNeverBecomesRealNode 变红。"
         let d = Self.line(idx: 5)                      // x = 50，屏内
         let tool = HorizontalLineTool()
         #expect(tool.isVisible(drawing: d, mapper: m), "前提①：本例的线必须可见")
-        guard case let .real(_, center) = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true)[0] else {
+        guard case let .real(_, center) = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1)[0] else {
             Issue.record("前提②：本例必须有可见真实节点"); return
         }
         var lineHits = 0
@@ -604,7 +688,7 @@ offscreenAnchorNeverBecomesRealNode 变红。"
                 let p = CGPoint(x: center.x + dx, y: center.y + dy)
                 guard tool.hitTest(point: p, mapper: m, drawing: d) else { continue }
                 lineHits += 1
-                #expect(DrawingNodeGeometry.hitTestNode(point: p, drawing: d, mapper: m, isVisible: true) == 0,
+                #expect(DrawingNodeGeometry.hitTestNode(point: p, drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == 0,
                         "线命中却节点不命中：p=\(p)")
             }
         }
@@ -616,12 +700,12 @@ offscreenAnchorNeverBecomesRealNode 变红。"
         let mOut = Self.mapperShifted(9)                 // idx=-1 → x = -10+9 = -1（出左缘 1pt）
         let d = Self.line(idx: -1)
         let probe = CGPoint(x: 0, y: mOut.priceToY(15))  // 正是代理标记所在处（贴左边框）
-        #expect(DrawingNodeGeometry.hitTestNode(point: probe, drawing: d, mapper: mOut, isVisible: true) == nil,
+        #expect(DrawingNodeGeometry.hitTestNode(point: probe, drawing: d, mapper: mOut, isVisible: true, maxAnchors: 1) == nil,
                 "代理标记处必须无答案")
         // 正向对照：同一条线、同一个探针点，把视口挪到让锚点恰好落在边框上 ⇒ 变成真节点 ⇒ 有答案
         let mIn = Self.mapperShifted(10)                 // idx=-1 → x = -10+10 = 0（恰在左边框上）
         #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: mIn.priceToY(15)),
-                                                drawing: d, mapper: mIn, isVisible: true) == 0,
+                                                drawing: d, mapper: mIn, isVisible: true, maxAnchors: 1) == 0,
                 "⭐ 正向对照：锚点回到屏内必须有答案，否则上面那条只是因为函数恒返空")
     }
 
@@ -633,7 +717,7 @@ offscreenAnchorNeverBecomesRealNode 变红。"
             let d = Self.line(idx: -1)
             #expect(m.indexToX(-1) == CGFloat(expectedX), "构造自检：锚点 x 必须真的是 \(expectedX)")
             #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: m.priceToY(15)),
-                                                    drawing: d, mapper: m, isVisible: true) == nil,
+                                                    drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == nil,
                     "左外 \(expectedX)pt：代理标记处必须无答案")
         }
         // 右侧：idx=80 → x = 800 + shift。要 x = 801/808/811 ⇒ shift = 1/8/11
@@ -642,17 +726,17 @@ offscreenAnchorNeverBecomesRealNode 变红。"
             let d = Self.line(idx: 80)
             #expect(m.indexToX(80) == CGFloat(expectedX), "构造自检：锚点 x 必须真的是 \(expectedX)")
             #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 800, y: m.priceToY(15)),
-                                                    drawing: d, mapper: m, isVisible: true) == nil,
+                                                    drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == nil,
                     "右外 \(expectedX)pt：代理标记处必须无答案")
         }
         // ⭐ 正向对照（⛔ 不可省）：锚点恰好落在边框【上】= 未出屏 ⇒ 同一个探针点必须有答案。
         //    没有这一条，上面 6 档全空可能只是因为函数恒返空。
         let mL = Self.mapperShifted(10)                  // idx=-1 → x = 0（左边框上）
         #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: mL.priceToY(15)),
-                                                drawing: Self.line(idx: -1), mapper: mL, isVisible: true) == 0)
+                                                drawing: Self.line(idx: -1), mapper: mL, isVisible: true, maxAnchors: 1) == 0)
         let mR = Self.mapperShifted(0)                   // idx=80 → x = 800（右边框上）
         #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 800, y: mR.priceToY(15)),
-                                                drawing: Self.line(idx: 80), mapper: mR, isVisible: true) == 0)
+                                                drawing: Self.line(idx: 80), mapper: mR, isVisible: true, maxAnchors: 1) == 0)
     }
 
     @Test("外层：线不可见时一律无答案")
@@ -660,10 +744,10 @@ offscreenAnchorNeverBecomesRealNode 变红。"
         let m = Self.mapper()
         let d = Self.line(idx: 5)
         #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
-                                                drawing: d, mapper: m, isVisible: false) == nil)
+                                                drawing: d, mapper: m, isVisible: false, maxAnchors: 1) == nil)
         // 正向对照：同一个点、可见时有答案
         #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
-                                                drawing: d, mapper: m, isVisible: true) == 0)
+                                                drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == 0)
     }
 ```
 
@@ -701,9 +785,11 @@ Expected: 编译错误 `type 'DrawingNodeGeometry' has no member 'nearestNode'`
     /// ⇒ **命中集合 ≡ 渲染集合**（D131）：出屏锚点与代理标记一律不可命中。
     /// 返回值是该锚点在 `drawing.anchors` 里的**原下标**（⛔ 不是筛选后数组的位置）。
     /// ⚠️ 本片只提供本函数，**不接任何手势**；第 3 片接拖动时必须自己定「先问节点还是先问线」（Q19）。
-    public static func hitTestNode(point: CGPoint, drawing: DrawingObject,
-                                   mapper: CoordinateMapper, isVisible: Bool) -> Int? {
-        let visible: [(index: Int, at: CGPoint)] = marks(for: drawing, mapper: mapper, isVisible: isVisible)
+    public static func hitTestNode(point: CGPoint, drawing: DrawingObject, mapper: CoordinateMapper,
+                                   isVisible: Bool, maxAnchors: Int) -> Int? {
+        // ⛔ `maxAnchors` 必须**原样透传**给 `marks` —— 写死任何常数都会让命中集合与渲染集合分叉（D131）
+        let visible: [(index: Int, at: CGPoint)] = marks(for: drawing, mapper: mapper,
+                                                         isVisible: isVisible, maxAnchors: maxAnchors)
             .compactMap { mark -> (index: Int, at: CGPoint)? in
                 guard case let .real(i, p) = mark else { return nil }   // 代理标记不进命中集合
                 return (index: i, at: p)
@@ -718,7 +804,7 @@ Expected: 编译错误 `type 'DrawingNodeGeometry' has no member 'nearestNode'`
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -12
 ```
 
-Expected: 17 个测试全 PASS（Task 2 的 10 条 + 本任务 7 条）
+Expected: 18 个测试全 PASS（Task 2 的 11 条 + 本任务 7 条）
 
 - [ ] **Step 5: 变异验证 —— 证明 D131 的守卫真的守得住**
 
@@ -1278,7 +1364,8 @@ Expected: `D41/D55 端到端…` FAIL，消息含「选中后必须出现节点�
         if let sel = selectedForNodes {
             let marks = DrawingNodeGeometry.marks(
                 for: sel.drawing, mapper: mapper,
-                isVisible: sel.tool.isVisible(drawing: sel.drawing, mapper: mapper))
+                isVisible: sel.tool.isVisible(drawing: sel.drawing, mapper: mapper),
+                maxAnchors: sel.tool.requiredAnchors.upperBound)   // D132 第 1 条：按该工具真正消费的锚数截断
             DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
                                      clipTo: mapper.viewport.mainChartFrame)
         }
