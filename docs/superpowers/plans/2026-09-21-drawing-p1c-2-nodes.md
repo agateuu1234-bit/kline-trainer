@@ -413,10 +413,7 @@ struct DrawingNodeGeometryTests {
         let inChart = twoAnchorLine(secondPrice: 12)
         let m1 = DrawingNodeGeometry.marks(for: inChart, mapper: m, isVisible: true, maxAnchors: 1)
         #expect(m1.count == 1, "水平线只消费 anchors.first ⇒ 必须只产生 1 个记号，实得 \(m1.count)")
-        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(40), y: m.priceToY(12)),
-                                                drawing: inChart, mapper: m,
-                                                isVisible: true, maxAnchors: 1) == nil,
-                "第二锚处必须【点不中】—— 它根本不该存在")
+        // ⚠️ 命中侧的断言在 Task 3（`hitTestNode` 那时才存在）—— 见 `malformedAnchorsAreNotHittable`
         // ② 第二锚价位【在图外】(999) —— 渲染会被裁掉，若命中侧仍认它就直接违反 D131
         let offChart = twoAnchorLine(secondPrice: 999)
         let m2 = DrawingNodeGeometry.marks(for: offChart, mapper: m, isVisible: true, maxAnchors: 1)
@@ -429,10 +426,6 @@ struct DrawingNodeGeometryTests {
                                   isExtended: false, panelPosition: 0)
             #expect(DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1).isEmpty,
                     "price=\(bad) 的锚点画不出来 ⇒ 不得产生任何记号")
-            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: 180),
-                                                    drawing: d, mapper: m,
-                                                    isVisible: true, maxAnchors: 1) == nil,
-                    "price=\(bad) 的锚点也必须点不中")
         }
         // ④ 锚点 y 在图外（price 25 超出 10...20）→ 不产生记号
         let offY = DrawingObject(toolType: .horizontal,
@@ -443,11 +436,7 @@ struct DrawingNodeGeometryTests {
         //    没有这一条，上面所有「== 1」「isEmpty」都可能只是函数恒返固定结果
         let healthy = Self.line(idx: 5)
         let mh = DrawingNodeGeometry.marks(for: healthy, mapper: m, isVisible: true, maxAnchors: 1)
-        #expect(mh.count == 1)
-        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
-                                                drawing: healthy, mapper: m,
-                                                isVisible: true, maxAnchors: 1) == 0,
-                "正常线必须点得中 ⇒ 证明上面那些 nil 不是因为函数恒返 nil")
+        #expect(mh.count == 1, "正常线必须产生 1 个记号 ⇒ 证明上面那些 isEmpty 不是因为函数恒返空")
         // ⑤ maxAnchors 真的在起作用：同一条畸形线放开到 2 ⇒ 记号数变成 2
         #expect(DrawingNodeGeometry.marks(for: inChart, mapper: m, isVisible: true, maxAnchors: 2).count == 2,
                 "⭐ 证明截断是 maxAnchors 在管，而不是函数恒返 1 个")
@@ -582,8 +571,9 @@ cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingN
 # 变异③：拿掉锚数截断（投影 anchors 全部元素）
 perl -pi -e 's/drawing\.anchors\.prefix\(max\(0, maxAnchors\)\)\.enumerated\(\)/drawing.anchors.enumerated()/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
-cd ios/Contracts && swift test --filter malformedAnchorsProduceNoPhantomNodes 2>&1 | grep -E '✘|Issue' | head
-# Expected: 该测试的 ①② 档变红（幽灵节点出现）
+cd ios/Contracts && swift test --filter malformedAnchors 2>&1 | grep -E '✘|Issue' | head
+# Expected: `malformedAnchorsProduceNoPhantomNodes` 的 ①② 档变红（幽灵节点出现）；
+#           `malformedAnchorsAreNotHittable`（Task 3 建立后）的第二锚档同时变红
 
 cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
 # 变异④：拿掉 y 的有限性 / 范围守卫
@@ -622,6 +612,11 @@ offscreenAnchorNeverBecomesRealNode 变红。"
   - 内层 `nearestNode(to:among:radius:) -> Int?`（收 `[(index: Int, at: CGPoint)]`，返回**原下标**）
   - 外层 `hitTestNode(point:drawing:mapper:isVisible:maxAnchors:) -> Int?`
   - 第 3 片消费外层；⛔ 本片不接任何手势。
+
+**⚠️ 任务依赖纪律（evaluation R5）**：Task 2 的测试文件**只能引用 Task 2 已建立的 API**。
+Swift 按**整个测试 target** 编译，`--filter` **不绕过编译** ⇒ 在 Task 2 里写一行 `hitTestNode`
+就会让 Task 2 的「跑绿」与变异验证全部执行不到。畸形数据的命中侧断言因此落在本任务，
+与 `marks` 侧（Task 2 的 `malformedAnchorsProduceNoPhantomNodes`）配对。
 
 **两层的分工（D131 的第 ② 条结果要求）**：内层只做「最近距离选择」，不认识视口，因此可以**直接喂两个靠得很近的坐标** ⇒ 水平线只有 1 个锚点也能测 N7；外层负责**用与渲染共用的判据筛出可见真实节点**，T5 / T8 / T9 验的就是这一层。⛔ 内层测试不得冒充外层测试。
 
@@ -739,6 +734,40 @@ offscreenAnchorNeverBecomesRealNode 变红。"
                                                 drawing: Self.line(idx: 80), mapper: mR, isVisible: true, maxAnchors: 1) == 0)
     }
 
+    @Test("⭐T12（命中侧）：畸形持久化数据的锚点一律点不中（D131 命中集合 ≡ 渲染集合）")
+    func malformedAnchorsAreNotHittable() {
+        let m = Self.mapper()
+        // 两锚水平线：第二锚价位在图内，但水平线只消费 anchors.first ⇒ 第二锚处不该有可命中节点
+        let two = DrawingObject(toolType: .horizontal,
+                                anchors: [DrawingAnchor(period: .m3, candleIndex: 5,  price: 15),
+                                          DrawingAnchor(period: .m3, candleIndex: 40, price: 12)],
+                                isExtended: false, panelPosition: 0)
+        let secondAnchorPoint = CGPoint(x: m.indexToX(40), y: m.priceToY(12))
+        #expect(DrawingNodeGeometry.hitTestNode(point: secondAnchorPoint, drawing: two, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == nil,
+                "第二锚处必须点不中 —— 它根本不该存在")
+        // price 非有限（解码零校验，可从磁盘进来）
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let d = DrawingObject(toolType: .horizontal,
+                                  anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: bad)],
+                                  isExtended: false, panelPosition: 0)
+            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: 180),
+                                                    drawing: d, mapper: m,
+                                                    isVisible: true, maxAnchors: 1) == nil,
+                    "price=\(bad) 的锚点必须点不中")
+        }
+        // ⭐ 正向对照①：正常线点得中 ⇒ 证明上面那些 nil 不是因为函数恒返 nil
+        let healthy = Self.line(idx: 5)
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
+                                                drawing: healthy, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == 0)
+        // ⭐ 正向对照②：把 maxAnchors 放开到 2 ⇒ 同一个点变成【点得中】且返回原下标 1
+        //    这证明拦截确实由 maxAnchors 决定，而不是「第二锚碰巧总也命中不了」
+        #expect(DrawingNodeGeometry.hitTestNode(point: secondAnchorPoint, drawing: two, mapper: m,
+                                                isVisible: true, maxAnchors: 2) == 1,
+                "放开到 2 ⇒ 第二锚可命中且返回原下标 1")
+    }
+
     @Test("外层：线不可见时一律无答案")
     func invisibleLineIsNotHittable() {
         let m = Self.mapper()
@@ -804,7 +833,7 @@ Expected: 编译错误 `type 'DrawingNodeGeometry' has no member 'nearestNode'`
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -12
 ```
 
-Expected: 18 个测试全 PASS（Task 2 的 11 条 + 本任务 7 条）
+Expected: 19 个测试全 PASS（Task 2 的 11 条 + 本任务 8 条）
 
 - [ ] **Step 5: 变异验证 —— 证明 D131 的守卫真的守得住**
 
