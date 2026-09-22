@@ -373,6 +373,28 @@ struct DrawingNodeGeometryTests {
             Issue.record("正向对照：框内 .ray 必须有真节点"); return
         }
     }
+
+    @Test("⭐T11：极端 candleIndex 不得让节点投影崩溃（磁盘解码零范围校验）")
+    func extremeCandleIndexDoesNotTrap() {
+        // startIndex 为【正】—— 与 Int.min 相减即下溢。这正是 evaluation R3-high 指的构造。
+        let m = Self.mapper(startIndex: 10)
+        for (idx, expectLeft) in [(Int.min, true), (Int.max, false)] {
+            let d = DrawingObject(toolType: .horizontal,
+                                  anchors: [DrawingAnchor(period: .m3, candleIndex: idx, price: 15)],
+                                  isExtended: false, panelPosition: 0)
+            let marks = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true)   // ⛔ 不得 trap
+            #expect(marks.count == 1, "极端 candleIndex 仍须产出恰好一个记号：idx=\(idx)")
+            guard case let .proxy(_, _, left) = marks[0] else {
+                Issue.record("idx=\(idx)：极端锚点必须按「极远处」产出代理标记，实得 \(marks[0])"); return
+            }
+            #expect(left == expectLeft, "Int.min 应朝左、Int.max 应朝右：idx=\(idx) 实得 pointingLeft=\(left)")
+        }
+        // ⭐ 正向对照：普通 candleIndex 仍产出真节点 ⇒ 证明不是靠「一律返回代理标记」蒙混
+        let normal = DrawingNodeGeometry.marks(for: Self.line(idx: 15), mapper: m, isVisible: true)
+        guard case .real = normal[0] else {
+            Issue.record("正向对照：普通锚点必须仍是真节点"); return
+        }
+    }
 }
 ```
 
@@ -429,9 +451,23 @@ public enum DrawingNodeGeometry {
                              isVisible: Bool) -> [NodeMark] {
         guard isVisible, toolsWithNodes.contains(drawing.toolType) else { return [] }
         let frame = mapper.viewport.mainChartFrame
+        let startIndex = mapper.viewport.startIndex
         return drawing.anchors.enumerated().map { (i, anchor) -> NodeMark in
-            let x = mapper.indexToX(anchor.candleIndex)      // ⛔ 不 clamp（T4 钉死）
             let y = mapper.priceToY(anchor.price)
+            // ⛔⛔ 溢出保护（evaluation R3-high）：`indexToX` 内部是 `index - viewport.startIndex` 的
+            // **Int 减法**（`Geometry.swift:139`），Swift 对 Int 溢出是 **trap（崩溃）**。
+            // 而 `candleIndex` 从磁盘解码时**零范围校验**（`RecordRepositoryImpl.swift:227-230`）⇒
+            // 一条 `candleIndex == Int.min` 的持久化直线今天能正常渲染与命中（`.straight` 的几何
+            // 根本不看锚点 x，`HorizontalLineTool.swift:55`），**一旦本函数无保护地调 `indexToX`，
+            // 选中它的那一刻就会崩**。⇒ 本函数是这条崩溃路径的唯一入口，保护必须落在这里。
+            // 溢出只可能在两端发生，且此时两操作数必然异号 ⇒ 用 `candleIndex` 的符号定方向。
+            let (_, overflowed) = anchor.candleIndex.subtractingReportingOverflow(startIndex)
+            if overflowed {
+                let left = anchor.candleIndex < 0          // 极远的过去 → 左；极远的未来 → 右
+                return .proxy(index: i, at: CGPoint(x: left ? frame.minX : frame.maxX, y: y),
+                              pointingLeft: left)
+            }
+            let x = mapper.indexToX(anchor.candleIndex)      // ⛔ 不 clamp（T4 钉死）
             if x < frame.minX { return .proxy(index: i, at: CGPoint(x: frame.minX, y: y), pointingLeft: true) }
             if x > frame.maxX { return .proxy(index: i, at: CGPoint(x: frame.maxX, y: y), pointingLeft: false) }
             return .real(index: i, at: CGPoint(x: x, y: y))
@@ -446,7 +482,7 @@ public enum DrawingNodeGeometry {
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -12
 ```
 
-Expected: 9 个测试全 PASS
+Expected: 10 个测试全 PASS
 
 - [ ] **Step 5: 变异验证 —— 证明 T4 真的守得住**
 
@@ -460,6 +496,16 @@ cd ios/Contracts && rm -rf .build/*/debug/*.build 2>/dev/null; swift test --filt
 
 Expected: **`offscreenAnchorNeverBecomesRealNode` 变红**（记录具体是哪条测试名；「有测试变红」不算数）。
 另外 `proxyMarkSideAndDirection` 与 `threeOutcomesAreMutuallyExclusiveAndExhaustive` 也应变红。
+
+```bash
+cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+# 变异②：拿掉溢出保护（直接 indexToX）
+perl -0pi -e 's/            let \(_, overflowed\) = anchor\.candleIndex\.subtractingReportingOverflow\(startIndex\)\n            if overflowed \{\n                let left = anchor\.candleIndex < 0.*?\n                return \.proxy\(index: i, at: CGPoint\(x: left \? frame\.minX : frame\.maxX, y: y\),\n                              pointingLeft: left\)\n            \}\n//s' \
+  ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
+cd ios/Contracts && swift test --filter extremeCandleIndexDoesNotTrap 2>&1 | tail -6
+```
+
+Expected: **`extremeCandleIndexDoesNotTrap` 崩溃 / 变红**（Swift 的 Int 溢出是 trap，表现为该用例 crash 而非普通失败）。
 
 ```bash
 cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift   # ⛔ 不用 git checkout
@@ -672,7 +718,7 @@ Expected: 编译错误 `type 'DrawingNodeGeometry' has no member 'nearestNode'`
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tail -12
 ```
 
-Expected: 16 个测试全 PASS（Task 2 的 9 条 + 本任务 7 条）
+Expected: 17 个测试全 PASS（Task 2 的 10 条 + 本任务 7 条）
 
 - [ ] **Step 5: 变异验证 —— 证明 D131 的守卫真的守得住**
 
@@ -956,8 +1002,43 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
 
 **⚠️ 顺序是有意的**：先接线（节点出现）、Task 6 再取消变蓝。中间态是「既变蓝又有节点」——视觉冗余但**仍然可用**。反过来做会产生一段「变蓝已拿掉、节点还没有 ⇒ 选中一条线屏幕上完全无反馈」的中间态，正是上游 D108 落点明令要避免的。
 
-**⚠️ 本任务新增 1 个 UIKit-gated 测试名**（下面的 N1）⇒ **Catalyst 基线本任务要加 1 行**。
+**⚠️ 本任务新增 2 个 UIKit-gated 测试名**（N1 与 T10）⇒ **Catalyst 基线本任务要加 2 行**。
 ⛔ spec §8.4 原写「基线改动只有一处」**不准确**，已在本 plan 的 Step 6 一并订正 spec。
+
+- [ ] **Step 0: ⛔ 先实测 bitmap 的行序，不得假设**
+
+`UIGraphicsPushContext(ctx)` **不做坐标翻转**：UIKit 的 `draw(_:)` 以**左上**为原点绘制，而
+`CGBitmapContext` 的坐标原点在**左下** ⇒ `data` 的行号与 CG y 值的对应关系**必须实测**。
+⚠️ 既有的 `litPixels(of:)` 只找「有没有某颜色」、从不看位置，所以这个问题一直没暴露；
+但 Step 1 的 `pixelAt(x:y:)` 是**直接按 y 索引 data 行**的，假设错了整条断言就失效。
+
+一次性探针（确认后即删，**不入库**）：
+
+```swift
+@Test("探针（跑完即删）：确定 data 行序")
+func probeRowOrder() {
+    let (engine, upperC, _, upperV, _) = makeRig()
+    engine.toggleDrawingMode()
+    upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))
+    upperC.rebuildRenderState(bounds: bounds)
+    let w = Int(upperV.bounds.width), h = Int(upperV.bounds.height)
+    var data = [UInt8](repeating: 0, count: w * h * 4)
+    let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    UIGraphicsPushContext(ctx); upperV.draw(upperV.bounds); UIGraphicsPopContext()
+    let mp = CoordinateMapper(viewport: upperV.renderState.viewport, displayScale: 1)
+    let expectedCGY = Int(mp.priceToY(engine.drawings[0].anchors[0].price))
+    let inkRows = (0..<h).filter { row in
+        (0..<w).contains { x in data[(row * w + x) * 4 + 3] > 128 }
+    }
+    print("PROBE expectedCGY=\(expectedCGY) h=\(h) inkRows(前后各3)=\(inkRows.prefix(3))…\(inkRows.suffix(3))")
+}
+```
+
+**判读**：若 `inkRows` 落在 `expectedCGY` 附近 ⇒ **top-down**，`pixelAt` 与 T10 里按 `y` 直接索引即可；
+若落在 `h - 1 - expectedCGY` 附近 ⇒ **bottom-up**，两处索引一律改成 `(h - 1 - y)`。
+**把判读结论逐字写进这两处测试的注释**，⛔ 不得只在脑子里记。
 
 - [ ] **Step 1: 在既有端到端测试里追加断言**
 
@@ -1106,6 +1187,52 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
 `onlySelectedLineDrawsNodes` 的 **① 选中首位**那一档必须变红、② 那一档仍绿。
 若两档都绿，说明这条测试没真的测到叠加顺序。
 
+- [ ] **Step 1c: 补 T10 —— 裁剪不得波及线（D125 的真守卫）**
+
+⚠️ **T6 抓不到这件事**（evaluation R3-medium，已核实）：`selectionLeavesLinePixelsUntouched` 走
+`renderPixelsSelected` → **直接调 `HorizontalLineTool().render`**，根本不经过 dispatch；而裁剪在
+`DrawingNodeRenderer.draw` 里、由 dispatch 调用。且那条测试的线在 price 15（图正中），
+就算在 tool 内裁剪也影响不到它。⇒ spec §8.5 那条变异必须由**本测试**承担。
+
+追加到 `DrawDrawingsDispatchTests.swift`：
+
+```swift
+    @Test("⭐T10：裁剪只作用于节点 —— 贴主图下沿的粗线必须仍有一部分画在框外")
+    func nodeClippingDoesNotThinTheLine() {
+        // frame 高 200，bitmap 高 240 ⇒ 框外（CG y > 200）有 40pt 的空间可供观察。
+        // 线 price = 100（= priceRange.min）⇒ CG y = frame.maxY = 200，thickness 5 ⇒ 线宽 3.5pt
+        // ⇒ 不裁剪时线覆盖 CG y ∈ [198.25, 201.75]，有约 1.75pt 落在框外。
+        let w = 320, h = 240
+        let mapper = makeMapperFixture()                    // mainChartFrame = 320×200
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let d = DrawingObject(id: "L", toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m60, candleIndex: 10, price: 100)],
+                              isExtended: false, panelPosition: 0, thickness: 5)
+        makeViewFixture().drawDrawings(ctx: ctx, mapper: mapper, drawings: [d], period: .m60,
+                                       scheme: .light, selectedDrawingID: "L",   // 选中 ⇒ 节点也会画
+                                       tools: [.horizontal: HorizontalLineTool()])
+        let snap = data
+        // ⛔ 不假设 data 行序（见 Step 0）：只数「哪些行有成片的墨」，再看跨度落在哪一端。
+        // 远离节点：节点在 x ≈ 80，故只统计 x ≥ 200 的区域，避免把节点像素算成线。
+        let inkRows = (0..<h).filter { row in
+            (200..<w).reduce(0) { acc, x in acc + (snap[(row * w + x) * 4 + 3] > 128 ? 1 : 0) } >= 50
+        }
+        #expect(!inkRows.isEmpty, "前提：线必须真的画出来了（否则下面的断言恒真）")
+        let minRow = inkRows.min()!, maxRow = inkRows.max()!
+        // frame.maxY = 200。top-down 时框外行 > 200；bottom-up 时框外行 < h-1-200 = 39。
+        // 两端各查一次 ⇒ 不依赖行序，且裁剪一旦扩大到整条线，两端都不成立。
+        #expect(maxRow > 200 || minRow < 39,
+                "线必须有一部分落在主图框外（证明裁剪没波及线）：inkRows=[\(minRow)…\(maxRow)]")
+    }
+```
+
+**⚠️ 实施后必做的变异**：把 `DrawingNodeRenderer.draw` 里的 `ctx.clip(to: frame)` **提到
+`drawDrawings` 的循环之前**（即扩大到包住整个 render）⇒ **`nodeClippingDoesNotThinTheLine` 必须变红**，
+而 `selectionLeavesLinePixelsUntouched`（T6）**仍绿** —— 后者正是它抓不到这件事的证明。
+
 - [ ] **Step 2: 跑 Catalyst，确认新断言失败（节点还没接线）**
 
 ```bash
@@ -1183,11 +1310,11 @@ DD=$(mktemp -d)
 xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/catalyst.log | tail -3
 python3 .github/scripts/uikit-expected-tests.py > .github/scripts/catalyst-uikit-baseline.txt
-git diff --stat .github/scripts/catalyst-uikit-baseline.txt     # 期望：+1 行（onlySelectedLineDrawsNodes 的测试名）
+git diff --stat .github/scripts/catalyst-uikit-baseline.txt     # 期望：+2 行（onlySelectedLineDrawsNodes / nodeClippingDoesNotThinTheLine）
 ```
 
-同时把 spec `§8.4` 那张表改成**两处改动**：第 29 行随 A7 改名（Task 6）**＋新增一行** N1
-（`N1：两条同价位重合的线 —— 只有被选中的那条画节点`，Task 5）。⛔ 不得让 spec 继续写着「只有一处」。
+同时把 spec `§8.4` 那张表改成**三处改动**：第 29 行随 A7 改名（Task 6）**＋新增两行**（N1 的
+`两条同价位重合的线…` 与 T10 的 `裁剪只作用于节点…`，均在 Task 5）。⛔ 不得让 spec 继续写着「只有一处」。
 
 - [ ] **Step 7: 提交**
 
