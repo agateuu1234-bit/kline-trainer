@@ -209,14 +209,42 @@ def _column_list(text: str, after: int) -> str | None:
             break
     if i >= len(text) or text[i] != "(":
         return None
+    # ⛔ 配平扫描必须**跳过注释与引号内的内容**，不能只数括号（codex 第八轮实测）：
+    #    `(stock_code /* , schema_version) */, stock_name, …)`
+    #    注释**里面**那个 `)` 会提前终止扫描 ⇒ 截出 `(stock_code /* , schema_version)`，
+    #    其中的注释**未闭合**、剥注释的正则匹配不到 ⇒ `schema_version` 字样作为「列名」
+    #    幸存 ⇒ 守卫**判为通过**，而 PostgreSQL 会忽略该注释、用 DEFAULT 1。
+    #    ⇒ 这是一次**真假绿**，不是误报。引号同理（`'x)y'` 里的 `)` 也不该算）。
     depth = 0
-    for j in range(i, len(text)):
-        if text[j] == "(":
+    j = i
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if text.startswith("/*", j):                      # 块注释：整段跳过
+            k = text.find("*/", j + 2)
+            if k == -1:
+                return None                                # 注释没闭合 ⇒ 判不了
+            j = k + 2
+            continue
+        if text.startswith("--", j):                       # 行注释：跳到行尾
+            k = text.find("\n", j)
+            if k == -1:
+                return None
+            j = k + 1
+            continue
+        if ch in "'\"":                                    # 引号：整段跳过
+            k = text.find(ch, j + 1)
+            if k == -1:
+                return None
+            j = k + 1
+            continue
+        if ch == "(":
             depth += 1
-        elif text[j] == ")":
+        elif ch == ")":
             depth -= 1
             if depth == 0:
                 return text[i:j + 1]
+        j += 1
     return None
 
 
