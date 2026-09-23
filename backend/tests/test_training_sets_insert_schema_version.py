@@ -15,6 +15,25 @@ P6b 形状闸门的 `schema.sql` md5 锚失配、必须重新生成整份闸门�
    · 「到分号为止」在 `generate_training_sets.py` 那条上会跑飞 —— 它是 asyncpg
      参数化查询，整条 SQL 里**根本没有分号**。
    取「紧随表名之后的那一对配平圆括号」对在场三种写法全都成立。
+
+⛔⛔ **本守卫的【已知边界】—— 表名不在文本里时，任何文本扫描都看不见**
+
+实测漏掉、且**本层无法修复**的三种（表名来自变量，源码文本里根本没有
+`training_sets` 这个词）：
+
+    f"INSERT INTO {TBL} (...)"              # f-string
+    "INSERT INTO {} (...)".format(TBL)      # .format()
+    "INSERT INTO " + TBL + " (...)"         # 常量相加
+
+⚠️ ⛔ **不要为此把判据放宽成「`insert into` 后面跟任何东西」** —— 那会在每一条
+   插入**别的表**的语句上误报，守卫当场失去可用性（本仓教训：守卫必须在当前树上
+   为绿，否则就是一张放行许可证）。
+
+⇒ 这条边界的**真正补偿措施在数据库层**：去掉 PostgreSQL 的
+  `training_sets.schema_version DEFAULT 1`，让漏给字段的写入**直接失败**（fail-closed）——
+  那样无论 SQL 是怎么拼出来的都挡得住。该项已登记为**残留 TS1-R1**（属 DDL 变更，
+  需受治理 migration，且会让 P6b 形状闸门的 `schema.sql` md5 锚失配）。
+  ⇒ 本守卫覆盖的是「**SQL 以字面量写在源码里**」这一类，**不声称覆盖全部写入路径**。
 """
 from __future__ import annotations
 
@@ -34,7 +53,9 @@ SELF = Path(__file__).resolve()
 #: 关键字之间允许出现的东西：空白 / SQL 注释 / **Python 字符串拼接留下的引号**。
 #: ⚠️ 引号那一项是必须的：`"INSERT INTO "` 换行 `"training_sets (…)"` 是**最自然的
 #:    换行点**，真实开发者会这么写（实测不加这一项时 G1/G2/G4 三种拼法全部漏掉）。
-_KW_GAP = r"(?:\s|[\"']|/\*.*?\*/|--[^\n]*\n)+"
+#: ⚠️ `+` 与 `\\` 也必须容忍：`"INSERT INTO " + "training_sets (…)"` 是**普通的 Python
+#:    字符串拼接**，codex 实测这样写能同时绕过精确正则与粗网（守卫仍 `1 passed`）。
+_KW_GAP = r"(?:\s|[\"'+\\]|/\*.*?\*/|--[^\n]*\n)+"
 
 _INSERT_RE = re.compile(
     # ⚠️ 引号必须**成对**匹配，不能写 `"?training_sets"?`：那样在
@@ -62,7 +83,7 @@ _INSERT_RE = re.compile(
 #:       `INSERT INTO p15_targets (id) SELECT … FROM training_sets` 这条**插另一张表**的
 #:       合法语句会被误判；⇒ 两者之间只容忍空白/引号/下划线（正好够兜住被劈开的表名）。
 _COARSE_RE = re.compile(
-    r"""insert[\s"'/*-]{0,40}?into[\s"'_]{0,40}?training[\s"'_]*sets""",
+    r"""insert[\s"'/*+\\-]{0,40}?into[\s"'_+\\]{0,40}?training[\s"'_+\\]*sets""",
     re.I,
 )
 
