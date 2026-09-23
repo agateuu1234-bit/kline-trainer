@@ -75,10 +75,123 @@ _EXPECTED_CELLS = (
 # ⚠️ 修法是让**词元间隔**本身认注释，⛔ 不是「先把整份文件的注释屏蔽掉再匹配」——
 #    后者会引入一条**新的**静默通道：`.md` 里一个没闭合的 `/*` 会把其后全部内容
 #    屏蔽掉，真语句跟着消失。
-_GAP = r"(?:\s|/\*.*?\*/|--[^\n]*\n)"
-_HEAD = re.compile(
-    rf'INSERT{_GAP}+INTO{_GAP}+(?:"?[A-Za-z_][\w$]*"?{_GAP}*\.{_GAP}*)?"?training_sets"?\b',
-    re.I | re.S)
+_HEAD = re.compile(r'INSERT\s+INTO\s+(?:"?[A-Za-z_][\w$]*"?\s*\.\s*)?"?training_sets"?\b', re.I)
+
+
+class _Span:
+    """只暴露 `start()` / `end()`，好让下游代码与 `re.Match` 一样用。"""
+    __slots__ = ("_a", "_b")
+
+    def __init__(self, a: int, b: int):
+        self._a, self._b = a, b
+
+    def start(self) -> int:
+        return self._a
+
+    def end(self) -> int:
+        return self._b
+
+
+_INSERT_KW = re.compile(r"\bINSERT\b", re.I)
+_INTO_KW = re.compile(r"\bINTO\b", re.I)
+_IDENT_BARE = re.compile(r"([A-Za-z_][\w$]*)")
+_IDENT_QUOTED = re.compile(r'"([A-Za-z_][\w$]*)"')
+
+
+def _ident(text: str, i: int):
+    """取一个标识符，返回 `(名字, 结束位置)`；取不到返回 `(None, i)`。
+
+    ⛔ **引号必须成对才吃**（实测打回）：写成 `"?name"?` 的话，
+       `if "INSERT INTO training_sets" in query:` 这种**合法提及**里，
+       表名后面那个**属于 Python 字符串的**引号会被一起吃掉 ⇒ 结束位置越过了引号 ⇒
+       `_classify` 的「两侧都是引号才算提及」判据失效 ⇒ 本该判「提及」的落进
+       【认不出的形状】、变成**误报**。
+    """
+    if i < len(text) and text[i] == '"':
+        m = _IDENT_QUOTED.match(text, i)
+        return (m.group(1), m.end()) if m else (None, i)
+    m = _IDENT_BARE.match(text, i)
+    return (m.group(1), m.end()) if m else (None, i)
+
+
+def _skip_gap(text: str, i: int):
+    """从 `i` 起跳过空白与注释（**块注释嵌套感知**）。返回新位置；未闭合则返回 None。"""
+    n = len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j + 1
+            continue
+        if text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth += 1; i += 2
+                elif text.startswith("*/", i):
+                    depth -= 1; i += 2
+                else:
+                    i += 1
+            if depth:
+                return None          # 未闭合
+            continue
+        break
+    return i
+
+
+def _heads(text: str):
+    r"""找出所有表头。返回 `(_Span 列表, 是否在某个表头里撞到未闭合块注释)`。
+
+    ⛔ **不能用正则「在间隔里允许注释」**（codex attest 第 2 轮实测的静默放行）：
+       正则**不认嵌套**。`/\*.*?\*/` 遇到
+         `INSERT /* outer /* inner */ INTO training_sets (schema_version) */ INTO training_sets (stock_code, file_path)`
+       会在**内层** `*/` 收手，于是把**被注释掉的假列清单** `(schema_version)` 当成真的读；
+       而 PostgreSQL 把整段外层注释吃掉、真实列清单是 `['stock_code','file_path']`（**真漏写**）
+       ⇒ **静默放行**。⭐ 根因是本仓成文教训「**订正只落在两份等价副本中的一份**」——
+       我已经有嵌套感知的 `_mask_sql_comments`，却在表头另写了个不认嵌套的正则。
+
+    ⛔ **也不能「把整份文件按 SQL 注释规则屏蔽掉再匹配」**（实测打回）：
+       作用域里的 `.py` / `.yml` / `.md` **根本不是 SQL**，`/*` 在它们里面只是普通字符。
+       实测仓内**有 14 个文件**含没有配对 `*/` 的 `/*`（正则字面量、正文叙述等）——
+       整份屏蔽会把它们其后的内容整片吞掉，**真语句跟着消失**。
+    ⇒ 故这里**只从每个 `INSERT` 关键字往后走一小段**，手写扫描器逐字符消注释，
+       其余文本一个字都不碰。
+    """
+    heads, unterminated = [], False
+    for km in _INSERT_KW.finditer(text):
+        i = _skip_gap(text, km.end())
+        if i is None:
+            unterminated = True
+            continue
+        m_into = _INTO_KW.match(text, i)
+        if not m_into:
+            continue
+        i = _skip_gap(text, m_into.end())
+        if i is None:
+            unterminated = True
+            continue
+        name, end = _ident(text, i)
+        if name is None:
+            continue
+        # 可选的 schema 限定前缀：`public.training_sets`
+        if name.lower() != "training_sets":
+            j = _skip_gap(text, end)
+            if j is None:
+                unterminated = True
+                continue
+            if j >= len(text) or text[j] != ".":
+                continue
+            j = _skip_gap(text, j + 1)
+            if j is None:
+                unterminated = True
+                continue
+            name, end = _ident(text, j)
+            if name is None or name.lower() != "training_sets":
+                continue
+        heads.append(_Span(km.start(), end))
+    return heads, unterminated
 _NO_COLS = re.compile(r"\s*(VALUES|SELECT|DEFAULT|OVERRIDING)\b", re.I)
 _ALIAS = re.compile(r"\s*(?:AS\s+)?(?!VALUES\b|SELECT\b|DEFAULT\b|OVERRIDING\b)[A-Za-z_]\w*", re.I)
 # ⭐ 允许跨过**引号标识符表名的闭合引号**（`INSERT INTO "training_sets" (…)` —— `_HEAD`
@@ -107,7 +220,7 @@ def _iter_files():
                     yield q
 
 
-def _mask_sql_comments(s: str) -> str:
+def _mask_sql_comments(s: str) -> tuple[str, bool]:
     r"""把 SQL 注释替换成**等长空格**（⛔ 不是删除 —— 保长才不会打乱偏移量与行号）。
 
     ⛔ **块注释在 PostgreSQL 里【可以嵌套】**（Task 3 定向复评用 `pglast`
@@ -118,8 +231,10 @@ def _mask_sql_comments(s: str) -> str:
          `INSERT INTO training_sets (/* /* */ schema_version */ stock_code, file_path)`
          pglast 真实列清单 = ['stock_code', 'file_path'] ⇒ **真缺失**，
          旧版守卫却判「含 schema_version」⇒ **放行**。
-    ⚠️ 未闭合的 `/*` ⇒ 一路屏蔽到末尾 ⇒ 列清单取不到 ⇒ 落「认不出的形状」**必报**。
-       （PostgreSQL 自己也会 `ParseError: unterminated /* comment`，两边都是响亮失败。）
+    ⚠️ 返回 `(屏蔽后的文本, 是否有未闭合的块注释)`。**未闭合必须回传出去**：
+       屏蔽是「一路盖到末尾」，若无声吞掉，其后的真语句会跟着消失 ⇒ **静默漏扫**。
+       调用方（`_scan`）据此报一条**响亮**的问题。PostgreSQL 自己也会
+       `ParseError: unterminated /* comment`，两边都是响亮失败。
     """
     out = list(s)
     i, n, depth = 0, len(s), 0
@@ -144,7 +259,7 @@ def _mask_sql_comments(s: str) -> str:
         if depth > 0:
             out[i] = " "
         i += 1
-    return "".join(out)
+    return "".join(out), depth > 0
 
 
 def _column_list(text: str, pos: int) -> str | None:
@@ -158,7 +273,7 @@ def _column_list(text: str, pos: int) -> str | None:
        ⭐ 顺带闭合了「表名与列清单之间夹注释」那处误报（原先落「认不出的形状」）。
     ⚠️ 返回的是**原文**切片（给报错信息看），判据那边会自己再屏蔽一次。
     """
-    masked = _mask_sql_comments(text[pos:])
+    masked, _ = _mask_sql_comments(text[pos:])
     m = _OPEN_PAREN.match(masked, 0)
     if not m:
         return None
@@ -214,7 +329,7 @@ def _column_names(cols: str) -> set[str]:
     #     正则会在第一个 `*/` 收手、把注释尾巴当真内容（pglast 实测的假通过）。
     #     ⇒ 必须用 `_mask_sql_comments`（嵌套感知 + 保长）。
     #   ⭐ 四个方向分别由变异 M4i / M4j / M4m / M4n 钉住。
-    cols = _mask_sql_comments(cols)
+    cols, _ = _mask_sql_comments(cols)
     names = set()
     for part in _top_split(cols):
         part = part.strip()
@@ -290,7 +405,7 @@ def _scan(files, root):
     """
     missing, positional, unknown, checked = [], [], [], 0
     per_cell = {c: 0 for c in _EXPECTED_CELLS}
-    lost = []
+    lost, bad_comment = [], []
 
     for q in files:
         try:
@@ -309,10 +424,14 @@ def _scan(files, root):
         #    ⭐ 本仓成文教训：「『这几个各自存在』抓不到『多出来的第五个』⇒ 用集合等式」。
         # ⚠️ `expected_hits` 必须是**独立的第二次扫描**（故意用 `findall`，⛔ 不复用下面的
         #    `finditer` 结果）—— 两个来源互不依赖，一处编辑才改不掉两边。
-        expected_hits = len(_HEAD.findall(text))
+        _hits, _unterminated = _heads(text)
+        if _unterminated:
+            # ⛔ 未闭合的块注释会把其后全部内容屏蔽掉 ⇒ 真语句静默消失。必须**响**。
+            bad_comment.append(rel)
+        expected_hits = len(_hits)
         bucketed = 0
 
-        for m in _HEAD.finditer(text):
+        for m in _heads(text)[0]:
             where = f"{rel}:{text.count(chr(10), 0, m.start()) + 1}"
             kind, cols = _classify(text, m.start(), m.end())
             bucketed += 1          # ⛔ 四类**都要**计数，含「提及」—— 否则等式对不上
@@ -335,7 +454,7 @@ def _scan(files, root):
 
         if bucketed != expected_hits:
             lost.append(f"{rel}：表头命中 {expected_hits} 条，却只有 {bucketed} 条被判过")
-    return missing, positional, unknown, checked, per_cell, lost
+    return missing, positional, unknown, checked, per_cell, lost, bad_comment
 
 
 def _enforce(files, root):
@@ -362,9 +481,16 @@ def _enforce(files, root):
        这不碍事：合成自测本来就期待它**抛异常**，且该条对那次运行**确实成立**。
        ⭐ 反过来这还让合成自测**顺带钉住**了 `blind` 与 `checked` 这两条分支。
     """
-    missing, positional, unknown, checked, per_cell, lost = _scan(files, root)
+    missing, positional, unknown, checked, per_cell, lost, bad_comment = _scan(files, root)
 
     problems = []
+    # ⛔ **未闭合的块注释排在最前**：它会让其后的真语句整片消失，
+    #    此时别的判据报什么都不作数。
+    if bad_comment:
+        problems.append(
+            "【有未闭合的块注释】`/*` 没有配对的 `*/` ⇒ 其后的内容会被整片当成注释，"
+            "真语句会**静默消失**（PostgreSQL 也会报 unterminated comment）：\n  "
+            + "\n  ".join(bad_comment))
     # ⛔ **守恒等式排在最前**（整支最终评审「重要 1」）：它报的是「**发现端**被掏空了」——
     #    有命中却没被判过。这种时候后面那些判据的「全都合规」都是**没有意义的**。
     if lost:
@@ -389,7 +515,7 @@ def _enforce(files, root):
     #    守卫**仍然红**，由格子锚点接住（`backend/.py` 那一格掉到 0）。
     #    ⇒ 短路它**不会造成静默放行**，只会丢掉一条**更精确的报错信息**。
     gen_src = (REPO_ROOT / "backend" / "generate_training_sets.py").read_text(encoding="utf-8")
-    gen_seen = sum(1 for m in _HEAD.finditer(gen_src)
+    gen_seen = sum(1 for m in _heads(gen_src)[0]
                    if _classify(gen_src, m.start(), m.end())[0] == "cols")
     if gen_seen < 1:
         problems.append(
@@ -558,6 +684,15 @@ _DIFFERENTIAL_CASES = (
     "INSERT /* seed */ INTO training_sets (stock_code, file_path) VALUES (1,2)",
     "INSERT INTO /* x */ training_sets (stock_code, schema_version, file_path) VALUES (1,2,3)",
     "INSERT -- x\nINTO training_sets (stock_code, file_path) VALUES (1,2)",
+    # ⭐⭐ codex attest 第 2 轮挖出的那条：**嵌套**表头注释里藏了一个**假列清单**。
+    #    PG 把整段外层注释吃掉 ⇒ 真实列清单是 (stock_code, file_path)、**真漏写**；
+    #    而不认嵌套的正则会在内层 `*/` 收手，把被注释掉的 `(schema_version)` 当成真的读。
+    "INSERT /* outer /* inner */ INTO training_sets (schema_version) */ "
+    "INTO training_sets (stock_code, file_path) VALUES (1,2)",
+    "INSERT /* a /* b /* c */ */ */ INTO training_sets (stock_code, file_path) VALUES (1,2)",
+    "INSERT /* a /* b */ */ INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3)",
+    "INSERT INTO public /* x */ . /* y */ training_sets (stock_code, file_path) VALUES (1,2)",
+    'INSERT /* x */ INTO "training_sets" (stock_code, file_path) VALUES (1,2)',
     # 引号标识符：PG 眼里是**另一个列**（逐字、大小写敏感、内部空格有意义）
     'INSERT INTO training_sets (stock_code, "schema_version ", file_path) VALUES (1,2,3)',
     'INSERT INTO training_sets (stock_code, "Schema_Version", file_path) VALUES (1,2,3)',
@@ -606,7 +741,8 @@ def test_guard_agrees_with_real_postgres_parser():
     mismatches, guard_said = [], set()
     truths = set()
     for sql in _DIFFERENTIAL_CASES:
-        m = _HEAD.search(sql)
+        _hs, _ = _heads(sql)
+        m = _hs[0] if _hs else None
         # ⛔ 防空转：表头没命中 ⇒ 这条用例**从未被判过**，等于白写。
         assert m, f"表头正则没命中，这条用例是空转的：{sql!r}"
         kind, cols = _classify(sql, m.start(), m.end())
