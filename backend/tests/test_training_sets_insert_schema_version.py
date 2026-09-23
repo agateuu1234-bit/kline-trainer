@@ -63,7 +63,47 @@ SELF = Path(__file__).resolve()
 #: ⚠️ **等长**是硬要求：抹平后的下标要能直接映射回原文，否则报出来的行号是错的。
 #: ⚠️ `--` 行注释**不做全局抹平**（它在 shell / YAML 里另有含义，全局抹会吃掉同一行
 #:    后面的真 SQL ⇒ 制造**漏报**）；只在关键字之间的间隔里局部容忍。
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+#: ⛔⛔ **全片只有这一个块注释扫描器** —— 发现层、配平扫描、列名提取**三处共用**。
+#: 之前是**四份各自为政**的非贪婪正则/内联跳过，codex 第九轮用**嵌套注释**一次打穿：
+#:     (stock_code /* outer /* inner */ , schema_version, */ , stock_name, …)
+#: PostgreSQL 的块注释**可嵌套** ⇒ 整段都是注释、`schema_version` 被注掉；
+#: 而非贪婪正则在**第一个** `*/` 就停 ⇒ 残留的 `schema_version` 字样被当成列名 ⇒ **假绿**。
+#: ⚠️ 本仓教训「同一条判据存在于多处实现，改完必须两处都验」—— 这次直接**去掉重复**。
+def _blank_block_comments(text: str) -> str:
+    """把 `/* … */` 换成**等长**空白（换行保留，位置 1:1）。**支持嵌套**。
+
+    ⛔ **找不到配对的 `*/` 就【不抹】**（当它不是注释）。
+       起初我写成「未闭合就一路抹到文末」（想对齐 PostgreSQL 的行为），**当场闯祸**：
+       `.github/workflows/schema-smoke.yml` 的 `paths:` 里有 `'backend/sql/**'` ——
+       `/` 加 `*` 正好构成 `/*`，而全文没有 `*/` ⇒ **从第 6 行一路抹到文末**，
+       该文件里 5 条 INSERT 全部消失、守卫只剩 5/12（防空转断言当场报红才没放过去）。
+       ⇒ 失败必须往**吵**的方向倒（不抹 ⇒ 可能误报 ⇒ 有人看），
+         ⛔ 不能往**瞎**的方向倒（乱抹 ⇒ 漏报 ⇒ 没人知道）。
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif text.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            if depth:                 # 没配对上 ⇒ 当它不是注释，原样留着
+                i += 2
+                continue
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+        else:
+            i += 1
+    return "".join(out)
 #: ⚠️ 还要抹掉**表示空白的转义序列**：Python 字面量里 `"INSERT INTO\\ntraining_sets (…)"`
 #:    执行时是合法 SQL（`\\n` 就是换行），但源码文本里是**反斜杠 + 字母 n** 两个字符 ——
 #:    只抹反斜杠会留下一个 `n`，发现层当场瞎掉（codex 实测这样写守卫仍 `1 passed`）。
@@ -79,7 +119,7 @@ def _blank_for_discovery(text: str) -> str:
         return "".join("\n" if ch == "\n" else " " for ch in m.group(0))
     # 次序：块注释 → 空白转义（整段等长抹）→ 单字符拼接痕迹。
     # ⚠️ 空白转义必须在单字符那步**之前**：否则反斜杠先被抹成空格，留下的 `n` 就再也认不出来了。
-    t = _BLOCK_COMMENT_RE.sub(blank, text)
+    t = _blank_block_comments(text)
     t = _WS_ESCAPE_RE.sub(blank, t)
     return _CONCAT_ARTIFACT_RE.sub(" ", t)
 
@@ -149,7 +189,7 @@ def _scope_files() -> list[Path]:
     return out
 
 
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+#: 块注释已由 `_blank_block_comments` 统一抹掉（见上），这里只需处理行注释。
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 
 
@@ -167,7 +207,6 @@ def _column_names(cols: str) -> set[str]:
     inner = cols.strip()
     assert inner.startswith("(") and inner.endswith(")"), inner[:60]
     inner = inner[1:-1]
-    inner = _BLOCK_COMMENT.sub(" ", inner)
     inner = _LINE_COMMENT.sub(" ", inner)
     names = set()
     for tok in inner.split(","):
@@ -195,11 +234,6 @@ def _column_list(text: str, after: int) -> str | None:
     while i < len(text):
         if text[i] in " \t\r\n":
             i += 1
-        elif text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            if j == -1:
-                return None
-            i = j + 2
         elif text.startswith("--", i):
             j = text.find("\n", i)
             if j == -1:
@@ -220,12 +254,6 @@ def _column_list(text: str, after: int) -> str | None:
     n = len(text)
     while j < n:
         ch = text[j]
-        if text.startswith("/*", j):                      # 块注释：整段跳过
-            k = text.find("*/", j + 2)
-            if k == -1:
-                return None                                # 注释没闭合 ⇒ 判不了
-            j = k + 2
-            continue
         if text.startswith("--", j):                       # 行注释：跳到行尾
             k = text.find("\n", j)
             if k == -1:
@@ -257,7 +285,8 @@ def test_every_executable_insert_specifies_schema_version():
 
     for path in _scope_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        scan = _blank_for_discovery(text)      # 位置与 text 1:1 对齐
+        parse_text = _blank_block_comments(text)   # 解析层用：块注释已抹、位置 1:1
+        scan = _blank_for_discovery(text)          # 发现层用：再抹拼接痕迹与空白转义
         precise_starts = {m.start() for m in _INSERT_RE.finditer(scan)}
 
         # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
@@ -275,7 +304,7 @@ def test_every_executable_insert_specifies_schema_version():
             rel = path.relative_to(ROOT)
             lineno = text.count("\n", 0, pos) + 1
             tail = text[after: after + 20]
-            cols = _column_list(text, after)
+            cols = _column_list(parse_text, after)
             if cols is not None:
                 checked += 1
                 if "schema_version" not in _column_names(cols):
