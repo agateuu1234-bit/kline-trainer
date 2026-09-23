@@ -1444,7 +1444,13 @@ xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,varia
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tail -30
 ```
 
-Expected: `D41/D55 端到端…` FAIL，消息含「选中后必须出现节点像素」
+Expected: **编译失败**，错误形如 `value of type 'KLineView' has no member 'drawSelectionNodes'`。
+
+⚠️ 这一步的「红」是**编译失败**、不是断言失败 —— Step 1b/1c 的测试引用了本任务 Step 3 才建立的
+`drawSelectionNodes`。**同一个 Task 内**这样是正常的 TDD 循环；⛔ 但**跨 Task** 不行（R5 的教训：
+Task 2 的测试引用 Task 3 的 API，会让 Task 2 的「跑绿」永远执行不到）。
+⛔ 数编译错误不得用 `grep -c 'error:'`（会把 macOS 的 XPC 噪音算进去），用
+`grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:'`。
 
 - [ ] **Step 3: 接线**
 
