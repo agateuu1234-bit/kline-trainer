@@ -113,7 +113,7 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 | **A0** | **【硬前提，别跳】应用前**跑 `gh pr list`，看还有没有开着的 PR | 要么没有；要么每个都已 rebase 到含 `06373ef`（PR #180）之后的 main。**否则先别应用** | |
 | A6 | 跑应用脚本后，再看网页上的必需检查列表 | 从 6 项变成 8 项，新增的正是后端测试和 iOS 构建 | |
 | A7 | 随便开一个新 PR（或看已开的） | 检查列表里 `backend pytest (full suite)` 标着 **Required** | |
-| A7b | 看脚本打印的 artifact 目录 | 里面**真的有** `rollback-payload.json` —— 它是唯一可用的回滚凭据（见 spec §9；**该路径未实跑演练过**） | |
+| A7b | 看脚本打印的 artifact 目录 | 里面**真的有** `rollback-payload.json`（见 spec §9）。⚠️ **它不是「唯一凭据」，也不持久** —— 详见 §六 | |
 | A8pre | 按下面「§一附」把那一步的 run 块在本地原样跑两遍：干净树一遍、临时加一个必红测试一遍 | 干净树 → `退出码=0`；有红测试 → `退出码` **非 0**，末行 `FAIL: 1 个 failed …`。这一条在本地就能证明「测试红了这一步真的会红」，不必等到 A8 | |
 | **A8** | **要害验证**：找一个后端测试会红的改动开 PR（比如故意改坏一个后端测试） | `backend pytest (full suite)` 标着 **Required** 且是**红的**，GitHub 明示**合并被阻断**。⚠️ **按钮未必变灰** —— 你是管理员且 ruleset 给管理员开了 always-bypass，GitHub 多半仍让你点、但会提示你正在**绕过规则**。**看到「绕过」提示＝通过**；完全看不到任何阻断迹象才算不通过。确认后**关掉该 PR、不要合** | |
 
@@ -189,7 +189,7 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 | **A0** | ✅ | 三个在途 PR 全含 #180。**#179 原本会被卡死**（它的检查列表里根本没有 `backend pytest (full suite)`，只有 7 项），`gh pr update-branch 179` 后变 8 项，且挂了 18 天的 `acceptance` 红**自己变绿**（纯属 base 太旧） |
 | A6 | ✅ | 必需检查 **6 → 8** 项，`verify-required-checks.sh --mode assert` 退出码 0 |
 | A7 | ✅ | #179 / #188 的检查列表里该项标 Required |
-| A7b | ✅ | `/tmp/apply-art/rollback-payload.json` 存在（1226 字节、7 条 context）。⛔ **该回滚路径仍未实跑演练** |
+| A7b | ✅（但措辞已订正，见 §六） | 当时 `/tmp/apply-art/rollback-payload.json` 存在（1226 字节、7 条 context）。⛔ **回滚路径仍未实跑演练**；⚠️ 该文件**已于 5 天内被系统清理**（2026-09-23 复查：目录在、文件没了） |
 | A7d / A7e | ✅ | 插 `defaults.run.shell: bash {0}` → 判据红且报「与被批准的结构不一致」；只改注释 → 仍全绿 |
 | A8pre | ✅ | run 块原样抽出跑：干净树两种 shell 均 exit 0；塞一个必红测试后两种 shell 均 exit 1 |
 | **A8** | ✅ **通过** | PR #192（2026-09-17，看完即关）：`gh pr checks --required` 列出 8 项且该项在内 → **唯独它 fail、其余 7 项 pass** → GitHub `mergeStateStatus=BLOCKED` → 归因 `test_a8_required_check_proof.py:6: AssertionError` / `1 failed, 1505 passed` / `FAIL: 1 个 failed —— CI 拒绝静默 skip，也拒绝红着报绿`（**正是本次加固那段运行块打的**） |
@@ -201,3 +201,27 @@ diff -u /tmp/payload-cur.pretty.json /tmp/payload-new.pretty.json
 本 PR 的检出里跑了同一个应用脚本**（那一版 canonical 清单只有两项）。拿合并前那版 builder
 对当时快照复跑，结果逐字吻合。**无害** —— 该 builder 的循环只增不删，先后顺序不影响终态；
 但若将来改成「会删多余项」，旧检出跑一次就会删掉新加的必需检查。
+
+## 六、订正：回滚凭据「唯一且易失」这个说法是错的（2026-09-23 复查）
+
+原文把 `/tmp/apply-art/rollback-payload.json` 写成「**唯一**可用的回滚凭据」，
+并把「未实跑演练」列为重点残留。复查后三条事实推翻了这个框架：
+
+1. **它确实不持久，但这不要紧。** 2026-09-23 复查：`/tmp/apply-art/` 目录还在、
+   **文件已被系统清理**（约 5 天）。若它真是唯一凭据，这里已经出事了。
+2. **它可以随时重新生成。** 对 live ruleset 跑
+   `build-protection-put-payload.py --normalize-only --ruleset-json <live>`
+   即产出一份干净的 PUT body（实测：只读字段已剥离，顶层只剩
+   `name/target/enforcement/conditions/bypass_actors/rules` 六个键）。
+3. **要回到过去某个已知良好状态，GitHub 自己就存着。**
+   `gh api "repos/{owner}/{repo}/rulesets/<id>/history"` 列出每次写入的时间与 actor，
+   `.../history/<version_id>` 取回那一版的完整状态。本次排查「应用当晚为何被写两次」
+   用的就是它。
+
+⇒ **真正的残留只剩一条**：「这种形状的 PUT 会不会被 GitHub 接受」没有端到端演练过。
+但同一个 builder 产出的**姊妹 payload**（`payload.json`，同一套字段剥离逻辑）
+已于 2026-09-17 被真实 PUT 接受 ⇒ 形状基本已证。
+
+**为什么不做实弹演练**：真演练要对分支保护**连写两次**（先降回 7 条、再恢复 8 条），
+中间有窗口期主干不设防，换来的边际信息很少。**风险大于收益，明确决定不做。**
+若将来非做不可，正确做法是先用 history API 记下当前 version_id 作为回退锚点。
