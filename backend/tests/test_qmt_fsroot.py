@@ -2186,3 +2186,65 @@ def test_close_all_or_note_still_closes_the_rest_when_nothing_is_in_flight(
             f"第一个中间描述符关闭失败之后，第二个没有被尝试关到（实测 {after}）")
     finally:
         os.close(root)
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 12：`_close_all_or_note` 自己那圈 `for` 循环的捕获宽度
+# ══════════════════════════════════════════════════════════════════
+#
+# `_close_or_note`（本节 ⑬）与 `_close_all_or_note` 的 for 循环里各有一处
+# `except Exception as e:`——判据是同一条（`KeyboardInterrupt`/`SystemExit`
+# 不许被当成「这一项关闭失败了」），但这是**两处**独立的捕获点：`_close_or_note`
+# 那处此前已有测试（⑬），`_close_all_or_note` 自己 for 循环里那处（约 :257）
+# 此前一条守卫都没有——即使 `_close_or_note` 本身守住了宽度，`_close_all_or_note`
+# 仍可能把 `_close_or_note` 放出来的 `KeyboardInterrupt` 自己接住。
+#
+# 判据放宽成 `except BaseException` 之后，`KeyboardInterrupt` 逃出来的**类型不变**
+# （`first = e` 之后原样 `raise first`），单看类型断不出来；真正的判别力在于
+# **循环还继续了没有**：判据正确时中断必须当场打断循环，第二个中间描述符压根
+# 不会被尝试关闭；判据被放宽后循环会把它当成一次普通失败记下、继续关下一个。
+
+def test_close_all_or_note_lets_keyboard_interrupt_stop_the_loop(
+        tmp_path: Path, monkeypatch):
+    """走一条 `a/b/leaf.csv`（两个中间描述符），第一个关闭时抛
+    `KeyboardInterrupt`：中断必须原样逃出、**当场打断**这圈 `for` 循环，
+    第二个中间描述符不许被尝试关闭。
+
+    判别力：把 `_close_all_or_note` 那处 `except Exception` 放宽成
+    `except BaseException`，中断会被当成 `first` 接住、循环继续关第二个
+    ——`after` 不再是空的，本条立刻红。
+    """
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "leaf.csv").write_bytes(b"x")
+    root = open_root(str(tmp_path))
+    try:
+        real_close = os.close
+        fired: list[int] = []
+        after: list[int] = []
+
+        def spy(fd):
+            if not fired:
+                fired.append(fd)
+                real_close(fd)
+                raise KeyboardInterrupt()
+            after.append(fd)
+            return real_close(fd)
+
+        monkeypatch.setattr(os, "close", spy)
+
+        with pytest.raises(KeyboardInterrupt) as ei:
+            parent_fd_under(root, "a/b/leaf.csv")
+
+        assert fired, "前提不成立：注入没生效"
+        assert after == [], (
+            f"第一个中间描述符关闭抛出 `KeyboardInterrupt` 之后，第二个仍然被"
+            f"尝试关闭（实测 {after}）——说明中断被当成「这一项关闭失败了」接住，"
+            "循环没有被当场打断")
+        assert not isinstance(ei.value, Exception), (
+            "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+        assert not any("关描述符失败" in n
+                       for n in getattr(ei.value, "__notes__", [])), (
+            "中断被记进了诊断，说明它被更宽的捕获接住、当成了「这一项没关成」"
+            "顺手咽掉，而不是原样放行")
+    finally:
+        os.close(root)

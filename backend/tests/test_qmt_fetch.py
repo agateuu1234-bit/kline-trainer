@@ -2943,6 +2943,144 @@ def test_rollback_lets_keyboard_interrupt_escape_when_refunding_fails(
 
 
 # ══════════════════════════════════════════════════════════════════
+# fix round 12：把 `_settle_rollback` 两条刻意的 `isinstance` 判据钉住
+# ══════════════════════════════════════════════════════════════════
+#
+# `_settle_rollback` 三支里，「回滚完整」那支（`errors` 为空）此前就无守卫可言
+# ——它本来就什么都不做。真正刻意的是回滚**不完整**时剩下两支怎么分：
+#
+#   判据 A：`if isinstance(original, (RunTerminated, PathEscapeError)): return`
+#   判据 B：`if not isinstance(original, Exception): return`
+#   （落不进 A/B 的才 `raise RollbackIncomplete(...)`）
+#
+# fix round 9 是按「语法形式」枚举的：三处 `except Exception as e:`（本模块
+# `_close_or_note` / `_rollback_all` 删项 / `_rollback_all` 退账项）都补了守卫，
+# 但这两条写成 `isinstance(...)` 的判据是同一条「决定要不要吞/换掉在途异常」
+# 的判据的另外两个分支，形状不同、没被同一次枚举扫到，一直没有测试。
+#
+# 下面两条各钉一支，判别力互斥（原异常的类型不同、注入点不同）：
+#   A —— 原异常本身就是 `PathEscapeError`（信任边界被绕过），回滚删 `.tmp`
+#        自己再撞一次 `EIO`；
+#   B —— 原异常本身是 `KeyboardInterrupt`（非 `Exception` 的 `BaseException`），
+#        回滚删 `.tmp` 同样撞 `EIO`。
+# 两条都不是本文件已有的三条 `keyboard_interrupt` 测试的重复：那三条测的是
+# `KeyboardInterrupt` **在回滚过程本身**里冒出来（只轮到 `_rollback_all` 的
+# `except Exception`）；这里 `KeyboardInterrupt` / `PathEscapeError` 是**原本就
+# 在途的那个异常**，回滚失败是另一件事——只有这样才轮到 `_settle_rollback`
+# 自己那两条 `isinstance` 判据。
+
+def test_settle_rollback_keeps_path_escape_original_when_cleanup_itself_fails(
+        roots, monkeypatch):
+    """判据 A：原异常是 `PathEscapeError`（信任边界被绕过，整次致命、不属于
+    `RunTerminated` 族），发布那一步（`_publish_part`）就撞上它；随后回滚删
+    `.tmp` 自己又撞 `EIO`（`errors` 非空）。逃出来的必须仍是那同一个
+    `PathEscapeError`，不许被升级成 `RollbackIncomplete`，也不许被塞进后者的
+    `.original` / `.errors`（`PathEscapeError` 自己没有这两个字段——断言就是
+    「它还是原来那个对象，没被任何东西包过一层」）。
+    """
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"payload" * 20
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None, used=0)
+    boom = PathEscapeError(relative_path=rel, component="1m", errno=errno.ELOOP)
+
+    def escaping_publish(stg_fd_, rel_, suffix_):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "_publish_part", escaping_publish)
+
+    real_unlink = os.unlink
+    seen: list[str] = []
+
+    def spy_unlink(path, *args, **kwargs):
+        if isinstance(path, str) and path.endswith(".tmp") and PART in path:
+            seen.append(path)
+            raise OSError(errno.EIO, "打桩：回滚删 .tmp 自己撞 EIO")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", spy_unlink)
+
+    with pytest.raises(PathEscapeError) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert len(seen) == 1 and seen[0].endswith(".tmp"), (
+        f"前提不成立：回滚删 .tmp 没被尝试到或注入没生效，实测 {seen}")
+
+    exc = ei.value
+    assert exc is boom, (
+        "逃出来的不是发布时那同一个 `PathEscapeError` 对象——说明它被换成了"
+        "别的类型/实例，判据 A 被绕过了")
+    assert not isinstance(exc, RollbackIncomplete), (
+        "被升级成了 `RollbackIncomplete`——回滚不完整时终止条件族/路径逃逸"
+        "不许被换类型")
+    assert not hasattr(exc, "original") and not hasattr(exc, "errors"), (
+        "逃出来的对象带上了 `RollbackIncomplete` 才有的 `.original`/`.errors`"
+        "字段，说明它其实是被包了一层，不是原样放行")
+    assert any("回滚未完成" in n for n in getattr(exc, "__notes__", [])), (
+        "前提不成立：回滚失败的诊断没有被记到原异常上，说明注入没有真的让"
+        "`_settle_rollback` 走到 errors 非空那一支")
+    assert budget.used == 0, "退账那一半没被注入失败，应当正常退完"
+
+
+def test_settle_rollback_lets_keyboard_interrupt_original_escape_when_cleanup_fails(
+        roots, monkeypatch):
+    """判据 B：原异常本身就是 `KeyboardInterrupt`（用户按 Ctrl-C，拷贝写到一半
+    中断），随后回滚删 `.tmp` 自己又撞 `EIO`（`errors` 非空）。非 `Exception`
+    的 `BaseException` 一律原样放行，不许因为「回滚不完整」被升级成
+    `RollbackIncomplete`——中断的地位与 `RunTerminated`/`PathEscapeError` 同规格。
+    """
+    src_fd, stg_fd, src_path, stg_path = roots
+    rel = "1m/600000.SH_x_1分钟K线_前复权.csv"
+    data = b"payload" * 20
+    _put_source_file(src_path, rel, data)
+
+    budget = ByteBudget(limit=None, used=0)
+    boom = KeyboardInterrupt()
+
+    def exploding_write_all(fd, payload):
+        raise boom
+
+    monkeypatch.setattr(qmt_fetch, "_write_all", exploding_write_all)
+
+    real_unlink = os.unlink
+    seen: list[str] = []
+
+    def spy_unlink(path, *args, **kwargs):
+        if isinstance(path, str) and path.endswith(".tmp") and PART in path:
+            seen.append(path)
+            raise OSError(errno.EIO, "打桩：回滚删 .tmp 自己撞 EIO")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", spy_unlink)
+
+    with pytest.raises(KeyboardInterrupt) as ei:
+        copy_one(src_fd, stg_fd, rel, budget)
+
+    assert len(seen) == 1 and seen[0].endswith(".tmp"), (
+        f"前提不成立：回滚删 .tmp 没被尝试到或注入没生效，实测 {seen}")
+    leftovers = [p.name for p in (stg_path / "1m").iterdir()
+                 if p.name.endswith(".tmp")]
+    assert len(leftovers) == 1, (
+        f"前提不成立：注入没生效，临时文件还是被删掉了（实测 {leftovers}）")
+
+    exc = ei.value
+    assert exc is boom, (
+        "逃出来的不是原来那个 `KeyboardInterrupt` 对象——说明它被换成了"
+        "别的类型/实例，判据 B 被绕过了")
+    assert not isinstance(exc, Exception), (
+        "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+    assert not hasattr(exc, "original") and not hasattr(exc, "errors"), (
+        "逃出来的对象带上了 `RollbackIncomplete` 才有的 `.original`/`.errors`"
+        "字段，说明它其实是被包了一层，不是原样放行")
+    assert any("回滚未完成" in n for n in getattr(exc, "__notes__", [])), (
+        "前提不成立：回滚失败的诊断没有被记到原异常上，说明注入没有真的让"
+        "`_settle_rollback` 走到 errors 非空那一支")
+    assert budget.used == 0, "退账那一半没被注入失败，应当正常退完"
+
+
+# ══════════════════════════════════════════════════════════════════
 # fix round 10 · codex R7 [high]：在途标记自己的耐久屏障
 # ══════════════════════════════════════════════════════════════════
 #
