@@ -706,6 +706,52 @@ $$…$$ 美元引用（PG 的写法）          SQLite ❌ 拒绝：OperationalE
 
 ---
 
+### M14 / M15 —— ⭐⭐⭐ **表头里夹注释**（codex attest 挖出的唯一一条【真静默放行】）
+
+**这一组的来历值得单独写**：本片守卫①经过 **5 轮 Opus 定向复评 + 整支最终评审 + 控制者 11 组单点编辑攻击**，全都没碰到这个洞。**codex 一轮就挖出来了，而且它自己复现过。**
+⭐ 这是本仓成文教训「**换通道会挖出旧通道十几轮没碰到的 Critical**」最锋利的一次印证。
+
+**洞在哪**：PostgreSQL **允许把注释塞在关键字之间**。这三种都是**合法语句**（`pglast` 能正常解析出列清单），而旧 `_HEAD` 用 `\s+` 连接词元 ⇒ **一条都匹配不到**：
+
+```
+INSERT /* seed */ INTO training_sets (…)
+INSERT INTO /* x */ training_sets (…)
+INSERT -- x⏎INTO training_sets (…)
+```
+
+⛔ **为什么它是【静默】的（而不是像别的洞那样吵闹）**：
+守恒等式的第二来源 `findall` 与主循环的 `finditer` 用的是**同一个** `_HEAD` ⇒ **两边同时看不见它** ⇒ 「命中总数 == 四桶之和」**仍然成立**、`lost` 为空 ⇒ **刚加的守恒等式也接不住**。
+
+**端到端实测（修复前）**：往 `rehearse.sh` 第 2 条语句**真删掉** `schema_version`，同时把表头改成 `INSERT /* seed */ INTO`：
+
+```
+【对照组】只删字段、不加注释                ⇒ 1 failed, 2 passed
+【codex 报的】删字段 + 表头夹注释            ⇒ 3 passed          ← 静默放行
+```
+
+**修法**：让**词元间隔**本身认注释 —— `_GAP = r"(?:\s|/\*.*?\*/|--[^\n]*\n)"`，`_HEAD` 用 `{_GAP}+` 连接 `INSERT` / `INTO` / 表名。
+⛔ **刻意不采用**「先把整份文件的注释屏蔽掉再匹配」那种写法 —— 它会引入一条**新的**静默通道：`.md` 里一个**没闭合的** `/*` 会把其后全部内容屏蔽掉，真语句跟着消失。
+
+**端到端实测（修复后）**：
+
+```
+codex 报的 INSERT /* */ INTO    落盘=True  ⇒ 1 failed   类别=列清单里没有 `schema_version`
+INSERT INTO /* */ 表名          落盘=True  ⇒ 1 failed   类别=列清单里没有 `schema_version`
+INSERT -- x⏎INTO               落盘=True  ⇒ 1 failed   类别=列清单里没有 `schema_version`
+```
+
+**M14（真漏写 + 表头夹注释）⇒ 红；M15（合规 + 表头夹注释）⇒ 绿**（误报方向也核过）。
+
+**⭐ 已钉成常驻**：三条表头夹注释的用例进了**差分测试**（拿 `pglast` 当裁判那条）。证明它能报非 0 —— 把 `_HEAD` 退回 `\s+`：
+
+```
+E   AssertionError: 表头正则没命中，这条用例是空转的：'INSERT /* seed */ INTO training_sets (stock_code, file_path) VALUES (1,2)'
+```
+
+**全量回归**：改 `_HEAD` 之后复跑 27 组变异（23 组该红的红、4 组合规/误报方向该绿的绿），**不符期望 0 组**；守卫本身耗时 **0.09s**，新正则无回溯问题。
+
+---
+
 ### M5 —— 冻结文件 `CREATE TABLE meta` 纯排版压成一行（不改任何列名/类型/约束）
 
 **改了什么**：`backend/sql/training_set_schema_v1.sql` 里 `CREATE TABLE meta (…)` 从「一列一行」压缩成一行，逗号、括号旁的空白全部去掉，但**不改动任何列名、类型、约束**。
