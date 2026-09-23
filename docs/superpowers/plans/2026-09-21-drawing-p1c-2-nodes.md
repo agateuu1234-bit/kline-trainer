@@ -10,10 +10,17 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-21-drawing-tools-P1c-2-nodes-design.md`（D121–D133）
 
-> ⚠️ **评审存证的真实范围**（⛔ 不得含糊）：codex 对该 spec 的 `approve` 只覆盖到 **D131**
-> （账本条目 `branch:feat/drawing-p1c-2-nodes@28fa2a17`，即 rebase 前的 `bdb38cca`）。
-> **D132（输入契约）与 D133（绘制阶段）是那次 approve 之后新增的，从未经官方通道评审。**
-> 且 rebase 之后该条目按 head SHA 索引已失效。⇒ 合并前必须重跑一次覆盖当前 HEAD 的官方评审。
+> **评审存证**：codex `approve` @ `f46f0de7`（账本 `branch:feat/drawing-p1c-2-nodes@f46f0de7`，
+> base `daa3b446`，fp `sha256:1526be25…`）。该轮是 `--scope branch-diff`，**覆盖 spec + plan 的全部内容**
+> （含 D121–D133）。
+> ⚠️ **它自陈的限定，逐字照录**：「批准覆盖的是设计与实施计划；**生产行为与测试结果在实施完成前仍未经验证**」。
+> ⇒ 这是对**文档**的通过，**不是**对实现的。实施完成后仍须走整支评审。
+> ⚠️ **任何新提交都会让本条目按 head SHA 失效** —— 实施过程中的每次提交都如此，合并前必须重跑。
+>
+> **达成过程**（供后来者判断这份 plan 被挖过多深）：spec 2 轮（codex）；plan 共 9 轮 ——
+> codex 8 轮 + **Opus 5 high 子代理 1 轮**（codex 配额于 2026-09-23 耗尽期间，按 user 指定切通道）。
+> 两个通道**盲区不同**：codex 连跑 6 轮未碰到的 2 条 Critical（不存在的局部变量、像素行序反向），
+> 被 Opus 首轮真编译真跑挖出；而 Opus 未提的「提交清单漏文件导致假绿」由 codex 挖出。
 
 ## Global Constraints
 
