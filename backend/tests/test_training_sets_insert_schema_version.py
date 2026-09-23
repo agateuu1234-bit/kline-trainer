@@ -64,6 +64,12 @@ SELF = Path(__file__).resolve()
 #: ⚠️ `--` 行注释**不做全局抹平**（它在 shell / YAML 里另有含义，全局抹会吃掉同一行
 #:    后面的真 SQL ⇒ 制造**漏报**）；只在关键字之间的间隔里局部容忍。
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+#: ⚠️ 还要抹掉**表示空白的转义序列**：Python 字面量里 `"INSERT INTO\\ntraining_sets (…)"`
+#:    执行时是合法 SQL（`\\n` 就是换行），但源码文本里是**反斜杠 + 字母 n** 两个字符 ——
+#:    只抹反斜杠会留下一个 `n`，发现层当场瞎掉（codex 实测这样写守卫仍 `1 passed`）。
+#: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，对应的转义写法就这几种
+#:    （`\\n` `\\t` `\\r` `\\x20` `\\u0020` `\\040`）。⇒ 按**整个转义序列**抹成等长空白。
+_WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
 _CONCAT_ARTIFACT_RE = re.compile(r"[\"'+\\]")
 
 
@@ -71,7 +77,11 @@ def _blank_for_discovery(text: str) -> str:
     """位置保持的抹平：干扰物 → 等长空白（换行原样保留）。"""
     def blank(m):
         return "".join("\n" if ch == "\n" else " " for ch in m.group(0))
-    return _CONCAT_ARTIFACT_RE.sub(" ", _BLOCK_COMMENT_RE.sub(blank, text))
+    # 次序：块注释 → 空白转义（整段等长抹）→ 单字符拼接痕迹。
+    # ⚠️ 空白转义必须在单字符那步**之前**：否则反斜杠先被抹成空格，留下的 `n` 就再也认不出来了。
+    t = _BLOCK_COMMENT_RE.sub(blank, text)
+    t = _WS_ESCAPE_RE.sub(blank, t)
+    return _CONCAT_ARTIFACT_RE.sub(" ", t)
 
 
 #: 抹平之后，发现层只剩这一条：关键字之间允许空白或 `--` 行注释；schema 限定符可选；
