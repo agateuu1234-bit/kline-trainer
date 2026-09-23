@@ -8,7 +8,12 @@
 
 **Tech Stack:** Swift 6 / swift-testing（`@Test` + `#expect`）/ CoreGraphics（跨平台，host `swift test` 可跑像素断言）/ UIKit 仅在 dispatch 接线处。
 
-**Spec:** `docs/superpowers/specs/2026-09-21-drawing-tools-P1c-2-nodes-design.md`（D121–D131，codex `approve` @ `28fa2a17`）
+**Spec:** `docs/superpowers/specs/2026-09-21-drawing-tools-P1c-2-nodes-design.md`（D121–D133）
+
+> ⚠️ **评审存证的真实范围**（⛔ 不得含糊）：codex 对该 spec 的 `approve` 只覆盖到 **D131**
+> （账本条目 `branch:feat/drawing-p1c-2-nodes@28fa2a17`，即 rebase 前的 `bdb38cca`）。
+> **D132（输入契约）与 D133（绘制阶段）是那次 approve 之后新增的，从未经官方通道评审。**
+> 且 rebase 之后该条目按 head SHA 索引已失效。⇒ 合并前必须重跑一次覆盖当前 HEAD 的官方评审。
 
 ## Global Constraints
 
@@ -575,7 +580,9 @@ cd ios/Contracts && swift test --filter malformedAnchors 2>&1 | tee /tmp/mut.log
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
 grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
-# Expected: `malformedAnchorsProduceNoPhantomNodes` 的 ①② 档变红（幽灵节点出现）；
+# Expected: `malformedAnchorsProduceNoPhantomNodes` 的 **① 档**变红（幽灵节点出现）。
+#   ⛔ 不要去追 ② 档的红：② 的第二锚价位是 999（图外），它是被 **y 守卫**挡下的，
+#     与锚数截断无关 ⇒ 对本变异判别力为零（Opus 评审 M2 实测：变异③ 下 ② 仍 count==1）。
 #           `malformedAnchorsAreNotHittable`（Task 3 建立后）的第二锚档同时变红
 
 cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
@@ -930,23 +937,28 @@ struct DrawingNodeRendererTests {
     static let frame = CGRect(x: 0, y: 0, width: 800, height: 360)
 
     static func render(_ marks: [DrawingNodeGeometry.NodeMark],
-                       scheme: AppColorScheme = .light) -> [UInt8] {
+                       scheme: AppColorScheme = .light,
+                       clipTo clip: CGRect? = nil) -> [UInt8] {
         var data = [UInt8](repeating: 0, count: W * H * 4)
         let ctx = CGContext(data: &data, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4,
                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme, clipTo: frame)
+        DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme, clipTo: clip ?? frame)
         return data
     }
 
     /// 某一列上不透明像素的个数（= 该列被画到的垂直厚度）。
+    /// ⚠️ 整列求和，**不受行序影响** —— 与 `pixel(_:x:y:)` 不同，这里无需做 bottom-up 换算。
     static func columnInk(_ data: [UInt8], x: Int) -> Int {
         (0..<H).reduce(0) { acc, y in acc + (data[(y * W + x) * 4 + 3] > 76 ? 1 : 0) }
     }
 
-    /// 某像素的（反 premultiplied）颜色，alpha 太低则 nil。
+    /// 某像素的（反 premultiplied）颜色，alpha 太低则 nil。`y` 是 **CG 坐标**。
+    /// ⛔⛔ **`data` 的行序是 bottom-up：内存行 = H - 1 - CG的y**。
+    /// 实测（800×400 bitmap，在 CG (400,180) 画直径 7 的圆）：有墨的内存行是 **216…223**，
+    /// 而内存行 180 的 alpha 是 **0**。⇒ 直接拿 CG 的 y 当行号会读到完全无关的位置。
     static func pixel(_ data: [UInt8], x: Int, y: Int) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {
-        let i = (y * W + x) * 4
+        let i = ((H - 1 - y) * W + x) * 4
         let a = CGFloat(data[i+3]) / 255
         guard a > 0.3 else { return nil }
         return (CGFloat(data[i])/255/a, CGFloat(data[i+1])/255/a, CGFloat(data[i+2])/255/a)
@@ -990,13 +1002,18 @@ struct DrawingNodeRendererTests {
 
     @Test("D125：节点被裁剪到主图框内（贴下沿时不溢出到副图区）")
     func nodeIsClippedToMainChartFrame() {
-        // 圆心 y=358，半径 3.5 ⇒ 无裁剪会画到 361.5；frame.maxY = 360
-        let data = Self.render([.real(index: 0, at: CGPoint(x: 400, y: 358))])
-        #expect(Self.pixel(data, x: 400, y: 358) != nil, "前提：圆心处必须有墨（否则下面恒真）")
-        for y in 361..<365 {
-            #expect(Self.pixel(data, x: 400, y: y) == nil,
-                    "y=\(y) 超出主图框 maxY=360，必须被裁掉 —— 否则会画到成交量面板上")
-        }
+        // 圆心 CG y=358、半径 3.5 ⇒ 圆覆盖 CG y 354.5…361.5；frame.maxY = 360。
+        // ⭐ **对照式**断言：同一个记号，裁到 frame（360 高）vs 裁到全图（400 高），
+        //    在 CG y=360 这一行必须**一有一无**。⛔ 单看「裁剪后那里没墨」是恒真的 ——
+        //    实测：无裁剪时 CG y=360 的 alpha=255、有裁剪时=0；而更远的 y=362 两种情况都是 0。
+        let mark = DrawingNodeGeometry.NodeMark.real(index: 0, at: CGPoint(x: 400, y: 358))
+        let clipped   = Self.render([mark])                                             // clipTo: frame
+        let unclipped = Self.render([mark], clipTo: CGRect(x: 0, y: 0, width: 800, height: 400))
+        #expect(Self.pixel(unclipped, x: 400, y: 360) != nil,
+                "⭐ 前提：不裁剪时 CG y=360 必须有墨，否则下面那条断言是空的")
+        #expect(Self.pixel(clipped, x: 400, y: 360) == nil,
+                "裁剪后 CG y=360（已达 frame.maxY）必须没墨 —— 否则节点会画到成交量面板上")
+        #expect(Self.pixel(clipped, x: 400, y: 358) != nil, "圆心仍须有墨（别把整个圆裁没了）")
     }
 
     @Test("空记号 → 一个像素都不画（接线层传空时的零开销路径）")
@@ -1147,6 +1164,12 @@ git commit -m "P1c-2 Task4：节点与代理三角的绘制（零判断 + 裁剪
 ⚠️ 既有的 `litPixels(of:)` 只找「有没有某颜色」、从不看位置，所以这个问题一直没暴露；
 但 Step 1 的 `pixelAt(x:y:)` 是**直接按 y 索引 data 行**的，假设错了整条断言就失效。
 
+**⛔ 探针本身必须有判别力**（Opus 评审 M1，**已核实为真**）：不能把整张图的墨行打印出来看两端 ——
+`KLineView.draw` 会画 K 线、成交量柱、MACD 柱、轴标签盒，**它们都是不透明的、横跨整个画布**
+（只有网格线 alpha=0.25 会被 >128 滤掉）⇒ 墨行从接近 0 一直排到接近 `h-1`，
+两种行序下打印出来的两端**一模一样**，判读规则的两条会同时成立、只能靠猜。
+⇒ 探针必须**只看那条画线的两个候选位置**，并要求「恰好一个有墨」。
+
 一次性探针（确认后即删，**不入库**）：
 
 ```swift
@@ -1164,16 +1187,24 @@ func probeRowOrder() {
     UIGraphicsPushContext(ctx); upperV.draw(upperV.bounds); UIGraphicsPopContext()
     let mp = CoordinateMapper(viewport: upperV.renderState.viewport, displayScale: 1)
     let expectedCGY = Int(mp.priceToY(engine.drawings[0].anchors[0].price))
-    let inkRows = (0..<h).filter { row in
-        (0..<w).contains { x in data[(row * w + x) * 4 + 3] > 128 }
-    }
-    print("PROBE expectedCGY=\(expectedCGY) h=\(h) inkRows(前后各3)=\(inkRows.prefix(3))…\(inkRows.suffix(3))")
+    let ax = Int(mp.indexToX(engine.drawings[0].anchors[0].candleIndex))
+    // ⭐ 只看那条线的两个候选行，要求【恰好一个】有墨
+    let topDownAlpha  = data[(expectedCGY * w + ax) * 4 + 3]
+    let bottomUpAlpha = data[((h - 1 - expectedCGY) * w + ax) * 4 + 3]
+    print("PROBE topDownAlpha=\(topDownAlpha) bottomUpAlpha=\(bottomUpAlpha)")
+    #expect((topDownAlpha > 76) != (bottomUpAlpha > 76),
+            "⛔ 必须恰好一个有墨。两个都有或都没有 ⇒ 探针本身坏了（取样点选错 / 线没画出来），不得继续")
 }
 ```
 
-**判读**：若 `inkRows` 落在 `expectedCGY` 附近 ⇒ **top-down**，`pixelAt` 与 T10 里按 `y` 直接索引即可；
-若落在 `h - 1 - expectedCGY` 附近 ⇒ **bottom-up**，两处索引一律改成 `(h - 1 - y)`。
-**把判读结论逐字写进这两处测试的注释**，⛔ 不得只在脑子里记。
+**判读**：`topDownAlpha` 有墨 ⇒ **top-down**，按 `y` 直接索引；`bottomUpAlpha` 有墨 ⇒ **bottom-up**，
+索引一律写成 `(h - 1 - y)`。
+
+**⚠️ 本片已在独立环境实测过，结论是 bottom-up**（800×400 bitmap、`premultipliedLast`、sRGB，
+在 CG (400,180) 画直径 7 的圆 ⇒ 有墨的**内存行是 216…223**、内存行 180 的 alpha 是 **0**）。
+plan 里三处按 y 索引的地方（Task 4 的 `pixel`、Task 5 的 `pixelAt` 与 N1 的 `isInk`）
+**均已按 bottom-up 写好**。本探针的作用是**在实机环境再确认一次**；若它报出 top-down，
+说明环境与实测不符 ⇒ **停下来查清再继续**，⛔ 不得直接改索引了事。
 
 - [ ] **Step 1: 在既有端到端测试里追加断言**
 
@@ -1199,10 +1230,6 @@ func probeRowOrder() {
         let mp = CoordinateMapper(viewport: upperV.renderState.viewport, displayScale: 1)
         let anchor0 = engine.drawings[0].anchors[0]
         let ax = Int(mp.indexToX(anchor0.candleIndex)), ay = Int(mp.priceToY(anchor0.price))
-        let beforeAtAnchor = Self.pixelAt(upperV, x: ax, y: ay, rebuildWith: upperC, bounds: bounds,
-                                          select: nil, engine: engine)
-        let afterAtAnchor  = Self.pixelAt(upperV, x: ax, y: ay, rebuildWith: upperC, bounds: bounds,
-                                          select: engine.drawings[0].id, engine: engine)
         // 出厂橙昼夜同值（`DrawingColorResolver.swift:10` 逐字：legacy 默认，昼夜同）⇒ 只需一套
         let orange = DrawingColorResolver.resolve(.orange, scheme: .light)
         func isOrange(_ px: Px?) -> Bool {
@@ -1229,12 +1256,7 @@ func probeRowOrder() {
     /// 与 `litPixels(of:)` 同一条渲染链（renderState → drawDrawings → tool.render），
     /// 区别只在于**保留坐标**，因而不会把别处的轴标签 / 指标线误当成节点。
     @MainActor
-    private static func pixelAt(_ view: KLineView, x: Int, y: Int,
-                                rebuildWith coordinator: ChartContainerView.Coordinator,
-                                bounds: CGRect, select id: DrawingID?,
-                                engine: TrainingEngine) -> Px? {
-        engine.drawingSession.setSelectedDrawingIDForTesting(id)
-        coordinator.rebuildRenderState(bounds: bounds)
+    private static func pixelAt(_ view: KLineView, x: Int, y: Int) -> Px? {
         let w = Int(view.bounds.width), h = Int(view.bounds.height)
         guard x >= 0, x < w, y >= 0, y < h else { return nil }
         var data = [UInt8](repeating: 0, count: w * h * 4)
@@ -1244,16 +1266,29 @@ func probeRowOrder() {
         UIGraphicsPushContext(ctx)
         view.draw(view.bounds)
         UIGraphicsPopContext()
-        let i = (y * w + x) * 4
+        // ⛔ 行序是 bottom-up（Step 0 实测）：内存行 = h - 1 - CG的y
+        let i = ((h - 1 - y) * w + x) * 4
         let a = CGFloat(data[i+3]) / 255
         guard a > 0.3 else { return nil }
         return Px(r: CGFloat(data[i])/255/a, g: CGFloat(data[i+1])/255/a, b: CGFloat(data[i+2])/255/a)
     }
 ```
 
-⚠️ **实施时先确认 `setSelectedDrawingIDForTesting` 这类入口是否已存在**（`git grep -n 'ForTesting' -- 'ios/Contracts/Sources'`）。
-若不存在，**⛔ 不要为测试新增生产 API** —— 改为复用本测试既有的
-`upperC.handleDrawingTapForTesting(at: p)` 走真实命中路径来切换选中态，`select:` 参数随之去掉。
+⚠️ **`setSelectedDrawingIDForTesting` 实测【不存在】**（`grep -rn 'ForTesting' ios/Contracts/Sources/` 无此项），
+且 `DrawingSession.selectedDrawingID` 是 `public private(set)`（`DrawingSession.swift:49`）⇒ **外部设不了**。
+**⛔ 不要为测试新增生产 API。** 改用既有入口，按下面的顺序取两次快照：
+
+```swift
+        // 未选中态（此刻 selectedDrawingID 已是 nil —— setMode(.select) 清过，见上文断言）
+        let beforeAtAnchor = Self.pixelAt(upperV, x: ax, y: ay)
+        upperC.handleDrawingTapForTesting(at: p)        // 走真实命中路径选中它
+        #expect(engine.drawingSession.selectedDrawingID == engine.drawings[0].id)   // 前提成立
+        let afterAtAnchor = Self.pixelAt(upperV, x: ax, y: ay)
+```
+
+⇒ `pixelAt` 的签名相应简化为 `pixelAt(_ view:x:y:)`（不再收 `select:` / `engine:` / `coordinator:`），
+内部只做「渲染一次 + 取那一个像素」。⚠️ 取 `beforeAtAnchor` 必须在那次 tap **之前** —— 本测试上文
+已有 `upperC.rebuildRenderState(bounds: bounds)` 与 `selectedDrawingID == nil` 的前提断言，直接接在其后。
 
 **⚠️ 显式两主题由 host 层承担**：Task 4 的 `realNodeIsInkFilledCircle` 已对 `.light` / `.dark`
 各断言一次节点颜色。本条端到端验的是**接线通没通**，不重复验颜色 —— 因为测试环境的 scheme
@@ -1300,7 +1335,7 @@ func probeRowOrder() {
                                     tools: [.horizontal: HorizontalLineTool()])
             let snap = data                      // 先快照，避免与 CGContext 的 inout 访问重叠
             func isInk(_ x: Int) -> Bool {
-                let i = (yLine * w + x) * 4
+                let i = ((h - 1 - yLine) * w + x) * 4   // ⛔ bottom-up（Step 0 实测）
                 let al = CGFloat(snap[i+3]) / 255
                 guard al > 0.5 else { return false }
                 return CGFloat(snap[i])/255/al < 0.12 && CGFloat(snap[i+1])/255/al < 0.12
@@ -1405,7 +1440,9 @@ struct SelectionNodeDrawOrderGuardTests {
         let url = Self.contractsRoot
             .appendingPathComponent("Sources/KlineTrainerContracts/Render/KLineView.swift")
         let src = try String(contentsOf: url, encoding: .utf8)
-        // 只看 draw(_:) 函数体内的调用序，避免被别处的同名字符串干扰
+        // 从 draw(_:) 的声明处截到文件末尾再找调用序，避免被【它之前】的同名字符串干扰。
+        // ⚠️ 今天 draw(_:) 恰好是本文件最后一个函数，故这段等价于函数体；
+        //    将来若在它后面新增函数，本判据需收紧到真正的函数体边界。
         guard let bodyStart = src.range(of: "public override func draw(_ rect: CGRect)") else {
             Issue.record("找不到 draw(_:) —— 判据的文本来源坏了，⛔ 不得当作通过"); return
         }
@@ -1524,11 +1561,17 @@ Task 2 的测试引用 Task 3 的 API，会让 Task 2 的「跑绿」永远执�
         // P1c 第 2 片：选中态节点画在所有**持久**内容之上（K 线 / 画线 / 交易标记 / 轴标签），
         // 但在**瞬时**的十字光标之下 —— 光标是用户此刻正在用的交互反馈，不该被压住。
         drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
-                           scheme: scheme, selectedDrawingID: renderState.selectedDrawingID,
+                           scheme: themeController.resolve(trait: traitCollection),
+                           selectedDrawingID: renderState.selectedDrawingID,
                            tools: Self.drawingTools)
 ```
 
-⚠️ `scheme` 与 `mapper` 取 `draw(_:)` 里已有的那两个局部量（与 `drawDrawings` 那行用的是同一个）。
+⚠️ **`scheme` 不是局部量**（实测）：`draw(_:)` 里的局部量只有
+`drawToken / ctx / scale / mapper / volMapper / macdMapper / axisGrid`（`KLineView.swift:78-118`）。
+`drawDrawings` 那行的 `scheme:` 是**内联求值** `themeController.resolve(trait: traitCollection)`（`:111`），
+`themeController` 是同文件的 `private let`（`:36`）。⇒ 本行照抄那个内联写法。
+⛔ **不要**为此在 `draw(_:)` 里新抽一个 `let scheme` —— 那会改变 `drawDrawings` 的取值时机，属本片范围外。
+`mapper` 则确实是已有局部量（`:85`），直接用。
 
 - [ ] **Step 4: 跑 Catalyst，确认通过**
 
