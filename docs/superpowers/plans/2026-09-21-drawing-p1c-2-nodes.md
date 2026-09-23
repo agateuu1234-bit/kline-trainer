@@ -1484,7 +1484,7 @@ struct SelectionNodeDrawOrderGuardTests {
 
 ```bash
 DD=$(mktemp -d)
-xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,variant=Mac Catalyst' \
+xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tail -30
 ```
 
@@ -1584,7 +1584,7 @@ Task 2 的测试引用 Task 3 的 API，会让 Task 2 的「跑绿」永远执�
 
 ```bash
 DD=$(mktemp -d)
-xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,variant=Mac Catalyst' \
+xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tail -15
 ```
 
@@ -1601,7 +1601,7 @@ cd ios/Contracts && swift test 2>&1 | tail -3
 
 ```bash
 DD=$(mktemp -d)
-xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,variant=Mac Catalyst' \
+xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/catalyst.log | tail -3
 python3 .github/scripts/uikit-expected-tests.py > .github/scripts/catalyst-uikit-baseline.txt
 git diff --stat .github/scripts/catalyst-uikit-baseline.txt     # 期望：+2 行（onlySelectedLineDrawsNodes / nodeClippingDoesNotThinTheLine）
@@ -1788,7 +1788,7 @@ Step 1 追加的**受控点**断言（`isOrange(before)` / `isInk(after)` / `!is
 
 ```bash
 DD=$(mktemp -d)
-xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,variant=Mac Catalyst' \
+xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$DD" -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/catalyst.log | tail -5
 python3 .github/scripts/uikit-expected-tests.py > .github/scripts/catalyst-uikit-baseline.txt
 git diff --stat .github/scripts/catalyst-uikit-baseline.txt

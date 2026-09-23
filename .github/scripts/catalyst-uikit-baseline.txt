@@ -7,6 +7,8 @@ render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间�
 render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界
 D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true
 D55 dispatch：selectedDrawingID == nil → 一条都不高亮
+N1：两条同价位重合的线 —— 只有被选中的那条画节点（选中项在数组首/尾各验一次）
+⭐T10：裁剪只作用于节点 —— 贴主图下沿的粗线必须仍有一部分画在框外
 前置实测：ImageRenderer 能 flatten Canvas 图标（子树不塌成零尺寸）——Task4 几何断言的前提
 像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）
 像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）

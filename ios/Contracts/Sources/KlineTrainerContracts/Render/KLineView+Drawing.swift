@@ -53,6 +53,32 @@ extension KLineView {
             }
         }
     }
+
+    /// P1c 第 2 片（D121 / D131）：选中态的节点与代理标记。
+    /// **必须由 `KLineView.draw` 在 `drawMarkers` 与 `drawAxisLabels` 之后单独调用** ——
+    /// 交易标记是半径 5pt 的实心圆（`KLineView+Markers.swift:30`/`:44`，直径 10pt > 节点 7pt），
+    /// 画在节点之后会把它整个盖掉；而取消变蓝之后节点是**唯一的图内选中反馈**，被盖住等于没有。
+    /// **工具无关** —— 决策全在 `DrawingNodeGeometry`、绘制全在 `DrawingNodeRenderer`，
+    /// 本层只负责问一次「这条线画不画得出来」并转发。⛔ 不得在此写死任何 `toolType`。
+    func drawSelectionNodes(ctx: CGContext,
+                            mapper: CoordinateMapper,
+                            drawings: [DrawingObject],
+                            scheme: AppColorScheme,
+                            selectedDrawingID: DrawingID?,
+                            tools: [DrawingToolType: any DrawingTool]) {
+        guard let id = selectedDrawingID else { return }
+        // 数组序即 z-order，重复 id 时取**最后一条**（与既有约定一致：后画的在上）
+        guard let drawing = drawings.last(where: { $0.id == id }),
+              let tool = tools[drawing.toolType] else { return }
+        let marks = DrawingNodeGeometry.marks(
+            for: drawing, mapper: mapper,
+            isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
+            maxAnchors: tool.requiredAnchors.upperBound)   // D132 第 1 条：按该工具真正消费的锚数截断
+        // D125：裁剪只作用于节点与代理标记 —— `DrawingNodeRenderer.draw` 内部自带
+        // saveGState/clip/restoreGState，故别处画的线**一点不受影响**。
+        DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
+                                 clipTo: mapper.viewport.mainChartFrame)
+    }
 }
 
 #endif
