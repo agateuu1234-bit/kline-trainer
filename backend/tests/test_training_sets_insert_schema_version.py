@@ -187,9 +187,26 @@ def _column_list(text: str, after: int) -> str | None:
     与「检查通过」区分开来处理，否则一个 `continue` 就同时制造漏报与假阳性
     （本仓「守卫里一个 continue 混了两件事」的老教训）。
     """
+    # ⚠️ 找左括号时要**同时跳过空白与 SQL 注释**：`training_sets /* c */ (cols)` 与
+    #    `training_sets -- c\n  (cols)` 都是合法 SQL。只跳空白的话，这两种会掉进
+    #    「判据够不着」兜底分支 —— **红是红了，但报文说「判不了」，而其实完全判得了**
+    #    （实测确认过走的是兜底分支）。兜底分支应该留给真正够不着的形态。
     i = after
-    while i < len(text) and text[i] in " \t\r\n":
-        i += 1
+    while i < len(text):
+        if text[i] in " \t\r\n":
+            i += 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            if j == -1:
+                return None
+            i = j + 2
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            if j == -1:
+                return None
+            i = j + 1
+        else:
+            break
     if i >= len(text) or text[i] != "(":
         return None
     depth = 0
