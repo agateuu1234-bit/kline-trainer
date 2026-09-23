@@ -49,41 +49,49 @@ SELF = Path(__file__).resolve()
 #:    之间换行、`public.training_sets` —— 守卫**照样 `1 passed`**（PostgreSQL 侧确认三条
 #:    都是合法语句）。而既有 12 处仍满足计数断言，于是**新写入方可以静默绕过**、拿到
 #:    `DEFAULT 1`，把第 2 代产物错标成第 1 代。
-#: ⇒ 改用正则，覆盖：关键字大小写、任意空白/换行、可选 `public.` 限定、可选双引号。
-#: 关键字之间允许出现的东西：空白 / SQL 注释 / **Python 字符串拼接留下的引号**。
-#: ⚠️ 引号那一项是必须的：`"INSERT INTO "` 换行 `"training_sets (…)"` 是**最自然的
-#:    换行点**，真实开发者会这么写（实测不加这一项时 G1/G2/G4 三种拼法全部漏掉）。
-#: ⚠️ `+` 与 `\\` 也必须容忍：`"INSERT INTO " + "training_sets (…)"` 是**普通的 Python
-#:    字符串拼接**，codex 实测这样写能同时绕过精确正则与粗网（守卫仍 `1 passed`）。
-_KW_GAP = r"(?:\s|[\"'+\\]|/\*.*?\*/|--[^\n]*\n)+"
+#: ⛔⛔ **发现层用「先抹平、再简单正则」，不再一个个往字符类里补字符。**
+#:
+#: 为什么是这个做法：发现层被连续攻破**五次** —— 大小写/换行/`public.` 限定 →
+#: 关键字之间夹注释 → `+` 拼接 → **schema 限定符与表名之间夹注释**
+#: （`INSERT INTO public./* c */training_sets`）。每次我都往间隔字符类里补一个字符，
+#: 这是打地鼠：**字符类永远数不全**。
+#:
+#: 结构性做法：先把**干扰物**换成**等长空白**（位置 1:1 保持、换行保留 ⇒ 行号不会错），
+#: 再用一条**简单**正则扫抹平后的文本。干扰物只有两类：
+#:   ① SQL 块注释 `/* … */` —— 可以出现在语句的任何缝隙里；
+#:   ② Python 字符串拼接的痕迹 `"` `'` `+` `\` —— 它们永远不属于标识符。
+#: ⚠️ **等长**是硬要求：抹平后的下标要能直接映射回原文，否则报出来的行号是错的。
+#: ⚠️ `--` 行注释**不做全局抹平**（它在 shell / YAML 里另有含义，全局抹会吃掉同一行
+#:    后面的真 SQL ⇒ 制造**漏报**）；只在关键字之间的间隔里局部容忍。
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_CONCAT_ARTIFACT_RE = re.compile(r"[\"'+\\]")
 
+
+def _blank_for_discovery(text: str) -> str:
+    """位置保持的抹平：干扰物 → 等长空白（换行原样保留）。"""
+    def blank(m):
+        return "".join("\n" if ch == "\n" else " " for ch in m.group(0))
+    return _CONCAT_ARTIFACT_RE.sub(" ", _BLOCK_COMMENT_RE.sub(blank, text))
+
+
+#: 抹平之后，发现层只剩这一条：关键字之间允许空白或 `--` 行注释；schema 限定符可选；
+#: 表名的引号已被抹成空白，所以不必再写引号分支。
+_GAP = r"(?:\s|--[^\n]*\n)+"
 _INSERT_RE = re.compile(
-    # ⚠️ 引号必须**成对**匹配，不能写 `"?training_sets"?`：那样在
-    #    `if "INSERT INTO training_sets" in query:` 上会把 Python 字符串的**收尾引号**
-    #    一起吃掉，`m.end()` 越过它 ⇒ 下面按 tail 认 test double 的白名单当场失配。
-    # ⚠️ 关键字之间允许夹 **SQL 注释**：`INSERT /* c */ INTO training_sets` 是合法语句，
-    #    只写 `\s+` 会漏掉它（codex 复审第 3 轮实测：那样写守卫仍绿）。
-    #    ⛔ 只在「INSERT…INTO…表名」这个构造**内部**容忍注释，不做全文剥注释 ——
-    #       `--` 在 shell / YAML 里有别的含义，全文剥会误伤同行后面的真 SQL。
-    rf'insert{_KW_GAP}into{_KW_GAP}(?:"?public"?\s*\.\s*)?(?:"training_sets"|training_sets)',
-    re.I | re.S,
+    rf"insert{_GAP}into{_GAP}(?:public\s*\.\s*)?training_sets",
+    re.I,
 )
 
-#: ⛔⛔ **粗网**：精确正则再宽也总有够不着的拼法（实测：把表名劈成
-#:    `"INSERT INTO training_"` + `"sets …"` 两段拼接就能溜过去）。
-#:    本仓的铁律是「**不许把『断定不是目标』和『判据够不着』混进同一个分支**」——
-#:    两者会互相伪装成对方。⇒ 这里用一张**故意放宽**的网把「`insert` 附近出现类似
-#:    表名的东西」全兜住，凡是**精确正则没认领**的，一律报「判据够不着」**让测试红**，
-#:    ⛔ 绝不静默放行。宁可偶尔误报（红了有人看），也不要漏报（绿了没人知道）。
-#: ⚠️ 粗网的两条收紧，都是干净树上的误报逼出来的（守卫**必须在当前树上是绿的**，
-#:    否则它就成了一张放行许可证）：
-#:    ① 只认 `insert` 会在**中文散文**上误报 —— 实测 7 处，例如注释里
-#:       「并发 sweep 在预检与 INSERT 之间插入同一起点时」；⇒ 要求后面不远处跟 `into`。
-#:    ② `into` 与表名之间不能放任意内容 —— 否则
-#:       `INSERT INTO p15_targets (id) SELECT … FROM training_sets` 这条**插另一张表**的
-#:       合法语句会被误判；⇒ 两者之间只容忍空白/引号/下划线（正好够兜住被劈开的表名）。
+#: ⛔⛔ **粗网**：精确正则再宽也总有够不着的拼法（如表名被劈成 `training_` + `sets`）。
+#:    铁律是「**不许把『断定不是目标』和『判据够不着』混进同一个分支**」—— 两者会
+#:    互相伪装成对方。⇒ 凡「像是往 training_sets 写」却**没被上面那条认领**的，
+#:    一律报「判据够不着」**让测试红**，⛔ 绝不静默放行。
+#:    宁可偶尔误报（红了有人看），也不要漏报（绿了没人知道）。
+#: ⚠️ `into` 与表名之间**仍然收得很紧**，是被干净树上的误报逼出来的：放宽到任意字符会让
+#:    `INSERT INTO p15_targets (id) SELECT … FROM training_sets` 这条**插另一张表**的
+#:    合法语句误报（守卫必须在当前树上为绿，否则就是一张放行许可证）。
 _COARSE_RE = re.compile(
-    r"""insert[\s"'/*+\\-]{0,40}?into[\s"'_+\\]{0,40}?training[\s"'_+\\]*sets""",
+    rf"insert{_GAP}into[\s_]{{0,40}}?training[\s_]*sets",
     re.I,
 )
 
@@ -188,10 +196,11 @@ def test_every_executable_insert_specifies_schema_version():
 
     for path in _scope_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        precise_starts = {m.start() for m in _INSERT_RE.finditer(text)}
+        scan = _blank_for_discovery(text)      # 位置与 text 1:1 对齐
+        precise_starts = {m.start() for m in _INSERT_RE.finditer(scan)}
 
         # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
-        for cm in _COARSE_RE.finditer(text):
+        for cm in _COARSE_RE.finditer(scan):
             if cm.start() in precise_starts:
                 continue
             lineno = text.count("\n", 0, cm.start()) + 1
@@ -200,8 +209,8 @@ def test_every_executable_insert_specifies_schema_version():
                 f"{text[cm.start(): cm.start() + 60]!r}"
             )
 
-        for m in _INSERT_RE.finditer(text):
-            pos, after = m.start(), m.end()
+        for m in _INSERT_RE.finditer(scan):
+            pos, after = m.start(), m.end()      # 下标对 text 同样有效（抹平等长）
             rel = path.relative_to(ROOT)
             lineno = text.count("\n", 0, pos) + 1
             tail = text[after: after + 20]
