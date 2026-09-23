@@ -585,7 +585,7 @@ perl -pi -e 's/drawing\.anchors\.prefix\(max\(0, maxAnchors\)\)\.enumerated\(\)/
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
 cd ios/Contracts && swift test --filter malformedAnchors 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 # Expected: `malformedAnchorsProduceNoPhantomNodes` 的 **① 档**变红（幽灵节点出现）。
 #   ⛔ 不要去追 ② 档的红：② 的第二锚价位是 999（图外），它是被 **y 守卫**挡下的，
@@ -598,7 +598,7 @@ perl -pi -e 's/            guard y\.isFinite, y >= frame\.minY, y <= frame\.maxY
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
 cd ios/Contracts && swift test --filter 'malformedAnchorsProduceNoPhantomNodes|threeOutcomes' 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 # Expected: T12 的 ③④ 档变红
 
@@ -866,7 +866,7 @@ perl -0pi -e 's/guard case let \.real\(i, p\) = mark else \{ return nil \}[^\n]*
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
 cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
@@ -879,7 +879,7 @@ perl -pi -e 's/public static let hitRadius: CGFloat = 11/public static let hitRa
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
 cd ios/Contracts && swift test --filter visibleNodeCoversLineHitsNearby 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
@@ -1112,7 +1112,7 @@ perl -pi -e 's/let baseX = pointingLeft \? p\.x \+ d : p\.x - d/let baseX = poin
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
 cd ios/Contracts && swift test --filter proxyTriangleDirectionIsDistinguishable 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
@@ -1124,7 +1124,7 @@ cp /tmp/noderend.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/Drawing
 perl -pi -e 's/        ctx\.clip\(to: frame\)\n//' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
 cd ios/Contracts && swift test --filter nodeIsClippedToMainChartFrame 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
@@ -1494,7 +1494,7 @@ Expected: **编译失败**，错误形如 `value of type 'KLineView' has no memb
 `drawSelectionNodes`。**同一个 Task 内**这样是正常的 TDD 循环；⛔ 但**跨 Task** 不行（R5 的教训：
 Task 2 的测试引用 Task 3 的 API，会让 Task 2 的「跑绿」永远执行不到）。
 ⛔ 数编译错误不得用 `grep -c 'error:'`（会把 macOS 的 XPC 噪音算进去），用
-`grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:'`。
+`sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:'`。
 
 - [ ] **Step 3: 接线**
 
@@ -1589,7 +1589,7 @@ xcodebuild test -scheme KlineTrainer-Catalyst -destination 'platform=macOS,varia
 ```
 
 Expected: 全绿。⚠️ 数编译错误**不得用** `grep -c 'error:'`（会把 macOS 的 XPC 噪音算进去），要用：
-`grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:'`
+`sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:'`
 
 - [ ] **Step 5: 跑 host 全量，确认没碰坏别的**
 
@@ -1814,7 +1814,7 @@ perl -pi -e 's/let rgba = DrawingColorResolver\.resolve\(drawing\.colorToken, sc
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift
 cd ios/Contracts && swift test --filter 'selectionNeverChangesStrokeColor|selectionLeavesLinePixelsUntouched' 2>&1 | tee /tmp/mut.log | tail -3
 # ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
-grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+sed 's/\x1b\[[0-9;]*m//g' | grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
 grep -E '✘|Issue recorded' /tmp/mut.log | head
 cp /tmp/hlt.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift
 ```
