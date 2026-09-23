@@ -21,14 +21,14 @@
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | B1 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend"' 'git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD' '../.venv/bin/python -m pytest tests/ -q -rs 2>&1 | tail -6' > /tmp/s4a_b1.sh` | 没有任何输出（安静就是成功） | 没报错 = 通过 |
-| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1611 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1611 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
+| B2 | 粘贴并回车：`bash /tmp/s4a_b1.sh` | 最后几行里有 **`1614 passed`**，并且**没有** `skipped` 或 `failed` 字样 | 数字是 1614 且无 skipped/failed = 通过；出现 failed 或 skipped = 不通过 |
 | B3 | 看 B2 输出**最上面**两行 | 第一行是 `qmt-4b-s4a`，第二行的编号与 A1 打印的一致 | 一致 = 通过；不一致说明跑的不是这棵树 = 不通过 |
 
 ## 第三节 · 三条核心行为各跑一条命令
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| C1 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend"' '../.venv/bin/python -m pytest tests/test_qmt_fetch.py -q -k "daily_missing_leaves_no_orphan or rejects_fifo_at_final_target or terminates_before_marker" -v 2>&1 | tail -12' > /tmp/s4a_c1.sh` | 无输出 | 没报错 = 通过 |
+| C1 | 粘贴并回车：`printf '%s\n' 'cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4b-s4a/backend"' '../.venv/bin/python -m pytest tests/test_qmt_fetch.py -k "daily_missing_leaves_no_orphan or rejects_fifo_at_final_target or terminates_before_marker" -v 2>&1 | tail -12' > /tmp/s4a_c1.sh` | 无输出 | 没报错 = 通过 |
 | C2 | 粘贴并回车：`bash /tmp/s4a_c1.sh` | 看到 **3 个**测试名后面都是 `PASSED`，最后一行是 `3 passed` | 三个都 PASSED = 通过；任何一个 FAILED 或总数不是 3 = 不通过 |
 
 **这三条分别在验证**：
@@ -80,8 +80,11 @@
    · **最终在提交上拿到一次基准正确的「通过」，评审账本已写入记录 ⇒ 治理要求的那道闸门满足了。**
 
    ⚠️ **读这个「通过」要连它没做的事一起读**（这是本仓踩过的坑，写在这里供你自己判断）：
-   · 它**没有跑任何测试** —— 它自己写着「Review was static; filesystem-writing tests
-     were not run」。测试是我跑的，第二节那条就是让你亲手复核这一点的；
-   · 它这一轮**逐字比对的是两个程序文件的改动**，并没有逐行看那 500 多行新增测试与契约文档；
+   · 它**没有跑任何测试** —— 最后那次判决的原话是「Static review covered publication
+     ordering, rollback accounting, exception propagation, and filesystem boundaries;
+     tests were not executed in the read-only environment」（静态审查覆盖了发布次序、
+     回滚记账、异常传递、文件系统边界；测试没有执行）。测试是我跑的，
+     第二节那条就是让你亲手复核这一点的；
+   · 它**没有逐行看**那 600 多行新增测试与契约文档；
    · 所以这个「通过」的意思是「**在它看过的代码里没找到会阻断发布的问题**」，
      **不是**「所有东西都被它验过一遍」。
