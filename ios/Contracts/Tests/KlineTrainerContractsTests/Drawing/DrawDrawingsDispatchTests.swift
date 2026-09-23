@@ -207,6 +207,8 @@ private final class SpyDrawingTool: DrawingTool {
         received.append((drawing, scheme, isSelected))
     }
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
+    // D131：这三个 mock 的测试目的与可见性无关，恒可见即可。
+    func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool { true }
 }
 
 @MainActor

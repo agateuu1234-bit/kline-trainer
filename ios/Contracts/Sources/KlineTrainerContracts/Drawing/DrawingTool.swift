@@ -21,4 +21,9 @@ public protocol DrawingTool {
     func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject,
                 scheme: AppColorScheme, isSelected: Bool)
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool
+    /// D131（P1c 第 2 片）：这条线此刻**画不画得出来**。
+    /// **节点的渲染与命中共用它** —— 各 tool 必须让它与自己的 `render` / `hitTest` 走**同一个判据**
+    /// （水平线三者共用 `visibleGeometry`），使「命中集合 ≡ 渲染集合」在结构上不可能分叉。
+    /// ⛔ 新工具不得为它单写一份可见性逻辑。
+    func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool
 }

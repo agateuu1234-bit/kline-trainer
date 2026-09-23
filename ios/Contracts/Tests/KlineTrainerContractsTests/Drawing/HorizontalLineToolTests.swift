@@ -348,4 +348,35 @@ struct HorizontalLineToolTests {
             }
         }
     }
+    @MainActor
+    @Test("D131：isVisible 与 visibleGeometry != nil 逐格等价（render/hitTest/节点共用同一判据）")
+    func isVisibleMatchesVisibleGeometry() {
+        let m = Self.mapper()   // mainChartFrame x∈[0,800] y∈[0,360]，price∈[10,20]
+        let tool = HorizontalLineTool()
+        // 逐格穷举：3 种线型 × 3 个价位（区间内 / 区间外上 / 区间外下） × 3 个锚点 x（屏内 / 左外 / 右外）
+        var checked = 0
+        for sub in [LineSubType.straight, .ray, .segment] {
+            for price in [15.0, 5.0, 25.0] {
+                for idx in [5, -50, 500] {
+                    let d = DrawingObject(toolType: .horizontal,
+                                          anchors: [DrawingAnchor(period: .m3, candleIndex: idx, price: price)],
+                                          isExtended: sub == .ray, panelPosition: 0, lineSubType: sub)
+                    #expect(tool.isVisible(drawing: d, mapper: m)
+                            == (HorizontalLineTool.visibleGeometry(for: d, mapper: m) != nil),
+                            "逐格等价失败：sub=\(sub) price=\(price) idx=\(idx)")
+                    checked += 1
+                }
+            }
+        }
+        #expect(checked == 27, "必须真的跑满 27 格，否则这条断言是空转")
+        // 判别力自检：这 27 格里 true 和 false 都必须出现，否则等价断言可能恒真
+        let anyTrue = tool.isVisible(drawing: DrawingObject(
+            toolType: .horizontal, anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .straight), mapper: m)
+        let anyFalse = tool.isVisible(drawing: DrawingObject(
+            toolType: .horizontal, anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .segment), mapper: m)
+        #expect(anyTrue == true, "正向档：可见的线必须报 true")
+        #expect(anyFalse == false, "负向档：.segment 必须报 false —— 证明本函数报得出非 true")
+    }
 }

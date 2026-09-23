@@ -102,4 +102,9 @@ public struct HorizontalLineTool: DrawingTool {
         guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return false }
         return abs(point.y - g.y) <= Self.hitTolerance && point.x >= g.minX && point.x <= g.maxX
     }
+
+    /// D131：与 `render` / `hitTest` **同一个判据**（三者都问 `visibleGeometry`）。
+    public func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool {
+        Self.visibleGeometry(for: drawing, mapper: mapper) != nil
+    }
 }
