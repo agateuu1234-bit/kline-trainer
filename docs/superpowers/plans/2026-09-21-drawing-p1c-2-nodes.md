@@ -571,7 +571,10 @@ cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingN
 # 变异③：拿掉锚数截断（投影 anchors 全部元素）
 perl -pi -e 's/drawing\.anchors\.prefix\(max\(0, maxAnchors\)\)\.enumerated\(\)/drawing.anchors.enumerated()/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
-cd ios/Contracts && swift test --filter malformedAnchors 2>&1 | grep -E '✘|Issue' | head
+cd ios/Contracts && swift test --filter malformedAnchors 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 # Expected: `malformedAnchorsProduceNoPhantomNodes` 的 ①② 档变红（幽灵节点出现）；
 #           `malformedAnchorsAreNotHittable`（Task 3 建立后）的第二锚档同时变红
 
@@ -579,7 +582,10 @@ cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingN
 # 变异④：拿掉 y 的有限性 / 范围守卫
 perl -pi -e 's/            guard y\.isFinite, y >= frame\.minY, y <= frame\.maxY else \{ return nil \}\n//' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
-cd ios/Contracts && swift test --filter 'malformedAnchorsProduceNoPhantomNodes|threeOutcomes' 2>&1 | grep -E '✘|Issue' | head
+cd ios/Contracts && swift test --filter 'malformedAnchorsProduceNoPhantomNodes|threeOutcomes' 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 # Expected: T12 的 ③④ 档变红
 
 cp /tmp/nodegeo.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift   # ⛔ 不用 git checkout
@@ -840,9 +846,14 @@ Expected: 19 个测试全 PASS（Task 2 的 11 条 + 本任务 8 条）
 ```bash
 cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift /tmp/nodegeo2.bak
 # 变异①：外层拿掉可见性筛选 —— 把代理标记也当成可命中的节点
-perl -0pi -e 's/guard case let \.real\(i, p\) = mark else \{ return nil \}   \/\/ 代理标记不进命中集合/switch mark { case let .real(i, p): return (index: i, at: p); case let .proxy(i, p, _): return (index: i, at: p) }/' \
+# ⛔ guard 与【紧随其后的 return】必须一起替换 —— 只换 guard 会留下引用已消失的 i / p 的那行，
+#    Swift 编译失败，T8/T9 根本跑不到（codex evaluation R6-medium 实证）
+perl -0pi -e 's/guard case let \.real\(i, p\) = mark else \{ return nil \}[^\n]*\n\s*return \(index: i, at: p\)/switch mark {\n                case let .real(i, p): return (index: i, at: p)\n                case let .proxy(i, p, _): return (index: i, at: p)\n                }/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
-cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | grep -E '✘|Issue recorded' | head
+cd ios/Contracts && swift test --filter DrawingNodeGeometry 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
 Expected: **`proxyMarkIsNotHittable` 与 `offscreenAnchorIsNeverHittableAtAnyDistance` 双双变红**（逐条记下测试名）。
@@ -852,7 +863,10 @@ cp /tmp/nodegeo2.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/Drawing
 # 变异②：命中半径从 11 改成 5（< 线容差 8）
 perl -pi -e 's/public static let hitRadius: CGFloat = 11/public static let hitRadius: CGFloat = 5/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeGeometry.swift
-cd ios/Contracts && swift test --filter visibleNodeCoversLineHitsNearby 2>&1 | grep -E '✘|Issue recorded' | head
+cd ios/Contracts && swift test --filter visibleNodeCoversLineHitsNearby 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
 Expected: **`visibleNodeCoversLineHitsNearby` 变红**（覆盖不变量被破坏）。
@@ -1072,7 +1086,10 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
 # 变异①：左右朝向互换
 perl -pi -e 's/let baseX = pointingLeft \? p\.x \+ d : p\.x - d/let baseX = pointingLeft ? p.x - d : p.x + d/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
-cd ios/Contracts && swift test --filter proxyTriangleDirectionIsDistinguishable 2>&1 | grep -E '✘|Issue' | head
+cd ios/Contracts && swift test --filter proxyTriangleDirectionIsDistinguishable 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
 Expected: **`proxyTriangleDirectionIsDistinguishable` 变红**。
@@ -1081,7 +1098,10 @@ Expected: **`proxyTriangleDirectionIsDistinguishable` 变红**。
 cp /tmp/noderend.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
 # 变异②：拿掉裁剪
 perl -pi -e 's/        ctx\.clip\(to: frame\)\n//' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingNodeRenderer.swift
-cd ios/Contracts && swift test --filter nodeIsClippedToMainChartFrame 2>&1 | grep -E '✘|Issue' | head
+cd ios/Contracts && swift test --filter nodeIsClippedToMainChartFrame 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 ```
 
 Expected: **`nodeIsClippedToMainChartFrame` 变红**。
@@ -1269,9 +1289,15 @@ func probeRowOrder() {
             let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                 space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-            makeViewFixture().drawDrawings(ctx: ctx, mapper: mapper, drawings: [a, b], period: .m60,
-                                           scheme: .light, selectedDrawingID: id,
-                                           tools: [.horizontal: HorizontalLineTool()])
+            // 复现 `KLineView.draw` 的真实先后：先画线，再（在所有持久内容之后）画选中节点。
+            // ⛔ 只调 drawDrawings 是画不出节点的 —— 节点已提成 draw 的独立阶段（R6）。
+            let view = makeViewFixture()
+            view.drawDrawings(ctx: ctx, mapper: mapper, drawings: [a, b], period: .m60,
+                              scheme: .light, selectedDrawingID: id,
+                              tools: [.horizontal: HorizontalLineTool()])
+            view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [a, b],
+                                    scheme: .light, selectedDrawingID: id,
+                                    tools: [.horizontal: HorizontalLineTool()])
             let snap = data                      // 先快照，避免与 CGContext 的 inout 访问重叠
             func isInk(_ x: Int) -> Bool {
                 let i = (yLine * w + x) * 4
@@ -1283,10 +1309,10 @@ func probeRowOrder() {
             return (isInk(xA), isInk(xB))
         }
 
-        // ① 选中数组【首位】—— ⭐ 这一档是关键：若节点画在逐条循环内，
-        //    后画的 B 的橙色描边会盖掉 A 节点的中心，本条当场红（codex plan-R1）
+        // ① 选中数组【首位】—— R6 把节点提成 draw 的独立阶段后，「被后画的线盖掉」在结构上
+        //    已不可能；本档现在守的是**另一件事**：节点只认选中项，不受同价位重合线干扰。
         let first = inkAt(selecting: "A")
-        #expect(first.atA, "选中数组首位时它的节点必须仍在 —— 不得被后画的重合线盖掉")
+        #expect(first.atA, "选中数组首位时它的节点必须画出来")
         #expect(!first.atB, "未选中的 B 不得有节点 —— 哪怕它与 A 同价位、视觉上完全重合")
         // ② 选中数组【末位】—— 与 ① 对照：只测这一档抓不到覆盖问题
         let last = inkAt(selecting: "B")
@@ -1298,9 +1324,8 @@ func probeRowOrder() {
 **⚠️ 实施后必做的变异（两条）**：
 ① **注释掉第二遍的节点绘制** ⇒ 端到端那条的 `isInk(afterAtAnchor)` **必须变红**
 （codex plan-R2 明确要求验证这一条 —— 它是「正向断言有没有判别力」的唯一证明）。
-② 把第二遍的节点绘制**挪回循环内**（`tool.render` 之后）⇒
-`onlySelectedLineDrawsNodes` 的 **① 选中首位**那一档必须变红、② 那一档仍绿。
-若两档都绿，说明这条测试没真的测到叠加顺序。
+② 把 `KLineView.draw` 里的 `drawSelectionNodes(...)` **挪到 `drawMarkers(...)` 之前** ⇒
+`selectionNodesDrawAfterMarkersAndLabels`（Step 1d 的源码顺序守卫）**必须变红**。
 
 - [ ] **Step 1c: 补 T10 —— 裁剪不得波及线（D125 的真守卫）**
 
@@ -1326,9 +1351,13 @@ func probeRowOrder() {
         let d = DrawingObject(id: "L", toolType: .horizontal,
                               anchors: [DrawingAnchor(period: .m60, candleIndex: 10, price: 100)],
                               isExtended: false, panelPosition: 0, thickness: 5)
-        makeViewFixture().drawDrawings(ctx: ctx, mapper: mapper, drawings: [d], period: .m60,
-                                       scheme: .light, selectedDrawingID: "L",   // 选中 ⇒ 节点也会画
-                                       tools: [.horizontal: HorizontalLineTool()])
+        let view = makeViewFixture()
+        view.drawDrawings(ctx: ctx, mapper: mapper, drawings: [d], period: .m60,
+                          scheme: .light, selectedDrawingID: "L",
+                          tools: [.horizontal: HorizontalLineTool()])
+        view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [d],      // 选中 ⇒ 节点也会画
+                                scheme: .light, selectedDrawingID: "L",
+                                tools: [.horizontal: HorizontalLineTool()])
         let snap = data
         // ⛔ 不假设 data 行序（见 Step 0）：只数「哪些行有成片的墨」，再看跨度落在哪一端。
         // 远离节点：节点在 x ≈ 80，故只统计 x ≥ 200 的区域，避免把节点像素算成线。
@@ -1345,8 +1374,67 @@ func probeRowOrder() {
 ```
 
 **⚠️ 实施后必做的变异**：把 `DrawingNodeRenderer.draw` 里的 `ctx.clip(to: frame)` **提到
-`drawDrawings` 的循环之前**（即扩大到包住整个 render）⇒ **`nodeClippingDoesNotThinTheLine` 必须变红**，
+`drawDrawings` 的循环之前**（即扩大到包住线的绘制）⇒ **`nodeClippingDoesNotThinTheLine` 必须变红**，
 而 `selectionLeavesLinePixelsUntouched`（T6）**仍绿** —— 后者正是它抓不到这件事的证明。
+
+- [ ] **Step 1d: 补绘制阶段的源码顺序守卫（host 可跑）**
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/Render/SelectionNodeDrawOrderGuardTests.swift`：
+
+```swift
+import Testing
+import Foundation
+@testable import KlineTrainerContracts
+
+/// P1c 第 2 片（R6）：选中态节点**必须**画在所有持久内容之上、瞬时光标之下。
+/// ⚠️ 这是**源码顺序**守卫：`KLineView.draw` 各阶段的先后决定谁盖谁，而顺序无法由纯函数表达。
+/// 判据读的是**仓内源文件本体**（不是编译产物、不是注释复述），路径按既有守卫的同一套算法推得。
+@Suite("SelectionNode draw order")
+struct SelectionNodeDrawOrderGuardTests {
+
+    static var contractsRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()    // Render
+            .deletingLastPathComponent()    // KlineTrainerContractsTests
+            .deletingLastPathComponent()    // Tests
+            .deletingLastPathComponent()    // ios/Contracts
+    }
+
+    @Test("⭐节点必须在 drawMarkers / drawAxisLabels 之后、drawCrosshair 之前")
+    func selectionNodesDrawAfterMarkersAndLabels() throws {
+        let url = Self.contractsRoot
+            .appendingPathComponent("Sources/KlineTrainerContracts/Render/KLineView.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        // 只看 draw(_:) 函数体内的调用序，避免被别处的同名字符串干扰
+        guard let bodyStart = src.range(of: "public override func draw(_ rect: CGRect)") else {
+            Issue.record("找不到 draw(_:) —— 判据的文本来源坏了，⛔ 不得当作通过"); return
+        }
+        let body = String(src[bodyStart.lowerBound...])
+        func pos(_ needle: String) -> Int? {
+            body.range(of: needle).map { body.distance(from: body.startIndex, to: $0.lowerBound) }
+        }
+        guard let markers = pos("drawMarkers("),
+              let labels  = pos("drawAxisLabels("),
+              let nodes   = pos("drawSelectionNodes("),
+              let cross   = pos("drawCrosshair(") else {
+            Issue.record("四个绘制阶段必须都能在 draw(_:) 里找到；缺任何一个都说明判据失效"); return
+        }
+        #expect(nodes > markers,
+                "节点必须画在交易标记【之后】—— 标记是直径 10pt 的实心圆，会把 7pt 的节点整个盖掉")
+        #expect(nodes > labels, "节点必须画在轴标签之后 —— 代理三角贴边框，与轴标签同区域")
+        #expect(nodes < cross, "节点必须画在十字光标【之前】—— 光标是瞬时交互反馈，不该被压住")
+    }
+}
+```
+
+**⚠️ 实施后必做的变异**：把 `drawSelectionNodes(...)` 那一行**挪到 `drawMarkers(...)` 之前** ⇒
+`selectionNodesDrawAfterMarkersAndLabels` **必须变红**。若不红，说明这条守卫读错了文本或判据写反了。
+
+**⚠️ 为什么不做像素级的「标记遮挡」行为测试**（如实登记，供评审复核）：交易标记的落点由
+`MarkersLayout.findCandleIndex` 决定，而它用的是**切片内下标**（`MarkersLayout.swift:36-40`
+`candles[idx]` 与 `mapper.indexToX(idx)`），与锚点的**全局** `candleIndex` 语义是否一致
+**本片未核实**，挖清它超出本片范围。⇒ 本片用源码顺序守卫承担这条，它对「顺序被改」的判别力是
+充分的（挪一行就红）；⛔ 但它**不能**证明「像素上真的没被盖住」，该限制随本片一起交接（§11-Q25）。
 
 - [ ] **Step 2: 跑 Catalyst，确认新断言失败（节点还没接线）**
 
@@ -1360,47 +1448,81 @@ Expected: `D41/D55 端到端…` FAIL，消息含「选中后必须出现节点�
 
 - [ ] **Step 3: 接线**
 
-**⛔⛔ 节点必须画成第二遍，不能插在逐条循环里**（codex plan-R1-medium，**已核实为真**）：
+**⛔⛔⛔ 节点必须画在 `KLineView.draw` 的【所有持久绘制之后】，不能留在 `drawDrawings` 里**
+（codex plan-R1-medium + R6-medium，两轮叠加，**已逐条核实**）：
+
+实测 `KLineView.draw`（`KLineView.swift:78-118`）的完整绘制顺序：
+
+```
+网格 → K线 → MA66 → BOLL → 成交量 → MACD
+→ drawDrawings      ← R1 修复把节点放到了这里面的「第二遍」
+→ drawMarkers       ← 交易标记：半径 5pt 的【实心】圆（`KLineView+Markers.swift:30` / `:44`）
+→ drawAxisLabels    ← 轴标签（代理三角贴边框，会撞）
+→ drawCrosshair     ← 十字光标（瞬时交互反馈）
+```
+
+⇒ 节点直径 **7pt**，交易标记直径 **10pt** ⇒ **一条锚在某根 K 线收盘价上的选中线，其节点会被同位置的
+交易标记完全盖住**。取消变蓝之后，选中它**屏幕上毫无变化** —— 与 R1 那个洞同构，只是换了个绘制阶段。
+
+**⚠️ R1 的修复只解决了 `drawDrawings` 内部的顺序，没有去查它之后还有三个阶段。本次一并纠正。**
+
+**结论：节点绘制提成 `KLineView.draw` 的独立阶段，位置钉死在 `drawAxisLabels` 之后、`drawCrosshair` 之前。**
+- 在**轴标签之后** —— 代理三角贴主图边框，与轴标签同区域；
+- 在**十字光标之前** —— 光标是**瞬时**交互反馈，用户按住时看的就是它，不该被节点压住。
+
+---
+
+**（以下为 R1 当时的记录，机理仍然成立，保留备查）**
 
 > 把节点插在循环内 `tool.render` 之后，则**后画的线会盖掉先画那条的节点**。实测构造：同价位的
 > `[A, B]` 两条线、选中 A —— 先画 A 的线与黑节点，再画 B 的线；B 横贯全屏且 y 与 A 相同，
 > 其橙色描边正好覆盖 A 节点的**中心**（节点直径 7pt、线宽 1.5pt）。
 > ⚠️ **这不只是测试问题**：取消变蓝后节点是**唯一的图内选中反馈**，被盖住等于没有。
 
-`KLineView+Drawing.swift` 的 `drawDrawings` 改成两遍。① 在 `for drawing in drawings {` **之前**插入：
+**① `drawDrawings` 完全不碰节点**（它只管线与标签，职责不变）。
+
+**② 在 `KLineView+Drawing.swift` 新增一个独立函数**：
 
 ```swift
-        // P1c 第 2 片（D121）：选中态节点要**叠加在所有线与标签之上**，故先记下来、循环后再画。
-        // ⛔ 不得画在循环内 —— 后画的重合线会盖掉它的中心（codex plan-R1 实证）。
-        var selectedForNodes: (tool: any DrawingTool, drawing: DrawingObject)?
-```
-
-② 在循环内 `tool.render(...)` 调用**之后**插入一行（**只记录，不绘制**）：
-
-```swift
-            if drawing.id == selectedDrawingID { selectedForNodes = (tool, drawing) }
-```
-
-③ 在 `for` 循环的右花括号 `}` **之后**、函数结束之前，插入第二遍：
-
-```swift
-        // 第二遍：选中态的节点与代理标记，叠加在所有线与标签之上。
-        // **工具无关** —— 决策全在 `DrawingNodeGeometry`，绘制全在 `DrawingNodeRenderer`，
-        // 本层只负责问一次「这条线画不画得出来」并转发。
-        // ⛔ 不得在此写死任何 `toolType`（那正是上面标签分支的问题，第 1 片交接为 Q10）。
+    /// P1c 第 2 片（D121 / D131）：选中态的节点与代理标记。
+    /// **必须由 `KLineView.draw` 在 `drawMarkers` 与 `drawAxisLabels` 之后单独调用** ——
+    /// 交易标记是半径 5pt 的实心圆（`KLineView+Markers.swift:30`/`:44`，直径 10pt > 节点 7pt），
+    /// 画在节点之后会把它整个盖掉；而取消变蓝之后节点是**唯一的图内选中反馈**，被盖住等于没有。
+    /// **工具无关** —— 决策全在 `DrawingNodeGeometry`、绘制全在 `DrawingNodeRenderer`，
+    /// 本层只负责问一次「这条线画不画得出来」并转发。⛔ 不得在此写死任何 `toolType`。
+    func drawSelectionNodes(ctx: CGContext,
+                            mapper: CoordinateMapper,
+                            drawings: [DrawingObject],
+                            scheme: AppColorScheme,
+                            selectedDrawingID: DrawingID?,
+                            tools: [DrawingToolType: any DrawingTool]) {
+        guard let id = selectedDrawingID else { return }
+        // 数组序即 z-order，重复 id 时取**最后一条**（与既有约定一致：后画的在上）
+        guard let drawing = drawings.last(where: { $0.id == id }),
+              let tool = tools[drawing.toolType] else { return }
+        let marks = DrawingNodeGeometry.marks(
+            for: drawing, mapper: mapper,
+            isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
+            maxAnchors: tool.requiredAnchors.upperBound)   // D132 第 1 条：按该工具真正消费的锚数截断
         // D125：裁剪只作用于节点与代理标记 —— `DrawingNodeRenderer.draw` 内部自带
-        // saveGState/clip/restoreGState，故循环里 `tool.render` 画的线**一点不受影响**。
-        if let sel = selectedForNodes {
-            let marks = DrawingNodeGeometry.marks(
-                for: sel.drawing, mapper: mapper,
-                isVisible: sel.tool.isVisible(drawing: sel.drawing, mapper: mapper),
-                maxAnchors: sel.tool.requiredAnchors.upperBound)   // D132 第 1 条：按该工具真正消费的锚数截断
-            DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
-                                     clipTo: mapper.viewport.mainChartFrame)
-        }
+        // saveGState/clip/restoreGState，故别处画的线**一点不受影响**。
+        DrawingNodeRenderer.draw(ctx: ctx, marks: marks, scheme: scheme,
+                                 clipTo: mapper.viewport.mainChartFrame)
+    }
 ```
 
-⚠️ 若 `drawings` 里出现重复 id（`injectDrawingsForTesting` 可造），循环会让**最后一条**胜出 —— 与数组序即 z-order 的既有约定一致（后画的在上）。
+**③ 在 `KLineView.swift` 的 `draw(_:)` 里**，把它插在 `drawAxisLabels(...)` **之后**、
+`drawCrosshair(...)` **之前**：
+
+```swift
+        // P1c 第 2 片：选中态节点画在所有**持久**内容之上（K 线 / 画线 / 交易标记 / 轴标签），
+        // 但在**瞬时**的十字光标之下 —— 光标是用户此刻正在用的交互反馈，不该被压住。
+        drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
+                           scheme: scheme, selectedDrawingID: renderState.selectedDrawingID,
+                           tools: Self.drawingTools)
+```
+
+⚠️ `scheme` 与 `mapper` 取 `draw(_:)` 里已有的那两个局部量（与 `drawDrawings` 那行用的是同一个）。
 
 - [ ] **Step 4: 跑 Catalyst，确认通过**
 
@@ -1609,7 +1731,10 @@ Expected: 通过。⚠️ 「八进制转义」那条判据要问的是**转义�
 cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift /tmp/hlt.bak
 perl -pi -e 's/let rgba = DrawingColorResolver\.resolve\(drawing\.colorToken, scheme: scheme\)/let rgba = isSelected ? AppColorRGBA(red: 0, green: 0.478, blue: 1) : DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)/' \
   ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift
-cd ios/Contracts && swift test --filter 'selectionNeverChangesStrokeColor|selectionLeavesLinePixelsUntouched' 2>&1 | grep -E '✘|Issue' | head
+cd ios/Contracts && swift test --filter 'selectionNeverChangesStrokeColor|selectionLeavesLinePixelsUntouched' 2>&1 | tee /tmp/mut.log | tail -3
+# ⛔ 先确认【编译成功】—— grep '✘|Issue' 会把编译错误一起吞掉，让「没测试变红」看起来像变异无效
+grep -cE '^/.*\.swift:[0-9]+:[0-9]+: error:' /tmp/mut.log   # 必须是 0
+grep -E '✘|Issue recorded' /tmp/mut.log | head
 cp /tmp/hlt.bak ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift
 ```
 
