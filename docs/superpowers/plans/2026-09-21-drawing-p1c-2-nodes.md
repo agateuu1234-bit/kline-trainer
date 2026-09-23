@@ -1607,17 +1607,42 @@ git diff --stat .github/scripts/catalyst-uikit-baseline.txt     # 期望：+2 �
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Drawing.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/SelectionNodeDrawOrderGuardTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawDrawingsDispatchTests.swift \
         .github/scripts/catalyst-uikit-baseline.txt \
         docs/superpowers/specs/2026-09-21-drawing-tools-P1c-2-nodes-design.md
-git commit -m "P1c-2 Task5：dispatch 接线，选中态开始画节点（变蓝暂留）
+git commit -m "P1c-2 Task5：选中态开始画节点（提成 draw 的独立阶段；变蓝暂留）
 
-工具无关：本层只问一次 isVisible 再转发，决策与绘制都在下层，⛔ 不写死 toolType。
-在既有端到端测试内追加「选中出现节点像素 + 未选中不得有」的正负两档 ⇒
-测试名不变，Catalyst 基线本次不动。
+节点绘制是 KLineView.draw 的独立一步，位置在 drawMarkers / drawAxisLabels 之后、
+drawCrosshair 之前 —— 交易标记是直径 10pt 的实心圆，画在节点之后会把 7pt 的节点整个盖掉。
+工具无关：只问一次 isVisible 再转发，决策与绘制都在下层，⛔ 不写死 toolType。
+新增 N1（两条同价位重合线只有选中那条有节点）、T10（裁剪不波及线）、
+T13（源码顺序守卫）；Catalyst UIKit 基线 +2 行。
 顺序有意：先让节点出现、下一个任务再取消变蓝，避免出现选中零反馈的中间态。"
 ```
+
+- [ ] **Step 8: ⛔ 校验提交树自身是完整的（不是靠未暂存文件才绿的）**
+
+```bash
+# 让节点真正出现的那行调用、以及守着它顺序的那条测试，必须【在提交里】
+for f in ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView.swift \
+         ios/Contracts/Tests/KlineTrainerContractsTests/Render/SelectionNodeDrawOrderGuardTests.swift; do
+  git show HEAD --name-only --format= | grep -qx "$f" && echo "  ✅ $f" || echo "  ❌ 漏了 $f"
+done
+# 再确认那行调用真的在提交的树里（而不只是文件被提交了）
+git show HEAD:ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView.swift \
+  | grep -c 'drawSelectionNodes(' | sed 's/^/  KLineView.swift 里 drawSelectionNodes 调用数: /'
+# 必须是 1；是 0 说明提交的是改动前的版本
+git status --short ios/Contracts | sed 's/^/  仍未暂存: /'   # 应为空
+```
+
+⚠️ **为什么要单设这一步**：本任务的新测试断言「选中后出现节点」，而让节点出现的是
+`KLineView.swift` 里那**一行调用**。两者分处不同文件 ⇒ 漏暂存其中一个，**本地照样全绿**
+（工作树里有那行），但**从这个提交干净检出就全红**。⇒ Task 5 就不再是 plan 要求的
+「独立可工作的检查点」。这条在其余 Task 不必单设：它们的实现与测试要么同文件、
+要么已被各自的 `git add` 路径完整覆盖（已逐个核对）。
 
 ---
 
