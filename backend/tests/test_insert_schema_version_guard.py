@@ -60,7 +60,25 @@ _EXPECTED_CELLS = (
 #    导致 `re.I` 在整条链路上是装饰品（小写写法在第一步就丢了）。
 # ⚠️ 表头允许标识符带双引号（`INSERT INTO "training_sets"` / `"public"."training_sets"`）——
 #    整支评审 R2-M1：上一版对这两种写法**零命中**，整条语句静默漏掉。
-_HEAD = re.compile(r'INSERT\s+INTO\s+(?:"?[A-Za-z_][\w$]*"?\s*\.\s*)?"?training_sets"?\b', re.I)
+# ⛔ **词元之间可以夹注释**（codex attest 对抗性评审实测的【静默放行】，本片唯一一条
+#    5 轮 Opus 定向复评 + 整支最终评审 + 控制者全部自查**都没碰到**的洞）：
+#    PostgreSQL 允许把注释塞在关键字之间 —— 下面三种都是**合法语句**，pglast 能正常
+#    解析出列清单，而上一版 `_HEAD` 用 `\s+` 连接词元 ⇒ **一条都匹配不到**：
+#        INSERT /* seed */ INTO training_sets (…)
+#        INSERT INTO /* x */ training_sets (…)
+#        INSERT -- x⏎INTO training_sets (…)
+#    ⛔ **为什么这是静默的**：`findall`（守恒等式的第二来源）与 `finditer`（主循环）
+#    用的是**同一个** `_HEAD` ⇒ 两边同时看不见它 ⇒ 命中数 == 四桶之和仍然成立、
+#    `lost` 为空 ⇒ 守恒等式**也接不住**。实测：真删掉一处字段 + 在表头夹一句注释
+#    ⇒ 三条测试 `3 passed`，而对照组（只删字段）是 `1 failed`。
+#    ⭐ 这正是本仓成文教训「**换通道会挖出旧通道十几轮没碰到的 Critical**」的又一例。
+# ⚠️ 修法是让**词元间隔**本身认注释，⛔ 不是「先把整份文件的注释屏蔽掉再匹配」——
+#    后者会引入一条**新的**静默通道：`.md` 里一个没闭合的 `/*` 会把其后全部内容
+#    屏蔽掉，真语句跟着消失。
+_GAP = r"(?:\s|/\*.*?\*/|--[^\n]*\n)"
+_HEAD = re.compile(
+    rf'INSERT{_GAP}+INTO{_GAP}+(?:"?[A-Za-z_][\w$]*"?{_GAP}*\.{_GAP}*)?"?training_sets"?\b',
+    re.I | re.S)
 _NO_COLS = re.compile(r"\s*(VALUES|SELECT|DEFAULT|OVERRIDING)\b", re.I)
 _ALIAS = re.compile(r"\s*(?:AS\s+)?(?!VALUES\b|SELECT\b|DEFAULT\b|OVERRIDING\b)[A-Za-z_]\w*", re.I)
 # ⭐ 允许跨过**引号标识符表名的闭合引号**（`INSERT INTO "training_sets" (…)` —— `_HEAD`
@@ -534,6 +552,12 @@ _DIFFERENTIAL_CASES = (
     "INSERT INTO training_sets (stock_code, schema_version, file_path) SELECT a,b,c FROM x",
     "INSERT INTO training_sets (stock_code, schema_version, file_path) VALUES (1,2,3) "
     "ON CONFLICT (stock_code) DO UPDATE SET schema_version = 2",
+    # ⭐ 表头里夹注释（codex attest 挖出的静默放行）—— 这三条同时钉住 `_HEAD` 的
+    #    词元间隔认不认注释：若退回 `\s+`，`_HEAD` 零命中 ⇒ 本测试开头那句
+    #    `assert m, "表头正则没命中，这条用例是空转的"` **当场炸**。
+    "INSERT /* seed */ INTO training_sets (stock_code, file_path) VALUES (1,2)",
+    "INSERT INTO /* x */ training_sets (stock_code, schema_version, file_path) VALUES (1,2,3)",
+    "INSERT -- x\nINTO training_sets (stock_code, file_path) VALUES (1,2)",
     # 引号标识符：PG 眼里是**另一个列**（逐字、大小写敏感、内部空格有意义）
     'INSERT INTO training_sets (stock_code, "schema_version ", file_path) VALUES (1,2,3)',
     'INSERT INTO training_sets (stock_code, "Schema_Version", file_path) VALUES (1,2,3)',
