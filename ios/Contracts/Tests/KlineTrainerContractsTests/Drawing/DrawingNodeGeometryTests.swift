@@ -243,4 +243,157 @@ struct DrawingNodeGeometryTests {
         #expect(DrawingNodeGeometry.marks(for: inChart, mapper: m, isVisible: true, maxAnchors: 2).count == 2,
                 "⭐ 证明截断是 maxAnchors 在管，而不是函数恒返 1 个")
     }
+    /// T9 需要把锚点精确放在「出边框 N pt」处。indexToX(i) = i*candleStep + pixelShift，
+    /// 故用 pixelShift 做亚格微调（candleStep=10 无法整除出 1pt 的偏移）。
+    static func mapperShifted(_ pixelShift: CGFloat) -> CoordinateMapper {
+        let main = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let vp = ChartViewport(
+            startIndex: 0, visibleCount: 80, pixelShift: pixelShift,
+            geometry: ChartGeometry(candleStep: 10, candleWidth: 7, gap: 3),
+            priceRange: PriceRange(min: 10, max: 20), mainChartFrame: main)
+        return CoordinateMapper(viewport: vp, displayScale: 2.0)
+    }
+
+    // MARK: - 内层（N7）
+
+    @Test("N7：命中半径内 / 外各一档")
+    func nearestNodeRespectsRadius() {
+        let n = [(index: 0, at: CGPoint(x: 100, y: 100))]
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 110, y: 100), among: n, radius: 11) == 0,
+                "距离 10 < 11 必须命中")
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 112, y: 100), among: n, radius: 11) == nil,
+                "距离 12 > 11 必须不命中")
+    }
+
+    @Test("N7：两个靠得很近的节点 —— 取距离最近者（不依赖遍历顺序）")
+    func nearestNodePicksClosest() {
+        let n = [(index: 0, at: CGPoint(x: 100, y: 100)), (index: 1, at: CGPoint(x: 104, y: 100))]
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 101, y: 100), among: n, radius: 11) == 0)
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 103, y: 100), among: n, radius: 11) == 1)
+        // 倒序喂同样的两个节点，答案必须不变 ⇒ 证明它不是靠数组顺序
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 101, y: 100),
+                                                among: Array(n.reversed()), radius: 11) == 0)
+    }
+
+    @Test("N7：距离相等时取【原下标】较小者 —— 同时钉死返回的是原下标而非数组位置")
+    func nearestNodeTieBreaksOnOriginalIndex() {
+        // 故意让数组顺序与原下标相反：数组第 0 位的原下标是 7，第 1 位才是 3
+        let n = [(index: 7, at: CGPoint(x: 100, y: 100)), (index: 3, at: CGPoint(x: 110, y: 100))]
+        #expect(DrawingNodeGeometry.nearestNode(to: CGPoint(x: 105, y: 100), among: n, radius: 11) == 3,
+                "距离都是 5 ⇒ 必须取原下标小的 3；若返回 7 说明按数组位置破的平局，若返回 0/1 说明返回的是数组位置")
+    }
+
+    // MARK: - 外层（T5 / T8 / T9）
+
+    @Test("T5：可见真实节点附近，凡线命中的点节点也命中（前提限定为「可见真实节点」）")
+    func visibleNodeCoversLineHitsNearby() {
+        let m = Self.mapper()
+        let d = Self.line(idx: 5)                      // x = 50，屏内
+        let tool = HorizontalLineTool()
+        #expect(tool.isVisible(drawing: d, mapper: m), "前提①：本例的线必须可见")
+        guard case let .real(_, center) = DrawingNodeGeometry.marks(for: d, mapper: m, isVisible: true, maxAnchors: 1)[0] else {
+            Issue.record("前提②：本例必须有可见真实节点"); return
+        }
+        var lineHits = 0
+        for dx in stride(from: -8.0, through: 8.0, by: 2.0) {
+            for dy in stride(from: -8.0, through: 8.0, by: 2.0) {
+                guard dx*dx + dy*dy <= 64 else { continue }          // 半径 8 的圆盘（= 线容差）
+                let p = CGPoint(x: center.x + dx, y: center.y + dy)
+                guard tool.hitTest(point: p, mapper: m, drawing: d) else { continue }
+                lineHits += 1
+                #expect(DrawingNodeGeometry.hitTestNode(point: p, drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == 0,
+                        "线命中却节点不命中：p=\(p)")
+            }
+        }
+        #expect(lineHits > 0, "⭐ 采样点里必须真的有线命中的，否则上面的蕴含式恒真")
+    }
+
+    @Test("T8：代理标记不参与命中 —— 同一条线把锚点移回屏内则有答案")
+    func proxyMarkIsNotHittable() {
+        let mOut = Self.mapperShifted(9)                 // idx=-1 → x = -10+9 = -1（出左缘 1pt）
+        let d = Self.line(idx: -1)
+        let probe = CGPoint(x: 0, y: mOut.priceToY(15))  // 正是代理标记所在处（贴左边框）
+        #expect(DrawingNodeGeometry.hitTestNode(point: probe, drawing: d, mapper: mOut, isVisible: true, maxAnchors: 1) == nil,
+                "代理标记处必须无答案")
+        // 正向对照：同一条线、同一个探针点，把视口挪到让锚点恰好落在边框上 ⇒ 变成真节点 ⇒ 有答案
+        let mIn = Self.mapperShifted(10)                 // idx=-1 → x = -10+10 = 0（恰在左边框上）
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: mIn.priceToY(15)),
+                                                drawing: d, mapper: mIn, isVisible: true, maxAnchors: 1) == 0,
+                "⭐ 正向对照：锚点回到屏内必须有答案，否则上面那条只是因为函数恒返空")
+    }
+
+    @Test("⭐T9：锚点出左/右边缘 1/8/11pt 共 6 档，在代理标记处命中均为空（+ 边框上的正向对照）")
+    func offscreenAnchorIsNeverHittableAtAnyDistance() {
+        // 左侧：idx=-1 → x = -10 + shift。要 x = -1/-8/-11 ⇒ shift = 9/2/-1
+        for (shift, expectedX) in [(9.0, -1.0), (2.0, -8.0), (-1.0, -11.0)] {
+            let m = Self.mapperShifted(CGFloat(shift))
+            let d = Self.line(idx: -1)
+            #expect(m.indexToX(-1) == CGFloat(expectedX), "构造自检：锚点 x 必须真的是 \(expectedX)")
+            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: m.priceToY(15)),
+                                                    drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == nil,
+                    "左外 \(expectedX)pt：代理标记处必须无答案")
+        }
+        // 右侧：idx=80 → x = 800 + shift。要 x = 801/808/811 ⇒ shift = 1/8/11
+        for (shift, expectedX) in [(1.0, 801.0), (8.0, 808.0), (11.0, 811.0)] {
+            let m = Self.mapperShifted(CGFloat(shift))
+            let d = Self.line(idx: 80)
+            #expect(m.indexToX(80) == CGFloat(expectedX), "构造自检：锚点 x 必须真的是 \(expectedX)")
+            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 800, y: m.priceToY(15)),
+                                                    drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == nil,
+                    "右外 \(expectedX)pt：代理标记处必须无答案")
+        }
+        // ⭐ 正向对照（⛔ 不可省）：锚点恰好落在边框【上】= 未出屏 ⇒ 同一个探针点必须有答案。
+        //    没有这一条，上面 6 档全空可能只是因为函数恒返空。
+        let mL = Self.mapperShifted(10)                  // idx=-1 → x = 0（左边框上）
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 0, y: mL.priceToY(15)),
+                                                drawing: Self.line(idx: -1), mapper: mL, isVisible: true, maxAnchors: 1) == 0)
+        let mR = Self.mapperShifted(0)                   // idx=80 → x = 800（右边框上）
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: 800, y: mR.priceToY(15)),
+                                                drawing: Self.line(idx: 80), mapper: mR, isVisible: true, maxAnchors: 1) == 0)
+    }
+
+    @Test("⭐T12（命中侧）：畸形持久化数据的锚点一律点不中（D131 命中集合 ≡ 渲染集合）")
+    func malformedAnchorsAreNotHittable() {
+        let m = Self.mapper()
+        // 两锚水平线：第二锚价位在图内，但水平线只消费 anchors.first ⇒ 第二锚处不该有可命中节点
+        let two = DrawingObject(toolType: .horizontal,
+                                anchors: [DrawingAnchor(period: .m3, candleIndex: 5,  price: 15),
+                                          DrawingAnchor(period: .m3, candleIndex: 40, price: 12)],
+                                isExtended: false, panelPosition: 0)
+        let secondAnchorPoint = CGPoint(x: m.indexToX(40), y: m.priceToY(12))
+        #expect(DrawingNodeGeometry.hitTestNode(point: secondAnchorPoint, drawing: two, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == nil,
+                "第二锚处必须点不中 —— 它根本不该存在")
+        // price 非有限（解码零校验，可从磁盘进来）
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let d = DrawingObject(toolType: .horizontal,
+                                  anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: bad)],
+                                  isExtended: false, panelPosition: 0)
+            #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: 180),
+                                                    drawing: d, mapper: m,
+                                                    isVisible: true, maxAnchors: 1) == nil,
+                    "price=\(bad) 的锚点必须点不中")
+        }
+        // ⭐ 正向对照①：正常线点得中 ⇒ 证明上面那些 nil 不是因为函数恒返 nil
+        let healthy = Self.line(idx: 5)
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
+                                                drawing: healthy, mapper: m,
+                                                isVisible: true, maxAnchors: 1) == 0)
+        // ⭐ 正向对照②：把 maxAnchors 放开到 2 ⇒ 同一个点变成【点得中】且返回原下标 1
+        //    这证明拦截确实由 maxAnchors 决定，而不是「第二锚碰巧总也命中不了」
+        #expect(DrawingNodeGeometry.hitTestNode(point: secondAnchorPoint, drawing: two, mapper: m,
+                                                isVisible: true, maxAnchors: 2) == 1,
+                "放开到 2 ⇒ 第二锚可命中且返回原下标 1")
+    }
+
+    @Test("外层：线不可见时一律无答案")
+    func invisibleLineIsNotHittable() {
+        let m = Self.mapper()
+        let d = Self.line(idx: 5)
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
+                                                drawing: d, mapper: m, isVisible: false, maxAnchors: 1) == nil)
+        // 正向对照：同一个点、可见时有答案
+        #expect(DrawingNodeGeometry.hitTestNode(point: CGPoint(x: m.indexToX(5), y: m.priceToY(15)),
+                                                drawing: d, mapper: m, isVisible: true, maxAnchors: 1) == 0)
+    }
 }

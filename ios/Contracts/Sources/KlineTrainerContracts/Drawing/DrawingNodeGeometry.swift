@@ -73,4 +73,37 @@ public enum DrawingNodeGeometry {
             return .real(index: i, at: CGPoint(x: x, y: y))
         }
     }
+
+    /// **内层**（纯）：在一组 `(原下标, 坐标)` 里找离 `point` 最近且在 `radius` 内的那个，返回**原下标**。
+    /// 距离相等时取**原下标较小**者 —— ⛔ 不得依赖数组顺序 / 字典序（确定性由 N7 钉死）。
+    /// 不认识视口，故可直接喂任意坐标 ⇒ 水平线只有 1 个锚点也测得了「两个节点靠得很近」（§8.3）。
+    public static func nearestNode(to point: CGPoint,
+                                   among nodes: [(index: Int, at: CGPoint)],
+                                   radius: CGFloat) -> Int? {
+        var best: (index: Int, d2: CGFloat)?
+        for n in nodes {
+            let dx = n.at.x - point.x, dy = n.at.y - point.y
+            let d2 = dx * dx + dy * dy
+            guard d2 <= radius * radius else { continue }
+            if let b = best, !(d2 < b.d2 || (d2 == b.d2 && n.index < b.index)) { continue }
+            best = (n.index, d2)
+        }
+        return best?.index
+    }
+
+    /// **外层**：先按**与渲染共用的判据**（`marks`）筛出可见真实节点，再交给内层。
+    /// ⇒ **命中集合 ≡ 渲染集合**（D131）：出屏锚点与代理标记一律不可命中。
+    /// 返回值是该锚点在 `drawing.anchors` 里的**原下标**（⛔ 不是筛选后数组的位置）。
+    /// ⚠️ 本片只提供本函数，**不接任何手势**；第 3 片接拖动时必须自己定「先问节点还是先问线」（Q19）。
+    public static func hitTestNode(point: CGPoint, drawing: DrawingObject, mapper: CoordinateMapper,
+                                   isVisible: Bool, maxAnchors: Int) -> Int? {
+        // ⛔ `maxAnchors` 必须**原样透传**给 `marks` —— 写死任何常数都会让命中集合与渲染集合分叉（D131）
+        let visible: [(index: Int, at: CGPoint)] = marks(for: drawing, mapper: mapper,
+                                                         isVisible: isVisible, maxAnchors: maxAnchors)
+            .compactMap { mark -> (index: Int, at: CGPoint)? in
+                guard case let .real(i, p) = mark else { return nil }   // 代理标记不进命中集合
+                return (index: i, at: p)
+            }
+        return nearestNode(to: point, among: visible, radius: hitRadius)
+    }
 }
