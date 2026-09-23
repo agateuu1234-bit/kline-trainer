@@ -87,8 +87,14 @@ def _blank_for_discovery(text: str) -> str:
 #: 抹平之后，发现层只剩这一条：关键字之间允许空白或 `--` 行注释；schema 限定符可选；
 #: 表名的引号已被抹成空白，所以不必再写引号分支。
 _GAP = r"(?:\s|--[^\n]*\n)+"
+#: ⚠️ schema 限定符的点号**两侧也要用同一种间隔**，不能只写 `\s*`：
+#:    `INSERT INTO public. -- target table\n training_sets (…)` 是合法 SQL，
+#:    而 `--` 行注释**故意不做全局抹平**（见上），所以必须在这里局部容忍
+#:    （codex 第七轮实测：只写 `\s*` 时守卫仍 `1 passed`）。
+#:    用 `*` 而非 `+`：没有间隔（`public.training_sets`）才是最常见的写法。
+_DOT_GAP = r"(?:\s|--[^\n]*\n)*"
 _INSERT_RE = re.compile(
-    rf"insert{_GAP}into{_GAP}(?:public\s*\.\s*)?training_sets",
+    rf"insert{_GAP}into{_GAP}(?:public{_DOT_GAP}\.{_DOT_GAP})?training_sets",
     re.I,
 )
 
