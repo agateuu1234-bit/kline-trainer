@@ -261,7 +261,8 @@ struct ChartContainerViewDrawingSessionTests {
         #expect(upperV.renderState.selectedDrawingID == nil, "清空后渲染态也必须立刻不再高亮")
     }
 
-    @Test("D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）")
+
+    @Test("D41/D108 端到端：tap 命中 → 线仍是自己的颜色 + 画出节点（像素级，不只是状态位）")
     func selectedLineActuallyRendersHighlighted() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
@@ -295,15 +296,14 @@ struct ChartContainerViewDrawingSessionTests {
 
         let after = Self.litPixels(of: upperV)
         #expect(!after.isEmpty, "选中后线仍要画出来（不能因为高亮反而消失）")
-        // ⚠️ 不假设测试环境的 scheme（`KLineView.draw` 取 `themeController.resolve(trait:)`，
-        //    CI 上是 light 还是 dark 不由本测试决定）→ 两套选中色都认，判据仍然有力：
-        //    两者都 ≠ 任何 DrawingColorToken 的解析结果（`selectionColorIsOutsideTokenRange` 已钉死）。
-        let sels = [DrawingColorResolver.selectionRGBA(scheme: .light),
-                    DrawingColorResolver.selectionRGBA(scheme: .dark)]
+// D108：线**不再变色** —— 选中前后都必须能找到它自己的 colorToken 色（本例出厂橙）。
+        let expOrange = DrawingColorResolver.resolve(.orange, scheme: .light)
+        let expOrangeDark = DrawingColorResolver.resolve(.orange, scheme: .dark)
         #expect(after.contains { px in
-            sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.g - CGFloat($0.green)) < 0.06
-                          && abs(px.b - CGFloat($0.blue)) < 0.06 }
-        }, "选中的线必须以选中色画出（D55）")
+            [expOrange, expOrangeDark].contains { e in
+                abs(px.r - CGFloat(e.red)) < 0.06 && abs(px.g - CGFloat(e.green)) < 0.06
+                && abs(px.b - CGFloat(e.blue)) < 0.06 }
+        }, "选中后线必须仍是它自己的颜色（D108 取消变蓝）")
         #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
 
         // P1c 第 2 片 Task 5：受控点对比 —— 靠「橙 → ink」的转变，不靠绝对亮度

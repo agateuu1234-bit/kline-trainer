@@ -284,7 +284,7 @@ struct HorizontalLineToolTests {
         #expect(HorizontalLineTool.visibleGeometry(for: offRight, mapper: m) == nil)
     }
 
-    // MARK: - D55（1b-i PR-3）选中高亮
+    // MARK: - D108（P1c 第 2 片）选中态终局：取消变蓝
 
     @MainActor
     static func renderPixelsSelected(_ drawing: DrawingObject, scheme: AppColorScheme, isSelected: Bool)
@@ -299,55 +299,43 @@ struct HorizontalLineToolTests {
         return (data, w, h)
     }
 
+
     @MainActor
-    @Test("D55：isSelected == true 时描边改用选中色；false 时仍是 colorToken 的色（同一条线两次渲染可区分）")
-    func selectedStrokeUsesSelectionColor() {
-        // ⚠️ `price: 15` / `period: .m3` 是本文件 `Self.mapper()` 的量纲（`priceRange(min:10,max:20)`，
-        //    `:11-18` 实测；既有测试全用 15）。用 100 会让 `visibleGeometry` 返 nil → 一条线都画不出来，
-        //    下面「必须画出了线」当场红（codex plan-R5-F2）。
+    @Test("D108/N2：变蓝真的没了 —— 选中与否，描边都是这条线自己的 colorToken 色")
+    func selectionNeverChangesStrokeColor() {
+        // ⚠️ 用 .red 而不是出厂默认 .orange：撞上出厂默认值就分不出「真的取了 colorToken」还是「碰巧」
         let d = DrawingObject(toolType: .horizontal,
                               anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
-                              isExtended: false, panelPosition: 0, colorToken: .orange)
-        let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
-        let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
-        let cn = Self.litColumn(normal.data, w: normal.w, h: normal.h)
-        let cp = Self.litColumn(picked.data, w: picked.w, h: picked.h)
-        #expect(!cn.isEmpty, "对照组必须真的画出了线（否则下面的差异断言恒真）")
-        #expect(!cp.isEmpty, "选中组必须真的画出了线")
-        let expOrange = DrawingColorResolver.resolve(.orange, scheme: .light)
-        let expSel = DrawingColorResolver.selectionRGBA(scheme: .light)
-        #expect(cn.contains { abs($0.r - CGFloat(expOrange.red)) < 0.06 && abs($0.b - CGFloat(expOrange.blue)) < 0.06 })
-        #expect(cp.contains { abs($0.r - CGFloat(expSel.red)) < 0.06 && abs($0.g - CGFloat(expSel.green)) < 0.06
-                             && abs($0.b - CGFloat(expSel.blue)) < 0.06 })
-        #expect(expOrange != expSel, "选中色与 legacy 橙必须不同，否则高亮看不出来")
-    }
-
-    @MainActor
-    @Test("D55：选中高亮只换颜色 —— 线宽 / 线型 / 几何一字不动")
-    func selectionChangesColorOnly() {
-        let d = DrawingObject(toolType: .horizontal,                 // 同上：15 在 mapper 的 10...20 内
-                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
-                              isExtended: false, panelPosition: 0,
-                              lineStyle: .dash1, thickness: 4, colorToken: .orange)
-        let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
-        let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
-        // 亮起来的像素**位置集合**必须完全一致（只有颜色变），故只比 alpha 通道
-        let alphaN = (0..<(normal.w * normal.h)).map { normal.data[$0 * 4 + 3] > 76 }
-        let alphaP = (0..<(picked.w * picked.h)).map { picked.data[$0 * 4 + 3] > 76 }
-        #expect(alphaN.contains(true), "对照组必须真的画出了线")
-        #expect(alphaN == alphaP, "选中不得改变线宽/dash/几何——亮起的像素位置必须逐点相同")
-    }
-
-    @Test("D55：选中色不占用 DrawingColorToken 值域（与 7 个彩色 + 自适应 ink 都不相等）")
-    func selectionColorIsOutsideTokenRange() {
-        for scheme in [AppColorScheme.light, .dark] {
-            let sel = DrawingColorResolver.selectionRGBA(scheme: scheme)
-            for token in DrawingColorToken.allCases {
-                #expect(DrawingColorResolver.resolve(token, scheme: scheme) != sel,
-                        "选中色撞上了 token \(token)（scheme \(scheme)）——高亮会与普通线混淆")
-            }
+                              isExtended: false, panelPosition: 0, colorToken: .red)
+        let expRed = DrawingColorResolver.resolve(.red, scheme: .light)
+        for selected in [false, true] {
+            let px = Self.renderPixelsSelected(d, scheme: .light, isSelected: selected)
+            let col = Self.litColumn(px.data, w: px.w, h: px.h)
+            #expect(!col.isEmpty, "isSelected=\(selected) 时必须真的画出了线（否则下面的断言恒真）")
+            #expect(col.contains { abs($0.r - CGFloat(expRed.red)) < 0.06
+                                && abs($0.g - CGFloat(expRed.green)) < 0.06
+                                && abs($0.b - CGFloat(expRed.blue)) < 0.06 },
+                    "isSelected=\(selected) 时描边必须就是红色 \(expRed)，实得 \(col.first!)")
         }
     }
+
+
+    @MainActor
+    @Test("D108/T6：选中不改变线本身的任何像素 —— 两次渲染逐字节完全相同")
+    func selectionLeavesLinePixelsUntouched() {
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+                              isExtended: false, panelPosition: 0,
+                              lineStyle: .dash1, thickness: 4, colorToken: .red)
+        let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
+        let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
+        #expect(!Self.litColumn(normal.data, w: normal.w, h: normal.h).isEmpty,
+                "前提：必须真的画出了线，否则「两张空图相同」恒真")
+        #expect(normal.data == picked.data,
+                "选中不得改变线的任何像素（颜色 / 线宽 / dash / 几何 / 裁剪都不许动）")
+        // 说明：节点由 dispatch 层的 DrawingNodeRenderer 画，不在 tool.render 内 ⇒ 这里应当逐字节相同。
+    }
+
     @MainActor
     @Test("D131：isVisible 与 visibleGeometry != nil 逐格等价（render/hitTest/节点共用同一判据）")
     func isVisibleMatchesVisibleGeometry() {
