@@ -354,15 +354,23 @@ def _column_list(text: str, after: int) -> str | None:
     while j < n:
         ch = text[j]
         if text.startswith("/*", j):                       # 块注释（**嵌套感知**）：整段跳过
-            depth, k = 1, j + 2
-            while k < n and depth:
+            # ⛔ **必须用【另一个】计数器** —— 这里原本复用了外层的 `depth`（它数的是**括号**），
+            #    进注释就把括号深度覆盖掉了：注释闭合后 `depth == 0`，列清单自己的右括号
+            #    再减一变成 -1，**永远返回不了** ⇒ 合法的
+            #    `(stock_code /* ticker */, schema_version)` 被判成「判据够不着」⇒ **CI 在正确代码上变红**。
+            # ⚠️ 这是**假阳性**（前面十三轮全是假绿），而且是我上一轮自己写的 bug。
+            #    ⭐ 我的回归套件当时**没抓到它** —— 因为所有带注释的用例都是「字段**缺失**」，
+            #      红得「看起来对」，其实红的理由是错的。⇒ **正向对照必须覆盖每一种语法形态**，
+            #      不能只对「裸的正常语句」做对照。
+            comment_depth, k = 1, j + 2
+            while k < n and comment_depth:
                 if text.startswith("/*", k):
-                    depth += 1; k += 2
+                    comment_depth += 1; k += 2
                 elif text.startswith("*/", k):
-                    depth -= 1; k += 2
+                    comment_depth -= 1; k += 2
                 else:
                     k += 1
-            if depth:
+            if comment_depth:
                 return None                                # 注释没闭合 ⇒ 判不了
             j = k
             continue
@@ -464,4 +472,52 @@ def test_every_executable_insert_specifies_schema_version():
     assert not missing, (
         "以下 INSERT 省略了 schema_version —— PostgreSQL 会用 DEFAULT 1 "
         "**静默**把行标成第 1 代：\n" + "\n".join(missing)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐ **正向对照，常驻**（codex 第十四轮打回后新增）
+#
+# 前十三轮挖到的全是**假绿**（该红的没红），于是我的回归套件几乎全是「坏样本应变红」。
+# 第十四轮挖到的是**假阳性**：合法的 `(stock_code /* ticker */, schema_version)`
+# 被判成「判据够不着」⇒ **CI 在正确代码上变红**。根因是我上一轮在配平扫描里
+# 复用了 `depth`（它数的是括号），进注释就把括号深度覆盖了。
+#
+# ⭐ **我的套件当时没抓到它** —— 因为所有带注释的用例都是「字段**缺失**」的，
+#    红得「看起来对」，其实**红的理由是错的**。
+# ⇒ 教训：**正向对照必须覆盖每一种语法形态**，不能只对「裸的正常语句」做对照。
+#    否则解析器坏掉时，坏样本照样红，你看不出区别。
+# ---------------------------------------------------------------------------
+
+_VALID_FORMS = {
+    "裸的": "INSERT INTO training_sets (stock_code, schema_version) VALUES (1,2);",
+    "单层块注释": "INSERT INTO training_sets (stock_code /* ticker */, schema_version) VALUES (1,2);",
+    "嵌套块注释": "INSERT INTO training_sets (stock_code /* a /* b */ c */, schema_version) VALUES (1,2);",
+    "注释里含括号": "INSERT INTO training_sets (stock_code /* (x) */, schema_version) VALUES (1,2);",
+    "注释在列清单末尾": "INSERT INTO training_sets (stock_code, schema_version /* z */) VALUES (1,2);",
+    "行注释在列清单里": "INSERT INTO training_sets (stock_code, -- t\n schema_version) VALUES (1,2);",
+    "限定表名": "INSERT INTO public.training_sets (stock_code, schema_version) VALUES (1,2);",
+    "大小写混写": "insert Into training_sets (stock_code, schema_version) VALUES (1,2);",
+}
+
+
+def test_valid_column_lists_with_comments_are_parsed_not_rejected():
+    """⛔ 合法且**字段在场**的写法必须被**正常解析出字段**，不许掉进「判据够不着」。
+
+    这条挡的是**假阳性** —— 守卫在正确代码上变红，比漏报更容易让人直接把它关掉。
+    """
+    broken = []
+    for label, sql in _VALID_FORMS.items():
+        m = _INSERT_RE.search(sql)
+        if m is None:
+            broken.append(f"{label}: 发现层就没匹配上")
+            continue
+        cols = _column_list(sql, m.end())
+        if cols is None:
+            broken.append(f"{label}: 列清单解析返回 None（会被判『判据够不着』）")
+        elif "schema_version" not in _column_names(cols):
+            broken.append(f"{label}: 解析出的列名里没有 schema_version -> {sorted(_column_names(cols))}")
+    assert not broken, (
+        "以下**合法且字段在场**的写法被守卫误判 —— 这是**假阳性**，"
+        "会让 CI 在正确代码上变红：\n" + "\n".join(broken)
     )
