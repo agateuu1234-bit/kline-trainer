@@ -114,6 +114,13 @@ public final class KLineView: UIView {
         drawMarkers(ctx: ctx, viewport: renderState.viewport, mapper: mapper,
                     markers: renderState.markers, candles: renderState.visibleCandles)
         drawAxisLabels(ctx: ctx, resolved: axisGrid)
+
+        // P1c 第 2 片：选中态节点画在所有**持久**内容之上（K 线 / 画线 / 交易标记 / 轴标签），
+        // 但在**瞬时**的十字光标之下 —— 光标是用户此刻正在用的交互反馈，不该被压住。
+        drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
+                           scheme: themeController.resolve(trait: traitCollection),
+                           selectedDrawingID: renderState.selectedDrawingID,
+                           tools: Self.drawingTools)
         drawCrosshair(ctx: ctx, at: renderState.crosshairPoint, viewport: renderState.viewport)
     }
 }

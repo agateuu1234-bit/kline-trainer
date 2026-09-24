@@ -83,10 +83,12 @@ public struct HorizontalLineTool: DrawingTool {
                        scheme: AppColorScheme, isSelected: Bool) {
         guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return }
         ctx.saveGState()
-        // D55：选中高亮**只换描边色** —— 线宽 / dash / 几何一字不动（`selectionChangesColorOnly` 钉死），
-        // 且不写回 `drawing.colorToken`（瞬时 UI 状态，绝不落盘）。
-        let rgba = isSelected ? DrawingColorResolver.selectionRGBA(scheme: scheme)
-                              : DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
+        // D108（P1c 第 2 片）：**取消「选中变蓝」**。选中反馈 = 节点（由 `KLineView.draw` 的独立
+        // 阶段 `drawSelectionNodes` 画）+ 底栏 🗑/🔒 变亮。
+        // 理由：变蓝会盖掉用户自己给这条线设的颜色 —— 样式面板此刻正显示着「红色」让他改，
+        // 屏幕上却是蓝的。⇒ 描边恒取这条线自己的 colorToken；
+        // `isSelected` 在本工具的渲染里**不再有任何作用**（参数保留，见 DrawingTool 头注）。
+        let rgba = DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
         ctx.setStrokeColor(CGColor(srgbRed: CGFloat(rgba.red), green: CGFloat(rgba.green),
                                    blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha)))
         ctx.setLineWidth(Self.lineWidth(forThickness: drawing.thickness))
@@ -101,5 +103,10 @@ public struct HorizontalLineTool: DrawingTool {
     public func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool {
         guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return false }
         return abs(point.y - g.y) <= Self.hitTolerance && point.x >= g.minX && point.x <= g.maxX
+    }
+
+    /// D131：与 `render` / `hitTest` **同一个判据**（三者都问 `visibleGeometry`）。
+    public func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool {
+        Self.visibleGeometry(for: drawing, mapper: mapper) != nil
     }
 }
