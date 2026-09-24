@@ -302,6 +302,57 @@ def _scope_files() -> list[Path]:
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 
 
+#: ⛔⛔ **单遍词法**。剥注释必须一遍走完，不能「先剥块注释、再剥行注释」——
+#: 两遍会互相污染，实测造出三条**误报**（守卫在合法代码上变红，而且报文是错的）：
+#:
+#:   ```sql
+#:   (stock_code, -- 注意 /* 这里
+#:    schema_version)
+#:   ```
+#:   `/*` 只是**行注释里的文字**，`schema_version` 是真列。而先剥块注释那一遍
+#:   会把它当成未闭合注释、一路吃到末尾 ⇒ 守卫报「**缺 schema_version**」——
+#:   字段明明在场，⛔ **报文本身是错的**，比单纯报错更误导人。
+#:   （同族：`'a--b'` / `'a/*b'` 这种引号内的定界符。）
+#:
+#: ⚠️ 顺带去掉重复实现：`_column_list` 的配平扫描此前另有一份同样的嵌套注释逻辑。
+#:    本仓老教训「同一条判据存在于多处实现，改完必须两处都验」—— 这里直接去掉重复。
+#: ⚠️ 引号内的内容**原样保留**（不是抹掉）：`"schema_version"` 是**带引号的标识符**，
+#:    是真列名，抹掉它会造出新的漏报。
+def _strip_comments(s: str) -> str:
+    """一遍扫完：`/* */`（嵌套感知）与 `--` 换成空格；引号内原样保留。"""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        ch = s[i]
+        if s.startswith("/*", i):
+            depth, k = 1, i + 2
+            while k < n and depth:
+                if s.startswith("/*", k):
+                    depth += 1; k += 2
+                elif s.startswith("*/", k):
+                    depth -= 1; k += 2
+                else:
+                    k += 1
+            out.append(" ")
+            i = k
+        elif s.startswith("--", i):
+            k = s.find("\n", i)
+            if k == -1:
+                out.append(" ")
+                break
+            out.append(" ")
+            i = k                      # 换行本身留着，token 切分要靠它
+        elif ch in "'\"":
+            k = i + 1
+            while k < n and s[k] != ch:
+                k += 1
+            out.append(s[i: k + 1])    # 引号内原样保留
+            i = k + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def _column_names(cols: str) -> set[str]:
     """把列清单原文切成**真正的列名集合**。
 
@@ -316,25 +367,7 @@ def _column_names(cols: str) -> set[str]:
     inner = cols.strip()
     assert inner.startswith("(") and inner.endswith(")"), inner[:60]
     inner = inner[1:-1]
-    # ⛔ 块注释必须**嵌套感知**地剥：非贪婪正则在第一个 `*/` 就停，
-    #    `/* a /* b */ , schema_version, */` 会让被注掉的字段字样幸存 ⇒ 假绿（codex 第九轮）。
-    out_chars, k, m = [], 0, len(inner)
-    while k < m:
-        if inner.startswith("/*", k):
-            depth, q = 1, k + 2
-            while q < m and depth:
-                if inner.startswith("/*", q):
-                    depth += 1; q += 2
-                elif inner.startswith("*/", q):
-                    depth -= 1; q += 2
-                else:
-                    q += 1
-            out_chars.append(" ")
-            k = q
-            continue
-        out_chars.append(inner[k])
-        k += 1
-    inner = _LINE_COMMENT.sub(" ", "".join(out_chars))
+    inner = _strip_comments(inner)
     names = set()
     for tok in inner.split(","):
         # 跨行的 asyncpg 查询会把引号与换行夹进 token（实测形如 '"\n        "schema_version'）
@@ -565,36 +598,61 @@ def _scan_source(path: Path, text: str):
     text = text
     # ⛔ 扫的是**还原后的运行时字符串**（`.py`）或原文（其它宿主），见 `_scan_units`。
     units = _scan_units(path, text)
-    claimed: list[tuple[int, int]] = []      # 已被认领的**原文**跨度
     hits: list[tuple[str, int, int, int, int]] = []  # (单元文本, 起点, 表名后下标, 行号, 单元原文终点)
+    seen_per_unit: list[tuple[int, int, int]] = []   # (原文起点, 原文终点, 该单元内已认领的条数)
 
     for utext, uline, ustart, uend in units:
         precise = _find_inserts(utext, loose=False)
         precise_starts = {s for s, _ in precise}
-        coarse = [cs for cs, _ in _find_inserts(utext, loose=True)]
-        if precise or coarse:
-            claimed.append((ustart, uend))
-        for pos, after in precise:
-            ln = uline if path.suffix == ".py" else utext.count("\n", 0, pos) + 1
-            hits.append((utext, pos, after, ln, uend))
-        for cs in coarse:
-            if cs in precise_starts:
-                continue
+        coarse_starts = {cs for cs, _ in _find_inserts(utext, loose=True)}
+        # ⛔⛔ **三张网都在【同一份文本】上跑，按【出现位置】去重。**
+        #    第 20 轮的缺陷就出在这里：我曾按「扫描单元」去重 —— 而非 `.py` 宿主的
+        #    扫描单元**就是整个文件**，于是**一条被认出来的 INSERT 会把整份文件的
+        #    兜底网关掉**。同一文件里再加一条 `INSERT INTO U&"training_sets" (…)`
+        #    （合法的 PostgreSQL 标识符写法、且缺字段）就**静默通过**了。
+        #    ⇒ 去重的粒度必须是「**这一条出现**」，不是「这一片文本」。
+        last_resort_starts = {mm.start() for mm in _LAST_RESORT_RE.finditer(utext)}
+        for cs in sorted((coarse_starts | last_resort_starts) - precise_starts):
             ln = uline if path.suffix == ".py" else utext.count("\n", 0, cs) + 1
             unknown_shape.append(
                 f"{rel}:{ln}: 判据够不着 -> {utext[cs: cs + 60]!r}"
             )
-
-    # ⛔ **最后一张网永远扫原文** —— `.py` 里解不动的拼法（`+` / `.format()` /
-    #    f-string 的变量部分）在扫描单元里是看不见的，只有原文这一层兜得住。
-    #    已被某个单元认领的跨度要跳过，否则 12 处真语句会被重复报成「判不了」。
-    for mm in _LAST_RESORT_RE.finditer(text):
-        if any(s <= mm.start() < e for s, e in claimed):
-            continue
-        lineno = text.count("\n", 0, mm.start()) + 1
-        unknown_shape.append(
-            f"{rel}:{lineno}: 判据够不着 -> {text[mm.start(): mm.start() + 60]!r}"
+        for pos, after in precise:
+            ln = uline if path.suffix == ".py" else utext.count("\n", 0, pos) + 1
+            hits.append((utext, pos, after, ln, uend))
+        seen_per_unit.append(
+            (ustart, uend, len(precise_starts | coarse_starts | last_resort_starts))
         )
+
+    if path.suffix == ".py":
+        # ⛔ `.py` 还要**额外扫一遍原文** —— `ast` 解不动的拼法（`+` 相加、`.format()`、
+        #    f-string 的变量部分）会把一条语句劈到**两个字面量**里，任何单个字面量
+        #    的还原文本里都看不见它。
+        # ⚠️ 去重按**条数**对账，不按跨度：一个字面量里可能同时有「已认领的一条」和
+        #    「跨到下一个字面量、因而没被认领的另一条」——按跨度去重会把后者一起吞掉
+        #    （这正是第 20 轮那个缺陷的 `.py` 版本）。
+        raw_per_unit: dict[int, int] = {}
+        outside = []
+        for mm in _LAST_RESORT_RE.finditer(text):
+            for idx, (ustart, uend, _) in enumerate(seen_per_unit):
+                if ustart <= mm.start() < uend:
+                    raw_per_unit[idx] = raw_per_unit.get(idx, 0) + 1
+                    break
+            else:
+                outside.append(mm.start())
+        for idx, raw_n in raw_per_unit.items():
+            ustart, _, claimed_n = seen_per_unit[idx]
+            for _ in range(max(0, raw_n - claimed_n)):
+                lineno = text.count("\n", 0, ustart) + 1
+                unknown_shape.append(
+                    f"{rel}:{lineno}: 判据够不着（跨字面量拼接，还原不出运行时文本）"
+                    f" -> {text[ustart: ustart + 60]!r}"
+                )
+        for start in outside:
+            lineno = text.count("\n", 0, start) + 1
+            unknown_shape.append(
+                f"{rel}:{lineno}: 判据够不着 -> {text[start: start + 60]!r}"
+            )
 
     for utext, pos, after, lineno, uend in hits:
         # 非 SQL 白名单要看**原文**里字面量后面那一小段（`… " in query:`）
@@ -1135,4 +1193,105 @@ def test_precision_does_not_regress_to_cannot_tell():
         "以下写法**判得出**缺 schema_version，守卫却报成「判据够不着」—— "
         "红是红了，但报文说「判不了」，人还得手工再看一遍：\n  "
         + "\n  ".join(f"{k}: {v}" for k, v in punted.items())
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐ **剥注释必须一遍扫完，常驻**
+#
+# 原先是「先剥块注释、再剥行注释」两遍走，两遍会互相污染 —— 造出三条**误报**：
+# 守卫在**合法代码**上报「缺 schema_version」，而字段明明在场。
+# ⛔ 报文本身是错的，比单纯报错更误导人（人会照着报文去「补」一个已经存在的列）。
+#
+# ⚠️ 这一组既要钉「注释里的字样不算数」（防假绿），也要钉「注释外的真列要认得」
+#    （防误报）。只钉一半就是第十四轮那个坑：坏样本照样红，只是红的理由变了。
+# ---------------------------------------------------------------------------
+
+_COLUMN_NAME_CASES = {
+    # (列清单, schema_version 是否真的在场)
+    "干净": ("(stock_code, schema_version)", True),
+    "带引号的标识符": ('(stock_code, "schema_version")', True),
+    "行注释里出现 /*，字段在下一行": ("(stock_code, -- 注意 /* 这里\n schema_version)", True),
+    "引号里出现 --": ("(stock_code, 'a--b', schema_version)", True),
+    "引号里出现 /*": ("(stock_code, 'a/*b', schema_version)", True),
+    "块注释注掉": ("(stock_code, /* , schema_version */ file_path)", False),
+    "嵌套块注释注掉": ("(stock_code, /* a /* b */ , schema_version, */ file_path)", False),
+    "行注释注掉到行尾": ("(stock_code, file_path -- , schema_version\n)", False),
+    "只是子串": ("(stock_code, my_schema_version)", False),
+    "注释里喂字样": ("(stock_code /* schema_version uses default */, file_path)", False),
+}
+
+
+def test_column_name_extraction_is_lexically_correct():
+    wrong = []
+    for label, (cols, expected) in _COLUMN_NAME_CASES.items():
+        got = "schema_version" in _column_names(cols)
+        if got != expected:
+            kind = "误报（字段在场却说不在）" if expected else "假绿（字段不在场却说在）"
+            wrong.append(f"{label}: {kind} -> {cols!r}")
+    assert not wrong, (
+        "列名提取的词法判断错了 —— 说「在场」会放过缺字段的写入（假绿），"
+        "说「不在场」会让守卫在合法代码上变红且**报文是错的**：\n  "
+        + "\n  ".join(wrong)
+    )
+    # ⭐ 防空转：两个方向都必须有用例，否则这条测试只挡得住一半。
+    assert any(v for _, v in _COLUMN_NAME_CASES.values()), "缺「字段真在场」的用例"
+    assert any(not v for _, v in _COLUMN_NAME_CASES.values()), "缺「字段被注掉」的用例"
+
+
+# ---------------------------------------------------------------------------
+# ⭐⭐ **一条被认出来的语句不许掩护同一文件里的其它语句，常驻**（codex 第二十轮）
+#
+# 第 17 轮我为了给 `.py` 做去重，引入了「**扫描单元**已被认领就跳过兜底网」。
+# 而非 `.py` 宿主的扫描单元**就是整个文件** —— 于是：
+#
+#   > 一条被认出来的 INSERT，会把**整份文件**的兜底网关掉。
+#
+# 往一个已覆盖的文件里再加一条 `INSERT INTO U&"training_sets" (…)`
+# （`U&"…"` 是合法的 PostgreSQL 标识符写法，且缺字段）就**静默通过**。
+#
+# ⛔ 这是「改动只落在一处、没落在整条判据家族上」的又一次 —— 同一套去重逻辑
+#    套在两种粒度完全不同的单元上，`.py` 那边对、这边错。
+# ⇒ 去重粒度收窄到「**这一条出现**」。
+# ---------------------------------------------------------------------------
+
+_MIXED_OK = "INSERT INTO training_sets (stock_code, schema_version) VALUES (1,2);"
+#: `U&"…"` 是 PostgreSQL 的 Unicode 转义标识符，合法；精确网够不着它，只有兜底网接得住。
+_MIXED_BAD = 'INSERT INTO U&"training_sets" (stock_code, file_path) VALUES (1,2);'
+
+_MIXED_CASES = {
+    "只有未认领的": _MIXED_BAD,
+    "已认领的在前": f"{_MIXED_OK}\n{_MIXED_BAD}",
+    "已认领的在后": f"{_MIXED_BAD}\n{_MIXED_OK}",
+    "夹在两条已认领的中间": f"{_MIXED_OK}\n{_MIXED_BAD}\n{_MIXED_OK}",
+}
+
+
+def test_a_recognized_insert_does_not_shield_its_neighbours():
+    shielded = []
+    for label, src in _MIXED_CASES.items():
+        missing, unknown, _, _, _ = _scan_source(Path("mixed.sql"), src + "\n")
+        if not missing and not unknown:
+            shielded.append(label)
+    assert not shielded, (
+        "同一文件里已经有一条被认出来的 INSERT，就把另一条**缺字段且判据够不着**的"
+        "语句掩护过去了 —— 往已覆盖的文件里追加写入即可静默绕过：\n  "
+        + "\n  ".join(shielded)
+    )
+    # ⭐ 防空转：这条测试只有在 `_MIXED_BAD` 确实**够不着精确网**时才有意义。
+    #    若哪天精确网认得它了，用例就退化成在验精确网，掩护问题不会再被发现。
+    assert not _find_inserts(_MIXED_BAD, loose=True), (
+        "`_MIXED_BAD` 已经能被精确/粗网认出来了 —— 这条测试对「掩护」问题的"
+        "判别力归零，请换一条真正够不着的样本"
+    )
+    assert _LAST_RESORT_RE.search(_MIXED_BAD), "`_MIXED_BAD` 连兜底网都够不着，用例无效"
+    # ⛔ `.py` 宿主的同一问题：一个字面量里同时有「已认领的一条」和「跨字面量、
+    #    因而认不出的另一条」。按跨度去重会把后者一起吞掉。
+    py_src = (
+        'q = "' + _MIXED_OK + ' INSERT INTO training_" + "sets (a) VALUES (1)"\n'
+    )
+    missing, unknown, checked, _, _ = _scan_source(Path("mixed.py"), py_src)
+    assert checked == 1 and unknown, (
+        f"`.py` 同一字面量里「已认领 + 跨字面量未认领」没有各自报出来："
+        f"checked={checked} unknown={unknown}"
     )
