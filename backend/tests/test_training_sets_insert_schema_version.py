@@ -66,161 +66,127 @@ SELF = Path(__file__).resolve()
 #:    之间换行、`public.training_sets` —— 守卫**照样 `1 passed`**（PostgreSQL 侧确认三条
 #:    都是合法语句）。而既有 12 处仍满足计数断言，于是**新写入方可以静默绕过**、拿到
 #:    `DEFAULT 1`，把第 2 代产物错标成第 1 代。
-#: ⛔⛔ **发现层用「先抹平、再简单正则」，不再一个个往字符类里补字符。**
-#:
-#: 为什么是这个做法：发现层被连续攻破**五次** —— 大小写/换行/`public.` 限定 →
-#: 关键字之间夹注释 → `+` 拼接 → **schema 限定符与表名之间夹注释**
-#: （`INSERT INTO public./* c */training_sets`）。每次我都往间隔字符类里补一个字符，
-#: 这是打地鼠：**字符类永远数不全**。
-#:
-#: 结构性做法：先把**干扰物**换成**等长空白**（位置 1:1 保持、换行保留 ⇒ 行号不会错），
-#: 再用一条**简单**正则扫抹平后的文本。干扰物只有两类：
-#:   ① SQL 块注释 `/* … */` —— 可以出现在语句的任何缝隙里；
-#:   ② Python 字符串拼接的痕迹 `"` `'` `+` `\` —— 它们永远不属于标识符。
-#: ⚠️ **等长**是硬要求：抹平后的下标要能直接映射回原文，否则报出来的行号是错的。
-#: ⚠️ `--` 行注释**不做全局抹平**（它在 shell / YAML 里另有含义，全局抹会吃掉同一行
-#:    后面的真 SQL ⇒ 制造**漏报**）；只在关键字之间的间隔里局部容忍。
-#: ⛔⛔ **全片只有这一个块注释扫描器** —— 发现层、配平扫描、列名提取**三处共用**。
-#: 之前是**四份各自为政**的非贪婪正则/内联跳过，codex 第九轮用**嵌套注释**一次打穿：
-#:     (stock_code /* outer /* inner */ , schema_version, */ , stock_name, …)
-#: PostgreSQL 的块注释**可嵌套** ⇒ 整段都是注释、`schema_version` 被注掉；
-#: 而非贪婪正则在**第一个** `*/` 就停 ⇒ 残留的 `schema_version` 字样被当成列名 ⇒ **假绿**。
-#: ⚠️ 本仓教训「同一条判据存在于多处实现，改完必须两处都验」—— 这次直接**去掉重复**。
-def _blank_block_comments(text: str, *, sql_quotes: bool = False) -> str:
-    """把 `/* … */` 换成**等长**空白（换行保留，位置 1:1）。**支持嵌套**。
+#: ⚠️ **表示空白的转义序列**也要当成间隔跳掉：Python 字面量里
+#:    `"INSERT INTO\\ntraining_sets (…)"` 执行时是合法 SQL（`\n` 就是换行），
+#:    但**源码文本**里是「反斜杠 + 字母 n」两个字符 —— 只跳反斜杠会留下一个 `n`，
+#:    发现层当场瞎掉（codex 第六轮实测：那样写守卫仍报 `1 passed`）。
+#: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，写法就这几种。
+_WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
 
-    ⛔ **注释定界符只有在【不处于别的词法上下文里】时才算定界符。** 这条被 codex 连打三次：
-       · 第 10 轮：`-- /*` —— 行注释里的 `/*` 被当成起点，把后面**要执行**的 INSERT 抹掉；
-       · 第 12 轮：`SELECT '/*'; INSERT …; SELECT '*/';` —— **SQL 字符串里**的 `/*` 同理。
-       两次都是**假绿**（真语句被抹掉 ⇒ 发现层看不见 ⇒ 报绿，而 PostgreSQL 照常执行、用 DEFAULT 1）。
-    ⇒ 不再逐个补上下文，改成**按词法走一遍**：行注释 / 字符串 / 块注释三种区域各自跳过。
 
-    ⚠️ **`sql_quotes` 为什么要分文件类型**：引号在两种宿主里含义相反 ——
-       · `.sql` 文件里 `'…'` 是 **SQL 字符串**（里面的 `/*` 是数据，不是注释）⇒ 必须跳过；
-       · `.py` / `.sh` / `.yml` / `.md` 里引号是**宿主语言的定界符**，SQL 正文就在**引号内部** ——
-         若把引号内当作不可见区域，整条 SQL 都会消失 ⇒ **只能不跳**。
-    ⚠️ 找不到配对的 `*/` 就**不抹**（当它不是注释）：抹错的代价是**漏报**（瞎），
-       不抹的代价是**可能误报**（吵）。⛔ 永远选吵。
-       （实测教训：曾写「未闭合就抹到文末」，`paths:` 里的 `'backend/sql/**'` 含 `/*`
-         且全文无 `*/` ⇒ 一个文件里 5 条 INSERT 全消失，靠防空转断言才抓住。）
+#: ⛔⛔ **发现层是一个【非破坏性的游标扫描器】，既不抹除、也不用正则。**
+#:
+#: 两条约束是十五轮打出来的，缺一不可：
+#:
+#: ① **不抹除** —— 抹除是**破坏性**的，破坏的代价是**漏报（瞎）**。
+#:    第 9 / 10 / 12 / 13 轮四次都是「抹掉了不该抹的 ⇒ 真语句从发现层消失 ⇒ 假绿」：
+#:    未闭合 `/*` 抹到文末、**行注释**里的 `/*`、**SQL 字符串**里的 `/*`、heredoc 与**美元引号**。
+#:    每次我的修法都是「再教它认一种上下文」，而上下文是**开放**的（`E'…'`、`U&'…'`、
+#:    各种宿主字符串……）—— **数不完**。
+#:
+#: ② **不用正则** —— 正则**做不了嵌套**。第 15 轮：
+#:    `INSERT /* outer /* inner */ outer */ INTO training_sets (…)` 是合法 PostgreSQL，
+#:    而非嵌套的注释模式在**第一个** `*/` 就停 ⇒ 两条正则都匹配不上 ⇒ **假绿**。
+#:    ⚠️ 第 13 轮我把注释处理从（嵌套感知的）抹除搬进（非嵌套的）正则间隔时，
+#:       判断过「关键字之间放嵌套注释很荒谬」—— **那个判断是错的**，它在声明的覆盖范围内。
+#:
+#: ⇒ 游标扫描器同时满足两条：**只前进、不改写原文**（非破坏性），且**手写的跳过逻辑
+#:    可以嵌套感知**。认不全某种语法时最坏是**推进失败 ⇒ 落进粗网报「判不了」（吵）**，
+#:    ⛔ 而不是把真语句变没（瞎）。
+
+def _skip_gap(text: str, i: int, *, required: bool, extra: str = "") -> int | None:
+    """跳过关键字之间允许出现的东西，返回新下标；`required` 时至少要跳掉一个字符。
+
+    允许：空白 / `--` 行注释 / `/* */` 块注释（**嵌套感知**）/ 宿主引号 / `+` / 续行反斜杠 /
+          表示空白的转义（`\n` `\t` `\r` `\x20` `\u0020` `\040`）。
+    `extra` 是额外容忍的字符，只给**粗网**用（见 `_find_inserts` 里劈开表名那一处）。
     """
-    out = list(text)
-    i, n = 0, len(text)
+    n, start = len(text), i
     while i < n:
-        if text.startswith("--", i):                       # 行注释：跳过，不抹
+        ch = text[i]
+        if ch in " \t\r\n":
+            i += 1
+        elif ch in "\"'+" or (extra and ch in extra):
+            i += 1
+        elif text.startswith("--", i):
             k = text.find("\n", i)
-            i = n if k == -1 else k + 1
-            continue
-        if sql_quotes and text[i] in "'\"":                # SQL 字符串/标识符：跳过，不抹
-            q = text[i]
-            k = i + 1
-            while k < n:
-                if text[k] == q:
-                    if q == "'" and k + 1 < n and text[k + 1] == "'":
-                        k += 2                              # `''` 是转义的单引号
-                        continue
-                    break
-                k += 1
-            if k >= n:                                      # 引号没闭合 ⇒ 不猜
-                return "".join(out)
+            if k == -1:
+                return None
             i = k + 1
-            continue
-        if text.startswith("/*", i):
-            depth, k = 1, i + 2
+        elif text.startswith("/*", i):
+            depth, k = 1, i + 2          # ⭐ 嵌套感知 —— 正则做不到的就在这里
             while k < n and depth:
                 if text.startswith("/*", k):
-                    depth += 1
-                    k += 2
+                    depth += 1; k += 2
                 elif text.startswith("*/", k):
-                    depth -= 1
-                    k += 2
+                    depth -= 1; k += 2
                 else:
                     k += 1
-            if depth:                                       # 没配对上 ⇒ 当它不是注释
-                i += 2
-                continue
-            for m in range(i, k):
-                if out[m] != "\n":
-                    out[m] = " "
+            if depth:
+                return None              # 注释没闭合 ⇒ 推进不了
             i = k
+        elif ch == "\\":
+            m = _WS_ESCAPE_RE.match(text, i)
+            i = m.end() if m else i + 1
+        else:
+            break
+    if required and i == start:
+        return None
+    return i
+
+
+def _match_word(text: str, i: int, word: str) -> int | None:
+    """大小写不敏感地匹配一个关键字/标识符，返回其后的下标。"""
+    seg = text[i: i + len(word)]
+    return i + len(word) if seg.lower() == word else None
+
+
+def _find_inserts(text: str, *, loose: bool):
+    """扫出 `INSERT … INTO … [public.] training_sets`，产出 (起点, 表名之后的下标)。
+
+    `loose=True` 是**粗网**：只要求走到「像表名的东西」，用来兜住精确推进走不通的写法。
+    """
+    out, n, i = [], len(text), 0
+    while i < n:
+        if text[i] not in "iI":
+            i += 1
             continue
-        i += 1
-    return "".join(out)
+        start = i
+        j = _match_word(text, i, "insert")
+        if j is None:
+            i += 1
+            continue
+        j = _skip_gap(text, j, required=True)
+        j = j if j is None else _match_word(text, j, "into")
+        j = j if j is None else _skip_gap(text, j, required=True)
+        if j is None:
+            i = start + 1
+            continue
+        k = _match_word(text, j, "public")          # 可选的 schema 限定符
+        if k is not None:
+            k = _skip_gap(text, k, required=False)
+            if k is not None and k < n and text[k] == ".":
+                k = _skip_gap(text, k + 1, required=False)
+                if k is not None:
+                    j = k
+        end = _match_word(text, j, "training_sets")
+        if end is None and loose:
+            # 粗网：容忍表名被引号/拼接劈开（`"INSERT INTO training_" "sets (…)"`）。
+            # ⛔ 这里必须**额外容忍 `_`** —— 劈开点常常就落在下划线两侧，
+            #    漏掉它就等于把这种写法静默放行（实测：G3「表名劈开」由抓到退回假绿）。
+            end = _match_word(text, j, "training")
+            if end is not None:
+                e2 = _skip_gap(text, end, required=False, extra="_")
+                end = _match_word(text, e2, "sets") if e2 is not None else None
+        if end is not None:
+            out.append((start, end))
+            i = end
+        else:
+            i = start + 1
+    return out
 
 
-#: ⚠️ 还要抹掉**表示空白的转义序列**：Python 字面量里 `"INSERT INTO\\ntraining_sets (…)"`
-#:    执行时是合法 SQL（`\\n` 就是换行），但源码文本里是**反斜杠 + 字母 n** 两个字符 ——
-#:    只抹反斜杠会留下一个 `n`，发现层当场瞎掉（codex 第六轮实测：那样写守卫仍 `1 passed`）。
-#: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，对应的转义写法就这几种。
-_WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
-#: Python 字符串拼接留下的痕迹：引号 / `+` / 续行反斜杠 —— 它们永远不属于标识符。
-_CONCAT_ARTIFACT_RE = re.compile(r"[\"'+\\]")
-
-
-def _blank_for_discovery(text: str, *, sql_quotes: bool = False) -> str:
-    """位置保持的抹平：干扰物 → 等长空白（换行原样保留）。"""
-    def blank(m):
-        return "".join("\n" if ch == "\n" else " " for ch in m.group(0))
-    # 次序：块注释 → 空白转义（整段等长抹）→ 单字符拼接痕迹。
-    # ⚠️ 空白转义必须在单字符那步**之前**：否则反斜杠先被抹成空格，留下的 `n` 就再也认不出来了。
-    t = _blank_block_comments(text, sql_quotes=sql_quotes)
-    t = _WS_ESCAPE_RE.sub(blank, t)
-    return _CONCAT_ARTIFACT_RE.sub(" ", t)
-
-
-#: 抹平之后，发现层只剩这一条：关键字之间允许空白或 `--` 行注释；schema 限定符可选；
-#: 表名的引号已被抹成空白，所以不必再写引号分支。
-#: ⛔⛔ **不再做任何「全局抹除」** —— 抹除是**破坏性**操作，而破坏的代价是**漏报**。
-#:
-#: codex 第 9 / 10 / 12 / 13 轮，**四次**都是同一个形状：**抹掉了不该抹的东西**，
-#: 真语句从发现层消失 ⇒ **假绿**。
-#:   · 第 9 轮：未闭合的 `/*` 抹到文末（`paths:` 里的 `'backend/sql/**'`）；
-#:   · 第 10 轮：**行注释**里的 `/*` 被当成起点，抹掉中间的真 INSERT；
-#:   · 第 12 轮：**SQL 字符串**里的 `/*` 同理；
-#:   · 第 13 轮：`.sh` heredoc 里的 `'/*'`、以及 `.sql` 的**美元引号** `$$/*$$`。
-#: 每次我的修法都是「再教它认一种上下文」，而上下文是**开放**的（美元引号、
-#: `E'…'`、`U&'…'`、宿主语言的各种字符串形式……）——**数不完**。
-#:
-#: ⇒ **换掉整个思路**：不抹任何东西，改成让**关键字之间的间隔**直接容忍这些干扰物。
-#:    `_GAP` 只在「`INSERT` … `INTO` … 表名」这个**很短的构造内部**生效，
-#:    所以它认不全某种字符串语法时，最坏结果是**匹配不上 ⇒ 落进粗网 ⇒ 报「判据够不着」**（吵），
-#:    ⛔ **而不会像抹除那样把整条真语句变没**（瞎）。
-#:
-#: 容忍：空白 / `--` 行注释 / `/* */` 块注释 / 宿主引号 / `+` 拼接 / 续行反斜杠 / 空白转义。
-_GAP = (
-    r"(?:"
-    r"\s"
-    r"|--[^\n]*\n"
-    r"|/\*(?:[^*]|\*(?!/))*\*/"
-    r"|[\"'+\\]"
-    r"|\\(?:u0020|x20|040|[ntr])"
-    r")+"
-)
-#: ⚠️ schema 限定符的点号**两侧也要用同一种间隔**，不能只写 `\s*`：
-#:    `INSERT INTO public. -- target table\n training_sets (…)` 是合法 SQL，
-#:    而 `--` 行注释**故意不做全局抹平**（见上），所以必须在这里局部容忍
-#:    （codex 第七轮实测：只写 `\s*` 时守卫仍 `1 passed`）。
-#:    用 `*` 而非 `+`：没有间隔（`public.training_sets`）才是最常见的写法。
-_DOT_GAP = _GAP[:-1] + "*"      # 同一套容忍，但允许「没有间隔」（`public.training_sets`）
-_INSERT_RE = re.compile(
-    rf"insert{_GAP}into{_GAP}(?:public{_DOT_GAP}\.{_DOT_GAP})?training_sets",
-    re.I,
-)
-
-#: ⛔⛔ **粗网**：精确正则再宽也总有够不着的拼法（如表名被劈成 `training_` + `sets`）。
-#:    铁律是「**不许把『断定不是目标』和『判据够不着』混进同一个分支**」—— 两者会
-#:    互相伪装成对方。⇒ 凡「像是往 training_sets 写」却**没被上面那条认领**的，
-#:    一律报「判据够不着」**让测试红**，⛔ 绝不静默放行。
-#:    宁可偶尔误报（红了有人看），也不要漏报（绿了没人知道）。
-#: ⚠️ `into` 与表名之间**仍然收得很紧**，是被干净树上的误报逼出来的：放宽到任意字符会让
-#:    `INSERT INTO p15_targets (id) SELECT … FROM training_sets` 这条**插另一张表**的
-#:    合法语句误报（守卫必须在当前树上为绿，否则就是一张放行许可证）。
-_COARSE_RE = re.compile(
-    rf"insert{_GAP}into[\s_\"'+\\]{{0,40}}?training[\s_\"'+\\]*sets",
-    re.I,
-)
-
-#: 只扫**可执行**路径。`docs/superpowers/**` 是历史记述（plan / spec 里引用这条
+#: 只扫**可执行**路径。#: 只扫**可执行**路径。`docs/superpowers/**` 是历史记述（plan / spec 里引用这条
 #: SQL 的地方不是要跑的东西），显式不在作用域内。
 _SCOPE_GLOBS = (
     "backend/**/*.py",
@@ -258,7 +224,7 @@ def _scope_files() -> list[Path]:
     return out
 
 
-#: 块注释已由 `_blank_block_comments` 统一抹掉（见上），这里只需处理行注释。
+#: 块注释在下面**就地**嵌套感知地剥（见 `_column_names` 与 `_column_list`），这里只管行注释。
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 
 
@@ -405,21 +371,21 @@ def test_every_executable_insert_specifies_schema_version():
 
     for path in _scope_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        # ⛔ 直接在**原文**上扫 —— 不抹除任何东西（理由见 `_GAP` 上方的长注释）。
-        precise_starts = {m.start() for m in _INSERT_RE.finditer(text)}
+        # ⛔ 直接在**原文**上扫 —— 非破坏性游标扫描器（理由见上方长注释）。
+        precise = _find_inserts(text, loose=False)
+        precise_starts = {s for s, _ in precise}
 
         # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
-        for cm in _COARSE_RE.finditer(text):
-            if cm.start() in precise_starts:
+        for cs, _ in _find_inserts(text, loose=True):
+            if cs in precise_starts:
                 continue
-            lineno = text.count("\n", 0, cm.start()) + 1
+            lineno = text.count("\n", 0, cs) + 1
             unknown_shape.append(
                 f"{path.relative_to(ROOT)}:{lineno}: 判据够不着 -> "
-                f"{text[cm.start(): cm.start() + 60]!r}"
+                f"{text[cs: cs + 60]!r}"
             )
 
-        for m in _INSERT_RE.finditer(text):
-            pos, after = m.start(), m.end()
+        for pos, after in precise:
             rel = path.relative_to(ROOT)
             lineno = text.count("\n", 0, pos) + 1
             tail = text[after: after + 20]
@@ -452,7 +418,9 @@ def test_every_executable_insert_specifies_schema_version():
                 prose += 1                # 反引号包住的散文提及，不是可执行 SQL
             else:
                 # ⛔ 既不是列清单、又不是已知的非 SQL 形状 —— **报错**，不静默跳过。
-                unknown_shape.append(f"{rel}:{lineno}: 未知写法 -> {m.group(0)}{tail!r}")
+                unknown_shape.append(
+                    f"{rel}:{lineno}: 未知写法 -> {text[pos:after]!r}{tail!r}"
+                )
 
     assert not unknown_shape, (
         "出现了本守卫判据够不着的 INSERT 写法 —— 不是「通过」，是**判不了**。\n"
@@ -498,6 +466,8 @@ _VALID_FORMS = {
     "行注释在列清单里": "INSERT INTO training_sets (stock_code, -- t\n schema_version) VALUES (1,2);",
     "限定表名": "INSERT INTO public.training_sets (stock_code, schema_version) VALUES (1,2);",
     "大小写混写": "insert Into training_sets (stock_code, schema_version) VALUES (1,2);",
+    "关键字间嵌套注释": "INSERT /* a /* b */ c */ INTO training_sets (stock_code, schema_version) VALUES (1,2);",
+    "限定符周围嵌套注释": "INSERT INTO public /* a /* b */ c */ . training_sets (stock_code, schema_version) VALUES (1,2);",
 }
 
 
@@ -508,11 +478,11 @@ def test_valid_column_lists_with_comments_are_parsed_not_rejected():
     """
     broken = []
     for label, sql in _VALID_FORMS.items():
-        m = _INSERT_RE.search(sql)
-        if m is None:
-            broken.append(f"{label}: 发现层就没匹配上")
+        hits = _find_inserts(sql, loose=False)
+        if not hits:
+            broken.append(f"{label}: 发现层就没扫到")
             continue
-        cols = _column_list(sql, m.end())
+        cols = _column_list(sql, hits[0][1])
         if cols is None:
             broken.append(f"{label}: 列清单解析返回 None（会被判『判据够不着』）")
         elif "schema_version" not in _column_names(cols):
