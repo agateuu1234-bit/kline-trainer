@@ -86,81 +86,84 @@ SELF = Path(__file__).resolve()
 #: PostgreSQL 的块注释**可嵌套** ⇒ 整段都是注释、`schema_version` 被注掉；
 #: 而非贪婪正则在**第一个** `*/` 就停 ⇒ 残留的 `schema_version` 字样被当成列名 ⇒ **假绿**。
 #: ⚠️ 本仓教训「同一条判据存在于多处实现，改完必须两处都验」—— 这次直接**去掉重复**。
-def _blank_block_comments(text: str) -> str:
+def _blank_block_comments(text: str, *, sql_quotes: bool = False) -> str:
     """把 `/* … */` 换成**等长**空白（换行保留，位置 1:1）。**支持嵌套**。
 
-    ⛔ **找不到配对的 `*/` 就【不抹】**（当它不是注释）。
-       起初我写成「未闭合就一路抹到文末」（想对齐 PostgreSQL 的行为），**当场闯祸**：
-       `.github/workflows/schema-smoke.yml` 的 `paths:` 里有 `'backend/sql/**'` ——
-       `/` 加 `*` 正好构成 `/*`，而全文没有 `*/` ⇒ **从第 6 行一路抹到文末**，
-       该文件里 5 条 INSERT 全部消失、守卫只剩 5/12（防空转断言当场报红才没放过去）。
-       ⇒ 失败必须往**吵**的方向倒（不抹 ⇒ 可能误报 ⇒ 有人看），
-         ⛔ 不能往**瞎**的方向倒（乱抹 ⇒ 漏报 ⇒ 没人知道）。
+    ⛔ **注释定界符只有在【不处于别的词法上下文里】时才算定界符。** 这条被 codex 连打三次：
+       · 第 10 轮：`-- /*` —— 行注释里的 `/*` 被当成起点，把后面**要执行**的 INSERT 抹掉；
+       · 第 12 轮：`SELECT '/*'; INSERT …; SELECT '*/';` —— **SQL 字符串里**的 `/*` 同理。
+       两次都是**假绿**（真语句被抹掉 ⇒ 发现层看不见 ⇒ 报绿，而 PostgreSQL 照常执行、用 DEFAULT 1）。
+    ⇒ 不再逐个补上下文，改成**按词法走一遍**：行注释 / 字符串 / 块注释三种区域各自跳过。
+
+    ⚠️ **`sql_quotes` 为什么要分文件类型**：引号在两种宿主里含义相反 ——
+       · `.sql` 文件里 `'…'` 是 **SQL 字符串**（里面的 `/*` 是数据，不是注释）⇒ 必须跳过；
+       · `.py` / `.sh` / `.yml` / `.md` 里引号是**宿主语言的定界符**，SQL 正文就在**引号内部** ——
+         若把引号内当作不可见区域，整条 SQL 都会消失 ⇒ **只能不跳**。
+    ⚠️ 找不到配对的 `*/` 就**不抹**（当它不是注释）：抹错的代价是**漏报**（瞎），
+       不抹的代价是**可能误报**（吵）。⛔ 永远选吵。
+       （实测教训：曾写「未闭合就抹到文末」，`paths:` 里的 `'backend/sql/**'` 含 `/*`
+         且全文无 `*/` ⇒ 一个文件里 5 条 INSERT 全消失，靠防空转断言才抓住。）
     """
     out = list(text)
     i, n = 0, len(text)
     while i < n:
-        # ⛔ **先认行注释，再认块注释**：`--` 之后的内容里如果出现 `/*`，那**不是**块注释
-        #    起点（PostgreSQL 把整行当注释）。反过来先认 `/*` 会闯祸 —— codex 第十轮实测：
-        #        -- /*
-        #        INSERT INTO training_sets(…) VALUES (…);   ← 这条是**要执行**的
-        #        -- */
-        #    扫描器把第 1 行的 `/*` 当起点、第 3 行的 `*/` 当终点 ⇒ **把中间那条真 INSERT
-        #    整段抹掉** ⇒ 发现层看不见它 ⇒ **假绿**，而 PostgreSQL 会照常执行它、用 DEFAULT 1。
-        # ⚠️ 行注释这里**只跳过、不抹**：是否抹由调用方决定（发现层不抹 —— `--` 在
-        #    shell / YAML 里另有含义；解析层才抹）。
-        #
-        # ⚠️ **由此带来一个【有意保留】的不对称，实测确认过**：
-        #    · 被 `/* */` 注掉的 INSERT —— 发现层**看不见**（块注释被抹成空白）⇒ 绿；
-        #    · 被 `--` 注掉的 INSERT —— 发现层**仍看得见** ⇒ 若缺字段则**红**。
-        #    看起来不一致，但**不改成一致**，理由有二：
-        #    ① 要改成一致就得在发现层也抹掉行注释，而那会让
-        #       `psql --dbname=x -c "INSERT INTO training_sets(…)"` 这种写法**整条被抹掉**
-        #       ⇒ **静默漏报**。实测当前作用域内「同一行 `--` 出现在 INSERT 之前」的行数为 **0**，
-        #       但这是**今天**的事实，不是结构保证。⛔ 失败要往**吵**的方向倒，不往**瞎**的方向倒。
-        #    ② 「注掉的、缺字段的 INSERT」本身就是**埋着的雷** —— 取消注释只要删两个字符。
-        #       红在这里是合理的：要么补上字段，要么把那行删掉。
-        if text.startswith("--", i):
-            j = text.find("\n", i)
-            i = n if j == -1 else j + 1
+        if text.startswith("--", i):                       # 行注释：跳过，不抹
+            k = text.find("\n", i)
+            i = n if k == -1 else k + 1
+            continue
+        if sql_quotes and text[i] in "'\"":                # SQL 字符串/标识符：跳过，不抹
+            q = text[i]
+            k = i + 1
+            while k < n:
+                if text[k] == q:
+                    if q == "'" and k + 1 < n and text[k + 1] == "'":
+                        k += 2                              # `''` 是转义的单引号
+                        continue
+                    break
+                k += 1
+            if k >= n:                                      # 引号没闭合 ⇒ 不猜
+                return "".join(out)
+            i = k + 1
             continue
         if text.startswith("/*", i):
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if text.startswith("/*", j):
+            depth, k = 1, i + 2
+            while k < n and depth:
+                if text.startswith("/*", k):
                     depth += 1
-                    j += 2
-                elif text.startswith("*/", j):
+                    k += 2
+                elif text.startswith("*/", k):
                     depth -= 1
-                    j += 2
+                    k += 2
                 else:
-                    j += 1
-            if depth:                 # 没配对上 ⇒ 当它不是注释，原样留着
+                    k += 1
+            if depth:                                       # 没配对上 ⇒ 当它不是注释
                 i += 2
                 continue
-            for k in range(i, j):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j
-        else:
-            i += 1
+            for m in range(i, k):
+                if out[m] != "\n":
+                    out[m] = " "
+            i = k
+            continue
+        i += 1
     return "".join(out)
+
+
 #: ⚠️ 还要抹掉**表示空白的转义序列**：Python 字面量里 `"INSERT INTO\\ntraining_sets (…)"`
 #:    执行时是合法 SQL（`\\n` 就是换行），但源码文本里是**反斜杠 + 字母 n** 两个字符 ——
-#:    只抹反斜杠会留下一个 `n`，发现层当场瞎掉（codex 实测这样写守卫仍 `1 passed`）。
-#: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，对应的转义写法就这几种
-#:    （`\\n` `\\t` `\\r` `\\x20` `\\u0020` `\\040`）。⇒ 按**整个转义序列**抹成等长空白。
+#:    只抹反斜杠会留下一个 `n`，发现层当场瞎掉（codex 第六轮实测：那样写守卫仍 `1 passed`）。
+#: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，对应的转义写法就这几种。
 _WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
+#: Python 字符串拼接留下的痕迹：引号 / `+` / 续行反斜杠 —— 它们永远不属于标识符。
 _CONCAT_ARTIFACT_RE = re.compile(r"[\"'+\\]")
 
 
-def _blank_for_discovery(text: str) -> str:
+def _blank_for_discovery(text: str, *, sql_quotes: bool = False) -> str:
     """位置保持的抹平：干扰物 → 等长空白（换行原样保留）。"""
     def blank(m):
         return "".join("\n" if ch == "\n" else " " for ch in m.group(0))
     # 次序：块注释 → 空白转义（整段等长抹）→ 单字符拼接痕迹。
     # ⚠️ 空白转义必须在单字符那步**之前**：否则反斜杠先被抹成空格，留下的 `n` 就再也认不出来了。
-    t = _blank_block_comments(text)
+    t = _blank_block_comments(text, sql_quotes=sql_quotes)
     t = _WS_ESCAPE_RE.sub(blank, t)
     return _CONCAT_ARTIFACT_RE.sub(" ", t)
 
@@ -326,8 +329,9 @@ def test_every_executable_insert_specifies_schema_version():
 
     for path in _scope_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        parse_text = _blank_block_comments(text)   # 解析层用：块注释已抹、位置 1:1
-        scan = _blank_for_discovery(text)          # 发现层用：再抹拼接痕迹与空白转义
+        is_sql = path.suffix == ".sql"            # .sql 里引号是 SQL 字符串；其它宿主里是定界符
+        parse_text = _blank_block_comments(text, sql_quotes=is_sql)
+        scan = _blank_for_discovery(text, sql_quotes=is_sql)
         precise_starts = {m.start() for m in _INSERT_RE.finditer(scan)}
 
         # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
