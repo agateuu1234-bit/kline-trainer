@@ -346,6 +346,30 @@ def _column_names(cols: str) -> set[str]:
     return names
 
 
+#: ⛔⛔ **无法逐字还原运行时字符串的宿主，遇到歧义就说「判不了」。**
+#:
+#: 「源码文本 ≠ 运行时字符串」这条根打穿了**四轮**（11 / 16 / 17 / 18）。
+#: `.py` 有精确解（语法树，见 `_scan_units`）；`.sh` / `.yml` / `.md` **没有**，
+#: 而它们同样会拼接：
+#:   · 第 11 轮：相邻 Python 字面量拼接，`--` 注掉了下一段里的 `schema_version`；
+#:   · 第 18 轮：**shell 的引号拼接** —— `/""*` 运行时就是 `/*`，
+#:     `(stock_code, /""* schema_version, *""/ stock_name, …)` 里字段**被注掉**，
+#:     源码里却看不出任何注释 ⇒ 守卫把它当成在场的列 ⇒ **假绿**。
+#:
+#: ⇒ 不再逐种写法去猜。这些宿主的列清单里只要出现**宿主引号**或 `--`，
+#:   就断言「**判据够不着**」让测试红 —— ⛔ 宁可吵，不可瞎。
+#: ⚠️ 实测：干净树上 11 条非 `.py` 列清单**一个引号都没有**，这条规则零代价。
+#: ⚠️ 要真正判准这一类得给每种宿主写词法器；在 TS1-R1（数据库层 fail-closed）
+#:    落地之前，不值得。
+def _ambiguous(cols: str) -> str | None:
+    """列清单里有没有「源码与运行时可能不一致」的东西；有就返回它的名字。"""
+    if '"' in cols or "'" in cols:
+        return "宿主引号（拼接后可能变出/变没注释）"
+    if "--" in cols:
+        return "`--`（源码换行未必是运行时换行）"
+    return None
+
+
 def _column_list(text: str, after: int) -> str | None:
     """取 `INSERT INTO training_sets` 之后紧随的配平圆括号内容。
 
@@ -565,7 +589,7 @@ def _scan_source(path: Path, text: str):
         tail = (text[uend - 1: uend + 20] if path.suffix == ".py"
                 else utext[after: after + 20])
         cols = _column_list(utext, after)
-        if cols is not None and "--" in cols and path.suffix not in (".sql", ".py"):
+        if cols is not None and path.suffix not in (".sql", ".py") and _ambiguous(cols):
             # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
             #    「悄悄猜错」变成「明说判不了」。
             #    codex 第十一轮实测：两个**相邻的 Python 字面量**
@@ -580,8 +604,8 @@ def _scan_source(path: Path, text: str):
             # ⚠️ 要真正判准这一类得上 AST 解析（把相邻字面量先拼出来）—— 那是 TS1-R1
             #    之外的另一条路；在 TS1-R1 落地前，**吵**比**瞎**重要。
             unknown_shape.append(
-                f"{rel}:{lineno}: 判据够不着（列清单含 `--`，而本文件非 .sql ⇒ "
-                f"源码换行未必是运行时换行）-> {cols[:80]}"
+                f"{rel}:{lineno}: 判据够不着（列清单含 {_ambiguous(cols)}，而本宿主"
+                f"无法逐字还原运行时字符串）-> {cols[:80]}"
             )
         elif cols is not None:
             checked += 1
@@ -974,6 +998,18 @@ def _verdict(suffix: str, src: str) -> str:
 #: ⚠️ 没有这一组的话，「把粗网从主循环里摘掉」**一条常驻测试都不会红** ——
 #:    实测过，所以补在这里。
 _SH_EVASIONS = {
+    # ⭐ 第十八轮（codex）：**shell 的引号拼接** —— `/""*` 运行时就是 `/*`，
+    #    于是 `schema_version` 落在注释里、被 PostgreSQL 忽略，而源码里看不出任何注释。
+    "shell 引号拼出块注释":
+        'psql -c "INSERT INTO training_sets (stock_code, /""* schema_version, *""/ '
+        "stock_name, start_datetime, end_datetime, file_path, content_hash) "
+        "VALUES ('X','Y',0,0,'f','abcdef12');\"\n",
+    "shell 单引号拼出块注释":
+        "psql -c 'INSERT INTO training_sets (stock_code, /''* schema_version, *''/ "
+        "stock_name, file_path, content_hash) VALUES (1);'\n",
+    "shell 引号拼出行注释":
+        'psql -c "INSERT INTO training_sets (stock_code, file_path, content_hash -""- '
+        ', schema_version) VALUES (1);"\n',
     "注释含左括号 + 表名劈开":
         'psql -c "INSERT /* (x) */ INTO training_""sets (a, b, c) VALUES (1);"\n',
     "行注释含分号 + 表名劈开":
