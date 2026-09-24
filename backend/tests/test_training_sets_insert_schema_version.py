@@ -650,6 +650,14 @@ def test_every_executable_insert_specifies_schema_version():
         f"要么作用域坏了，要么有语句被改成了判据够不着的写法"
         f"（同批：白名单 {whitelisted} 条、散文提及 {prose} 条）"
     )
+    # ⛔ **散文提及也是一条「悄悄判通过」的出口，必须和白名单一样钉死数量。**
+    #    第十八轮的教训是「改动只落在报告的那一处，没落在整条判据家族上」——
+    #    `whitelisted` 当时钉了 `== 2`，而同一类出口的 `prose` 只计数、没断言。
+    #    ⇒ 多出来的每一条都必须由人确认「它确实只是文字，不是要跑的 SQL」。
+    assert prose == 1, (
+        f"反引号包住的散文提及命中 {prose} 条，已知应为 1 条"
+        f"（spec 计数那句的引用）。多出来的必须逐条确认不是真 SQL"
+    )
     assert whitelisted == 2, (
         f"非 SQL 白名单命中 {whitelisted} 条，已知应为 2 条"
         f"（test_b2_reconnect_integration.py 的两处 test double 分派谓词）。"
