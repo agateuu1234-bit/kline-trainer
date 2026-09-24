@@ -34,9 +34,9 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p3d" && g
 
 □ 通过　□ 不通过
 
-**B4** —— 期望：最后一行是 `3 passed in N.NNs`（⛔ 读 passed 前面的**数字**，不读「success」之类的字样）
+**B4** —— 期望：最后一行是 `8 passed in N.NNs`（⛔ 读 passed 前面的**数字**，不读「success」之类的字样）
 
-> 三条分别是：①主判据 ②**正向对照**（合法写法不许被误判，第十四轮补）③**兜底网的独立判别力**（间隔解析不动时仍要报得出来，第十六轮补）。
+> 八条分别是：①主判据 ②正向对照（合法写法不许被误判）③兜底网的独立判别力 ④`.py` 字面量还原成运行时字符串 ⑤**攻击语料不许假绿**（41 条）⑥**合法语句保持绿** ⑦语料防空转 ⑧**精度不许退化**。
 
 ```
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p3d/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest tests/test_training_sets_insert_schema_version.py -q | tail -1

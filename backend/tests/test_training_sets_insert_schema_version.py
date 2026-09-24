@@ -54,6 +54,7 @@ P6b 形状闸门的 `schema.sql` md5 锚失配、必须重新生成整份闸门�
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -182,8 +183,15 @@ def _match_word(text: str, i: int, word: str) -> int | None:
 #: ⚠️ 它只用来报「判据够不着」**让测试红**，不参与「通过」的判定 ——
 #:    所以它宁可宽一点：多红一条有人看，少红一条没人知道。
 _SPAN = r"(?:(?![(;)])[\s\S])"
+#: 表名被劈开时中间只可能是「下划线 / 空白 / 宿主引号 / `+` / 续行反斜杠」。
+#: ⛔ 这里**不能**用 `_SPAN`（任意字符）—— 实测它会把 runbook 里的**文件路径**
+#:    `/data/training-sets/000001.SZ_….zip` 当成表名（中间是连字符），
+#:    连带把同一段里 `INSERT INTO p11_expected VALUES …`（往**另一张表**写）拖成误报。
+_NAME_SPLIT = r"[\s_\"'+\\]"
 _LAST_RESORT_RE = re.compile(
-    rf"insert{_SPAN}{{1,200}}?into{_SPAN}{{0,80}}?training{_SPAN}{{0,12}}?sets"
+    # ⚠️ 窗口 400/200 是**实测**定出来的：200/80 兜不住「长注释夹在关键字之间」，
+    #    而放宽到 400/200 在干净树上**多报 0 条**（800/400 也是 0，但没有额外收益）。
+    rf"insert{_SPAN}{{1,400}}?into{_SPAN}{{0,200}}?training{_NAME_SPLIT}{{0,12}}?sets"
     r"(?![A-Za-z0-9_$])",          # ⛔ 词边界：否则 `training_sets_audit` 也被拖下水
     re.I,
 )
@@ -428,6 +436,169 @@ def _column_list(text: str, after: int) -> str | None:
     return None
 
 
+#: ⛔⛔ **`.py` 宿主：扫描【ast 还原后的运行时字符串】，不扫源码文本。**
+#:
+#: 「源码文本 ≠ 运行时字符串」这条根，连着打穿了三轮：
+#:   · 第 11 轮：相邻字面量拼接，`--` 注掉了下一段里的 `schema_version`；
+#:   · 第 16 轮：`--` 后面是**转义**换行 `\n`，源码里没有物理换行 ⇒ 行注释永不结束；
+#:   · 第 17 轮：**注释定界符自己被劈开** —— `… /" "* … schema_version, *" "/ …`
+#:     运行时是 `/* … */`（字段被注掉），源码里却根本不存在 `/*`。
+#:
+#: 我前两轮的修法都是「再教扫描器认一种写法」，而这正是代码里自己写着的那条
+#: 「**数不完**」。⇒ 对 `.py` 有**精确解**：用 Python 自己的语法树把字面量解出来。
+#: `ast` 会把**相邻字面量折叠成一个常量**，并把所有转义序列还原 ——
+#: 得到的就是运行时真正交给 PostgreSQL 的那串字符。
+#:
+#: ⚠️ 解不动的写法（`+` 拼接、`.format()`、f-string 的变量部分）不会凭空消失：
+#:    **兜底网始终扫原文**，它们会落进「判据够不着」（吵），不是「瞎」。
+def _line_starts(text: str) -> list[int]:
+    out, pos = [0], text.find("\n")
+    while pos != -1:
+        out.append(pos + 1)
+        pos = text.find("\n", pos + 1)
+    return out
+
+
+def _py_literals(text: str):
+    """产出 `.py` 里每个字符串字面量的 (运行时值, 行号, 原文起点, 原文终点)。
+
+    返回 None 表示**这个文件解析不了**（语法错误）—— 调用方要退回扫原文，
+    ⛔ 不能当成「没有字面量」（那是把解析失败伪装成检查通过）。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    starts = _line_starts(text)
+
+    def abs_pos(lineno, col):
+        # ast 的 col_offset 按 **UTF-8 字节**计，这里换算回字符下标
+        line_start = starts[lineno - 1]
+        line = text[line_start: starts[lineno] if lineno < len(starts) else len(text)]
+        return line_start + len(line.encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+    out, inner = [], set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            # f-string：变量部分无法还原 ⇒ 用占位符，让表名被劈开的写法自然够不着
+            for part in ast.walk(node):
+                if part is not node:
+                    inner.add(id(part))
+            val = "".join(
+                p.value if isinstance(p, ast.Constant) and isinstance(p.value, str) else "{}"
+                for p in node.values
+            )
+            out.append((val, node.lineno, abs_pos(node.lineno, node.col_offset),
+                        abs_pos(node.end_lineno, node.end_col_offset)))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in inner):
+            out.append((node.value, node.lineno, abs_pos(node.lineno, node.col_offset),
+                        abs_pos(node.end_lineno, node.end_col_offset)))
+    return out
+
+
+def _scan_units(path: Path, text: str):
+    """产出 (待扫文本, 行号, 原文起点, 原文终点)。
+
+    `.py` ⇒ 每个还原后的字面量各算一块；其它宿主 ⇒ 整篇原文一块。
+    """
+    if path.suffix == ".py":
+        lits = _py_literals(text)
+        if lits is not None:
+            return lits
+    return [(text, 1, 0, len(text))]
+
+
+#: ⛔⛔ **逐文件扫描抽成函数，是为了让整套攻击语料能变成【常驻测试】。**
+#:
+#: 之前这些判据只能靠临时脚本往真文件里注样本来验 —— 临时脚本不进仓库，
+#: 于是「谁把某张网从主循环里摘掉」**没有任何常驻测试会红**（干净树上没有那种样本）。
+#: 实测：把兜底网从主循环摘掉，四条常驻测试**全绿**。
+#: 这正是本仓老教训「**守卫只钉『名字在不在』挡不住行为被改掉**」。
+#: ⇒ 抽成 `_scan_source(path, text)` 之后，攻击语料直接喂文本即可。
+def _scan_source(path: Path, text: str):
+    """扫一份源码，返回 (missing, unknown_shape, checked, whitelisted, prose)。
+
+    `path` 只用来取后缀（决定宿主语言）与拼报文里的相对路径，**不读盘**。
+    """
+    missing: list[str] = []
+    unknown_shape: list[str] = []
+    checked = whitelisted = prose = 0
+    rel = path
+    text = text
+    # ⛔ 扫的是**还原后的运行时字符串**（`.py`）或原文（其它宿主），见 `_scan_units`。
+    units = _scan_units(path, text)
+    claimed: list[tuple[int, int]] = []      # 已被认领的**原文**跨度
+    hits: list[tuple[str, int, int, int, int]] = []  # (单元文本, 起点, 表名后下标, 行号, 单元原文终点)
+
+    for utext, uline, ustart, uend in units:
+        precise = _find_inserts(utext, loose=False)
+        precise_starts = {s for s, _ in precise}
+        coarse = [cs for cs, _ in _find_inserts(utext, loose=True)]
+        if precise or coarse:
+            claimed.append((ustart, uend))
+        for pos, after in precise:
+            ln = uline if path.suffix == ".py" else utext.count("\n", 0, pos) + 1
+            hits.append((utext, pos, after, ln, uend))
+        for cs in coarse:
+            if cs in precise_starts:
+                continue
+            ln = uline if path.suffix == ".py" else utext.count("\n", 0, cs) + 1
+            unknown_shape.append(
+                f"{rel}:{ln}: 判据够不着 -> {utext[cs: cs + 60]!r}"
+            )
+
+    # ⛔ **最后一张网永远扫原文** —— `.py` 里解不动的拼法（`+` / `.format()` /
+    #    f-string 的变量部分）在扫描单元里是看不见的，只有原文这一层兜得住。
+    #    已被某个单元认领的跨度要跳过，否则 12 处真语句会被重复报成「判不了」。
+    for mm in _LAST_RESORT_RE.finditer(text):
+        if any(s <= mm.start() < e for s, e in claimed):
+            continue
+        lineno = text.count("\n", 0, mm.start()) + 1
+        unknown_shape.append(
+            f"{rel}:{lineno}: 判据够不着 -> {text[mm.start(): mm.start() + 60]!r}"
+        )
+
+    for utext, pos, after, lineno, uend in hits:
+        # 非 SQL 白名单要看**原文**里字面量后面那一小段（`… " in query:`）
+        tail = (text[uend - 1: uend + 20] if path.suffix == ".py"
+                else utext[after: after + 20])
+        cols = _column_list(utext, after)
+        if cols is not None and "--" in cols and path.suffix not in (".sql", ".py"):
+            # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
+            #    「悄悄猜错」变成「明说判不了」。
+            #    codex 第十一轮实测：两个**相邻的 Python 字面量**
+            #        "-- optional metadata: "
+            #        "schema_version,\n"
+            #    在**源码里分两行**（`--` 被当成只注掉第一行），但**运行时拼成一行**
+            #    ⇒ `schema_version` 落在 `--` 之后、**被 SQL 注释掉** ⇒ PostgreSQL 用
+            #    `DEFAULT 1`。而守卫按源码换行判定，把它当成在场的列 ⇒ **假绿**。
+            # ⇒ 只有 `.sql` 文件能保证「源码换行就是 SQL 换行」；其它宿主（.py / .sh /
+            #    .yml / .md）里 SQL 是字符串，换行可能来自 `\n` 转义或相邻字面量拼接。
+            #    ⇒ 非 `.sql` 文件的列清单里只要出现 `--`，一律报「判据够不着」**让测试红**。
+            # ⚠️ 要真正判准这一类得上 AST 解析（把相邻字面量先拼出来）—— 那是 TS1-R1
+            #    之外的另一条路；在 TS1-R1 落地前，**吵**比**瞎**重要。
+            unknown_shape.append(
+                f"{rel}:{lineno}: 判据够不着（列清单含 `--`，而本文件非 .sql ⇒ "
+                f"源码换行未必是运行时换行）-> {cols[:80]}"
+            )
+        elif cols is not None:
+            checked += 1
+            if "schema_version" not in _column_names(cols):
+                missing.append(f"{rel}:{lineno}: 列清单缺 schema_version -> {cols[:100]}")
+        elif _NON_SQL_SHAPE in tail:
+            whitelisted += 1          # test double 的分派谓词，不是 SQL
+        elif _is_prose_mention(utext, pos, after):
+            prose += 1                # 反引号包住的散文提及，不是可执行 SQL
+        else:
+            # ⛔ 既不是列清单、又不是已知的非 SQL 形状 —— **报错**，不静默跳过。
+            unknown_shape.append(
+                f"{rel}:{lineno}: 未知写法 -> {utext[pos:after]!r}{tail!r}"
+            )
+    return missing, unknown_shape, checked, whitelisted, prose
+
+
 def test_every_executable_insert_specifies_schema_version():
     missing: list[str] = []
     unknown_shape: list[str] = []
@@ -436,62 +607,14 @@ def test_every_executable_insert_specifies_schema_version():
     prose = 0
 
     for path in _scope_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        # ⛔ 直接在**原文**上扫 —— 非破坏性游标扫描器（理由见上方长注释）。
-        precise = _find_inserts(text, loose=False)
-        precise_starts = {s for s, _ in precise}
-
-        # 粗网 + 最后一张网：凡「像是往 training_sets 写」却没被精确扫描认领的，一律报出来。
-        # ⛔ 两张网都要跑 —— 粗网仍走 `_skip_gap`，间隔认不全时它会和精确网**一起**落空；
-        #    最后一张网不解析间隔，正是为此存在。
-        reported = set(precise_starts)
-        coarse = [cs for cs, _ in _find_inserts(text, loose=True)]
-        for cs in coarse + [m.start() for m in _LAST_RESORT_RE.finditer(text)]:
-            if cs in reported:
-                continue
-            reported.add(cs)
-            lineno = text.count("\n", 0, cs) + 1
-            unknown_shape.append(
-                f"{path.relative_to(ROOT)}:{lineno}: 判据够不着 -> "
-                f"{text[cs: cs + 60]!r}"
-            )
-
-        for pos, after in precise:
-            rel = path.relative_to(ROOT)
-            lineno = text.count("\n", 0, pos) + 1
-            tail = text[after: after + 20]
-            cols = _column_list(text, after)
-            if cols is not None and "--" in cols and path.suffix != ".sql":
-                # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
-                #    「悄悄猜错」变成「明说判不了」。
-                #    codex 第十一轮实测：两个**相邻的 Python 字面量**
-                #        "-- optional metadata: "
-                #        "schema_version,\n"
-                #    在**源码里分两行**（`--` 被当成只注掉第一行），但**运行时拼成一行**
-                #    ⇒ `schema_version` 落在 `--` 之后、**被 SQL 注释掉** ⇒ PostgreSQL 用
-                #    `DEFAULT 1`。而守卫按源码换行判定，把它当成在场的列 ⇒ **假绿**。
-                # ⇒ 只有 `.sql` 文件能保证「源码换行就是 SQL 换行」；其它宿主（.py / .sh /
-                #    .yml / .md）里 SQL 是字符串，换行可能来自 `\n` 转义或相邻字面量拼接。
-                #    ⇒ 非 `.sql` 文件的列清单里只要出现 `--`，一律报「判据够不着」**让测试红**。
-                # ⚠️ 要真正判准这一类得上 AST 解析（把相邻字面量先拼出来）—— 那是 TS1-R1
-                #    之外的另一条路；在 TS1-R1 落地前，**吵**比**瞎**重要。
-                unknown_shape.append(
-                    f"{rel}:{lineno}: 判据够不着（列清单含 `--`，而本文件非 .sql ⇒ "
-                    f"源码换行未必是运行时换行）-> {cols[:80]}"
-                )
-            elif cols is not None:
-                checked += 1
-                if "schema_version" not in _column_names(cols):
-                    missing.append(f"{rel}:{lineno}: 列清单缺 schema_version -> {cols[:100]}")
-            elif _NON_SQL_SHAPE in tail:
-                whitelisted += 1          # test double 的分派谓词，不是 SQL
-            elif _is_prose_mention(text, pos, after):
-                prose += 1                # 反引号包住的散文提及，不是可执行 SQL
-            else:
-                # ⛔ 既不是列清单、又不是已知的非 SQL 形状 —— **报错**，不静默跳过。
-                unknown_shape.append(
-                    f"{rel}:{lineno}: 未知写法 -> {text[pos:after]!r}{tail!r}"
-                )
+        m_, u_, c_, w_, p_ = _scan_source(
+            path.relative_to(ROOT), path.read_text(encoding="utf-8", errors="replace")
+        )
+        missing += m_
+        unknown_shape += u_
+        checked += c_
+        whitelisted += w_
+        prose += p_
 
     assert not unknown_shape, (
         "出现了本守卫判据够不着的 INSERT 写法 —— 不是「通过」，是**判不了**。\n"
@@ -619,4 +742,336 @@ def test_last_resort_net_has_independent_discriminating_power():
     assert not false_alarms, (
         "兜底网把**往别的表写**的合法语句也算进来了 —— 守卫会在干净树上变红，"
         "那等于给实施者发放宽许可证：\n  " + "\n  ".join(false_alarms)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐ **`.py` 字面量必须先还原成运行时字符串，常驻**（codex 第十七轮打回后新增）
+#
+# 「源码文本 ≠ 运行时字符串」这条根连着打穿了三轮（11 / 16 / 17）。前两轮我的修法
+# 都是「再教扫描器认一种写法」—— 而「数不完」这四个字就写在本文件自己的注释里。
+# 第十七轮把**注释定界符本身**劈开（`… /" "* …`），彻底说明这条路走不通。
+#
+# ⇒ 对 `.py` 宿主改用 Python 自己的语法树：`ast` 会把相邻字面量折叠成一个常量、
+#   把转义序列还原，得到的就是运行时真正交给 PostgreSQL 的那串字符。
+# ---------------------------------------------------------------------------
+
+#: 每条都是「**源码里看不出、运行时才成立**」的形态。
+#: 左边是 `.py` 源码，右边是它运行时真正的字符串。
+_PY_DECODE_CASES = {
+    "块注释定界符被劈开": (
+        'q = ("INSERT INTO t (a, /"\n     "* c, schema_version, *"\n     "/ b)")\n',
+        "INSERT INTO t (a, /* c, schema_version, */ b)",
+    ),
+    "行注释定界符被劈开": (
+        'q = ("INSERT INTO t (a, -"\n     "- schema_version)")\n',
+        "INSERT INTO t (a, -- schema_version)",
+    ),
+    "转义换行": (
+        'q = "INSERT -- c\\nINTO t (a)"\n',
+        "INSERT -- c\nINTO t (a)",
+    ),
+    "表名被劈开": (
+        'q = ("INSERT INTO training_"\n     "sets (a)")\n',
+        "INSERT INTO training_sets (a)",
+    ),
+    "字段名被劈开（合法且在场）": (
+        'q = ("INSERT INTO t (a, sch"\n     "ema_version)")\n',
+        "INSERT INTO t (a, schema_version)",
+    ),
+}
+
+
+def test_python_literals_are_decoded_before_scanning():
+    wrong = []
+    for label, (src, runtime) in _PY_DECODE_CASES.items():
+        values = [v for v, _, _, _ in _scan_units(Path("x.py"), src)]
+        if runtime not in values:
+            wrong.append(f"{label}: 还原出的是 {values!r}，期望含 {runtime!r}")
+    assert not wrong, (
+        "`.py` 字面量没有被还原成运行时字符串 —— 扫描层看到的将是**源码文本**，"
+        "而注释定界符、换行、字段名都可能在源码里被劈开 ⇒ 判定层必然判错：\n  "
+        + "\n  ".join(wrong)
+    )
+    # ⭐ 防空转：上面那条断言必须真的经过了「源码 ≠ 运行时」的路径。
+    #    若某条用例的源码文本里**本来就含有**目标字符串，它就证明不了还原这件事。
+    vacuous = [
+        label for label, (src, runtime) in _PY_DECODE_CASES.items() if runtime in src
+    ]
+    assert not vacuous, (
+        "以下用例的**源码文本里本来就含有**期望的运行时字符串 —— 不还原也能通过，"
+        "这条测试对它们的判别力是零：\n  " + "\n  ".join(vacuous)
+    )
+    # ⛔ 解析不了的 `.py` 必须**退回扫原文**，不能当成「没有字面量」
+    #    （那是把解析失败伪装成检查通过 —— 本仓「报 0 违反的扫描必须先证明它能报非 0」）。
+    broken = "def f(:\n"
+    assert _py_literals(broken) is None, "语法错误的文件应当返回 None"
+    units = _scan_units(Path("x.py"), broken)
+    assert units == [(broken, 1, 0, len(broken))], "解析失败时必须退回扫原文"
+
+
+# ---------------------------------------------------------------------------
+# ⭐⭐ **十七轮攻击语料，常驻**
+#
+# 这些形态此前只能靠临时脚本往真文件里注样本来验证 —— 临时脚本不进仓库，
+# 于是它们对**将来的改动**没有任何约束力。实测：把兜底网从主循环里摘掉，
+# 当时四条常驻测试**全绿**。⇒ 全部搬进来。
+#
+# 判据分三档（对同一条**缺字段**的语句）：
+#   `缺字段` = 精确网认领了它，判得最准；
+#   `判不了` = 精确网够不着，靠兜底网接住 —— **仍然吵，没瞎**；
+#   `绿`     = 三张网全落空 ⇒ **假绿**，这是唯一不可接受的结果。
+# ⛔ 所以断言写成「**不许是绿**」，而不是「必须报缺字段」——
+#    后者会把「判得更糙但仍然红」误判成回归，逼出无意义的修改。
+# ---------------------------------------------------------------------------
+
+_C6 = "(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)"
+_C7 = ("(stock_code, stock_name, start_datetime, end_datetime, file_path, "
+       "content_hash, schema_version)")
+_V = "VALUES ('X','Y',9,9,'/x.zip','deadbeef');"
+
+
+def _sql_file(sql: str) -> str:
+    """把一段 SQL 包成 `.sql` 文件内容。"""
+    return sql + "\n"
+
+
+#: 每条都是**合法 PostgreSQL 且缺 `schema_version`** —— 守卫不许报绿。
+_EVASIONS = {
+    # 发现层：大小写 / 空白 / 限定符
+    "全大写": f"INSERT INTO PUBLIC.TRAINING_SETS {_C6} {_V}",
+    "小写换行": f"insert\ninto training_sets {_C6} {_V}",
+    "点号带空格": f"INSERT INTO public . training_sets {_C6} {_V}",
+    "双引号全限定": f'INSERT INTO "public"."training_sets" {_C6} {_V}',
+    "非 public 限定": f"INSERT INTO qmt.training_sets {_C6} {_V}",
+    "两级限定": f"INSERT INTO db.qmt.training_sets {_C6} {_V}",
+    "制表符": f"INSERT\tINTO\ttraining_sets {_C6} {_V}",
+    "换页 \\f 当空白": f"INSERT\x0cINTO training_sets {_C6} {_V}",
+    "垂直制表 \\v 当空白": f"INSERT\x0bINTO training_sets {_C6} {_V}",
+    # 发现层：注释夹在关键字之间
+    "行注释夹关键字": f"INSERT -- c\nINTO training_sets {_C6} {_V}",
+    "表名前块注释": f"INSERT INTO /* c */ training_sets {_C6} {_V}",
+    "多块注释": f"INSERT /*a*//*b*/ INTO training_sets {_C6} {_V}",
+    "限定符后块注释": f"INSERT INTO public./* c */training_sets {_C6} {_V}",
+    "关键字间嵌套注释": f"INSERT /* o /* i */ o */ INTO training_sets {_C6} {_V}",
+    "限定符间嵌套注释": f"INSERT INTO public /* o /* i */ o */ . training_sets {_C6} {_V}",
+    "表名前嵌套注释": f"INSERT INTO /* o /* i */ o */ training_sets {_C6} {_V}",
+    # 判定层：用注释伪造列名
+    "注释里喂字样": (
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, "
+        f"end_datetime, file_path, content_hash /* schema_version uses default */) {_V}"
+    ),
+    "嵌套注释注掉字段": (
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, "
+        f"end_datetime, file_path, content_hash /* a /* b */ , schema_version, */ ) {_V}"
+    ),
+    "注释里含右括号": (
+        "INSERT INTO training_sets (stock_code /* , schema_version) */, stock_name, "
+        f"start_datetime, end_datetime, file_path, content_hash) {_V}"
+    ),
+    "行注释注掉字段": (
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, "
+        f"end_datetime, file_path, content_hash -- , schema_version\n  ) {_V}"
+    ),
+    "列名含子串": (
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, "
+        f"end_datetime, file_path, content_hash, my_schema_version) {_V}"
+    ),
+    # 没有列清单的写法（应落进「判不了」）
+    "无列清单": "INSERT INTO training_sets VALUES ('X','Y',9,9);",
+    "INSERT…SELECT": "INSERT INTO training_sets SELECT a,b,c,d,e,f FROM other;",
+    "VALUES 里含字样": "INSERT INTO training_sets VALUES ('schema_version','Y',9,9);",
+    "AS 别名": f"INSERT INTO training_sets AS t {_C6} {_V}",
+    "ON CONFLICT": f"INSERT INTO training_sets {_C6} {_V[:-1]} ON CONFLICT DO NOTHING;",
+    # 曾因「全局抹除」把真语句抹没的四种上下文
+    "引号里的 /*": f"SELECT '/*';\nINSERT INTO training_sets {_C6} {_V}\nSELECT '*/';",
+    "行注释里的 /*": f"-- /* 注意\nINSERT INTO training_sets {_C6} {_V}",
+    "未闭合的 /*": f"INSERT INTO training_sets {_C6} {_V}\n-- 结尾有个 /* 不闭合",
+}
+
+#: `.py` 宿主：源码文本与运行时字符串**不一致**的那一家子。
+_PY_EVASIONS = {
+    "INTO 后断行": 'q = ("INSERT INTO "\n     "training_sets (a, b, c) VALUES ($1)")\n',
+    "INSERT 后断行": 'q = ("INSERT "\n     "INTO training_sets (a, b, c) VALUES ($1)")\n',
+    "表名被劈开": 'q = ("INSERT INTO training_"\n     "sets (a, b, c) VALUES ($1)")\n',
+    "转义换行 \\n": 'q = "INSERT INTO\\ntraining_sets (a, b, c) VALUES ($1)"\n',
+    "`--` 配转义换行": 'q = "INSERT -- seed\\nINTO training_sets (a, b, c) VALUES ($1)"\n',
+    "`--` 拼接陷阱": (
+        'q = ("INSERT INTO training_sets (a, b, "\n     "-- optional: "\n'
+        '     "schema_version) VALUES ($1)")\n'
+    ),
+    "块注释定界符被劈开": (
+        'q = ("INSERT INTO training_sets (stock_code, /"\n     "* x, schema_version, *"\n'
+        '     "/ stock_name, file_path, content_hash) VALUES ($1)")\n'
+    ),
+    "行注释定界符被劈开": (
+        'q = ("INSERT INTO training_sets (stock_code, file_path, -"\n'
+        '     "- schema_version) VALUES ($1)")\n'
+    ),
+    "`+` 拼接劈开表名": 'q = "INSERT INTO training_" + "sets (a, b, c) VALUES ($1)"\n',
+    "行注释无终止": 'q = "INSERT -- c INTO training_sets (a, b, c) VALUES ($1)"\n',
+    "块注释不闭合": 'q = "INSERT /* c INTO training_sets (a, b, c) VALUES ($1)"\n',
+}
+
+#: 反向：**合法且字段真在场**，守卫必须保持绿。
+#: ⛔ 这一组是第十四轮逼出来的 —— 当时所有带注释的用例都是「字段缺失」的坏样本，
+#:    解析器坏掉后它们照样红，**只是红的理由变了**，套件看不出区别。
+_VALID = {
+    "裸的": f"INSERT INTO training_sets {_C7} {_V[:-1]} ;",
+    "列清单带注释": (
+        "INSERT INTO training_sets (stock_code /* ticker */, stock_name, start_datetime, "
+        "end_datetime, file_path, content_hash, schema_version) VALUES (1);"
+    ),
+    "列清单嵌套注释": (
+        "INSERT INTO training_sets (stock_code /* a /* b */ c */, stock_name, "
+        "start_datetime, end_datetime, file_path, content_hash, schema_version) VALUES (1);"
+    ),
+    "注释里含括号": (
+        "INSERT INTO training_sets (stock_code /* (x) */, stock_name, start_datetime, "
+        "end_datetime, file_path, content_hash, schema_version) VALUES (1);"
+    ),
+    "关键字间嵌套注释": f"INSERT /* o /* i */ o */ INTO training_sets {_C7} VALUES (1);",
+    "限定 + 大小写混写": f"insert Into public.training_sets {_C7} VALUES (1);",
+    "行注释在列清单里": (
+        "INSERT INTO training_sets (stock_code, -- t\n stock_name, start_datetime, "
+        "end_datetime, file_path, content_hash, schema_version) VALUES (1);"
+    ),
+}
+
+_VALID_PY = {
+    "字段名被劈开但在场": (
+        'q = ("INSERT INTO training_sets (stock_code, sch"\n     "ema_version, stock_name, '
+        'file_path, content_hash) VALUES ($1)")\n'
+    ),
+    "整条在一个字面量里": (
+        'q = "INSERT INTO training_sets (stock_code, schema_version) VALUES ($1,$2)"\n'
+    ),
+}
+
+#: 反向：往**别的表**写的合法语句，守卫不许把它们拖下水
+#: （守卫必须在干净树上是绿的，否则等于给实施者发放宽许可证）。
+_OTHER_TABLE = {
+    "插别表 + SELECT FROM 本表":
+        "INSERT INTO p15_targets (id) SELECT id FROM training_sets;",
+    "插前缀相同的表": f"INSERT INTO training_sets_audit {_C6} {_V}",
+    "路径里出现 training-sets":
+        "INSERT INTO p11_expected VALUES ('000001.SZ', '/data/training-sets/a.zip');",
+    "UPDATE 不是 INSERT": "UPDATE training_sets SET schema_version = 2;",
+}
+
+
+def _verdict(suffix: str, src: str) -> str:
+    missing, unknown, checked, _, _ = _scan_source(Path(f"probe{suffix}"), src)
+    if missing:
+        return "缺字段"
+    if unknown:
+        return "判不了"
+    return "绿"
+
+
+#: ⛔ **只有粗网接得住**的形态：表名被宿主引号劈开（精确网够不着），
+#:    而间隔里的注释含 `(` 或 `;`（兜底网**按设计**不许跨这几个字符）。
+#: ⚠️ 没有这一组的话，「把粗网从主循环里摘掉」**一条常驻测试都不会红** ——
+#:    实测过，所以补在这里。
+_SH_EVASIONS = {
+    "注释含左括号 + 表名劈开":
+        'psql -c "INSERT /* (x) */ INTO training_""sets (a, b, c) VALUES (1);"\n',
+    "行注释含分号 + 表名劈开":
+        'psql -c "INSERT -- x;\nINTO training_""sets (a, b, c) VALUES (1);"\n',
+}
+
+
+def test_known_evasions_never_produce_a_false_green():
+    green = [k for k, s in _EVASIONS.items() if _verdict(".sql", _sql_file(s)) == "绿"]
+    green += [f"[sh] {k}" for k, s in _EVASIONS.items()
+              if _verdict(".sh", f"psql <<SQL\n{s}\nSQL\n") == "绿"]
+    green += [f"[py] {k}" for k, s in _PY_EVASIONS.items() if _verdict(".py", s) == "绿"]
+    green += [f"[sh] {k}" for k, s in _SH_EVASIONS.items() if _verdict(".sh", s) == "绿"]
+    assert not green, (
+        "以下写法**合法、可执行、且缺 schema_version**，而守卫报绿 —— "
+        "PostgreSQL 会用 DEFAULT 1 把第 2 代产物静默标成第 1 代：\n  "
+        + "\n  ".join(green)
+    )
+
+
+def test_valid_statements_stay_green():
+    """⛔ 反向对照：守卫在**正确代码**上必须是绿的。
+
+    红得「看起来对」是最难发现的坏味道 —— 解析器坏掉时，缺字段的坏样本照样红，
+    只是**红的理由变了**（第十四轮实测：合法的 `(stock_code /* ticker */, schema_version)`
+    被判成「判据够不着」⇒ CI 在正确代码上变红）。
+    """
+    bad = [f"{k}: {_verdict('.sql', _sql_file(s))}" for k, s in _VALID.items()
+           if _verdict(".sql", _sql_file(s)) != "绿"]
+    bad += [f"[py] {k}: {_verdict('.py', s)}" for k, s in _VALID_PY.items()
+            if _verdict(".py", s) != "绿"]
+    bad += [f"[别的表] {k}: {_verdict('.sql', _sql_file(s))}"
+            for k, s in _OTHER_TABLE.items() if _verdict(".sql", _sql_file(s)) != "绿"]
+    assert not bad, (
+        "守卫在**合法代码**上变红了 —— 这是假阳性。一道在干净树上就红的守卫"
+        "等于给实施者发放宽许可证：\n  " + "\n  ".join(bad)
+    )
+
+
+def test_evasion_corpus_actually_exercises_every_net():
+    """⛔ 防空转：语料必须真的走过三张网，否则上面那条断言可能只是在验一张网。"""
+    kinds = {_verdict(".sql", _sql_file(s)) for s in _EVASIONS.values()}
+    kinds |= {_verdict(".py", s) for s in _PY_EVASIONS.values()}
+    assert "缺字段" in kinds and "判不了" in kinds, (
+        f"语料只触发了 {kinds} —— 说明它没覆盖到「精确网够不着、靠兜底网接住」"
+        f"这条路径，兜底网被摘掉时这套语料不会变红"
+    )
+    # 兜底网是「间隔根本解析不动」时的唯一防线，必须有语料专门走它
+    only_last_resort = [
+        k for k, s in _PY_EVASIONS.items()
+        if not _find_inserts(s, loose=True) and _LAST_RESORT_RE.search(s)
+    ]
+    assert only_last_resort, (
+        "没有任何一条语料是「粗网够不着、只有兜底网接得住」的 —— "
+        "那么把兜底网从主循环里摘掉，这套语料**一条都不会红**"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐ **精度不许退化，常驻**
+#
+# 上面那条断言写的是「**不许是绿**」—— 故意的：判得糙一点但仍然红（「判不了」）
+# 不是安全事故，把它当回归会逼出无意义的修改。
+#
+# 但这留下一个缺口：**纯精度**的修复没有任何测试守着。实测把下面三处改回去，
+# 七条常驻测试**全绿**（那三条语料只是从「缺字段」降级成「判不了」）：
+#   · `--` 行注释的终止符退回只认物理换行；
+#   · `\f` `\v` 退出空白集；
+#   · schema 限定符退回写死 `public`。
+#
+# ⇒ 这一条专门钉「**必须报得出真正的问题**」：守卫说「判不了」时，人得停下来
+#   手工看一眼；说「缺 schema_version」才是直接可行动的。差别是真实的成本。
+# ---------------------------------------------------------------------------
+
+#: 每条都必须被判成 **缺字段**（而不是「判不了」）。
+_PRECISION_FORMS = {
+    # `--` 的终止符：宿主是 YAML/shell 时，`\n` 是**转义**，源码里没有物理换行
+    "行注释配转义换行（.yml）": (
+        ".yml",
+        'run: psql -c "INSERT -- seed\\nINTO training_sets (a, b, c) VALUES (1);"\n',
+    ),
+    # PostgreSQL 的空白全集 `space [ \t\n\r\f\v]`
+    "换页 \\f 当空白": (".sql", "INSERT\x0cINTO training_sets (a, b, c) VALUES (1);\n"),
+    "垂直制表 \\v 当空白": (".sql", "INSERT\x0bINTO training_sets (a, b, c) VALUES (1);\n"),
+    # schema 限定符不写死 `public`
+    "非 public 限定": (".sql", "INSERT INTO qmt.training_sets (a, b, c) VALUES (1);\n"),
+    "两级限定": (".sql", "INSERT INTO db.qmt.training_sets (a, b, c) VALUES (1);\n"),
+}
+
+
+def test_precision_does_not_regress_to_cannot_tell():
+    punted = {
+        k: _verdict(suffix, src)
+        for k, (suffix, src) in _PRECISION_FORMS.items()
+        if _verdict(suffix, src) != "缺字段"
+    }
+    assert not punted, (
+        "以下写法**判得出**缺 schema_version，守卫却报成「判据够不着」—— "
+        "红是红了，但报文说「判不了」，人还得手工再看一遍：\n  "
+        + "\n  ".join(f"{k}: {v}" for k, v in punted.items())
     )
