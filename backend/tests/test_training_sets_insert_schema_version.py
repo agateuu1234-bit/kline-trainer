@@ -206,6 +206,41 @@ def _match_ident(text: str, i: int) -> int | None:
     return m.end() if m else None
 
 
+#: ⛔⛔ **表名不是字面量的 INSERT，也要报出来。**
+#:
+#: 这是本守卫**最后一个静默盲区**，而我此前在三份文档里都写着它「会落进
+#: 判据够不着、让测试红（吵）」—— **那是不实陈述**。实测四种写法
+#: （f-string 变量 / `.format()` / 常量相加 / `%` 格式化）**全部静默不可见**：
+#: 三张网都要求表名里有字面量的 `training` 与 `sets`，而它们一个字都没有。
+#:
+#: ⇒ 改成：凡 `INSERT INTO` 后面**不是字面量表名**的，一律报「判据够不着」。
+#: ⚠️ 这等于把**所有**动态表名的写入都报出来，不只是 `training_sets` 的 ——
+#:    所以先量了再做：**干净树上 0 条**，零代价。
+#:    将来真要往别的表做动态写入，必须显式在这里认领并说明理由。
+def _find_dynamic_targets(text: str) -> list[int]:
+    """扫出「`INSERT INTO` 之后不是字面量表名」的位置。"""
+    out, n, i = [], len(text), 0
+    while i < n:
+        if text[i] not in "iI":
+            i += 1
+            continue
+        start = i
+        j = _match_word(text, i, "insert")
+        if j is None:
+            i += 1
+            continue
+        j = _skip_gap(text, j, required=True)
+        j = j if j is None else _match_word(text, j, "into")
+        if j is None:
+            i = start + 1
+            continue
+        k = _skip_gap(text, j, required=False)
+        if k is None or k >= n or not _IDENT_RE.match(text, k):
+            out.append(start)      # 后面是 `{` / `%` / 哨兵 / 字面量到此为止
+        i = start + 1
+    return out
+
+
 def _find_inserts(text: str, *, loose: bool):
     """扫出 `INSERT … INTO … [public.] training_sets`，产出 (起点, 表名之后的下标)。
 
@@ -403,12 +438,17 @@ def _column_names(cols: str) -> set[str]:
 _COLS_ALLOWED = re.compile(r"[A-Za-z0-9_$,() \t\r\n]")
 
 
-def _ambiguous(cols: str) -> str | None:
+def _ambiguous(cols: str, *, exact_host: bool) -> str | None:
     """列清单里有没有「源码与运行时可能不一致」的东西；有就返回它的名字。
 
-    ⛔ 只对**无法逐字还原运行时字符串**的宿主（`.sh` / `.yml` / `.md`）生效；
-       `.sql` 源码就是运行时文本、`.py` 已由语法树还原，两者都走精确路径。
+    `exact_host` 指 `.sql`（源码就是运行时文本）与 `.py`（已由语法树还原）。
+    ⛔ 但「精确宿主」不等于「这一条一定精确」—— f-string 的插值**求不出来**，
+       哨兵在场时同样判不了（codex 第 21 轮）。
     """
+    if _UNRESOLVED in cols:
+        return "未解析的 f-string 插值（它可以求值成 `/*` 把字段注掉）"
+    if exact_host:
+        return None
     odd = sorted({c for c in cols if not _COLS_ALLOWED.match(c)})
     if odd:
         return f"合法列清单不该有的字符 {odd}（宿主拼接后可能变出/变没注释）"
@@ -520,6 +560,14 @@ def _column_list(text: str, after: int) -> str | None:
 #:
 #: ⚠️ 解不动的写法（`+` 拼接、`.format()`、f-string 的变量部分）不会凭空消失：
 #:    **兜底网始终扫原文**，它们会落进「判据够不着」（吵），不是「瞎」。
+#: ⚠️ 但**表名本身**是拼出来的（`{tbl}` / `%s` / 常量相加）时，兜底网也够不着 ——
+#:    那一类由 `_find_dynamic_targets` 单独接住（见下）。此处曾写「都会变红」，
+#:    **是不实陈述**，已订正。
+#: 未解析的 f-string 插值的哨兵。⛔ 取一个**绝不会出现在合法列清单里**的字符，
+#: 这样它自动落进 `_ambiguous` 的正字符集之外 —— 不必再为它单写一条判据。
+_UNRESOLVED = "\x00"
+
+
 def _line_starts(text: str) -> list[int]:
     out, pos = [0], text.find("\n")
     while pos != -1:
@@ -549,12 +597,19 @@ def _py_literals(text: str):
     out, inner = [], set()
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
-            # f-string：变量部分无法还原 ⇒ 用占位符，让表名被劈开的写法自然够不着
+                    # f-string：变量部分**求不出来** ⇒ 放哨兵。
+            # ⛔ 哨兵**必须落在列清单正字符集之外** —— 我原先放的是 `{}`，
+            #    而 codex 第 21 轮实测：插值可以求值成 `/*` 与 `*/`，
+            #        f"INSERT INTO training_sets (stock_code, {a} schema_version, {b} …)"
+            #    运行时 `schema_version` **在注释里**，而扫描层看到的是
+            #    `{} schema_version` —— 被当成真列名 ⇒ **假绿**。
+            #    ⚠️ 表名是字面量，所以这和「动态表名」那条已知局限**不是同一件事**。
             for part in ast.walk(node):
                 if part is not node:
                     inner.add(id(part))
             val = "".join(
-                p.value if isinstance(p, ast.Constant) and isinstance(p.value, str) else "{}"
+                p.value if isinstance(p, ast.Constant) and isinstance(p.value, str)
+                else _UNRESOLVED
                 for p in node.values
             )
             out.append((val, node.lineno, abs_pos(node.lineno, node.col_offset),
@@ -612,7 +667,10 @@ def _scan_source(path: Path, text: str):
         #    （合法的 PostgreSQL 标识符写法、且缺字段）就**静默通过**了。
         #    ⇒ 去重的粒度必须是「**这一条出现**」，不是「这一片文本」。
         last_resort_starts = {mm.start() for mm in _LAST_RESORT_RE.finditer(utext)}
-        for cs in sorted((coarse_starts | last_resort_starts) - precise_starts):
+        dynamic_starts = set(_find_dynamic_targets(utext))
+        for cs in sorted(
+            (coarse_starts | last_resort_starts | dynamic_starts) - precise_starts
+        ):
             ln = uline if path.suffix == ".py" else utext.count("\n", 0, cs) + 1
             unknown_shape.append(
                 f"{rel}:{ln}: 判据够不着 -> {utext[cs: cs + 60]!r}"
@@ -621,7 +679,8 @@ def _scan_source(path: Path, text: str):
             ln = uline if path.suffix == ".py" else utext.count("\n", 0, pos) + 1
             hits.append((utext, pos, after, ln, uend))
         seen_per_unit.append(
-            (ustart, uend, len(precise_starts | coarse_starts | last_resort_starts))
+            (ustart, uend,
+             len(precise_starts | coarse_starts | last_resort_starts | dynamic_starts))
         )
 
     if path.suffix == ".py":
@@ -659,7 +718,7 @@ def _scan_source(path: Path, text: str):
         tail = (text[uend - 1: uend + 20] if path.suffix == ".py"
                 else utext[after: after + 20])
         cols = _column_list(utext, after)
-        if cols is not None and path.suffix not in (".sql", ".py") and _ambiguous(cols):
+        if cols is not None and _ambiguous(cols, exact_host=path.suffix in (".sql", ".py")):
             # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
             #    「悄悄猜错」变成「明说判不了」。
             #    codex 第十一轮实测：两个**相邻的 Python 字面量**
@@ -674,8 +733,9 @@ def _scan_source(path: Path, text: str):
             # ⚠️ 要真正判准这一类得上 AST 解析（把相邻字面量先拼出来）—— 那是 TS1-R1
             #    之外的另一条路；在 TS1-R1 落地前，**吵**比**瞎**重要。
             unknown_shape.append(
-                f"{rel}:{lineno}: 判据够不着（列清单含 {_ambiguous(cols)}，而本宿主"
-                f"无法逐字还原运行时字符串）-> {cols[:80]}"
+                f"{rel}:{lineno}: 判据够不着（列清单含 "
+                f"{_ambiguous(cols, exact_host=path.suffix in ('.sql', '.py'))}）"
+                f"-> {cols[:80]}"
             )
         elif cols is not None:
             checked += 1
@@ -1294,4 +1354,82 @@ def test_a_recognized_insert_does_not_shield_its_neighbours():
     assert checked == 1 and unknown, (
         f"`.py` 同一字面量里「已认领 + 跨字面量未认领」没有各自报出来："
         f"checked={checked} unknown={unknown}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐⭐⭐ **表名不是字面量 / 插值落在列清单里，都不许静默通过**（codex 第二十一轮 + 自查）
+#
+# 第 21 轮 codex 报的是**列清单里的 f-string 插值**：插值可以求值成 `/*` `*/`，
+# 把 `schema_version` 注掉，而我原先把插值换成 `{}` —— 扫描层看到
+# `{} schema_version`，当成真列名 ⇒ **假绿**。（表名是字面量，所以这和
+# 「动态表名」那条已知局限不是同一件事。）
+# ⇒ 插值改用**列清单正字符集之外**的哨兵，自动落进「判不了」。
+#
+# ⚠️⚠️ 修这条时顺手核实「动态表名」那条已知局限，发现**我的文档在撒谎**：
+#   三份文档都写着它「会落进判据够不着、让测试红（吵）」，而实测**四种写法
+#   （f-string 变量 / `.format()` / 常量相加 / `%` 格式化）全部【静默不可见】** ——
+#   三张网都要求表名里有字面量的 `training` 与 `sets`，它们一个字都没有。
+#   ⛔ 不实陈述比缺陷更坏：它让人以为这件事已经有人管了。
+# ⇒ 先量后做（干净树上「表名不是字面量」的 INSERT = **0 条**，零代价），
+#   补第四个检测器把它们一律报成「判不了」。
+#
+# ⇒ 至此守卫的主张可以是：**作用域内每条路径要么判对、要么明说判不了，
+#   没有静默不可见的。** 这条主张由下面这个测试守着。
+# ---------------------------------------------------------------------------
+
+_MUST_NOT_BE_SILENT = {
+    "f-string 变量表名":
+        'q = f"INSERT INTO {tbl} (stock_code, file_path) VALUES (1)"\n',
+    ".format() 表名":
+        'q = "INSERT INTO {t} (stock_code) VALUES (1)".format(t="training_sets")\n',
+    "常量相加拼表名":
+        'TBL = "training_sets"\nq = "INSERT INTO " + TBL + " (stock_code) VALUES (1)"\n',
+    "% 格式化表名":
+        'q = "INSERT INTO %s (stock_code) VALUES (1)" % "training_sets"\n',
+    "插值落在列清单里（可求值成注释定界符）":
+        'q = f"INSERT INTO training_sets (stock_code, {a} schema_version, {b} file_path)'
+        ' VALUES (1)"\n',
+}
+
+#: ⛔ 反向：插值**只落在 `VALUES` 里**是完全正常的写法（参数化查询），必须保持绿。
+#:    不钉这一头的话，「把所有 f-string 都报出来」也能让上面那条断言通过 ——
+#:    那是把守卫变成噪音源。
+_INTERPOLATION_OK = {
+    "插值只在 VALUES 里":
+        'q = f"INSERT INTO training_sets (stock_code, schema_version) VALUES ({a}, {b})"\n',
+    "插值只在结尾的注释里":
+        'q = f"INSERT INTO training_sets (stock_code, schema_version) VALUES (1,2)'
+        ' ON CONFLICT DO NOTHING -- {tag}"\n',
+    "纯字面量": 'q = "INSERT INTO training_sets (stock_code, schema_version) VALUES (1,2)"\n',
+}
+
+
+def test_nothing_in_scope_is_silently_invisible():
+    silent = []
+    for label, src in _MUST_NOT_BE_SILENT.items():
+        missing, unknown, _, _, _ = _scan_source(Path("dyn.py"), src)
+        if not missing and not unknown:
+            silent.append(label)
+    # shell 变量同理
+    missing, unknown, _, _, _ = _scan_source(
+        Path("dyn.sh"), 'psql -c "INSERT INTO $TABLE (a) VALUES (1);"\n'
+    )
+    if not missing and not unknown:
+        silent.append("shell 变量表名")
+    assert not silent, (
+        "以下写法**静默通过**了 —— 守卫既没判对也没说判不了。"
+        "⛔ 静默是最坏的结果：没人知道该去看一眼：\n  " + "\n  ".join(silent)
+    )
+
+
+def test_interpolation_outside_the_column_list_stays_green():
+    noisy = []
+    for label, src in _INTERPOLATION_OK.items():
+        missing, unknown, checked, _, _ = _scan_source(Path("ok.py"), src)
+        if missing or unknown or checked != 1:
+            noisy.append(f"{label}: 缺={missing} 判不了={unknown} checked={checked}")
+    assert not noisy, (
+        "参数化查询（插值只在 VALUES 里）是**完全正常**的写法，守卫把它报红了 —— "
+        "那是把守卫变成噪音源，人很快就会开始无视它：\n  " + "\n  ".join(noisy)
     )

@@ -34,9 +34,9 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p3d" && g
 
 □ 通过　□ 不通过
 
-**B4** —— 期望：最后一行是 `10 passed in N.NNs`（⛔ 读 passed 前面的**数字**，不读「success」之类的字样）
+**B4** —— 期望：最后一行是 `12 passed in N.NNs`（⛔ 读 passed 前面的**数字**，不读「success」之类的字样）
 
-> 十条分别是：①主判据 ②正向对照（合法写法不许被误判）③兜底网的独立判别力 ④`.py` 字面量还原成运行时字符串 ⑤**攻击语料不许假绿**（41 条）⑥**合法语句保持绿** ⑦语料防空转 ⑧**精度不许退化** ⑨列名提取的**词法**正确（两个方向都钉）⑩**一条被认出来的语句不许掩护同一文件里的其它语句**。
+> 十二条分别是：①主判据 ②正向对照（合法写法不许被误判）③兜底网的独立判别力 ④`.py` 字面量还原成运行时字符串 ⑤**攻击语料不许假绿**（41 条）⑥**合法语句保持绿** ⑦语料防空转 ⑧**精度不许退化** ⑨列名提取的**词法**正确（两个方向都钉）⑩一条被认出来的语句不许掩护同一文件里的其它语句 ⑪**作用域内没有静默不可见的写法**（动态表名/插值）⑫参数化查询（插值只在 VALUES 里）必须保持绿。
 
 ```
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p3d/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest tests/test_training_sets_insert_schema_version.py -q | tail -1
