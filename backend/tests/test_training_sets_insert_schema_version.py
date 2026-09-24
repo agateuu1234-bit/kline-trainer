@@ -436,6 +436,16 @@ def _column_names(cols: str) -> set[str]:
 #:    自己的注释里 —— 枚举攻击面永远漏，枚举**合法面**才是封闭的。
 #: ⚠️ 实测：干净树上非 `.py`/`.sql` 宿主的 11 条列清单，**没有一条**含集合外字符。
 _COLS_ALLOWED = re.compile(r"[A-Za-z0-9_$,() \t\r\n]")
+#: 精确宿主（`.sql` 源码就是运行时文本；`.py` 已由语法树还原）额外允许注释与引号字符 ——
+#: 因为这两种我**确实能逐字词法**（`_strip_comments`）。
+#: ⛔ 但 `{` `}` `%` `\` **在任何宿主里都不是合法列清单字符**，它们只可能来自
+#:    **模板占位**。codex 第 22 轮实测：
+#:        "INSERT INTO training_sets (stock_code, {a} schema_version, {b} …)".format(a="/*", b="*/")
+#:    字面量本身看起来完全正常（不是 f-string、表名也是字面量），而 `.format()`
+#:    会把 `schema_version` 注掉 ⇒ **假绿**。
+#: ⇒ 正字符集对**所有宿主**生效，精确宿主只是多允许注释/引号那几个字符。
+#: ⚠️ 先量后做：干净树上精确宿主里含集合外字符的列清单 = **0 条**，零代价。
+_COLS_ALLOWED_EXACT = re.compile(r"[A-Za-z0-9_$,() \t\r\n/*'\"-]")
 
 
 def _ambiguous(cols: str, *, exact_host: bool) -> str | None:
@@ -447,11 +457,13 @@ def _ambiguous(cols: str, *, exact_host: bool) -> str | None:
     """
     if _UNRESOLVED in cols:
         return "未解析的 f-string 插值（它可以求值成 `/*` 把字段注掉）"
-    if exact_host:
-        return None
-    odd = sorted({c for c in cols if not _COLS_ALLOWED.match(c)})
+    allowed = _COLS_ALLOWED_EXACT if exact_host else _COLS_ALLOWED
+    odd = sorted({c for c in cols if not allowed.match(c)})
     if odd:
-        return f"合法列清单不该有的字符 {odd}（宿主拼接后可能变出/变没注释）"
+        return (
+            f"合法列清单不该有的字符 {odd}"
+            f"（模板占位 / 宿主拼接后可能变出、变没注释）"
+        )
     return None
 
 
@@ -1045,6 +1057,9 @@ _EVASIONS = {
     "VALUES 里含字样": "INSERT INTO training_sets VALUES ('schema_version','Y',9,9);",
     "AS 别名": f"INSERT INTO training_sets AS t {_C6} {_V}",
     "ON CONFLICT": f"INSERT INTO training_sets {_C6} {_V[:-1]} ON CONFLICT DO NOTHING;",
+    # 模板占位：`{}` `%` `\\` 在**任何**宿主里都不是合法列清单字符
+    "`.sql` 里出现模板占位":
+        "INSERT INTO training_sets (stock_code, {a} schema_version, file_path) VALUES (1);",
     # 曾因「全局抹除」把真语句抹没的四种上下文
     "引号里的 /*": f"SELECT '/*';\nINSERT INTO training_sets {_C6} {_V}\nSELECT '*/';",
     "行注释里的 /*": f"-- /* 注意\nINSERT INTO training_sets {_C6} {_V}",
@@ -1278,6 +1293,8 @@ _COLUMN_NAME_CASES = {
     "嵌套块注释注掉": ("(stock_code, /* a /* b */ , schema_version, */ file_path)", False),
     "行注释注掉到行尾": ("(stock_code, file_path -- , schema_version\n)", False),
     "只是子串": ("(stock_code, my_schema_version)", False),
+    "带注释且字段在场（精确宿主必须保持能解析）":
+        ("(stock_code /* ticker */, schema_version)", True),
     "注释里喂字样": ("(stock_code /* schema_version uses default */, file_path)", False),
 }
 
@@ -1387,6 +1404,17 @@ _MUST_NOT_BE_SILENT = {
         'TBL = "training_sets"\nq = "INSERT INTO " + TBL + " (stock_code) VALUES (1)"\n',
     "% 格式化表名":
         'q = "INSERT INTO %s (stock_code) VALUES (1)" % "training_sets"\n',
+    # ⭐ 第 22 轮（codex）：**`.format()` 模板**。字面量本身看起来完全正常
+    #    （不是 f-string、表名也是字面量），而 `.format()` 会把 `schema_version` 注掉。
+    ".format() 模板占位落在列清单里":
+        'q = "INSERT INTO training_sets (stock_code, {a} schema_version, {b} file_path)'
+        ' VALUES (1)".format(a="/*", b="*/")\n',
+    "% 格式化占位落在列清单里":
+        'q = "INSERT INTO training_sets (stock_code, %s schema_version, %s file_path)'
+        ' VALUES (1)" % ("/*", "*/")\n',
+    "反斜杠落在列清单里":
+        'q = "INSERT INTO training_sets (stock_code, \\\\ schema_version, file_path)'
+        ' VALUES (1)"\n',
     "插值落在列清单里（可求值成注释定界符）":
         'q = f"INSERT INTO training_sets (stock_code, {a} schema_version, {b} file_path)'
         ' VALUES (1)"\n',
