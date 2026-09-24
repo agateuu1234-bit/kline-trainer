@@ -170,13 +170,38 @@ def _blank_for_discovery(text: str, *, sql_quotes: bool = False) -> str:
 
 #: 抹平之后，发现层只剩这一条：关键字之间允许空白或 `--` 行注释；schema 限定符可选；
 #: 表名的引号已被抹成空白，所以不必再写引号分支。
-_GAP = r"(?:\s|--[^\n]*\n)+"
+#: ⛔⛔ **不再做任何「全局抹除」** —— 抹除是**破坏性**操作，而破坏的代价是**漏报**。
+#:
+#: codex 第 9 / 10 / 12 / 13 轮，**四次**都是同一个形状：**抹掉了不该抹的东西**，
+#: 真语句从发现层消失 ⇒ **假绿**。
+#:   · 第 9 轮：未闭合的 `/*` 抹到文末（`paths:` 里的 `'backend/sql/**'`）；
+#:   · 第 10 轮：**行注释**里的 `/*` 被当成起点，抹掉中间的真 INSERT；
+#:   · 第 12 轮：**SQL 字符串**里的 `/*` 同理；
+#:   · 第 13 轮：`.sh` heredoc 里的 `'/*'`、以及 `.sql` 的**美元引号** `$$/*$$`。
+#: 每次我的修法都是「再教它认一种上下文」，而上下文是**开放**的（美元引号、
+#: `E'…'`、`U&'…'`、宿主语言的各种字符串形式……）——**数不完**。
+#:
+#: ⇒ **换掉整个思路**：不抹任何东西，改成让**关键字之间的间隔**直接容忍这些干扰物。
+#:    `_GAP` 只在「`INSERT` … `INTO` … 表名」这个**很短的构造内部**生效，
+#:    所以它认不全某种字符串语法时，最坏结果是**匹配不上 ⇒ 落进粗网 ⇒ 报「判据够不着」**（吵），
+#:    ⛔ **而不会像抹除那样把整条真语句变没**（瞎）。
+#:
+#: 容忍：空白 / `--` 行注释 / `/* */` 块注释 / 宿主引号 / `+` 拼接 / 续行反斜杠 / 空白转义。
+_GAP = (
+    r"(?:"
+    r"\s"
+    r"|--[^\n]*\n"
+    r"|/\*(?:[^*]|\*(?!/))*\*/"
+    r"|[\"'+\\]"
+    r"|\\(?:u0020|x20|040|[ntr])"
+    r")+"
+)
 #: ⚠️ schema 限定符的点号**两侧也要用同一种间隔**，不能只写 `\s*`：
 #:    `INSERT INTO public. -- target table\n training_sets (…)` 是合法 SQL，
 #:    而 `--` 行注释**故意不做全局抹平**（见上），所以必须在这里局部容忍
 #:    （codex 第七轮实测：只写 `\s*` 时守卫仍 `1 passed`）。
 #:    用 `*` 而非 `+`：没有间隔（`public.training_sets`）才是最常见的写法。
-_DOT_GAP = r"(?:\s|--[^\n]*\n)*"
+_DOT_GAP = _GAP[:-1] + "*"      # 同一套容忍，但允许「没有间隔」（`public.training_sets`）
 _INSERT_RE = re.compile(
     rf"insert{_GAP}into{_GAP}(?:public{_DOT_GAP}\.{_DOT_GAP})?training_sets",
     re.I,
@@ -191,7 +216,7 @@ _INSERT_RE = re.compile(
 #:    `INSERT INTO p15_targets (id) SELECT … FROM training_sets` 这条**插另一张表**的
 #:    合法语句误报（守卫必须在当前树上为绿，否则就是一张放行许可证）。
 _COARSE_RE = re.compile(
-    rf"insert{_GAP}into[\s_]{{0,40}}?training[\s_]*sets",
+    rf"insert{_GAP}into[\s_\"'+\\]{{0,40}}?training[\s_\"'+\\]*sets",
     re.I,
 )
 
@@ -251,7 +276,25 @@ def _column_names(cols: str) -> set[str]:
     inner = cols.strip()
     assert inner.startswith("(") and inner.endswith(")"), inner[:60]
     inner = inner[1:-1]
-    inner = _LINE_COMMENT.sub(" ", inner)
+    # ⛔ 块注释必须**嵌套感知**地剥：非贪婪正则在第一个 `*/` 就停，
+    #    `/* a /* b */ , schema_version, */` 会让被注掉的字段字样幸存 ⇒ 假绿（codex 第九轮）。
+    out_chars, k, m = [], 0, len(inner)
+    while k < m:
+        if inner.startswith("/*", k):
+            depth, q = 1, k + 2
+            while q < m and depth:
+                if inner.startswith("/*", q):
+                    depth += 1; q += 2
+                elif inner.startswith("*/", q):
+                    depth -= 1; q += 2
+                else:
+                    q += 1
+            out_chars.append(" ")
+            k = q
+            continue
+        out_chars.append(inner[k])
+        k += 1
+    inner = _LINE_COMMENT.sub(" ", "".join(out_chars))
     names = set()
     for tok in inner.split(","):
         # 跨行的 asyncpg 查询会把引号与换行夹进 token（实测形如 '"\n        "schema_version'）
@@ -278,6 +321,18 @@ def _column_list(text: str, after: int) -> str | None:
     while i < len(text):
         if text[i] in " \t\r\n":
             i += 1
+        elif text.startswith("/*", i):
+            depth, k = 1, i + 2
+            while k < len(text) and depth:
+                if text.startswith("/*", k):
+                    depth += 1; k += 2
+                elif text.startswith("*/", k):
+                    depth -= 1; k += 2
+                else:
+                    k += 1
+            if depth:
+                return None
+            i = k
         elif text.startswith("--", i):
             j = text.find("\n", i)
             if j == -1:
@@ -298,6 +353,19 @@ def _column_list(text: str, after: int) -> str | None:
     n = len(text)
     while j < n:
         ch = text[j]
+        if text.startswith("/*", j):                       # 块注释（**嵌套感知**）：整段跳过
+            depth, k = 1, j + 2
+            while k < n and depth:
+                if text.startswith("/*", k):
+                    depth += 1; k += 2
+                elif text.startswith("*/", k):
+                    depth -= 1; k += 2
+                else:
+                    k += 1
+            if depth:
+                return None                                # 注释没闭合 ⇒ 判不了
+            j = k
+            continue
         if text.startswith("--", j):                       # 行注释：跳到行尾
             k = text.find("\n", j)
             if k == -1:
@@ -329,13 +397,11 @@ def test_every_executable_insert_specifies_schema_version():
 
     for path in _scope_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        is_sql = path.suffix == ".sql"            # .sql 里引号是 SQL 字符串；其它宿主里是定界符
-        parse_text = _blank_block_comments(text, sql_quotes=is_sql)
-        scan = _blank_for_discovery(text, sql_quotes=is_sql)
-        precise_starts = {m.start() for m in _INSERT_RE.finditer(scan)}
+        # ⛔ 直接在**原文**上扫 —— 不抹除任何东西（理由见 `_GAP` 上方的长注释）。
+        precise_starts = {m.start() for m in _INSERT_RE.finditer(text)}
 
         # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
-        for cm in _COARSE_RE.finditer(scan):
+        for cm in _COARSE_RE.finditer(text):
             if cm.start() in precise_starts:
                 continue
             lineno = text.count("\n", 0, cm.start()) + 1
@@ -344,12 +410,12 @@ def test_every_executable_insert_specifies_schema_version():
                 f"{text[cm.start(): cm.start() + 60]!r}"
             )
 
-        for m in _INSERT_RE.finditer(scan):
-            pos, after = m.start(), m.end()      # 下标对 text 同样有效（抹平等长）
+        for m in _INSERT_RE.finditer(text):
+            pos, after = m.start(), m.end()
             rel = path.relative_to(ROOT)
             lineno = text.count("\n", 0, pos) + 1
             tail = text[after: after + 20]
-            cols = _column_list(parse_text, after)
+            cols = _column_list(text, after)
             if cols is not None and "--" in cols and path.suffix != ".sql":
                 # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
                 #    「悄悄猜错」变成「明说判不了」。
