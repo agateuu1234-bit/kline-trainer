@@ -361,12 +361,24 @@ def _column_names(cols: str) -> set[str]:
 #: ⚠️ 实测：干净树上 11 条非 `.py` 列清单**一个引号都没有**，这条规则零代价。
 #: ⚠️ 要真正判准这一类得给每种宿主写词法器；在 TS1-R1（数据库层 fail-closed）
 #:    落地之前，不值得。
+#: ⛔⛔ **正字符集** —— 合法列清单里只可能有：标识符字符、`$`、逗号、括号、空白。
+#: ⚠️ 这是**反过来写**的，而且是被逼的：我前后**五次**往「歧义字符集」里补字符
+#:    （宿主引号 → `--` → …… → 第 19 轮的**反斜杠续行**，shell 会把
+#:    `/` + 反斜杠换行 + `*` 拼成 `/*`）。而「**数不完**」这四个字就写在本文件
+#:    自己的注释里 —— 枚举攻击面永远漏，枚举**合法面**才是封闭的。
+#: ⚠️ 实测：干净树上非 `.py`/`.sql` 宿主的 11 条列清单，**没有一条**含集合外字符。
+_COLS_ALLOWED = re.compile(r"[A-Za-z0-9_$,() \t\r\n]")
+
+
 def _ambiguous(cols: str) -> str | None:
-    """列清单里有没有「源码与运行时可能不一致」的东西；有就返回它的名字。"""
-    if '"' in cols or "'" in cols:
-        return "宿主引号（拼接后可能变出/变没注释）"
-    if "--" in cols:
-        return "`--`（源码换行未必是运行时换行）"
+    """列清单里有没有「源码与运行时可能不一致」的东西；有就返回它的名字。
+
+    ⛔ 只对**无法逐字还原运行时字符串**的宿主（`.sh` / `.yml` / `.md`）生效；
+       `.sql` 源码就是运行时文本、`.py` 已由语法树还原，两者都走精确路径。
+    """
+    odd = sorted({c for c in cols if not _COLS_ALLOWED.match(c)})
+    if odd:
+        return f"合法列清单不该有的字符 {odd}（宿主拼接后可能变出/变没注释）"
     return None
 
 
@@ -1018,6 +1030,11 @@ _SH_EVASIONS = {
     "shell 引号拼出行注释":
         'psql -c "INSERT INTO training_sets (stock_code, file_path, content_hash -""- '
         ', schema_version) VALUES (1);"\n',
+    # ⭐ 第十九轮（codex）：**反斜杠续行**。bash 会删掉「反斜杠+换行」，
+    #    于是 `/` 与 `*` 在运行时拼成 `/*` —— 源码里同样看不出注释。
+    "shell 续行拼出块注释":
+        'psql -c "INSERT INTO training_sets (stock_code, /\\\n* schema_version, *\\\n'
+        '/ stock_name, file_path, content_hash) VALUES (1);"\n',
     "注释含左括号 + 表名劈开":
         'psql -c "INSERT /* (x) */ INTO training_""sets (a, b, c) VALUES (1);"\n',
     "行注释含分号 + 表名劈开":
