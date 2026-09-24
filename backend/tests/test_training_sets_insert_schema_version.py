@@ -71,7 +71,14 @@ SELF = Path(__file__).resolve()
 #:    但**源码文本**里是「反斜杠 + 字母 n」两个字符 —— 只跳反斜杠会留下一个 `n`，
 #:    发现层当场瞎掉（codex 第六轮实测：那样写守卫仍报 `1 passed`）。
 #: ⛔ 这一类是**可穷举**的：SQL 里的空白只有 空格/制表/换行/回车，写法就这几种。
-_WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
+#: ⛔ PostgreSQL 词法里的空白是 `space [ \t\n\r\f\v]`（见 `src/backend/parser/scan.l`）——
+#:    **这是个封闭集合**，照抄全集即可，不必再打地鼠。
+#:    实测：漏掉 `\f` / `\v` 时 `INSERT\fINTO training_sets (…)` 是合法 SQL，
+#:    而精确网与粗网**同时落空** ⇒ 假绿。
+_PG_SPACE = " \t\n\r\f\v"
+_WS_ESCAPE_RE = re.compile(
+    r"\\(?:u000[bBcC]|x0[bBcC]|u0020|x20|0(?:13|14|40)|[ntrfv])"
+)
 
 
 #: ⛔⛔ **发现层是一个【非破坏性的游标扫描器】，既不抹除、也不用正则。**
@@ -94,6 +101,26 @@ _WS_ESCAPE_RE = re.compile(r"\\(?:u0020|x20|040|[ntr])")
 #:    可以嵌套感知**。认不全某种语法时最坏是**推进失败 ⇒ 落进粗网报「判不了」（吵）**，
 #:    ⛔ 而不是把真语句变没（瞎）。
 
+#: `--` 行注释的终止符。⛔ **不能只找物理换行** —— Python 字面量
+#:    `"INSERT -- seed row\\nINTO training_sets (…)"` 运行时是合法 SQL（`\\n` 就是换行），
+#:    但**源码里没有物理换行** ⇒ 行注释「永不结束」⇒ 推进失败 ⇒ 语句从两张网里同时消失
+#:    ⇒ **假绿**（codex 第十六轮实测）。
+#: ⛔ 换行的转义写法同样是**封闭集合**，照抄即可。
+_NEWLINE_ESCAPE_RE = re.compile(r"\\(?:u000[aAdD]|x0[aAdD]|0(?:12|15)|[nr])")
+
+
+def _line_comment_end(text: str, i: int) -> int | None:
+    """返回 `--` 行注释结束后的下标；找不到终止符返回 None。"""
+    phys = text.find("\n", i)
+    esc = _NEWLINE_ESCAPE_RE.search(text, i)
+    cands = []
+    if phys != -1:
+        cands.append(phys + 1)
+    if esc is not None:
+        cands.append(esc.end())
+    return min(cands) if cands else None
+
+
 def _skip_gap(text: str, i: int, *, required: bool, extra: str = "") -> int | None:
     """跳过关键字之间允许出现的东西，返回新下标；`required` 时至少要跳掉一个字符。
 
@@ -104,15 +131,15 @@ def _skip_gap(text: str, i: int, *, required: bool, extra: str = "") -> int | No
     n, start = len(text), i
     while i < n:
         ch = text[i]
-        if ch in " \t\r\n":
+        if ch in _PG_SPACE:
             i += 1
         elif ch in "\"'+" or (extra and ch in extra):
             i += 1
         elif text.startswith("--", i):
-            k = text.find("\n", i)
-            if k == -1:
+            k = _line_comment_end(text, i)
+            if k is None:
                 return None
-            i = k + 1
+            i = k
         elif text.startswith("/*", i):
             depth, k = 1, i + 2          # ⭐ 嵌套感知 —— 正则做不到的就在这里
             while k < n and depth:
@@ -141,6 +168,36 @@ def _match_word(text: str, i: int, word: str) -> int | None:
     return i + len(word) if seg.lower() == word else None
 
 
+#: ⛔⛔ **最后一张网：完全不解析间隔。**
+#:
+#: 上面两张网（精确 / 粗）共用 `_skip_gap`。这意味着我注释里写的那条不变量 ——
+#: 「认不全某种语法时，最坏是**推进失败 ⇒ 落进粗网报『判不了』（吵）**」——
+#: **其实没有兑现**：`_skip_gap` 一旦返回 None，两张网会**同时**落空，语句静默消失。
+#: codex 第十六轮就是从这个缝里进来的（`--` 遇上转义换行）。
+#:
+#: ⇒ 这张网只认三个**词**，中间允许任何字符，⛔ 但**不许跨** `(` `)` `;`。
+#:    不许跨括号是被干净树上的误报逼出来的：
+#:        `INSERT INTO p15_targets (id) SELECT id FROM training_sets`
+#:    这是往**另一张表**写的合法语句，中间的 `(id)` 把它排除掉。
+#: ⚠️ 它只用来报「判据够不着」**让测试红**，不参与「通过」的判定 ——
+#:    所以它宁可宽一点：多红一条有人看，少红一条没人知道。
+_SPAN = r"(?:(?![(;)])[\s\S])"
+_LAST_RESORT_RE = re.compile(
+    rf"insert{_SPAN}{{1,200}}?into{_SPAN}{{0,80}}?training{_SPAN}{{0,12}}?sets"
+    r"(?![A-Za-z0-9_$])",          # ⛔ 词边界：否则 `training_sets_audit` 也被拖下水
+    re.I,
+)
+
+#: 标识符：普通形式 `[A-Za-z_][A-Za-z0-9_$]*`（引号形式的引号已被 `_skip_gap` 当作宿主
+#: 定界符吃掉，所以这里不必再写引号分支）。
+_IDENT_RE = re.compile(r"[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*")
+
+
+def _match_ident(text: str, i: int) -> int | None:
+    m = _IDENT_RE.match(text, i)
+    return m.end() if m else None
+
+
 def _find_inserts(text: str, *, loose: bool):
     """扫出 `INSERT … INTO … [public.] training_sets`，产出 (起点, 表名之后的下标)。
 
@@ -162,13 +219,20 @@ def _find_inserts(text: str, *, loose: bool):
         if j is None:
             i = start + 1
             continue
-        k = _match_word(text, j, "public")          # 可选的 schema 限定符
-        if k is not None:
-            k = _skip_gap(text, k, required=False)
-            if k is not None and k < n and text[k] == ".":
-                k = _skip_gap(text, k + 1, required=False)
-                if k is not None:
-                    j = k
+        # 可选的 schema 限定符。⛔ **不写死 `public`** —— 写死一个标识符和写死一个字符类
+        #    是同一个毛病：数不完。实测 `INSERT INTO qmt.training_sets (…)` 两网皆空 ⇒ 假绿。
+        #    ⇒ 改成「任意标识符 + 点」，最多两级（PostgreSQL 不支持跨库引用）。
+        for _ in range(2):
+            k = _match_ident(text, j)
+            if k is None:
+                break
+            k2 = _skip_gap(text, k, required=False)
+            if k2 is None or k2 >= n or text[k2] != ".":
+                break                                   # 后面不是点 ⇒ 这不是限定符，回退
+            k3 = _skip_gap(text, k2 + 1, required=False)
+            if k3 is None:
+                break
+            j = k3
         end = _match_word(text, j, "training_sets")
         if end is None and loose:
             # 粗网：容忍表名被引号/拼接劈开（`"INSERT INTO training_" "sets (…)"`）。
@@ -178,7 +242,9 @@ def _find_inserts(text: str, *, loose: bool):
             if end is not None:
                 e2 = _skip_gap(text, end, required=False, extra="_")
                 end = _match_word(text, e2, "sets") if e2 is not None else None
-        if end is not None:
+        # ⛔ **词边界**：不加的话 `INSERT INTO training_sets_audit (…)` 会被当成本表 ⇒ **误报**
+        #    （旧的正则版同样如此）。表名后面不许紧跟标识符字符。
+        if end is not None and (end >= n or not (text[end].isalnum() or text[end] in "_$")):
             out.append((start, end))
             i = end
         else:
@@ -375,10 +441,15 @@ def test_every_executable_insert_specifies_schema_version():
         precise = _find_inserts(text, loose=False)
         precise_starts = {s for s, _ in precise}
 
-        # 粗网先跑：凡「像是往 training_sets 写」却没被精确正则认领的，一律报出来
-        for cs, _ in _find_inserts(text, loose=True):
-            if cs in precise_starts:
+        # 粗网 + 最后一张网：凡「像是往 training_sets 写」却没被精确扫描认领的，一律报出来。
+        # ⛔ 两张网都要跑 —— 粗网仍走 `_skip_gap`，间隔认不全时它会和精确网**一起**落空；
+        #    最后一张网不解析间隔，正是为此存在。
+        reported = set(precise_starts)
+        coarse = [cs for cs, _ in _find_inserts(text, loose=True)]
+        for cs in coarse + [m.start() for m in _LAST_RESORT_RE.finditer(text)]:
+            if cs in reported:
                 continue
+            reported.add(cs)
             lineno = text.count("\n", 0, cs) + 1
             unknown_shape.append(
                 f"{path.relative_to(ROOT)}:{lineno}: 判据够不着 -> "
@@ -490,4 +561,62 @@ def test_valid_column_lists_with_comments_are_parsed_not_rejected():
     assert not broken, (
         "以下**合法且字段在场**的写法被守卫误判 —— 这是**假阳性**，"
         "会让 CI 在正确代码上变红：\n" + "\n".join(broken)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⭐ **兜底网的独立判别力，常驻**（codex 第十六轮打回后新增）
+#
+# 精确网与粗网共用 `_skip_gap`。间隔一旦解析不动，两张网会**同时**落空 ——
+# 而我在注释里写的不变量是「最坏落进粗网报『判不了』（吵）」。**那句话当时是假的。**
+# 第十六轮就是从这个缝里进来的：Python 字面量里 `--` 后跟的是**转义**换行 `\n`
+# （源码中没有物理换行）⇒ 行注释「永不结束」⇒ 推进失败 ⇒ 语句静默消失 ⇒ 假绿。
+#
+# ⇒ 本测试钉的是**这张网自己**的判别力：它必须在「间隔根本解析不动」时仍然报得出来，
+#   同时不许把「往另一张表写」的合法语句拖下水（否则守卫在干净树上就是红的 ⇒
+#   那等于一张放行许可证）。
+# ---------------------------------------------------------------------------
+
+_COLS6 = "(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)"
+
+#: 这些形态里，间隔**故意**解析不动（注释没有终止符）。兜底网必须仍然报得出来。
+_LAST_RESORT_MUST_CATCH = {
+    "行注释完全无终止": f'"INSERT -- c INTO training_sets {_COLS6} VALUES (1);"',
+    "块注释不闭合": f'"INSERT /* c INTO training_sets {_COLS6} VALUES (1);"',
+}
+#: ⚠️ 下面这两种曾经也够不着，**现已被精确网正面覆盖**，所以**不能**放进上面那个字典 ——
+#:    放进去会让「防空转」那条断言失效（它要求样本确实够不着）：
+#:      · `"INSERT -- seed\\nINTO …"`（行注释配**转义**换行，第十六轮）
+#:      · `INSERT\fINTO …`（`\f` 也是 PostgreSQL 的空白）
+#:    它们的覆盖由 `_skip_gap` 负责，回归脚本里另有用例。
+
+#: ⛔ 反向：往**另一张表**写、只是碰巧 `SELECT … FROM training_sets` 的合法语句。
+#:    兜底网若把它算进来，守卫在干净树上就是红的 —— 那不是严格，是**放行许可证**
+#:    （本仓老教训：「守卫必须在功能还没写的当前树上就是绿的」）。
+_LAST_RESORT_MUST_NOT_CATCH = {
+    "插另一张表": "INSERT INTO p15_targets (id) SELECT id FROM training_sets;",
+    "插前缀相同的表": f"INSERT INTO training_sets_audit {_COLS6} VALUES (1);",
+}
+
+
+def test_last_resort_net_has_independent_discriminating_power():
+    missed = [k for k, s in _LAST_RESORT_MUST_CATCH.items() if not _LAST_RESORT_RE.search(s)]
+    assert not missed, (
+        "以下形态的**间隔解析不动**，而兜底网也没接住 —— 语句会从三张网里同时消失、"
+        "守卫静默报绿：\n  " + "\n  ".join(missed)
+    )
+    # ⭐ 防空转：上面那条断言必须真的经过了「精确网够不着」的路径，否则它只是在
+    #    重复验证精确网。这里逐条确认精确网**确实**认不出它们。
+    not_actually_unreachable = [
+        k for k, s in _LAST_RESORT_MUST_CATCH.items() if _find_inserts(s, loose=True)
+    ]
+    assert not not_actually_unreachable, (
+        "以下样本本意是「间隔解析不动」，但粗网已经认出来了 —— 这条测试对兜底网的"
+        "判别力就**归零**了，请换成真正够不着的样本：\n  "
+        + "\n  ".join(not_actually_unreachable)
+    )
+    false_alarms = [k for k, s in _LAST_RESORT_MUST_NOT_CATCH.items() if _LAST_RESORT_RE.search(s)]
+    assert not false_alarms, (
+        "兜底网把**往别的表写**的合法语句也算进来了 —— 守卫会在干净树上变红，"
+        "那等于给实施者发放宽许可证：\n  " + "\n  ".join(false_alarms)
     )
