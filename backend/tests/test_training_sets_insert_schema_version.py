@@ -346,7 +346,25 @@ def test_every_executable_insert_specifies_schema_version():
             lineno = text.count("\n", 0, pos) + 1
             tail = text[after: after + 20]
             cols = _column_list(parse_text, after)
-            if cols is not None:
+            if cols is not None and "--" in cols and path.suffix != ".sql":
+                # ⛔ **源码换行 ≠ 运行时换行** —— 这是本守卫的根本局限，这里把它从
+                #    「悄悄猜错」变成「明说判不了」。
+                #    codex 第十一轮实测：两个**相邻的 Python 字面量**
+                #        "-- optional metadata: "
+                #        "schema_version,\n"
+                #    在**源码里分两行**（`--` 被当成只注掉第一行），但**运行时拼成一行**
+                #    ⇒ `schema_version` 落在 `--` 之后、**被 SQL 注释掉** ⇒ PostgreSQL 用
+                #    `DEFAULT 1`。而守卫按源码换行判定，把它当成在场的列 ⇒ **假绿**。
+                # ⇒ 只有 `.sql` 文件能保证「源码换行就是 SQL 换行」；其它宿主（.py / .sh /
+                #    .yml / .md）里 SQL 是字符串，换行可能来自 `\n` 转义或相邻字面量拼接。
+                #    ⇒ 非 `.sql` 文件的列清单里只要出现 `--`，一律报「判据够不着」**让测试红**。
+                # ⚠️ 要真正判准这一类得上 AST 解析（把相邻字面量先拼出来）—— 那是 TS1-R1
+                #    之外的另一条路；在 TS1-R1 落地前，**吵**比**瞎**重要。
+                unknown_shape.append(
+                    f"{rel}:{lineno}: 判据够不着（列清单含 `--`，而本文件非 .sql ⇒ "
+                    f"源码换行未必是运行时换行）-> {cols[:80]}"
+                )
+            elif cols is not None:
                 checked += 1
                 if "schema_version" not in _column_names(cols):
                     missing.append(f"{rel}:{lineno}: 列清单缺 schema_version -> {cols[:100]}")
