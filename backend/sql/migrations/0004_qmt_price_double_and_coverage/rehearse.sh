@@ -204,17 +204,17 @@ VALUES
   ('000001', '1d', 20260105000000,  8.88,  9.01,  8.75,  8.95,  900000,  8012345.67);
 
 INSERT INTO training_sets
-  (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)
+  (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash)
 VALUES
-  ('000001', '平安银行', 20260101093000, 20260101150000,
+  ('000001', '平安银行', 20260101093000, 20260101150000, 1,
    '/mnt/nas/kline_trainer/datasets/000001/20260101_093000_20260101_150000.zip',
    'a1b2c3d4');
 
 INSERT INTO training_sets
-  (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash,
+  (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash,
    status, lease_id, lease_expires_at, reserved_at)
 VALUES
-  ('000001', '平安银行', 20260102093000, 20260102150000,
+  ('000001', '平安银行', 20260102093000, 20260102150000, 1,
    '/mnt/nas/kline_trainer/datasets/000001/20260102_093000_20260102_150000.zip',
    'b2c3d4e5', 'sent', gen_random_uuid(), NOW() + interval '1 hour', NOW());
 SQL
@@ -441,9 +441,9 @@ echo "  （构造 file_path 长度 = $LONG_PATH_LEN 字符，超出 VARCHAR(255)
 
 pg_exec overlong_db <<SQL
 INSERT INTO training_sets
-  (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)
+  (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash)
 VALUES
-  ('000001', '平安银行', 20260103093000, 20260103150000, '$LONG_PATH', 'c3d4e5f6');
+  ('000001', '平安银行', 20260103093000, 20260103150000, 1, '$LONG_PATH', 'c3d4e5f6');
 SQL
 
 if pg_run_file overlong_db "$ROLLBACK_SQL" > "$TMP_LOG" 2>&1; then
