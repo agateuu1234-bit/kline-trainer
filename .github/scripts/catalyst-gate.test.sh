@@ -535,13 +535,25 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   第三支还不得给「关闭 App」建议（存档还在，关掉重开会引到打不开的局）。**零条 UIKit-gated 新增**
 #   （uikit 基线仍 78；已逐行比对本轮真日志，78 条全部在场）。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁。
+#   【划线 P1c 第 2 片 · 节点显示 + 选中态终局（本轮）】total 1897→1935（+38），
+#   uikit 78→80（**本轮有 UIKit-gated 新增**，是这条记录里第一次不是「零条」）：
+#   新增 N1「两条同价位重合的线 —— 只有被选中的那条画节点」与 T10「裁剪只作用于节点」两条
+#   UIKit-gated 测试；另有第 31 行随 A7 翻转改名（D55 选中色 → D108 线仍是自己的颜色 + 画出节点）。
+#   host 侧净增 36 条（节点几何 11 + 命中 8 + 绘制 4 + 源码顺序守卫 1 + isVisible 等价 1 ...），
+#   同时**删除** 2 条（selectionColorIsOutsideTokenRange / selectionStrokeContrastWCAG ——
+#   取消变蓝后 selectionRGBA 整个函数已删，它们测的东西不复存在）。38 = 40 新增 − 2 删除，精确对账。
+#   ⚠️ 本轮又栽在同一处（CI 报红才发现）：基线上调了、fixture 没重裁 ⇒ 活基线里新增的 N1/T10
+#   在旧 fixture 里找不到结果行，「活基线覆盖」自测当场 FAIL。
+#   ⇒ 这条惯例值得再强调一次：**改 catalyst-uikit-baseline.txt 必须同时重裁 fixture 并更新下面的
+#   回显数字**，三者是同一件事的三份副本，漏任何一份都会让这道自测失真。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 80 行 UIKit 结果行取自真日志原文）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1897" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1897）→ GATE PASS 且回显 1897 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1935" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 80 / total 1935）→ GATE PASS 且回显 1935 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1897，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1935，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
