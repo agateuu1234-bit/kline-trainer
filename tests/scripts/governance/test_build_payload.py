@@ -14,7 +14,7 @@ def _load():
 mod = _load()
 CATALYST = "Mac Catalyst build-for-testing on macos-15"
 APP_BUILD = "iOS app build-for-running on macos-15"
-BACKEND = "backend pytest (full suite)"
+BACKEND = "backend pytest (v2)"
 APP_ID = 15368
 
 def _ruleset(name):
