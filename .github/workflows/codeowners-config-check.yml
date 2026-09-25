@@ -36,6 +36,24 @@ jobs:
         run: |
           python -m pip install --quiet pyyaml pytest
           python -m pytest backend/tests/test_backend_tests_workflow_runs_on_every_pr.py -q
+      # ── 治理套件（同样**不受下面 scope 门控**，每个 PR 都跑）──
+      # 为什么必须放在 scope 门控之外：门控内的步骤对「没改 CODEOWNERS/rules」的 PR
+      # 直接 no-op 通过。治理测试若放进去，等于给它开一条静默旁路 —— 而这套测试
+      # 守的恰恰是 canonical 必需检查清单本身，漏一次就可能全仓 PR 死锁。
+      #
+      # 为什么必须是**独立一步、只有一条命令**（而不是追加到上一步末尾）：
+      # 一步里有多条命令时，步骤退出码 = **最后一条**的退出码，中间那条要靠 shell 的
+      # `-e` 才会中止；而工作流级 `defaults: run: shell: bash {0}` 能把 `-e` 拿掉。
+      # 追加到上一步末尾，就会让上面那条 pin 测试不再是最后一条 —— 它变红会被这条
+      # 绿的盖掉。单命令步骤的退出码恒等于该命令，不存在遮盖。
+      # （这正是 PR #191 在 backend-tests.yml 上刚修掉的缺陷类，别在这里重建。）
+      #
+      # 纯离线：三套测试 0 处网络调用，`gh` 全程由 GH_CMD 注入假件；
+      # 外部命令只用到 diff / mktemp / python3 / pytest（pytest 由上一步装好）。
+      # 它堵的洞（2026-09-23 在 main 实测）：把 job 名 + BACKEND_TESTS_CONTEXT +
+      # 单测常量「协同三改」时，CI 原有两道门全绿可合入，而本套件报 SOME FAILED。
+      - name: Governance suites (offline; canonical required-check list + runbook + verifier)
+        run: bash tests/scripts/governance/run-all.sh
       - name: Decide scope (fast no-op pass when unrelated)
         id: scope
         run: |
