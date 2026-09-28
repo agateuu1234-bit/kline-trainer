@@ -233,6 +233,11 @@ _SELF = Path(__file__).resolve()
 #: 于是它自然落进「`INSERT INTO` 后面不是字面量表名」那条判据。
 _UNRESOLVED = "\x00"
 
+#: 「这里有东西求不出来」的**可枚举**标记：f-string 插值的哨兵 · `.format()` 的 `{}` ·
+#: 百分号格式化的 `%` · shell 变量的 `$`。出现在**表名区段**或**列清单**里都意味着
+#: 「判不了」—— ⛔ 不是「缺字段」。
+_COLS_MARKERS = (_UNRESOLVED, "{", "%", "$")
+
 
 def _py_units(text: str):
     """`.py` 源码 → `[(运行时字符串, 起始行号)]`；⛔ 解析不了返回 None。
@@ -255,8 +260,13 @@ def _py_units(text: str):
                 else _UNRESOLVED
                 for p in node.values)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            # ⛔ **求不出来的操作数放哨兵，不要返回 None**（codex 第二轮实测的静默绕过）：
+            #    返回 None 的话，`"INSERT INTO training_" + suffix + " (…)"` 整体折不起来，
+            #    两个常量碎片会被**各自当成一个单元** —— 而碎片 `INSERT INTO training_`
+            #    里**没有任何标记**，「表名不是字面量」那条判据也认不出它 ⇒ 一言不发。
+            # ⇒ 折成 `INSERT INTO training_<哨兵> (…)`，哨兵落在表名区段里 ⇒ 报「判不了」。
             lhs, rhs = fold(node.left), fold(node.right)
-            return None if lhs is None or rhs is None else lhs + rhs
+            return (_UNRESOLVED if lhs is None else lhs) + (_UNRESOLVED if rhs is None else rhs)
         return None
 
     units, consumed = [], set()
@@ -379,7 +389,7 @@ def _nonliteral_targets(text: str) -> list[int]:
         #      `"INSERT INTO " + TBL` 就是这样）。
         #      `{` = `.format()` · `%` = 百分号格式化 · `$` = shell 变量 ·
         #      哨兵 = f-string 的插值。
-        if not blob or any(mk in blob for mk in (_UNRESOLVED, "{", "%", "$")):
+        if not blob or any(mk in blob for mk in _COLS_MARKERS):
             out.append(km.start())
     return out
 
@@ -643,6 +653,14 @@ def _scan(files, root):
                     positional.append(where)
                 elif kind == "unknown":
                     unknown.append(where)
+                elif any(mk in cols for mk in _COLS_MARKERS):
+                    # ⛔ 列清单里有**未解析的插值/占位** ⇒ 判不了，
+                    #    ⛔ 不许报「缺 schema_version」：`{a}` 求值成 `/*` 时字段真被注掉，
+                    #    求值成空字符串时字段真在场 —— 两种都可能，说「缺」有一半概率
+                    #    是在撒谎。而人是照着报文去改代码的（会去补一个已经存在的列）。
+                    #    本仓成文教训：报文本身错了，比单纯报错更误导人。
+                    # ⚠️ 先量后做：干净树上这条判据命中 0 条。
+                    unknown.append(f"{where}（列清单里有未解析的插值/占位，判不了）")
                 else:
                     checked += 1
                     for _d in _SCOPE_DIRS:
@@ -1102,6 +1120,14 @@ _HOST_UNDECIDABLE = (
      'Q = f"INSERT INTO {sch}.training_sets (stock_code, file_path) VALUES ($1,$2)"\n'),
     ("sh 部分动态表名（shell 变量拼后半截）", ".sh",
      'psql -c "INSERT INTO training_${SUF} (stock_code, file_path) VALUES (1,2);"\n'),
+    # ⛔ codex 第二轮实测的静默绕过：`fold` 对**含变量的 `Add`** 返回 None，
+    #    于是碎片被各自当成单元 —— 而碎片 `INSERT INTO training_` 里**没有任何标记**，
+    #    「表名不是字面量」那条判据也就认不出它。
+    ("py 变量补全表名后半截（常量 + 变量 + 常量）", ".py",
+     'suffix = "sets"\n'
+     'Q = "INSERT INTO training_" + suffix + " (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("py 变量接在完整表名之后", ".py",
+     'Q = "INSERT INTO training_sets" + tail + " (stock_code, file_path) VALUES ($1,$2)"\n'),
 )
 
 
@@ -1292,6 +1318,52 @@ def test_guard_stays_quiet_on_prose_that_merely_mentions_insert_into(tmp_path):
     assert not noisy, (
         "只是提到 `INSERT INTO` 的散文被守卫报出来了 —— 这是噪音，不是严格：\n  "
         + "\n  ".join(noisy))
+
+
+#: ⛔ 列清单里含**未解析的插值/占位**时，守卫**判不了** —— 它不许说「缺 schema_version」。
+#:    `{a}` 求值成 `/*` 时字段真的被注掉；求值成空字符串时字段真的在场。
+#:    两种都可能，所以「缺字段」这个报文**有一半概率是在撒谎**。
+#: ⚠️ 两者都会让测试变红，差别只在**报文说的对不对** —— 而人是照着报文去改代码的：
+#:    看到「缺 schema_version」他会去补一个**可能已经存在**的列。
+#:    本仓成文教训：报文本身错了，比单纯报错更误导人。
+_COLS_UNDECIDABLE = (
+    ("整个列清单是插值", ".py",
+     'Q = f"INSERT INTO training_sets ({cols}) VALUES ($1,$2)"\n'),
+    ("插值夹在列清单里（可求值成注释定界符）", ".py",
+     'Q = f"INSERT INTO training_sets (stock_code, {a} schema_version, {b} file_path)'
+     ' VALUES ($1)"\n'),
+    (".format() 占位在列清单里", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, {a} schema_version, {b} file_path)'
+     ' VALUES ($1)".format(a="/*", b="*/")\n'),
+    ("% 占位在列清单里", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, %s schema_version, %s file_path)'
+     ' VALUES ($1)" % ("/*", "*/")\n'),
+    ("shell 变量在列清单里", ".sh",
+     'psql -c "INSERT INTO training_sets (stock_code, $EXTRA) VALUES (1);"\n'),
+)
+
+
+def test_guard_says_cannot_tell_when_the_column_list_has_unresolved_interpolation(tmp_path):
+    """列清单里有未解析插值 ⇒ 报「判不了」，⛔ 不许报「缺 schema_version」。"""
+    mislabelled = []
+    for label, suffix, src in _COLS_UNDECIDABLE:
+        got = _guard_on_source(tmp_path, suffix, src)
+        if got["silent"]:
+            mislabelled.append(f"{label}：一言不发（最坏的结果）")
+        elif got["missing"]:
+            mislabelled.append(
+                f"{label}：报了「缺 schema_version」，可这里**判不了** -> {got['missing']}")
+        elif not got["unknown"]:
+            mislabelled.append(f"{label}：红了但不是「判不了」-> {got}")
+    assert not mislabelled, (
+        "列清单里有未解析的插值，守卫却给出了**确定性的结论** —— 人会照着这个"
+        "报文去补一个可能已经存在的列：\n  " + "\n  ".join(mislabelled))
+    # ⛔ 防空转：反向必须仍然绿 —— 插值只落在 VALUES 里是**完全正常**的参数化查询。
+    ok = _guard_on_source(
+        tmp_path, ".py",
+        'Q = f"INSERT INTO training_sets (stock_code, schema_version) VALUES ({a},{b})"\n')
+    assert ok["checked"] == 1 and not ok["missing"] and not ok["unknown"], (
+        f"插值只在 VALUES 里是正常写法，守卫却报了问题：{ok}")
 
 
 def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
