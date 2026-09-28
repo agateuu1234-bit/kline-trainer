@@ -263,12 +263,19 @@ def _py_units(text: str):
     # 先吃能整体折起来的 `+` 表达式（`"INSERT INTO training_" + "sets (…)"`），
     # 免得它的两半被拆成两个单元、表头正好卡在接缝上。
     for node in ast.walk(tree):
+        # ⛔ **必须先查 `consumed`**：`ast.walk` 是广度优先，`Add(Add(a,b), c)` 里
+        #    外层先被访问并标记内层已消费，但如果这里不查，**内层那个 Add 也会被
+        #    当成一个单元发出** —— 而它是「半条语句」（括号没配平）⇒ 被报「判不了」
+        #    ⇒ 三段以上常量相加的**合法代码变红**（codex 第一轮实测的误报）。
+        if id(node) in consumed:
+            continue
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             v = fold(node)
             if v is not None:
                 units.append((v, node.lineno))
                 for p in ast.walk(node):
-                    consumed.add(id(p))
+                    if p is not node:
+                        consumed.add(id(p))
     # f-string 的内部零件不要再单独当成一个单元
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
@@ -351,15 +358,28 @@ def _nonliteral_targets(text: str) -> list[int]:
         i = _skip_gap(text, m_into.end())
         if i is None:
             continue
-        name, _end = _ident(text, i)
-        if name is not None:
-            continue
+        # ⛔ **必须看整个「表名区段」，不能只看第一个字符**（codex 第一轮实测的
+        #    **静默绕过**，评级 high）：`f"INSERT INTO training_{suffix} (…)"` 解码后是
+        #    `training_<哨兵>` —— `_heads` 认不出这个表名，而只看第一个字符的话，
+        #    `training_` **是**个合法标识符 ⇒ 直接放过 ⇒ 既判不了又一言不发。
+        # ⇒ 区段 = 从 `INTO` 之后一直读到空白 / `(` / `;` / `,` / 末尾；
+        #    区段里出现任何**模板或变量标记**就报。这样部分动态、限定符动态、
+        #    shell 的 `training_${SUF}` 都能接住。
+        j, n, region = i, len(text), []
+        while j < n and j - i <= 128:
+            ch = text[j]
+            if ch.isspace() or ch in "(;,":
+                break
+            region.append(ch)
+            j += 1
+        blob = "".join(region)
         # ⛔ **不是「取不到标识符就报」** —— 那样 `.md` 散文里「INSERT INTO 表」
         #    这种中文字样也会响（`_IDENT_BARE` 要求首字符是 ASCII 字母/下划线）。
-        #    ⇒ 只认**可枚举的模板/变量标记**，外加「字面量到此为止」：
+        #    ⇒ 只认**可枚举的模板/变量标记**，外加「区段是空的」（= 字面量到此为止，
+        #      `"INSERT INTO " + TBL` 就是这样）。
         #      `{` = `.format()` · `%` = 百分号格式化 · `$` = shell 变量 ·
-        #      哨兵 = f-string 的插值 · 到末尾 = 与变量相加（`"INSERT INTO " + TBL`）。
-        if i >= len(text) or text[i] in "{%$" or text[i] == _UNRESOLVED:
+        #      哨兵 = f-string 的插值。
+        if not blob or any(mk in blob for mk in (_UNRESOLVED, "{", "%", "$")):
             out.append(km.start())
     return out
 
@@ -1048,6 +1068,15 @@ _HOST_CASES = (
     ("py 正向·相邻字面量劈开表名且字段在场", ".py",
      'Q = ("INSERT INTO training_"\n'
      '     "sets (stock_code, schema_version, file_path) VALUES ($1,$2,$3)")\n'),
+    # ⛔ **三段以上**常量相加。codex 第一轮实测的误报 —— `_py_units` 第一遍没查
+    #    `consumed`，`Add(Add(a,b), c)` 里**内层那个 Add 也被当成一个单元发出**，
+    #    而内层是「半条语句」（括号没配平）⇒ 被报「判不了」⇒ 合法代码变红。
+    ("py 正向·三段常量相加且字段在场", ".py",
+     'Q = "INSERT INTO training_sets (" + "stock_code, " '
+     '+ "schema_version) VALUES ($1,$2)"\n'),
+    ("py 正向·四段常量相加且字段在场", ".py",
+     'Q = ("INSERT INTO " + "training_sets " + "(stock_code, schema_version) " '
+     '+ "VALUES ($1,$2)")\n'),
     ("sh 正向·heredoc 里字段在场", ".sh",
      'psql <<SQL\nINSERT INTO training_sets (stock_code, schema_version, file_path)\n'
      '  VALUES (1,2,3);\nSQL\n'),
@@ -1063,6 +1092,16 @@ _HOST_UNDECIDABLE = (
      'Q = "INSERT INTO " + TBL + " (stock_code, file_path) VALUES ($1,$2)"\n'),
     ("py % 格式化变量表名", ".py",
      'Q = "INSERT INTO %s (stock_code, file_path) VALUES ($1,$2)" % TBL\n'),
+    # ⛔ **部分动态**：表名有字面量前缀、后半截是插值。codex 第一轮实测的静默绕过 ——
+    #    解码后是 `training_<哨兵>`，`_heads` 认不出它，而「表名不是字面量」那条判据
+    #    看到 `training_` **是**个合法标识符就放过了 ⇒ 既判不了又一言不发。
+    ("py 部分动态表名（字面量前缀 + 插值）", ".py",
+     'suffix = "sets"\n'
+     'Q = f"INSERT INTO training_{suffix} (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("py 部分动态表名（限定符也是插值）", ".py",
+     'Q = f"INSERT INTO {sch}.training_sets (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("sh 部分动态表名（shell 变量拼后半截）", ".sh",
+     'psql -c "INSERT INTO training_${SUF} (stock_code, file_path) VALUES (1,2);"\n'),
 )
 
 
