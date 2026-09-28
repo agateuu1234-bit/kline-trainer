@@ -43,7 +43,6 @@ verdict() {
 import importlib.util, pathlib, sys
 
 want = sys.argv[1]                       # 期望在报文里被指名的文件（相对路径片段）
-here = pathlib.Path(__file__).resolve() if "__file__" in dir() else None
 guard = pathlib.Path("backend/tests/test_insert_schema_version_guard.py").resolve()
 spec = importlib.util.spec_from_file_location("g_a4", guard)
 m = importlib.util.module_from_spec(spec)

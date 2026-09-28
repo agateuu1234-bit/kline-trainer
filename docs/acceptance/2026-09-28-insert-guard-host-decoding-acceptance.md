@@ -74,10 +74,15 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" &&
 
 期望：打印两行，**都以 `变红了 ✅` 开头**
 
-> 它干的事：先在一个**临时副本**里故意删掉一处 `schema_version`，看守卫是否变红，
-> 然后**立刻改回去**。⛔ 全程在临时目录里操作，**不会动你的真文件**。
+> 它干的事：故意删掉一处 `schema_version`，看守卫是否变红，然后改回去。
+>
+> ⚠️ **说清楚风险**：它**确实会临时修改你的真文件**（两个文件，各改一行）。
+> 三重保护：改动前先复制一份备份；用 `trap` 保证**无论怎么退出**（成功 / 报错 / 你按 Ctrl-C）
+> 都会还原；最后再用 git 复核一遍「工作树干不干净」，不干净就大声报错并列出清单。
+> ⛔ 开工前如果你的工作树本来就有未提交的改动，脚本会**拒绝运行**（避免把你的改动搞混）。
+>
 > 为什么必须验这一条：一道「什么都不报」的守卫和一道「一切正常」的守卫，
-> 从输出上看完全一样 —— 必须先证明它**能**报错，它报的「没问题」才有意义。
+> 从输出上看**完全一样** —— 必须先证明它**能**报错，它报的「没问题」才有意义。
 
 ```
 bash "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host/docs/acceptance/2026-09-28-insert-guard-host-decoding-a4.sh"
@@ -93,25 +98,34 @@ bash "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host/d
 
 ---
 
-**A5** —— 期望：打印 `干净树上误报=0`
+**A5** —— 期望：最后一行是 `2 passed in N.NNs`
 
-> 它干的事：把 #194 守卫**原本会静默放过**的 10 种写法，逐条喂给新守卫，
-> 同时把**合法写法**也喂一遍，确认新守卫既能报出问题、又不会把正常代码误判。
-> 这一条已经内置在 A1 那 6 条测试里；这里再单独把「合法写法不许变红」这一半打出来，
-> 因为它是最容易被忽略的一半。
+> 它验的是**最容易被忽略的那一半**：守卫不许把**正常代码**判成有问题。
+> 两条分别是：①只是提到 `INSERT INTO` 的散文（含中文）不许被报；
+> ②合法写法（含「表名被引号劈开但字段在场」）必须放行。
+>
+> ⚠️ 为什么单独拎出来：一道**什么都报**的守卫也能让「坏样本该红」那一半全过，
+> 但它会把人逼到「干脆无视它」。两头都得钉。
 
 ```
-cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest backend/tests/test_insert_schema_version_guard.py::test_guard_stays_quiet_on_prose_that_merely_mentions_insert_into backend/tests/test_insert_schema_version_guard.py::test_guard_sees_the_runtime_sql_not_the_source_text -q 2>&1 | tail -1 | sed 's/^/干净树上误报=0 ⇐ 若这行是 "2 passed" 则成立，实际：/'
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest "backend/tests/test_insert_schema_version_guard.py::test_guard_stays_quiet_on_prose_that_merely_mentions_insert_into" "backend/tests/test_insert_schema_version_guard.py::test_guard_sees_the_runtime_sql_not_the_source_text" -q | tail -1
 ```
 
 □ 通过　□ 不通过
 
 ---
 
-**A6** —— 期望：打印 `本片只改了 1 个文件` 和 `backend/tests/test_insert_schema_version_guard.py`
+**A6** —— 期望：打印 `本片改了 3 个文件`，且下面**恰好**是这三个：
 
-> 为什么要看这个：本片是**只改测试文件**的一片 —— 没有动任何生产代码、没有动数据库、
-> 没有动 CI 配置。如果输出里出现别的文件名，说明有不该有的改动混进来了。
+```
+backend/tests/test_insert_schema_version_guard.py
+docs/acceptance/2026-09-28-insert-guard-host-decoding-a4.sh
+docs/acceptance/2026-09-28-insert-guard-host-decoding-acceptance.md
+```
+
+> 为什么要看这个：本片**没有动任何生产代码**（改的是一个测试文件 + 两份验收材料），
+> 没有动数据库、没有动 CI 配置。如果输出里出现别的文件名，说明有不该有的改动混进来了。
+> ⚠️ 这一条是**集合等式**，不是「至少有」—— 多出来的和少掉的都算不通过。
 
 ```
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" && echo "本片只改了 $(git diff --name-only origin/main...HEAD | wc -l | tr -d ' ') 个文件" && git diff --name-only origin/main...HEAD
@@ -125,7 +139,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" &&
 
 - ⛔ **没有**动数据库。`schema_version` 的 `DEFAULT 1` 还在 —— 忘记填字段时数据库
   **仍然不会报错**。真正让它报错是下一片（TS1-R1）的事。
-- ⛔ **没有**动任何生产代码，只改了一个测试文件。
+- ⛔ **没有**动任何生产代码 —— 改的是一个测试文件，加两份验收材料（清单本身和 A4 脚本）。
 - ⛔ **不代表手机上能用了**。库存的 3 个训练组仍是第 1 代产物、App 读取端也还钉在第 1 代。
 
 ## 仍然挡不住什么（实测过，不是猜的）
