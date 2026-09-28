@@ -675,16 +675,35 @@ git commit -m "feat: rebuild_one —— 装配之前先断言右端等于旧产�
 
 **为什么**：spec §3.4 R2 要求「源库只读要有机器可查的证据，不是口头纪律」，§7 判据 9② 要求跑前跑后四张表行数与 `training_sets` 的 `count/max(id)` 完全一致。对应 spec §4 的 **B56**。
 
+⭐ **两道防线，次序不能颠倒**（codex 评审第 4 轮订正）：
+
+| 道 | 做法 | 挡得住什么 | 实测 |
+|---|---|---|---|
+| **第一道（承重）** | 连接时让**数据库自己**进只读（`default_transaction_read_only=on`），并当场自证 | **全部** —— 包括纯文本解析**永远看不见**的函数副作用 | 一次性 PG 实测：裸 `UPDATE` / **写 CTE** / `CREATE TABLE` / `SELECT sneaky_write()`（函数体里有 UPDATE）**四种全被 PG 拒绝**，表内容一个字节没变 |
+| **第二道（证据）** | 用 `pglast` 逐条判「是不是单条纯 SELECT」，并把发出的语句记下来 | 语法上看得见的写 | 实测对真实读查询**零误报**、对写 CTE 与多语句**全部拦住** |
+
+⛔ **上一版只有第二道，而且是按【首个关键字】判的 —— 实测有两个洞**（codex 第 4 轮）：
+
+```
+WITH changed AS (UPDATE training_sets SET schema_version = 1 RETURNING id)
+SELECT count(*) FROM changed          ← 首词是 WITH ⇒ 放行
+SELECT 1; UPDATE training_sets SET …  ← 首词是 SELECT ⇒ 放行
+```
+
+而且这两条改的是 `schema_version`，**不动行数、也不动 `max(id)`** ⇒ 「跑前跑后计数一致」那条**同样发现不了**。
+⇒ 一道专门用来发现误写的守卫，会在真有误写时照样报「全部为读」—— 本仓「假绿家族」的标准形态。
+
 **Files:**
 - Modify: `backend/rebuild_training_sets.py`
 - Test: `backend/tests/test_rebuild_training_sets.py`
 
 **Interfaces:**
 - Produces:
-  - `WRITE_KEYWORDS: frozenset[str]`
-  - `def assert_no_write_statements(statements: list[str]) -> None`（发现写语句 → 抛 `RebuildMismatch`）
-  - `class ReadOnlyConn`：包住任意 asyncpg 风格连接，把每条 SQL 记进 `.statements`，写语句**当场拒绝**
+  - `async def connect_read_only(dsn: str)`（**第一道**：数据库层只读 + 当场自证）
+  - `def assert_no_write_statements(statements) -> None`（**第二道**：`pglast` 白名单判据；发现问题 → 抛 `RebuildMismatch`）
+  - `class ReadOnlyConn`：包住任意 asyncpg 风格连接，把每条 SQL 记进 `.statements`，非纯读**当场拒绝**
   - `async def snapshot_source_counts(conn) -> dict`
+  - ⛔ **不再有** `WRITE_KEYWORDS` / `_first_keyword` —— 按首词判有实测可复现的漏报
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -692,25 +711,84 @@ git commit -m "feat: rebuild_one —— 装配之前先断言右端等于旧产�
 
 ```python
 def test_write_detector_reports_nonzero_on_a_planted_write():
-    """⭐ 正向对照：先证明这个检测器**能报出非 0**，再让它去报 0。
-    本仓记过的教训：报『0 条违反』之前必须先证明它报得出非 0。"""
+    """⭐ 先证明这个检测器**能报出非 0**，再让它去报 0。
+
+    ⭐ 后三条是**按首词判**会漏掉的（codex 评审第 4 轮实测复现）：
+    前两条首词分别是 `WITH` / `SELECT`，第三条根本解析不了。
+    """
     for bad in ["INSERT INTO training_sets(stock_code) VALUES ('X')",
                 "UPDATE training_sets SET schema_version = 1",
                 "DELETE FROM klines",
                 "CREATE TABLE t(x int)",
                 "ALTER TABLE klines ADD COLUMN x int",
                 "TRUNCATE training_sets",
-                "DROP TABLE klines"]:
+                "DROP TABLE klines",
+                "WITH changed AS (UPDATE training_sets SET schema_version = 1"
+                " RETURNING id) SELECT count(*) FROM changed",
+                "SELECT 1; UPDATE training_sets SET schema_version = 1",
+                "SELECT FROM WHERE ((("]:
         with pytest.raises(r.RebuildMismatch) as ei:
             r.assert_no_write_statements(["SELECT 1", bad])
-        assert bad.split()[0].lower() in str(ei.value).lower()
+        assert bad[:40] in str(ei.value), "错误信息里没点名是哪一条"
 
 
 def test_write_detector_passes_on_reads_only():
+    """⭐ 正向对照：本片真正会发出的那几条，一条都不许误报。"""
     r.assert_no_write_statements([
-        "SELECT period, datetime FROM klines WHERE stock_code=$1",
+        "SELECT period, datetime FROM klines WHERE stock_code=$1 AND period=$2"
+        " ORDER BY datetime",
         "SELECT dense_1m_start_date FROM stock_coverage WHERE stock_code=$1",
+        "SELECT count(*) FROM training_sets",
+        "SELECT max(id) FROM training_sets",
     ])
+
+
+def test_connect_read_only_refuses_a_session_that_is_not_read_only(monkeypatch):
+    """⛔ 连上了但会话不是只读 ⇒ 拒绝并把连接关掉。
+
+    ⭐ 这条自证**有判别力**，不是恒返回 `on`：一次性 PG 上实测过对照 ——
+    只读连接返回 `'on'`、普通连接返回 `'off'`。
+    """
+    import asyncio
+    import types
+    closed = {"n": 0}
+
+    class _Conn:
+        async def fetchval(self, q):
+            return "off"
+
+        async def close(self):
+            closed["n"] += 1
+
+    async def _connect(dsn, **kw):
+        assert kw.get("server_settings", {}).get(
+            "default_transaction_read_only") == "on", "连接时没有要求数据库进入只读"
+        return _Conn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+    with pytest.raises(r.RebuildMismatch):
+        asyncio.run(r.connect_read_only("postgresql://x/y"))
+    assert closed["n"] == 1, "拒绝时没有把连接关掉"
+
+
+def test_connect_read_only_accepts_a_read_only_session(monkeypatch):
+    """⭐ 正向对照：⛔ 没有它，一个**恒抛**的 connect_read_only 也能让上一条绿。"""
+    import asyncio
+    import types
+
+    class _Conn:
+        async def fetchval(self, q):
+            return "on"
+
+        async def close(self):
+            raise AssertionError("不该关掉一个合法的只读连接")
+
+    async def _connect(dsn, **kw):
+        return _Conn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+    got = asyncio.run(r.connect_read_only("postgresql://x/y"))
+    assert isinstance(got, _Conn)
 
 
 def test_rebuild_one_issues_no_write_statements(bundle, tmp_path):
@@ -735,39 +813,84 @@ def test_rebuild_one_issues_no_write_statements(bundle, tmp_path):
 追加到 `backend/rebuild_training_sets.py`：
 
 ```python
-import re
+async def connect_read_only(dsn: str):
+    """【第一道】连源库，让**数据库自己**进只读，并当场自证它真的只读了。
 
-#: 会改动数据或结构的语句首词。⛔ 枚举的是**语句种类**，不是「危险的表名」——
-#: 后者永远漏（换个表名就绕过去了）。
-WRITE_KEYWORDS = frozenset({
-    "insert", "update", "delete", "truncate", "merge", "copy",
-    "create", "alter", "drop", "grant", "revoke", "comment", "refresh",
-})
-
-_LEADING = re.compile(r"\s*(?:--[^\n]*\n|/\*.*?\*/|\s)*", re.S)
-
-
-def _first_keyword(sql: str) -> str:
-    """取语句的第一个关键字（跳过前导空白与注释）。"""
-    body = sql[_LEADING.match(sql).end():]
-    m = re.match(r"[A-Za-z_]+", body)
-    return (m.group(0) if m else "").lower()
+    ⭐ 这是唯一挡得住**函数副作用**的一道 —— 一次性 PG 实测：只读会话下
+       `SELECT sneaky_write()`（函数体里有 `UPDATE`）被 PG 拒为
+       `cannot execute UPDATE in a read-only transaction`，而**任何纯文本解析
+       都看不见它**（语法上它就是个普通 SELECT）。
+    ⭐ 自证不是走过场：实测对照过 —— 只读连接这句返回 `'on'`、普通连接返回 `'off'`
+       ⇒ 这条判据**有判别力**，不是恒返回 `on`。
+    ⚠️ 用 `SELECT current_setting(...)` 而**不是** `SHOW ...`：后者的语法树顶层不是
+       `SelectStmt`，会被第二道自己拦下来。
+    """
+    import asyncpg
+    conn = await asyncpg.connect(
+        dsn, server_settings={"default_transaction_read_only": "on"})
+    mode = await conn.fetchval("SELECT current_setting('transaction_read_only')")
+    if mode != "on":
+        await conn.close()
+        raise RebuildMismatch(
+            f"连上了，但这个会话不是只读的（transaction_read_only = {mode!r}）"
+            f" —— ⛔ 拒绝在这种连接上跑重建")
+    return conn
 
 
 def assert_no_write_statements(statements) -> None:
-    """发现任何写语句 → 抛 RebuildMismatch，并**逐条点名**。"""
-    bad = [s for s in statements if _first_keyword(s) in WRITE_KEYWORDS]
+    """【第二道】每条 SQL 都必须是**单条纯 SELECT**：解析得动、只有一条、顶层是
+    `SelectStmt`、且语法树里不出现别的语句节点。不合格就逐条点名并抛错。
+
+    ⛔ **不许按首个关键字判**（codex 评审第 4 轮，两个洞都实测复现过）：
+       `WITH changed AS (UPDATE … RETURNING id) SELECT …` 首词是 `WITH` ⇒ 放行；
+       `SELECT 1; UPDATE …` 首词是 `SELECT` ⇒ 放行。而它们改的是 `schema_version`，
+       **不动行数也不动 `max(id)`** ⇒ 「跑前跑后计数一致」那条同样发现不了。
+    ⭐ 判据写成**白名单**（只许 `SelectStmt`），⛔ 不枚举「危险写法」——
+       攻击面枚举永远漏，合法面枚举不会。
+    ⚠️ **解析不了 ⇒ 判不了 ⇒ 拒绝**，⛔ 不得当成「看起来没问题」。
+    ⚠️ 它**看不见**函数副作用 —— 那一类由 `connect_read_only()` 兜住。
+    """
+    from pglast import parse_sql
+    from pglast.visitors import Visitor
+
+    class _Collect(Visitor):
+        def __init__(self):
+            self.tags = []
+
+        def visit(self, ancestors, node):
+            self.tags.append(node.__class__.__name__)
+
+    bad = []
+    for sql in statements:
+        try:
+            parsed = parse_sql(sql)
+        except Exception as exc:
+            bad.append((sql, f"解析不了（{exc}）⇒ 判不了 ⇒ 拒绝"))
+            continue
+        if len(parsed) != 1:
+            bad.append((sql, f"一次发了 {len(parsed)} 条语句"))
+            continue
+        top = parsed[0].stmt.__class__.__name__
+        if top != "SelectStmt":
+            bad.append((sql, f"顶层是 {top}，不是 SelectStmt"))
+            continue
+        v = _Collect()
+        v(parsed[0])
+        others = sorted({x for x in v.tags
+                         if x.endswith("Stmt") and x not in ("SelectStmt", "RawStmt")})
+        if others:
+            bad.append((sql, f"语法树里有非 SELECT 的语句节点：{others}"))
     if bad:
-        listed = "\n".join(f"  · {s.strip()[:160]}" for s in bad)
+        listed = "\n".join(f"  · {s.strip()[:160]}\n      ↳ {why}" for s, why in bad)
         raise RebuildMismatch(
-            f"源库只读被破坏：发出了 {len(bad)} 条写语句 —— ⛔ 停下来查清楚\n{listed}")
+            f"源库只读被破坏：{len(bad)} 条语句不是纯读 —— ⛔ 停下来查清楚\n{listed}")
 
 
 class ReadOnlyConn:
-    """包住一个 asyncpg 风格连接：记录每条 SQL，写语句**当场拒绝**。
+    """包住一个 asyncpg 风格连接：记录每条 SQL，非纯读**当场拒绝**。
 
-    ⚠️ 它是**证据**，不是保险：`copy_records_to_table` 之类不走 SQL 文本的写入路径
-    它看不见。本片重建路径只用 fetch / fetchrow / fetchval / transaction 四样，
+    ⚠️ 它是**第二道 + 证据**，不是保险 —— 真正兜底的是 `connect_read_only()` 让
+    数据库自己拒绝。本片重建路径只用 fetch / fetchrow / fetchval / transaction 四样，
     由 `test_rebuild_one_issues_no_write_statements` 钉住实际发出的语句集合。
     """
 
@@ -812,7 +935,8 @@ async def snapshot_source_counts(conn) -> dict:
     return out
 ```
 
-⚠️ `import re` 放到文件顶部既有的 import 区，⛔ 不要留在函数中间。
+⚠️ `pglast` 的两个 import 放在 `assert_no_write_statements` **函数里**（⛔ 不放模块顶部）——与 `read_legacy_rows` 一致。它在 `backend/requirements-test.txt` 里（CI 有），但放模块顶部会让「机器上没装 pglast 就 import 不了本模块」。
+⚠️ 本任务**不再需要** `import re`（首词法已被删掉）；若你顺手加了，删掉它。
 
 - [ ] **Step 4: 跑测试，确认全绿**
 
@@ -826,7 +950,18 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 
 **变异 5a**：在 `rebuild_one` 结尾加一行 `await conn.execute("INSERT INTO training_sets(stock_code) VALUES ('X')")`。证明改到了：`grep -n "INSERT INTO training_sets" backend/rebuild_training_sets.py` 应命中 1 行。期望 `test_rebuild_one_issues_no_write_statements` **FAIL**。
 
-**变异 5b**（判别力的另一半）：把 `WRITE_KEYWORDS` 改成空集合。期望 `test_write_detector_reports_nonzero_on_a_planted_write` **FAIL** —— 证明这个检测器不是恒真放行。
+**变异 5b（对准第 4 轮那两个洞）**：把 `assert_no_write_statements` 换回**按首个关键字**判。
+证明改到了：`grep -c "parse_sql" backend/rebuild_training_sets.py`（变异前后差 1）。
+期望 `test_write_detector_reports_nonzero_on_a_planted_write` **FAIL**，且 pytest 打出的
+失败样本正是那条 `WITH changed AS (UPDATE …)`。
+
+**变异 5c（判别力的另一半）**：把 `assert_no_write_statements` 改成直接 `return`（恒放行）。
+期望同一条用例 **FAIL**；而 `test_write_detector_passes_on_reads_only` **仍绿** ——
+如实记下：这说明「全是拒了」那一组**单独**不足以证明它没坏，正向对照才是另一半。
+
+**变异 5d（第一道防线）**：把 `connect_read_only` 里的 `server_settings={...}` 整个删掉。
+期望 `test_connect_read_only_refuses_a_session_that_is_not_read_only` **FAIL**
+（替身里那句「连接时没有要求数据库进入只读」当场炸）。
 
 ⚠️ 变异 5a 之前先跑 `find . -name __pycache__ -type d -exec rm -rf {} +`。两组都复原后再跑一遍确认回绿。
 
@@ -1261,10 +1396,12 @@ def test_publish_manifest_writes_when_destination_is_free(tmp_path):
     assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
 
 
-def _stub_asyncpg(monkeypatch):
-    """把 asyncpg 换成一个什么都不做的替身（`main` 里是函数内 import，所以换 sys.modules）。"""
-    import types
+def _stub_connection(monkeypatch):
+    """把「连源库」整个换成替身 —— 本组用例验的是命令行的闸门，不是数据库。
 
+    ⭐ 换的是 `connect_read_only` 本身：如果哪天 `main` 绕过它去裸连数据库，
+    这些用例会去真连 `postgresql://x/y` 然后炸掉 —— 等于顺带钉住了「必须走只读连接」。
+    """
     class _StubConn:
         async def close(self):
             pass
@@ -1272,7 +1409,7 @@ def _stub_asyncpg(monkeypatch):
     async def _connect(dsn):
         return _StubConn()
 
-    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+    monkeypatch.setattr(r, "connect_read_only", _connect)
 
 
 def test_cli_always_verifies_determinism_even_without_any_flag(tmp_path, monkeypatch):
@@ -1283,7 +1420,7 @@ def test_cli_always_verifies_determinism_even_without_any_flag(tmp_path, monkeyp
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "qmt_trial_out").mkdir()
-    _stub_asyncpg(monkeypatch)
+    _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
     calls = []
 
@@ -1310,7 +1447,7 @@ def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "qmt_trial_out").mkdir()
-    _stub_asyncpg(monkeypatch)
+    _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
     n = {"i": 0}
 
@@ -1338,7 +1475,7 @@ def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monke
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "qmt_trial_out").mkdir()
-    _stub_asyncpg(monkeypatch)
+    _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
 
     async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
@@ -1557,8 +1694,7 @@ def main(argv=None) -> int:
         return 2
 
     async def _run():
-        import asyncpg
-        conn = ReadOnlyConn(await asyncpg.connect(args.dsn))
+        conn = ReadOnlyConn(await connect_read_only(args.dsn))
         try:
             man = await rebuild_all(conn, PINNED_TARGETS, out, old_rows=old_rows)
             # ⛔ **确定性自证是无条件的，不是开关**（codex 评审第 3 轮）：
@@ -1604,7 +1740,7 @@ if __name__ == "__main__":  # pragma: no cover
 ```
 
 ⚠️ 顶部补 `import argparse, asyncio, json, os, sys, tempfile`（`tempfile` 是验证目录用的）。
-⚠️ `import asyncpg` 放在函数里（⛔ 不放模块顶部）—— 否则测试 `import rebuild_training_sets` 就会拉 asyncpg，而本片其它用例根本不需要它。
+⚠️ `import asyncpg` 放在 `connect_read_only` 里（⛔ 不放模块顶部）—— 否则测试 `import rebuild_training_sets` 就会拉 asyncpg，而本片其它用例根本不需要它。`pglast` 同理（放在用到它的函数里）。
 
 - [ ] **Step 4: 跑全套后端测试**
 
@@ -1715,12 +1851,37 @@ Task 6（统一路径闸 `assert_write_target_is_safe` + 验证目录改用全�
 
 ⛔ **它这一轮仍然没有执行任何代码**。
 
+### 第 4 轮 · `codex:adversarial-review`（2026-09-28，同上口径，**未传 focus**）
+
+判决仍是 **needs-attention**，账本**未写入**（退出码 7）。**1 条 `medium`**，打的是只读守卫**自己**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 只看首个关键字 ⇒ 带写入的 SQL 会被放行 —— **属实** | 逐条实测：`WITH changed AS (UPDATE … RETURNING id) SELECT …` 首词是 `WITH` ⇒ 放行；`SELECT 1; UPDATE …` 首词是 `SELECT` ⇒ 放行。两条改的都是 `schema_version`，**不动行数也不动 `max(id)`** ⇒ 「跑前跑后计数一致」那条同样发现不了 |
+
+⭐ **为什么这条值钱**：它不是「重建路径里有写」——重建路径里没有。
+它是「**这道专门用来发现误写的守卫，在真有误写时会照样报『全部为读』**」。
+本仓管这叫假绿家族：一个报不出非 0 的「0 违反」。
+
+⇒ 修法分两道，**都在一次性 PG 上真跑验过**（⛔ 没碰 `qmt-trial`、⛔ 没碰 `kline-postgres`、⛔ 没复用 `backend_pgdata`；容器用完已删、零残留）：
+
+| 道 | 做法 | 实测 |
+|---|---|---|
+| **第一道** | `connect_read_only()`：连接时 `default_transaction_read_only=on`，并用 `SELECT current_setting('transaction_read_only')` 当场自证 | 裸 `UPDATE` / **写 CTE** / `CREATE TABLE` / **`SELECT sneaky_write()`（函数体里有 UPDATE）四种全被 PG 拒绝**，表内容一个字节没变。⭐ 最后那种**任何纯文本解析都看不见**。自证有判别力：只读连接返回 `'on'`、普通连接返回 `'off'` |
+| **第二道** | `assert_no_write_statements()` 改用 `pglast`：解析得动 + 只有一条 + 顶层是 `SelectStmt` + 树里无别的语句节点，**白名单**写法；解析不了 ⇒ 判不了 ⇒ 拒绝 | 写 CTE 与多语句**全部拦住**；本片真实会发的四条读查询**零误报** |
+
+⛔ **它这一轮仍然没有执行任何代码**（上表每一格都是我在本机跑出来的）。
+
 ---
 
 ## 已知残留（本片交付时仍在）
 
 - ⛔ 库存 3 个产物仍是第 1 代，NAS 上的 `api` 容器**仍在运行**（实测 2026-09-28：`Up 4 weeks`，宿主 `127.0.0.1:8010` 有监听）—— 停它归片 3 的 R0。
-- ⛔ `ReadOnlyConn` 是**证据**不是保险：不走 SQL 文本的写入路径（如 `copy_records_to_table`）它看不见。本片靠「实际发出的语句集合」这条用例兜住。
+- ⚠️ `ReadOnlyConn` 与 `assert_no_write_statements` 是**第二道 + 证据**，不是保险：不走 SQL 文本的
+  写入路径（如 `copy_records_to_table`）、以及**函数副作用**，它们都看不见。
+  兜底的是 `connect_read_only()` 让**数据库自己**拒绝（实测四种写入全拦、含函数副作用）。
+  ⚠️ 剩下的真残留只有一条：**它保护的是源库，不是文件系统** —— 文件那侧由
+  `assert_write_target_is_safe` 与原子发布负责，两者互不覆盖。
 - ⛔ 片 1 的测试全部跑在假连接 + 合成 bundle 上，**没有碰过真源库** —— 「在真数据上算出的右端等于权威值」要到片 3 真跑时才验得到。
 - ⛔⛔ **`assemble_from_windows` 自带的那道「没逃出 output_dir」守卫，挡不住符号链接** —— 实测坐实：
   它比的是 `output_dir.resolve()` 与 `zip_path.resolve().parents`，而 `.resolve()` 会跟着符号链接走，
