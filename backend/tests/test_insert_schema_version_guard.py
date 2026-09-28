@@ -773,3 +773,269 @@ def test_guard_agrees_with_real_postgres_parser():
     assert not mismatches, (
         f"守卫与真 PostgreSQL 解析器不一致，共 {len(mismatches)} 条：\n  "
         + "\n  ".join(mismatches))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⭐⭐⭐ 差分测试之二：**宿主语言这一层**也要拿真东西当裁判
+#
+# 为什么要再加一条（上面那条差分测试**接不住**这一层）：
+#   `test_guard_agrees_with_real_postgres_parser` 直接把**SQL 字符串**喂给
+#   `_heads` / `_classify`，它从不走「**文件原文 → 宿主解码 → 扫描**」这条路。
+#   而 `_scan` 喂给 `_heads` 的是**文件原文**——`.py` / `.sh` 里的 SQL 是**字符串**，
+#   源码原文与运行时真正交给 PostgreSQL 的字符串**不是一回事**：
+#
+#     · 相邻字面量拼接   `"INSERT INTO " "training_sets (…)"`      → 运行时是一整条
+#     · 转义换行         `"INSERT INTO\ntraining_sets (…)"`        → 运行时是真换行
+#     · `--` 配转义换行  `"INSERT -- c\nINTO training_sets (…)"`   → 运行时行注释真的结束
+#     · 注释定界符被劈开 `… /" "* schema_version, *" "/ …`         → 运行时才形成 `/* */`
+#     · 常量相加劈开表名 `"INSERT INTO training_" + "sets (…)"`    → 运行时才拼出表名
+#     · shell 引号拼接   `INTO training_""sets (…)`                → 运行时才拼出表名
+#
+#   实测（三个预言机逐条核实）：上面这一家子里有 **9 条**是
+#   「**合法 SQL + 写 training_sets + 列清单确实没有 schema_version**」，
+#   而守卫**一言不发** —— `_heads` 连表头都没找到，语句整条从视野里消失。
+#
+# ⛔ **期望值一个字都不由人写**，三个预言机各管一段：
+#     ① `.py` 的运行时字符串 → 交给 **Python 自己的 `ast`**（相邻字面量折叠、转义还原）
+#     ② `.sh` 的运行时字符串 → **让 bash 自己把那个参数吐出来**（绝不执行 psql）
+#     ③ 「是合法 SQL 吗 / 列清单里到底有没有 schema_version」→ 交给 **`pglast`**
+#
+# ⚠️ 表名来自**变量**（f-string / `.format()` / `%` / 与变量相加）时，
+#    运行时字符串**从源码取不出来** —— 这一类的正确行为是**明说「判不了」让测试红**，
+#    ⛔ 不是静默放行。本测试把这一类单独钉住。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `(标签, 后缀, 源码)` —— 每条都是**宿主层**的写法，不是裸 SQL。
+_HOST_CASES = (
+    # ── `.py`：相邻字面量 / 转义 / 定界符被劈开 / 常量相加 ──────────────────
+    ("py 相邻字面量在 INTO 后断开", ".py",
+     'Q = ("INSERT INTO "\n     "training_sets (stock_code, file_path) VALUES ($1,$2)")\n'),
+    ("py 相邻字面量在 INSERT 后断开", ".py",
+     'Q = ("INSERT "\n     "INTO training_sets (stock_code, file_path) VALUES ($1,$2)")\n'),
+    ("py 相邻字面量劈开表名", ".py",
+     'Q = ("INSERT INTO training_"\n     "sets (stock_code, file_path) VALUES ($1,$2)")\n'),
+    ("py 转义换行当空白", ".py",
+     'Q = "INSERT INTO\\ntraining_sets (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("py 行注释配转义换行", ".py",
+     'Q = "INSERT -- 种子\\nINTO training_sets (stock_code, file_path) VALUES ($1,$2)"\n'),
+    # ⚠️ 这个排列是**刻意挑的**：被劈开的假注释里**含 `schema_version` 字样**，
+    #    于是源码原文上按逗号切出来的 token 会把它当成真列名 ⇒ 守卫判「合规」（**假通过**）。
+    #    ⛔ 换成 `/" "* 先不要 schema_version, *" "/` 那种排列就**复现不出**这个洞
+    #    （守卫会报缺字段，方向恰好对）—— RED 阶段实测到的，所以这里写死这个排列。
+    ("py 块注释定界符被劈开（假注释里含字段字样）", ".py",
+     'Q = ("INSERT INTO training_sets (stock_code, /"\n'
+     '     "* x, schema_version, *"\n'
+     '     "/ stock_name, file_path, content_hash) VALUES ($1)")\n'),
+    ("py 常量相加劈开表名", ".py",
+     'Q = "INSERT INTO training_" + "sets (stock_code, file_path) VALUES ($1,$2)"\n'),
+    # ── `.sh`：引号拼接劈开表名 ────────────────────────────────────────────
+    ("sh 引号拼接劈开表名（间隔注释含左括号）", ".sh",
+     'psql -c "INSERT /* (x) */ INTO training_""sets '
+     '(stock_code, file_path) VALUES (1,2);"\n'),
+    ("sh 引号拼接劈开表名（间隔行注释含分号）", ".sh",
+     'psql -c "INSERT -- x;\nINTO training_""sets '
+     '(stock_code, file_path) VALUES (1,2);"\n'),
+    # ── 正向对照：合法且字段在场，⛔ 守卫必须放行 ─────────────────────────
+    ("py 正向·整条在一个字面量里", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, schema_version, file_path) '
+     'VALUES ($1,$2,$3)"\n'),
+    ("py 正向·相邻字面量拼接且字段在场", ".py",
+     'Q = ("INSERT INTO training_sets (stock_code, sch"\n'
+     '     "ema_version, file_path) VALUES ($1,$2,$3)")\n'),
+    ("sh 正向·heredoc 里字段在场", ".sh",
+     'psql <<SQL\nINSERT INTO training_sets (stock_code, schema_version, file_path)\n'
+     '  VALUES (1,2,3);\nSQL\n'),
+)
+
+#: 表名来自**变量** ⇒ 运行时字符串从源码取不出来 ⇒ 守卫必须报「判不了」，不得沉默。
+_HOST_UNDECIDABLE = (
+    ("py f-string 变量表名", ".py",
+     'Q = f"INSERT INTO {tbl} (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("py .format() 变量表名", ".py",
+     'Q = "INSERT INTO {t} (stock_code, file_path) VALUES ($1,$2)".format(t=TBL)\n'),
+    ("py 与变量相加拼表名", ".py",
+     'Q = "INSERT INTO " + TBL + " (stock_code, file_path) VALUES ($1,$2)"\n'),
+    ("py % 格式化变量表名", ".py",
+     'Q = "INSERT INTO %s (stock_code, file_path) VALUES ($1,$2)" % TBL\n'),
+)
+
+
+def _oracle_runtime_sql(suffix: str, src: str) -> list[str]:
+    """预言机 ①②：把宿主源码**还原成运行时真正交给 PostgreSQL 的字符串**。
+
+    ⛔ 一个字都不由人写：
+      · `.py` → **Python 自己的 `ast`**（相邻字面量已折叠、转义已还原）；
+        常量 `+` 常量再手动折一层；变量部分折不出来 ⇒ 该条返回空表。
+      · `.sh` → **让 bash 自己吐出 `psql -c` 的那个参数**（⛔ 绝不执行 psql）。
+    """
+    if suffix == ".py":
+        import ast as _ast
+
+        def _fold(node):
+            if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+                a, b = _fold(node.left), _fold(node.right)
+                return None if a is None or b is None else a + b
+            return None
+
+        out = []
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, (_ast.Assign, _ast.Expr)):
+                v = _fold(node.value)
+                if v:
+                    out.append(v)
+        return out
+
+    import shutil as _shutil
+    import subprocess as _subprocess
+    # ⛔ 不许 skip（本仓规则：后端 CI 是 Linux 且零容忍 skip）—— bash 必须在。
+    assert _shutil.which("bash"), "预言机②需要 bash，环境里没有 —— 这是硬失败，不是 skip"
+    # ⛔ stub 必须**同时**接住两种喂法：`psql -c "<SQL>"` 与 heredoc / 管道（读 stdin）。
+    #    只接 `-c` 的话，heredoc 那条用例会还原不出 SQL ⇒ 防空转断言当场炸
+    #    （RED 阶段实测到的，正是这条断言该有的作用）。
+    stub = (
+        "psql() { got=0; while [ $# -gt 0 ]; do "
+        "if [ \"$1\" = -c ]; then shift; printf '\\1%s\\2' \"$1\"; got=1; fi; "
+        "shift; done; "
+        "if [ \"$got\" = 0 ]; then printf '\\1'; cat; printf '\\2'; fi; }\n"
+    )
+    r = _subprocess.run(["bash", "-c", stub + src], capture_output=True, text=True)
+    blob, out = r.stdout, []
+    while "\1" in blob:
+        _, _, rest = blob.partition("\1")
+        arg, _, blob = rest.partition("\2")
+        out.append(arg)
+    # ⛔ 取不出来就**明说取不出来**，绝不退回「把整篇当 SQL」——
+    #    那会让 `psql <<SQL …` 这种壳子进到 pglast 里，制造「预言机也解析不了」的假象。
+    return out
+
+
+def _oracle_truth(sqls: list[str]):
+    """预言机 ③：`pglast` 说这批语句里有没有「写 training_sets 且缺 schema_version」。
+
+    返回 `True`（有合规写入）/ `False`（有真漏）/ `None`（PG 眼里没有这样的 INSERT）。
+    """
+    import pglast
+
+    verdict = None
+    for sql in sqls:
+        try:
+            tree = pglast.parse_sql(sql)
+        except Exception:
+            continue
+        for raw in tree:
+            stmt = raw.stmt
+            if type(stmt).__name__ != "InsertStmt":
+                continue
+            rel = stmt.relation
+            if rel is None or rel.relname != "training_sets":
+                continue
+            if rel.schemaname not in (None, "public"):
+                continue
+            cols = [c.name for c in (stmt.cols or []) if getattr(c, "name", None)]
+            if not cols:
+                continue
+            if "schema_version" not in cols:
+                return False         # 真漏最要紧，直接定案
+            verdict = True
+    return verdict
+
+
+def _guard_on_source(tmp_root, suffix: str, src: str):
+    """把源码写成一个真文件，走**守卫真正的那条装配线**（`_scan`）。
+
+    ⛔ 必须走 `_scan` 而不是直接调 `_heads` —— 本文件上面那条差分测试正是因为
+       绕过了装配线，才让「宿主原文 ≠ 运行时字符串」这一层**整层没人钉**。
+    """
+    f = tmp_root / f"probe{suffix}"
+    f.write_text(src, encoding="utf-8")
+    missing, positional, unknown, checked, _cells, lost, bad_comment = _scan([f], tmp_root)
+    return {
+        "missing": missing, "positional": positional, "unknown": unknown,
+        "checked": checked, "lost": lost, "bad_comment": bad_comment,
+        "silent": not (missing or positional or unknown or lost or bad_comment),
+    }
+
+
+def test_guard_sees_the_runtime_sql_not_the_source_text(tmp_path):
+    """守卫对宿主源码的判定，必须与「**还原成运行时字符串再问 PostgreSQL**」一致。
+
+    ⛔ 这一条钉的是 `_scan` 喂给 `_heads` 的**文本来源**。
+       上面那条差分测试直接喂 SQL 字符串，**绕过了**这一层。
+    """
+    wrong = []
+    truths, guard_verdicts = set(), set()
+
+    for label, suffix, src in _HOST_CASES:
+        runtime = _oracle_runtime_sql(suffix, src)
+        truth = _oracle_truth(runtime)
+        # ⛔ 防空转：预言机必须真的从这条源码里还原出一条「写 training_sets」的 INSERT，
+        #    否则这条用例什么都没验（本仓成文教训：报 0 违反要先证明能报非 0）。
+        assert truth is not None, (
+            f"预言机没能从这条源码里还原出写 training_sets 的 INSERT，用例是空转的："
+            f"{label} -> 还原结果={runtime!r}"
+        )
+        truths.add(truth)
+
+        got = _guard_on_source(tmp_path, suffix, src)
+        # 「守卫判它合规」= 真的判过（checked ≥ 1）且没报任何问题
+        said_ok = (got["checked"] >= 1 and not got["missing"]
+                   and not got["unknown"] and not got["positional"])
+        guard_verdicts.add(said_ok)
+
+        if truth is False:
+            # PG 说真漏 ⇒ 守卫**不许判为合规**，也不许连表头都没找到。
+            # ⚠️ 两者要分开报：「判过了但说合规」与「整条从视野里消失」根因不同，
+            #    混成一句话会让人修错地方（报文本身错了比单纯报错更误导人）。
+            if said_ok:
+                wrong.append(
+                    f"[假通过] {label}：PG 说缺 schema_version，守卫判过它却说合规"
+                    f"（checked={got['checked']}）")
+            elif got["silent"]:
+                wrong.append(
+                    f"[整条消失] {label}：PG 说缺 schema_version，守卫连表头都没找到"
+                    f"（checked={got['checked']}）")
+        else:
+            # PG 说合规 ⇒ 守卫必须真的**判过**它，且判为合规
+            if not said_ok:
+                wrong.append(
+                    f"[误报] {label}：PG 说合规，守卫却 missing={got['missing']} "
+                    f"unknown={got['unknown']} positional={got['positional']} "
+                    f"checked={got['checked']}"
+                )
+
+    # ⛔ 防恒真：两种真相都要出现过，守卫也要两种判定都给过 ——
+    #    否则本测试可能只是在比对两个恒定值。
+    assert truths == {True, False}, f"用例表退化了：PG 真相只出现了 {truths}"
+    assert guard_verdicts == {True, False}, f"用例表退化了：守卫只给出过 {guard_verdicts}"
+
+    assert not wrong, (
+        f"守卫看的是**源码原文**、而 PostgreSQL 看的是**运行时字符串**，共 "
+        f"{len(wrong)} 条不一致：\n  " + "\n  ".join(wrong)
+    )
+
+
+def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
+    """表名来自变量时，运行时字符串取不出来 ⇒ 必须**明说判不了**，⛔ 不许沉默。
+
+    ⚠️ 这一类**无法**判对（表名到底是不是 `training_sets`，源码里没写）。
+       但「判不了」与「沉默」是两件完全不同的事：前者让测试红、有人来看，
+       后者是**放行许可证**。本仓成文教训：失败要往「吵」的方向倒，不往「瞎」的方向倒。
+    """
+    silent = []
+    for label, suffix, src in _HOST_UNDECIDABLE:
+        # ⛔ 防空转：这些用例的前提是「预言机也还原不出来」。若哪天能还原了，
+        #    它们就该搬去上面那条测试，而不是留在这里继续验「沉默」。
+        runtime = _oracle_runtime_sql(suffix, src)
+        assert _oracle_truth(runtime) is None, (
+            f"预言机居然还原出了运行时 SQL：{label} —— 这条用例该搬去 "
+            f"test_guard_sees_the_runtime_sql_not_the_source_text"
+        )
+        got = _guard_on_source(tmp_path, suffix, src)
+        if got["silent"]:
+            silent.append(f"{label}")
+    assert not silent, (
+        "表名是拼出来的，守卫既判不了、又一言不发 —— 往作用域里加这样一条写入即可"
+        "静默绕过，拿到 DEFAULT 1：\n  " + "\n  ".join(silent)
+    )
