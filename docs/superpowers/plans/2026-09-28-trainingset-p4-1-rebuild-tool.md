@@ -312,6 +312,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 
 import pandas as pd
 import pytest
@@ -1150,6 +1151,7 @@ git commit -m "feat: 确定性自证 + 新旧两栏清单（旧七元组由真�
 - Produces:
   - `def _resolve_v1_archive() -> Path`
   - `def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path`
+  - `def publish_manifest(manifest_path: Path, payload: str) -> None`（原子发布，目标已存在即失败）
   - `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个）、`--verify-determinism`）
 
 - [ ] **Step 1: 写失败的测试**
@@ -1223,17 +1225,71 @@ def test_cli_refuses_to_overwrite_an_existing_manifest(tmp_path, monkeypatch):
     assert "首轮快照" in man.read_text(encoding="utf-8"), "已有清单被覆盖了"
 
 
-def test_cli_requires_empty_out_dir(tmp_path, monkeypatch):
-    """输出目录里已有 zip ⇒ 拒绝，⛔ 不得把旧产物和新产物混在一起。"""
+def test_cli_refuses_an_existing_out_dir(tmp_path, monkeypatch):
+    """产出目录必须【不存在】（spec §3.4 R2 要的就是一个新目录）。
+
+    ⭐ 这比「必须为空」强：`os.mkdir` 是原子的，两个进程同时开工时后来者当场失败；
+    而「先看是不是空的、再往里写」拦不住它们（与清单那条是同一个窗口）。
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "qmt_trial_out").mkdir()
     out = tmp_path / "out"
-    out.mkdir()
-    (out / "stale.zip").write_bytes(b"x")
+    out.mkdir()                       # 已经存在，哪怕是空的也要拒
     rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(out),
                  "--p11-sql", str(_repo_root() / _P11),
                  "--manifest", str(tmp_path / "m.json")])
     assert rc != 0
+
+
+def test_publish_manifest_refuses_an_existing_destination(tmp_path):
+    """目标已存在 ⇒ 抛错，且**一个字节都不碰**。"""
+    dest = tmp_path / "m.json"
+    dest.write_bytes(b"FIRST-RUN-SNAPSHOT")
+    with pytest.raises(r.RebuildMismatch):
+        r.publish_manifest(dest, '{"new": []}\n')
+    assert dest.read_bytes() == b"FIRST-RUN-SNAPSHOT", "目标被动过了"
+    assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
+
+
+def test_publish_manifest_writes_when_destination_is_free(tmp_path):
+    """⭐ 正向对照：⛔ 没有它，一个**恒抛**的 publish_manifest 也能让上面那条绿。"""
+    dest = tmp_path / "m.json"
+    r.publish_manifest(dest, '{"ok": 1}\n')
+    assert json.loads(dest.read_text(encoding="utf-8")) == {"ok": 1}
+    assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
+
+
+def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monkeypatch):
+    """⭐ codex 评审第 2 轮那条：预检与真正写盘之间隔着**整轮重建**（几分钟）。
+
+    这里让「重建」那一步自己在窗口期内把清单建出来，模拟另一个进程
+    （操作者以为卡住了、在另一个终端又跑了一次）。
+    ⛔ 预检必然放行 —— 它早就跑完了。拦住它的只能是 `publish_manifest` 的原子发布。
+    """
+    import types
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    man = tmp_path / "m.json"
+
+    class _StubConn:
+        async def close(self):
+            pass
+
+    async def _connect(dsn):
+        return _StubConn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        man.write_bytes(b"FIRST-RUN-SNAPSHOT")      # ← 窗口期内被别的进程建出来
+        return {"new": [], "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
+    assert rc != 0
+    assert man.read_bytes() == b"FIRST-RUN-SNAPSHOT", "首轮快照被覆盖了"
 
 
 def test_cli_requires_exactly_one_old_value_source(tmp_path, monkeypatch):
@@ -1343,14 +1399,56 @@ def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False
         raise RebuildMismatch(
             f"{kind} {q} 已经存在 —— ⛔ 拒绝覆盖。首轮清单里的【旧身份快照】"
             f"一旦被盖掉就再也取不回来（那时 P11 已经是第 2 代了）")
+    # ⚠️ `must_not_exist` 这一支是**早失败**（给操作者一个好看的错误），
+    #    **不是**保证 —— 它与真正写盘之间隔着整轮重建。承重的那道在 `publish_manifest`
+    #    的 `os.link`（codex 评审第 2 轮）。⛔ 不要因为有了这里就把那里放宽。
     return real
+
+
+def publish_manifest(manifest_path: Path, payload: str) -> None:
+    """**原子发布**清单：先写临时文件并落盘，再用「目标已存在就失败」的方式挂上去。
+
+    ⛔ **不能用 `write_text()`**（codex 评审第 2 轮）：它是 `O_CREAT|O_TRUNC`，
+       会**截断**既有文件。而 `main` 里那道「清单不得已存在」的预检与这里之间
+       隔着**整轮重建**（几分钟）—— 窗口期内另一个进程（比如操作者以为卡住了、
+       在另一个终端重跑了一次）把清单建出来，预检**拦不住**，随后就被截断。
+       实测：首轮那份 22 字节的快照被覆盖成新内容，**旧身份从此取不回来**。
+    ⭐ `os.link` 在目标已存在时抛 `FileExistsError` 且**一个字节都不碰**（实测坐实），
+       这一步本身是原子的 —— 预检只是「早点给出好看的错误信息」，
+       **真正的保证在这里**。⛔ 不要因为有了预检就把这里退回 `write_text`。
+    ⚠️ 这里用硬链接是**取它「已存在即失败」这一条性质**，与本仓记过的
+       「硬链接能穿过守卫写到仓外」是两回事：那里的路径来自外部，这里的目标由我们自己算出、
+       且刚刚过完路径闸。
+    """
+    d = manifest_path.parent
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".manifest.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, manifest_path)
+        except FileExistsError:
+            raise RebuildMismatch(
+                f"清单 {manifest_path} 在本轮重建期间被别的东西创建了 —— "
+                f"⛔ 拒绝覆盖，一个字节都没动。"
+                f"（首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来）") from None
+        # 改名/挂链接的原子性 **不等于** 目录项已经落盘（spec §3.4 R4 同一条道理）
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        os.unlink(tmp)      # 成功时目标已是同一 inode 的另一个名字，删临时名无损
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="切片一 P4 R2：按钉死的起点重建 3 个训练组（只读源库）")
     ap.add_argument("--dsn", required=True, help="源库连接串（⛔ 必须是源库的只读副本）")
-    ap.add_argument("--out-dir", required=True, help="产出目录（必须为空或不存在）")
+    ap.add_argument("--out-dir", required=True, help="产出目录（⛔ 必须【不存在】，由本命令新建）")
     ap.add_argument("--manifest", required=True, help="清单写到哪里（JSON，⛔ 不得已存在）")
     ap.add_argument("--p11-sql",
                     help="【首轮用】现有 p11 SQL 的路径；⛔ P11 已被片 2 重新生成后不可再用")
@@ -1370,19 +1468,33 @@ def main(argv=None) -> int:
         out = assert_write_target_is_safe(args.out_dir, kind="产出目录")
         manifest_path = Path(args.manifest)
         assert_write_target_is_safe(manifest_path, kind="清单", must_not_exist=True)
-        if out == manifest_path.resolve().parent or out in manifest_path.resolve().parents:
+        if out in manifest_path.resolve().parents:
             raise RebuildMismatch(
                 f"清单 {manifest_path} 落在产出目录 {out} 里 —— ⛔ 输入输出不得混放")
-        if out.exists() and any(out.glob("*.zip")):
+        # `publish_manifest` 的临时文件要建在清单的上级目录里；上级不存在的话
+        # `mkstemp` 抛的是 FileNotFoundError，会变成一个没人接的崩溃栈而不是干净的退出码。
+        if not manifest_path.parent.is_dir():
             raise RebuildMismatch(
-                f"产出目录 {out} 里已经有 zip —— 请换一个空目录，"
-                f"⛔ 不要把两批产物混在一起")
+                f"清单 {manifest_path} 的上级目录不存在 —— ⛔ 请先把它建好")
         old_rows = (read_legacy_rows(Path(args.p11_sql)) if args.p11_sql
                     else read_old_snapshot(Path(args.old_snapshot)))
+        # ⭐ 用 `os.mkdir`（⛔ **不加** `exist_ok`）把产出目录**原子地占下来**。
+        #   spec §3.4 R2 要的本来就是「产出到一个【新目录】」，所以「必须不存在」
+        #   比「必须为空」更贴合，而且顺手关掉了与清单同型的那个窗口：
+        #   「先检查是不是空的、再往里写」拦不住两个进程同时开工，`mkdir` 拦得住
+        #   （实测：第二次 mkdir 抛 FileExistsError）。
+        try:
+            os.mkdir(out)
+        except FileExistsError:
+            raise RebuildMismatch(
+                f"产出目录 {out} 已经存在 —— spec §3.4 R2 要求产出到一个【新目录】，"
+                f"⛔ 请换一个不存在的路径") from None
+        except FileNotFoundError:
+            raise RebuildMismatch(
+                f"产出目录 {out} 的上级目录不存在 —— ⛔ 请先把上级目录建好") from None
     except RebuildMismatch as exc:
         print(f"重建中止：{exc}", file=sys.stderr)
         return 2
-    out.mkdir(parents=True, exist_ok=True)
 
     async def _run():
         import asyncpg
@@ -1408,9 +1520,13 @@ def main(argv=None) -> int:
     except RebuildMismatch as exc:
         print(f"重建中止：{exc}", file=sys.stderr)
         return 1
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8")
+    try:
+        publish_manifest(
+            manifest_path,
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except RebuildMismatch as exc:
+        print(f"清单发布失败：{exc}", file=sys.stderr)
+        return 1
     print(f"清单已写到 {manifest_path}；发出的 SQL 共 {manifest['statements_issued']} 条，"
           f"全部为读")
     return 0
@@ -1440,7 +1556,8 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 4. 把 `conn.statements` 打印出来**逐条**看，确认里面全是 `SELECT`；
 5. 用真解析器读出的旧三行指纹 == `851f9444` / `32892a5f` / `150d8d6c` 且 `schema_version` 全是 `1`；
 6. 命令行入口对下面每一种都拒绝、退出码非 0：产出目录落在归档里 / **清单落在归档里** /
-   **清单已存在** / 输出目录里已有 zip / `--p11-sql` 与 `--old-snapshot` 都给或都不给；
+   **清单已存在** / **产出目录已存在** / `--p11-sql` 与 `--old-snapshot` 都给或都不给 /
+   **清单在重建途中被别的进程建出来**（这一条拦住它的不是预检，是原子发布）；
 7. ⭐ **两条正向对照各跑一次并确认是绿的**：合法路径能通过路径闸、合法的首轮清单能通过旧快照校验。
    ⛔ 少了这两条，上面那一串「拒了」掩盖得住一个**恒抛**的守卫 —— 那是本仓点名的头号假绿形态；
 8. ⭐ 亲手确认一次：把清单指向归档里的某个 zip 跑一遍，**那个 zip 的字节数跑完仍然没变**。
@@ -1491,6 +1608,25 @@ git commit -m "feat: 重建入口命令行 + 非程序员验收清单 + 变异�
 
 ⇒ 修法见 Task 5（代数闸 + `read_old_snapshot` + `rebuild_all` 改为接收 `old_rows`）与
 Task 6（统一路径闸 `assert_write_target_is_safe` + 验证目录改用全新临时目录 + 清单拒绝覆盖 + 两条正向对照）。
+
+### 第 2 轮 · `codex:adversarial-review`（2026-09-28，同上口径，**未传 focus**）
+
+判决仍是 **needs-attention**，账本**未写入**（退出码 7）。finding 从 2 条降到 **1 条 high**，
+而且它是第 1 轮那两条的**更深一层**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 清单的「不得覆盖」只是**预检**，与真正写盘之间隔着整轮重建 —— **属实** | 实测：预检时目标不存在（放行），窗口期内另一个进程把它建出来，随后 `write_text` 把它截断；另实测 `os.link` 在目标已存在时抛 `FileExistsError` 且**一个字节都不碰**，`os.mkdir` 不加 `exist_ok` 时第二个进程当场失败 |
+
+⭐ **这一条的价值在于它区分了「早失败」与「保证」**：预检给的是好看的错误信息，
+真正承重的必须是一个**原子操作**。我上一轮把预检当成了保证。
+
+⇒ 修法：新增 `publish_manifest()`（临时文件 → `fsync` → `os.link` 不覆盖 → 目录 `fsync`）；
+产出目录从「必须为空或不存在」收紧为「**必须不存在**」并用 `os.mkdir` 原子占位
+（顺手关掉同型的那个窗口，且更贴合 spec §3.4 R2 的「产出到一个【新目录】」）；
+补 1 条模拟窗口期被抢占的用例 + 1 条正向对照。
+
+⛔ **它这一轮同样没有执行任何代码**（沙箱只读、无 pglast）。上表的复现是我在本机跑的。
 
 ---
 
