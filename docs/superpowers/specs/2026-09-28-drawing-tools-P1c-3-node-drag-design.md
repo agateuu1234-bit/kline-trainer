@@ -21,7 +21,7 @@
 
 ---
 
-## 1. 决策（D134–D144，含 D134b）
+## 1. 决策（D134–D144，含 D134b / D134c）
 
 ### D134　分叉发生在手指按下那一刻，判据是「这一点有没有可拖的节点」；⛔ 起手路径上不问线（Q19 的答案）
 
@@ -41,6 +41,33 @@
 2. **本面板就是 `selectedPanel`** —— 选中是 `(selectedPanel, selectedDrawingID)` **二元组**（D41）。上下两个面板各有一套仲裁器；选中在上面板时，**下面板的探针必须回答「没有」**，否则在下面板按住同一屏幕位置也会拖动上面板的线；
 3. **`DrawingEditRouter.editableIgnoringGeometry(engine:)` 为真**（`DrawingEditRouter.swift:76-84`）；
 4. `DrawingNodeGeometry.hitTestNode` 在该点返回非 nil（几何性可见 + 在命中半径内）。
+
+### D134c　`.began` **不是**手指按下那一刻：路由用**重建出来的起手点**，位移用 `translation`
+
+**第 3 轮评审 R1-high 逼出，已在仓内核实为真。**
+
+`UIPanGestureRecognizer` 只有在手指**移动够了**才会 `.began`（UIKit 的 deadzone / slop，是**未公开**的实现细节，量级约 10pt）。⇒ `.began` 回调里的 `location(in:)` **已经不是手指按下的那一点**。
+
+**仓内的直接证据**（不是查文档得来的）：
+
+- `GestureClassifiers.swift:116` 逐字：「R14 finding：UIKit `.began` **可能已带过阈值 translation**」；
+- `:101` 逐字：`.began` 锁定水平时「基线设当前累积（**deadzone 不计入**）」—— 既有实现**刻意把这段位移丢掉**，正说明它确实存在且非零。
+
+**为什么这条是 high 而不是边角**：节点命中半径 **11pt**（`DrawingNodeGeometry.swift:19`），deadzone 约 10pt —— **同一个数量级**。⇒ 两个方向都会错：
+
+- 手指**按在节点上**，`.began` 时已滑出 11pt → 探针答「没有」⇒ 用户明明按住了黑点，图表却开始平移（或抬手切了周期）。**这是本片的主功能直接失效**；
+- 手指**按在节点外**，`.began` 时滑进 11pt → 探针答「有」⇒ 用户想平移图表，却把线拖走了。
+
+**两条规则，都与 deadzone 的具体数值无关**（⛔ 绝不依赖那个未公开常数）：
+
+| 用途 | 取值 | 为什么 |
+|---|---|---|
+| **路由**（问探针的那一点） | **重建的起手点** = `location(in:) - translation(in:)` | `translation` 的定义就是「自**手指按下**以来的累计位移」⇒ 这个减法是**精确重建**，不是近似 |
+| **拖动位移** | **`translation(in:)`**；目标屏幕点 = 「原锚点在**当前**视口下的投影」+ `translation` | ⛔ **不得**把 `location` 直接当成节点的目标位置。那会在 `.began` 把节点**瞬间吸到手指底下**（丢掉抓取偏移，最大可跳 11pt），而且跳多远取决于 deadzone ⇒ 行为挂在 Apple 的内部常数上 |
+
+⇒ **节点位移 ≡ 手指位移**，起手时用户握住黑点的相对关系全程保持；deadzone 在两条规则里**都被消掉**。
+
+⚠️ 「原锚点」全程就在 `engine.drawings` 里原样不动（D135 的直接好处）⇒ 投影**每帧用当前 mapper 现算**，不需要额外存任何东西。视口在拖动中变化时的交互见 §10-Q26。
 
 ### D134b　探针的非几何前置条件 ≡ 引擎新接口的非几何门，且**靠复用同一个函数**保证，⛔ 不靠两处同步
 
@@ -353,6 +380,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **T6** | **拖动中一次盘都不写**（D135）：`.began` 到最后一个 `.changed` 期间 `drawingsRevision` **一次都没变** | host | ⭐ 正向对照：`.ended` 之后它 **+1**。这条直接守住「每秒 60 次写盘」那个缺陷 |
 | **T7** | **新写入面的门逐条**（D136 的 ⓪①②②b③④⑤ 共 7 道拒收门） | host | ⭐ **每档都配一个「把这道门拿掉就会放行」的对照**，⛔ 不得只断言「返回 false」——恒返 false 的实现会全绿 |
 | **T7b** | **门 ⑥ 的方向，两档分别钉死**：① **相等档**（新锚点 == 原锚点）→ 返 `true`、`drawingsRevision` **不变**、撤销栈**不变**；② **不相等档**（真的拖动过）→ 返 `true`、`drawings` 里那条**确实变成了新锚点**、`drawingsRevision` **+1**、撤销栈**恰好多一条** | host | ⭐ **必须两档都写**。只写相等档 ⇒ 条件写反时全绿（第 1 轮评审 R1 实证的正是这个方向）；只写不相等档 ⇒ 无条件写入的实现也全绿。⛔ 不相等档**不得只断言返回值** —— 返 `true` 不等于真的写了 |
+| **T9** | **起手点的重建**（D134c），四档：① 起手**在**节点半径内、`.began` 时 `translation` 已把当前点带**出**半径 → **必须进拖动**；② 起手**在**半径外、`.began` 时当前点已落**进**半径 → **必须不进拖动**、且照常走图表手势；③ `translation == .zero` 的退化档 → 与今天行为一致；④ **节点位移 ≡ `translation`**：给定一串 `translation`，锚点投影的位移逐帧等于它 | host | ⭐ ①② 是**互为对照**的一对，⛔ 缺一不可：只写 ① ⇒ 「探针恒答有」全绿；只写 ② ⇒ 「探针恒答没有」全绿。④ 必须断言位移**非零**且**不等于** `location` 直接当目标时的值（两者只在 `translation != .zero` 时才分得开 ⇒ 该档的 `.began` translation **必须非零**，⛔ 不得用 0） |
 | **T8** | **作废之后手势不回落成平移**（D138 末段）：周期变化作废后，同一手势的后续 `.changed / .ended` **不产生任何 pan emission、不产生 periodSwipe** | host | 正向对照：**没有**进入过节点拖动的同一串回调**确实**产生 pan emission |
 
 ### 8.3 源码守卫（G 系列）
@@ -361,7 +389,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 |---|---|---|
 | **G1** | 既有两条手势守卫**继续绿**：`handleSinglePan` 体内无 `drawingMode`；`GestureClassifiers` 里无 `drawingTakesOver` / `DrawingModePanPolicy` / `panPolicyInDrawingMode` | 既有守卫自带「防切片为空」的正向断言（`#expect(body.contains("singlePanStep("))`）。本片**只需确认它们仍绿**，⛔ 不得因为「挡路」去改它们 |
 | **G2** | **起手路径上不得出现 `DrawingHitTester`**（D134 的结构不变量）：探针实现所在函数体内不引用该类型 | ⚠️ 切片锚点找不到时必须 `Issue.record` 当场红（⛔ 不得静默通过）；且必须配**防切片为空**的正向断言（体内确实含 `hitTestNode(`）。⚠️ 判据的**文本来源是判据的一部分**：读仓内源文件本体、先剥注释 |
-| **G3** | **拖节点起手的顺序契约**（D140）：`settleDeceleration` → `rebuildRenderState` → 读 viewport → `CoordinateMapper` → 探针，五者顺序 | 与既有 `drawingTapSettlesBeforeMapping`（`DrawingGestureSourceGuardTests.swift:62`）同款写法。⚠️ 五个锚点**缺任何一个都要显式报错**，⛔ 不得当作通过 |
+| **G3** | **拖节点起手的顺序契约**（D140）：`settleDeceleration` → `rebuildRenderState` → 读 viewport → `CoordinateMapper` → 探针，五者顺序；**且喂给探针的是重建的起手点**（体内出现 `translation` 参与的减法，D134c） | 与既有 `drawingTapSettlesBeforeMapping`（`DrawingGestureSourceGuardTests.swift:62`）同款写法。⚠️ 五个锚点**缺任何一个都要显式报错**，⛔ 不得当作通过 |
 
 | **G4** | **探针不得自己重写那份非几何清单**（D134b 的结构保证）：探针实现所在函数体内**不出现** `locked` / `hasKnownFuture` / `isEditableToolType` / `flow.mode` 任一字面量，且**确实调用了** `editableIgnoringGeometry(` | ⚠️ 两个方向都要：只写「不出现」⇒ 探针整个不查也全绿（撞空转）；只写「调用了」⇒ 又调又自己抄一份也全绿。⚠️ 切片锚点找不到必须 `Issue.record` 当场红；先剥注释再匹配（注释里必然提到这些词） |
 | **G5** | **`editableIgnoringGeometry` 的函数体未被本片改动**（只许改访问级别）：取该函数体的**归一化文本**（逐行剥行尾注释 → 压连续空白 → 去首尾空格 → 丢空行 → 以 `\|` 连接），**整串相等**于下面这个期望值（`private` 一词由本片改成 `internal`，⇒ 期望串的首行相应为 `internal static func …`）：<br><br>`internal static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {` \| `guard engine.flow.mode != .review else { return false }` \| `guard let d = uniqueSelected(engine: engine) else { return false }` \| `guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }` \| `guard !d.locked else { return false }` \| `guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }` \| `return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])` \| `&& !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])` \| `}` | ⛔ **必须整串相等，不得只数分量个数**（改一个分量名个数不变，撞「存在性检查表达不了穷尽性」那一族）。⚠️ 期望串写死在测试里 ⇒ 本片**故意**让「日后有人动这个函数」变成当场红；真要动它的人必须同时解释为什么本片这三条消费路径不受影响。⚠️ 归一化函数自身要配双向自检（喂一段改了分量的样本必须**不**相等） |
@@ -379,6 +407,8 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | 变异 | 期望变红 |
 |---|---|
 | 探针改成「先问线，线命中就返回没有」 | **T1** ⭐（不红 = Q19 无人看守） |
+| 路由改用 `.began` 的 `location`（不减 `translation`） | **T9** 的 ①② 两档 ⭐ 第 3 轮评审抓到的那条 |
+| 节点目标位置改用 `location` 直接当目标（丢掉抓取偏移） | **T9** 的 ④ 档 |
 | 探针改成只查 `locked`（即第 2 轮评审报的那一稿：不调 `editableIgnoringGeometry`） | **N6** 的 ②③④⑤⑥ 五档的**探针层** ⭐ 第 2 轮评审抓到的那条。⚠️ ① `locked` 档**预期不红**（它本来就查）——若它也红说明测试串了 |
 | 探针整个不查非几何门（连 `locked` 也不查） | **N6** 全部六档的探针层 |
 | 夹取整个拿掉（锚点原样写出） | **N7** 的四个方向档 |
