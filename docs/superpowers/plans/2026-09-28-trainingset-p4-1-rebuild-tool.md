@@ -841,7 +841,15 @@ git commit -m "feat: 源库只读的机器证据——语句级写检测 + 行�
 ### Task 5: 确定性自证 + 清单（含旧七元组快照）
 
 **为什么**：确定性是整条恢复处方的地基 —— spec §3.4 的崩溃处方里「R2 产物有疑 → 任何时刻重跑得到同一批包」这条，全靠它。对应 spec §4 的 **B34**。
-清单里那一栏**旧值**是 P11b 身份闸的输入，spec §3.4 R3 明令**必须在重新生成 P11 之前抄**（B68）；把它放进片 1 的清单生成里，这条次序就成了构造保证 —— 片 2 读的是清单，不可能读到被自己覆盖过的新值。
+清单里那一栏**旧值**是 P11b 身份闸的输入，spec §3.4 R3 明令**必须在重新生成 P11 之前抄**（B68）。
+
+⛔ **上一版这里写着「把它放进片 1 的清单生成里，这条次序就成了构造保证」—— 那句话是错的**（codex 评审第 1 轮 finding 2，已实测坐实）。
+我保证的次序是「读在重建之前」，而 spec 要的次序是「读在 **P11 被重新生成**之前」——**两者不是一回事**。
+实测：把 P11 按片 2 的样子重新生成（指纹换新、代数换 2）之后，再按 spec 的崩溃处方「重跑 R2」，
+`read_legacy_rows` 读回来的三行全是 `schema_version=2` + 新指纹，**被原样当成「旧值」记进清单**；
+CLI 又无条件覆盖清单 ⇒ **真正的旧身份快照就此消失**，而 P11b 的身份闸要拿这份假「旧值」去比一张还是旧值的表 ⇒ 必然失配、整轮卡死，错误信息看起来像「数据被人动过」（正是 B68 描述的那个故障）。
+
+⇒ **改成按判据本身守，而不是按次序守**：`read_legacy_rows` **失败即拒**——只要读到的代数不是迁移前那一代就抛错，让它**不可能**把新值当旧值返回；旧值的来源改由命令行显式选择（首轮 `--p11-sql`，重跑 `--old-snapshot` 指向首轮清单），且清单**拒绝覆盖**。
 
 **Files:**
 - Modify: `backend/rebuild_training_sets.py`
@@ -849,6 +857,9 @@ git commit -m "feat: 源库只读的机器证据——语句级写检测 + 行�
 
 **Interfaces:**
 - Produces:
+  - `LEGACY_SCHEMA_VERSION: int = 1`（库存产物迁移前的代数，实测事实）
+  - `def read_old_snapshot(path) -> list[dict]`（重跑时从首轮清单取旧身份并逐项验证）
+  - ⚠️ `rebuild_all` 的签名是 `(conn, targets, output_dir, *, old_rows)` —— **不再**接 `p11_sql_path`
   - `def container_file_path(stock_code: str, start_datetime: int) -> str`
   - `def manifest_row(gts: GeneratedTrainingSet) -> dict`（七元组）
   - `def read_legacy_rows(p11_sql_path: Path) -> list[dict]`（用 pglast 从 p11 SQL 解析旧七元组）
@@ -901,6 +912,26 @@ def test_legacy_rows_are_parsed_from_the_real_sql_by_a_real_parser():
     assert {x["schema_version"] for x in rows} == {1}, (
         "库存三行仍应是第 1 代 —— 若这里变成 2，说明 P11 已被重新生成过，"
         "⛔ 旧值已经没有落脚点了，停下来查清楚")
+
+
+def test_read_legacy_rows_refuses_a_regenerated_p11(tmp_path):
+    """片 2 把 P11 整份重新生成之后，⛔ 不得再从它取旧身份。
+
+    ⭐ 这条是 codex 评审第 1 轮 finding 2 逼出来的：实测证明，不加这道闸时
+    `read_legacy_rows` 会把**新**七元组原样当成「旧值」返回，而调用方看不出任何异常。
+    """
+    src = (_repo_root() / _P11).read_text(encoding="utf-8")
+    fake = (src.replace("851f9444", "aaaa1111")
+               .replace("32892a5f", "bbbb2222")
+               .replace("150d8d6c", "cccc3333")
+               .replace("1756656000, 1777996799, 1,", "1756656000, 1777996799, 2,")
+               .replace("1762099200, 1782835199, 1,", "1762099200, 1782835199, 2,"))
+    assert fake != src and "aaaa1111" in fake, "变异体没造出来 —— 替换锚点漂了，停下来查"
+    q = tmp_path / "p11-regenerated.sql"
+    q.write_text(fake, encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_legacy_rows(q)
+    assert "已经被重新生成过" in str(ei.value)
 
 
 def test_pinned_targets_match_the_authority_row_for_row():
@@ -965,12 +996,19 @@ def assert_byte_identical(dir_a: Path, dir_b: Path) -> None:
 _P11_EXPECTED_COLUMNS = ("stock_code", "stock_name", "start_datetime", "end_datetime",
                          "schema_version", "file_path", "content_hash")
 
+#: 库存 3 个产物在迁移【之前】的代数。⚠️ 这是一条**历史事实**（实测 p11 SQL 现为 1），
+#: 不是可配置常量；它的作用是让「P11 已被重新生成」这件事**当场可判**。
+LEGACY_SCHEMA_VERSION = 1
+
 
 def read_legacy_rows(p11_sql_path) -> list[dict]:
     """用 pglast（真 PostgreSQL 解析器）从 p11 SQL 里取出 `p11_expected` 的三行。
 
-    ⛔ 不用正则、不人手抄：spec §3.4 R3 的次序约束（旧值必须在重新生成 P11 之前快照）
-    只有在旧值**由机器从那份文件里读出来**时才是可检验的。
+    ⛔ 不用正则、不人手抄：旧值**由机器从那份文件里读出来**，才谈得上可检验。
+    ⛔ **只有在 P11 还是第 1 代时才许用它取旧值**：片 2 会把 P11 整份重新生成，
+       之后再从它取，取到的是**新**值 —— 实测会被原样当成「旧值」写进清单
+       （codex 评审第 1 轮 finding 2）。所以下面那道代数检查是**失败即拒**的，
+       ⛔ 不得放宽成警告。重跑请改用 `read_old_snapshot()` 读【首轮】清单。
     """
     from pglast import parse_sql
     from pglast.stream import RawStream
@@ -1000,15 +1038,51 @@ def read_legacy_rows(p11_sql_path) -> list[dict]:
             rows.append(d)
     if not rows:
         raise RebuildMismatch(f"{p11_sql_path} 里没找到 p11_expected 的 INSERT")
+    seen = sorted({d["schema_version"] for d in rows})
+    if seen != [LEGACY_SCHEMA_VERSION]:
+        raise RebuildMismatch(
+            f"{p11_sql_path} 里的 schema_version 是 {seen}，不是"
+            f" [{LEGACY_SCHEMA_VERSION}] —— 说明这份 P11 已经被重新生成过，"
+            f"⛔ 旧身份不能再从它取（取到的会是【新】值）。"
+            f" 重跑请改用 --old-snapshot 指向【首轮】清单。")
     return rows
 
 
-async def rebuild_all(conn, targets, output_dir: Path, *, p11_sql_path) -> dict:
-    """R2 全流程：快照旧值 → 快照源库计数 → 逐个重建 → 再快照计数并比对。
+def read_old_snapshot(path) -> list[dict]:
+    """重跑时从【首轮清单】取旧身份，并逐项验证它确实是迁移前那一代。
 
-    ⛔ **次序是硬的**：旧值必须在这里先读出来（spec §3.4 R3 / 变异 B68）。
+    ⛔ 三条验证缺一不可：代数、目标集合、行数。少一条就可能把一份**新**清单
+       当成旧快照接受，而那正是 finding 2 要堵的那个洞。
     """
-    old_rows = read_legacy_rows(p11_sql_path)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = data.get("old")
+    if not isinstance(rows, list) or len(rows) != len(PINNED_TARGETS):
+        raise RebuildMismatch(
+            f"{path} 的 old 段不是 {len(PINNED_TARGETS)} 行（读到 "
+            f"{len(rows) if isinstance(rows, list) else type(rows).__name__}）")
+    seen = sorted({int(x.get("schema_version", -1)) for x in rows})
+    if seen != [LEGACY_SCHEMA_VERSION]:
+        raise RebuildMismatch(
+            f"{path} 的 old 段 schema_version 是 {seen} —— 它不是迁移前的快照，"
+            f"⛔ 拒绝当旧身份用")
+    got = {(x["stock_code"], int(x["start_datetime"]), int(x["end_datetime"]))
+           for x in rows}
+    want = {(t.stock_code, t.start_datetime, t.expected_end_datetime)
+            for t in PINNED_TARGETS}
+    if got != want:
+        raise RebuildMismatch(
+            f"{path} 的 old 段与钉死的目标对不上\n  快照：{sorted(got)}\n  目标：{sorted(want)}")
+    return rows
+
+
+async def rebuild_all(conn, targets, output_dir: Path, *, old_rows) -> dict:
+    """R2 全流程：快照源库计数 → 逐个重建 → 再快照计数并比对。
+
+    ⛔ `old_rows` **由调用方传进来**，本函数不自己去读 P11（codex 评审第 1 轮 finding 2）：
+       「旧值必须来自迁移前的来源」这条判据，由 `read_legacy_rows` / `read_old_snapshot`
+       各自**失败即拒**地守住；写成「在这里先读一次」只保证了『读在重建之前』，
+       **保证不了**『读在 P11 被重新生成之前』。
+    """
     before = await snapshot_source_counts(conn)
     new_rows = []
     for t in targets:
@@ -1029,7 +1103,7 @@ async def rebuild_all(conn, targets, output_dir: Path, *, p11_sql_path) -> dict:
 cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py -q -rs
 ```
 
-期望：**13 passed, 0 skipped**。（Step 5 补完次序那条用例后会变成 14。）
+期望：**14 passed, 0 skipped**（Task 2 的 4 条 + Task 3 的 2 条 + Task 4 的 3 条 + 本任务的 5 条）。
 
 - [ ] **Step 5: 三组变异**
 
@@ -1039,33 +1113,15 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 
 证明改到了：`grep -n "date_time=" backend/generate_training_sets.py` 应看到 `_MUT_N` 出现在那一行。期望 `test_two_runs_are_byte_identical` **FAIL**（两次 `content_hash` 不等）。
 
-**变异 5b（B68）**：把 `rebuild_all` 里 `old_rows = read_legacy_rows(...)` 挪到三次 `rebuild_one` **之后**。期望：现有用例**不会红** —— 请如实记下这一点，并补一条用例把次序钉住：
+**变异 5b（B68 —— 按新判据重写）**：⚠️ 上一版这条写的是「把 `rebuild_all` 里读 P11 那行挪到重建之后」。
+**那条变异现在不适用了** —— `rebuild_all` 已经不自己读 P11（见 finding 2 的订正），次序不再是承重判据。
+改成对准真正承重的那条：把 `read_legacy_rows` 末尾那道**代数闸**（`if seen != [LEGACY_SCHEMA_VERSION]`）整段删掉。
 
-```python
-def test_legacy_rows_are_snapshotted_before_any_rebuild(bundle, tmp_path, monkeypatch):
-    """次序判据：旧值必须在任何一次重建【之前】读出来。
-    ⛔ 只断言『读到了旧值』抓不住次序 —— 那在两种次序下都是绿的。"""
-    import asyncio
-    order = []
-    real_read = r.read_legacy_rows
-    real_one = r.rebuild_one
+证明改到了：`grep -c "已经被重新生成过" backend/rebuild_training_sets.py`（变异前 1、变异后 0）。
+期望 `test_read_legacy_rows_refuses_a_regenerated_p11` **FAIL**。
 
-    def read_spy(p):
-        order.append("read_legacy")
-        return real_read(p)
-
-    async def one_spy(c, t, d, **kw):
-        order.append("rebuild_one")
-        return await real_one(c, t, d, **kw)
-
-    monkeypatch.setattr(r, "read_legacy_rows", read_spy)
-    monkeypatch.setattr(r, "rebuild_one", one_spy)
-    asyncio.run(r.rebuild_all(_conn(bundle), [_target_for(bundle)], tmp_path,
-                              p11_sql_path=_repo_root() / _P11))
-    assert order[0] == "read_legacy", f"次序错了：{order}"
-```
-
-补完之后再跑一次变异 5b，期望这条**FAIL**。
+**反向变异**：把代数闸改成 `if seen != [2]`。期望 `test_legacy_rows_are_parsed_from_the_real_sql_by_a_real_parser`
+**在当前树上就 FAIL** —— 证明这道闸不是恒真放行，它确实在读那份文件里的真实代数。
 
 **变异 5d（对准新加的那条集合等式）**：把 `PINNED_TARGETS` 第一条的 `start_datetime` 改成 `1756656001`（末位 +1）。证明改到了：`grep -n "1756656001" backend/rebuild_training_sets.py` 应命中 1 行。期望 `test_pinned_targets_match_the_authority_row_for_row` **FAIL**，且错误信息把两边都打出来。
 ⚠️ 再做一次**反向**变异：往 `PINNED_TARGETS` 里**多加一条**（复制第三条）。期望同一条用例**仍然 FAIL** —— 证明它用的是集合等式、抓得住「多出来的第四个」，而不是「这三个各自存在」。
@@ -1091,9 +1147,150 @@ git commit -m "feat: 确定性自证 + 新旧两栏清单（旧七元组由真�
 - Create: `docs/acceptance/2026-09-28-trainingset-p4-1-mutation-log.md`
 
 **Interfaces:**
-- Produces: `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--p11-sql`、`--manifest`、`--verify-determinism`）
+- Produces:
+  - `def _resolve_v1_archive() -> Path`
+  - `def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path`
+  - `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个）、`--verify-determinism`）
 
 - [ ] **Step 1: 写失败的测试**
+
+⚠️ 这一组是 **codex 评审第 1 轮 finding 1** 逼出来的。原来只校验了 `--out-dir` 一个入口，
+而这个流程实际会往**三个**地方写：产出目录、验证目录、清单文件。**只挡其中一个等于没挡** ——
+本仓管这叫「同一判据的正交绕法」。下面每条都实测复现过。
+
+```python
+def test_write_gate_rejects_a_symlink_pointing_into_the_archive(tmp_path, monkeypatch):
+    """⭐ 最要命的一条：一个【指向归档的符号链接】目录。
+
+    实测（2026-09-28）：`assemble_from_windows` **自带**的那道「没逃出 output_dir」守卫
+    会**放行** —— 它比的是 `output_dir.resolve()` 与 `zip_path.resolve().parents`，
+    而 `.resolve()` 会跟着符号链接走，两边都被解析进了归档 ⇒ 判定「没逃出去」为真
+    ⇒ 归档里那个同名 zip 被 `ZipFile(..., "w")` 就地截断（实测原始 17 字节被销毁）。
+    ⇒ 所以这道闸必须在**我们自己这一侧**拦住，⛔ 不能指望下游守卫。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    archive = tmp_path / "qmt_trial_out"
+    archive.mkdir()
+    link = tmp_path / "newbatch-verify"
+    link.symlink_to(archive, target_is_directory=True)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.assert_write_target_is_safe(link, kind="验证目录")
+    assert "归档" in str(ei.value)
+
+
+def test_write_gate_accepts_a_normal_target(tmp_path, monkeypatch):
+    """⭐ 正向对照：⛔ 一套全是「拒了」的用例掩盖得住一个恒抛的守卫 ——
+    那是本仓点名的头号假绿形态（真栽过：五组判据一次都没执行，429 测试 + 14 轮评审全漏）。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    got = r.assert_write_target_is_safe(tmp_path / "newbatch", kind="产出目录")
+    assert got == (tmp_path / "newbatch").resolve()
+
+
+def test_cli_refuses_out_dir_inside_the_v1_archive(tmp_path, monkeypatch):
+    """⛔ spec §3.4 R2 ⓒ：不得写入 ~/qmt_trial_out/（v1 审计归档，逐字节不得改）。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    archive = tmp_path / "qmt_trial_out"
+    archive.mkdir()
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(archive),
+                 "--p11-sql", str(_repo_root() / _P11),
+                 "--manifest", str(tmp_path / "m.json")])
+    assert rc != 0
+
+
+def test_cli_refuses_manifest_inside_the_v1_archive(tmp_path, monkeypatch):
+    """清单路径也要过同一道闸 —— 实测 `Path(...).write_text()` 会把归档里的包**截断成 3 字节**。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    archive = tmp_path / "qmt_trial_out"
+    archive.mkdir()
+    victim = archive / "000001.SZ_1756656000.zip"
+    victim.write_bytes(b"V1-ORIGINAL-BYTES")
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(victim)])
+    assert rc != 0
+    assert victim.read_bytes() == b"V1-ORIGINAL-BYTES", "归档里的文件被动过了"
+
+
+def test_cli_refuses_to_overwrite_an_existing_manifest(tmp_path, monkeypatch):
+    """⛔ 首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来（P11 那时已是第 2 代）。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    man = tmp_path / "m.json"
+    man.write_text('{"old": "首轮快照"}', encoding="utf-8")
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
+    assert rc != 0
+    assert "首轮快照" in man.read_text(encoding="utf-8"), "已有清单被覆盖了"
+
+
+def test_cli_requires_empty_out_dir(tmp_path, monkeypatch):
+    """输出目录里已有 zip ⇒ 拒绝，⛔ 不得把旧产物和新产物混在一起。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "stale.zip").write_bytes(b"x")
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(out),
+                 "--p11-sql", str(_repo_root() / _P11),
+                 "--manifest", str(tmp_path / "m.json")])
+    assert rc != 0
+
+
+def test_cli_requires_exactly_one_old_value_source(tmp_path, monkeypatch):
+    """首轮给 --p11-sql、重跑给 --old-snapshot，⛔ 不得都给也不得都不给。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    base = ["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+            "--manifest", str(tmp_path / "m.json")]
+    assert r.main(base) != 0                                        # 都不给
+    assert r.main(base + ["--p11-sql", str(_repo_root() / _P11),
+                          "--old-snapshot", str(tmp_path / "s.json")]) != 0   # 都给
+
+
+def _valid_snapshot() -> dict:
+    return {"old": [{"stock_code": t.stock_code, "stock_name": t.stock_code,
+                     "start_datetime": t.start_datetime,
+                     "end_datetime": t.expected_end_datetime,
+                     "schema_version": r.LEGACY_SCHEMA_VERSION,
+                     "file_path": r.container_file_path(t.stock_code, t.start_datetime),
+                     "content_hash": "deadbeef"}
+                    for t in r.PINNED_TARGETS]}
+
+
+def test_read_old_snapshot_accepts_a_valid_first_round_manifest(tmp_path):
+    """⭐ 正向对照（同上：防一套全是拒了的用例掩盖恒抛守卫）。"""
+    s = tmp_path / "s.json"
+    s.write_text(json.dumps(_valid_snapshot()), encoding="utf-8")
+    assert len(r.read_old_snapshot(s)) == len(r.PINNED_TARGETS)
+
+
+def test_read_old_snapshot_refuses_a_second_generation_snapshot(tmp_path):
+    d = _valid_snapshot()
+    for row in d["old"]:
+        row["schema_version"] = 2
+    s = tmp_path / "s.json"
+    s.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch):
+        r.read_old_snapshot(s)
+
+
+def test_read_old_snapshot_refuses_when_targets_do_not_match(tmp_path):
+    d = _valid_snapshot()
+    d["old"][0]["start_datetime"] += 1
+    s = tmp_path / "s.json"
+    s.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch):
+        r.read_old_snapshot(s)
+
+
+def test_read_old_snapshot_refuses_wrong_row_count(tmp_path):
+    d = _valid_snapshot()
+    d["old"].append(d["old"][-1])
+    s = tmp_path / "s.json"
+    s.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch):
+        r.read_old_snapshot(s)
+```
 
 ```python
 def test_cli_refuses_to_write_into_the_v1_archive(tmp_path, monkeypatch):
@@ -1123,7 +1320,30 @@ def test_cli_requires_empty_out_dir(tmp_path):
 
 ```python
 def _resolve_v1_archive() -> Path:
+    """v1 审计归档的真实路径。⚠️ 读 `HOME` —— 测试里可以 monkeypatch 它。"""
     return Path(os.path.expanduser("~/qmt_trial_out")).resolve()
+
+
+def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path:
+    """**任何**要写的路径，写之前都必须过这一道。返回解析后的真实路径。
+
+    ⛔ **对每一个写入目标都要跑一遍**（产出目录 / 验证目录 / 清单）——
+       只挡其中一个等于没挡（codex 评审第 1 轮 finding 1：原来只挡了产出目录）。
+    ⭐ 判据用 `.resolve()` 是**故意的**：它会跟着符号链接走，而这正是需要的 ——
+       实测一个指向归档的符号链接能让 `assemble_from_windows` 自带的守卫放行。
+    """
+    q = Path(path)
+    real = q.resolve()
+    archive = _resolve_v1_archive()
+    if real == archive or archive in real.parents:
+        raise RebuildMismatch(
+            f"{kind} 的真实路径 {real} 落在 v1 审计归档 {archive} 之内"
+            f"（给进来的是 {q}）—— 那里逐字节不得改动，⛔ 拒绝写入")
+    if must_not_exist and (q.exists() or q.is_symlink()):
+        raise RebuildMismatch(
+            f"{kind} {q} 已经存在 —— ⛔ 拒绝覆盖。首轮清单里的【旧身份快照】"
+            f"一旦被盖掉就再也取不回来（那时 P11 已经是第 2 代了）")
+    return real
 
 
 def main(argv=None) -> int:
@@ -1131,21 +1351,36 @@ def main(argv=None) -> int:
         description="切片一 P4 R2：按钉死的起点重建 3 个训练组（只读源库）")
     ap.add_argument("--dsn", required=True, help="源库连接串（⛔ 必须是源库的只读副本）")
     ap.add_argument("--out-dir", required=True, help="产出目录（必须为空或不存在）")
-    ap.add_argument("--p11-sql", required=True, help="现有 p11 SQL 的路径（取旧七元组）")
-    ap.add_argument("--manifest", required=True, help="清单写到哪里（JSON）")
+    ap.add_argument("--manifest", required=True, help="清单写到哪里（JSON，⛔ 不得已存在）")
+    ap.add_argument("--p11-sql",
+                    help="【首轮用】现有 p11 SQL 的路径；⛔ P11 已被片 2 重新生成后不可再用")
+    ap.add_argument("--old-snapshot",
+                    help="【重跑用】首轮清单 JSON 的路径，旧身份从它取")
     ap.add_argument("--verify-determinism", action="store_true",
                     help="连跑两次并断言两批 zip 逐字节相同")
     args = ap.parse_args(argv)
 
-    out = Path(args.out_dir).resolve()
-    archive = _resolve_v1_archive()
-    if out == archive or archive in out.parents:
-        print(f"拒绝：{out} 落在 v1 审计归档 {archive} 之内 —— 那里逐字节不得改动",
-              file=sys.stderr)
+    if bool(args.p11_sql) == bool(args.old_snapshot):
+        print("拒绝：--p11-sql 与 --old-snapshot 必须【恰好给一个】——"
+              " 首轮给 --p11-sql（那时 P11 还是第 1 代），重跑给 --old-snapshot"
+              "（P11 已被片 2 改过，再从它取会取到【新】值）", file=sys.stderr)
         return 2
-    if out.exists() and any(out.glob("*.zip")):
-        print(f"拒绝：{out} 里已经有 zip —— 请换一个空目录，⛔ 不要把两批产物混在一起",
-              file=sys.stderr)
+
+    try:
+        out = assert_write_target_is_safe(args.out_dir, kind="产出目录")
+        manifest_path = Path(args.manifest)
+        assert_write_target_is_safe(manifest_path, kind="清单", must_not_exist=True)
+        if out == manifest_path.resolve().parent or out in manifest_path.resolve().parents:
+            raise RebuildMismatch(
+                f"清单 {manifest_path} 落在产出目录 {out} 里 —— ⛔ 输入输出不得混放")
+        if out.exists() and any(out.glob("*.zip")):
+            raise RebuildMismatch(
+                f"产出目录 {out} 里已经有 zip —— 请换一个空目录，"
+                f"⛔ 不要把两批产物混在一起")
+        old_rows = (read_legacy_rows(Path(args.p11_sql)) if args.p11_sql
+                    else read_old_snapshot(Path(args.old_snapshot)))
+    except RebuildMismatch as exc:
+        print(f"重建中止：{exc}", file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)
 
@@ -1153,13 +1388,14 @@ def main(argv=None) -> int:
         import asyncpg
         conn = ReadOnlyConn(await asyncpg.connect(args.dsn))
         try:
-            man = await rebuild_all(conn, PINNED_TARGETS, out,
-                                    p11_sql_path=Path(args.p11_sql))
+            man = await rebuild_all(conn, PINNED_TARGETS, out, old_rows=old_rows)
             if args.verify_determinism:
-                second = out.parent / (out.name + "-verify")
-                second.mkdir(parents=True, exist_ok=True)
-                await rebuild_all(conn, PINNED_TARGETS, second,
-                                  p11_sql_path=Path(args.p11_sql))
+                # ⭐ 用**全新的临时目录**，⛔ 不再用 `out.parent / (out.name + "-verify")`：
+                #    那个名字可能早就被一个【指向归档的符号链接】占着（finding 1 实测）。
+                #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
+                second = Path(tempfile.mkdtemp(prefix="rebuild-verify-"))
+                assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
+                await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
                 assert_byte_identical(out, second)
                 man["determinism_verified_against"] = str(second)
             man["statements_issued"] = len(conn.statements)
@@ -1172,10 +1408,10 @@ def main(argv=None) -> int:
     except RebuildMismatch as exc:
         print(f"重建中止：{exc}", file=sys.stderr)
         return 1
-    Path(args.manifest).write_text(
+    manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8")
-    print(f"清单已写到 {args.manifest}；发出的 SQL 共 {manifest['statements_issued']} 条，"
+    print(f"清单已写到 {manifest_path}；发出的 SQL 共 {manifest['statements_issued']} 条，"
           f"全部为读")
     return 0
 
@@ -1184,7 +1420,7 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 ```
 
-⚠️ 顶部补 `import argparse, asyncio, json, os, sys`。
+⚠️ 顶部补 `import argparse, asyncio, json, os, sys, tempfile`（`tempfile` 是验证目录用的）。
 ⚠️ `import asyncpg` 放在函数里（⛔ 不放模块顶部）—— 否则测试 `import rebuild_training_sets` 就会拉 asyncpg，而本片其它用例根本不需要它。
 
 - [ ] **Step 4: 跑全套后端测试**
@@ -1203,11 +1439,16 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 3. 「不钉死时起点会变」那条对照确实是绿的（证明「钉死」这条判据不是空转）；
 4. 把 `conn.statements` 打印出来**逐条**看，确认里面全是 `SELECT`；
 5. 用真解析器读出的旧三行指纹 == `851f9444` / `32892a5f` / `150d8d6c` 且 `schema_version` 全是 `1`；
-6. 命令行入口对「写进 v1 归档」和「输出目录非空」两种情况都拒绝，退出码非 0。
+6. 命令行入口对下面每一种都拒绝、退出码非 0：产出目录落在归档里 / **清单落在归档里** /
+   **清单已存在** / 输出目录里已有 zip / `--p11-sql` 与 `--old-snapshot` 都给或都不给；
+7. ⭐ **两条正向对照各跑一次并确认是绿的**：合法路径能通过路径闸、合法的首轮清单能通过旧快照校验。
+   ⛔ 少了这两条，上面那一串「拒了」掩盖得住一个**恒抛**的守卫 —— 那是本仓点名的头号假绿形态；
+8. ⭐ 亲手确认一次：把清单指向归档里的某个 zip 跑一遍，**那个 zip 的字节数跑完仍然没变**。
 ⛔ 清单里禁止出现 `.claude/workflow-rules.json` 列的那些禁用措辞；每条都要自查「非程序员在这台机器上真做得到吗」。
 
 `docs/acceptance/2026-09-28-trainingset-p4-1-mutation-log.md` —— 逐条记：**怎么改的 / 怎么证明改真的落到文件里了（贴出计数或读回的那一行）/ 红的是哪一条测试 / 复原后是否回绿**。⛔ 只写「已变异」不算。⛔ 文内不写变异总数（数字会漂）。
-⚠️ 把 Task 5 变异 5b、5c 那两条「**现有用例没红**」如实记进去，连同补救措施 —— 延后或未覆盖的发现必须逐条列出，只记数量等于静默丢弃。
+⚠️ 把 Task 5 变异 5c 那条「**现有用例没红**」如实记进去，连同补救措施 —— 延后或未覆盖的发现必须逐条列出，只记数量等于静默丢弃。
+⚠️ 变异 5b 已按 codex 评审第 1 轮的订正**换了对象**（原来那条针对「读 P11 的次序」，而那已不再是承重判据），变异记录里要写明**换过对象、为什么换**。
 
 - [ ] **Step 6: 提交**
 
@@ -1221,14 +1462,47 @@ git commit -m "feat: 重建入口命令行 + 非程序员验收清单 + 变异�
 
 ## 交接给片 2 / 片 3 的既定事实
 
-1. 片 2 的 SQL 生成器**读片 1 产出的清单 JSON**，⛔ 不自己去解析 p11 SQL 取旧值 —— 次序约束（B68）已由片 1 的 `rebuild_all` 构造性保证。
+1. 片 2 的 SQL 生成器**读片 1 产出的清单 JSON**，⛔ 不自己去解析 p11 SQL 取旧值。
+   ⚠️ **上一版这里写「次序约束（B68）已由片 1 的 `rebuild_all` 构造性保证」—— 那句话是错的**，已订正（同 Task 5 开头那段）。
+   真正的保证是：`read_legacy_rows` 在 P11 不是第 1 代时**失败即拒**，`read_old_snapshot` 对首轮清单做三项验证，且清单**拒绝覆盖**。
+2. ⛔ **片 2 把 P11 重新生成之后，任何重跑 R2 都必须带 `--old-snapshot <首轮清单>`**，⛔ 不得再用 `--p11-sql`（用了会当场被拒，这是设计如此）。
 2. 清单 JSON 的结构：`{"new": [七元组×3], "old": [七元组×3], "source_counts_before": {...}, "source_counts_after": {...}, "statements_issued": N}`。
 3. ⛔ **`B2_GENERATION_LOCK_KEY` 要在 NAS 的生产库 `kline_trainer` 上取，不是在 Mac 的源库副本上** —— PostgreSQL 的 advisory lock 是**每个数据库各一套**的，在源库上持锁对生产端零约束。这条归片 3。
 4. 片 1 ⛔ 未覆盖：R0 静默期、R1 源库副本的制作、R3 三份 SQL、R4 部署、R5 写库、R6 收口闸、崩溃恢复演练、runbook P7 与 `2026-08-14-…-design.md` 的文字订正、旧指纹全仓 grep 闸、文案守卫。
 5. ⛔ **P11 本轮生成但不执行** —— 这条已知残留要一路带到片 3 的验收清单里。
+
+## 评审记录
+
+### 第 1 轮 · `codex:adversarial-review`（2026-09-28，attest 形式，scope=branch-diff，**未传 focus**）
+
+判决 **needs-attention**，账本**未写入**（脚本退出码 7）。两条 high，**逐条回源码实测复现后确认全部属实**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 归档保护只挡住三个写入口里的一个 —— **属实** | 造了一个指向假归档的符号链接目录，实测 `assemble_from_windows` **自带**的「没逃出 output_dir」守卫**放行**（`.resolve()` 跟着符号链接走，两边都解析进了归档），归档里那个文件的原始 17 字节被 `ZipFile(..., "w")` 就地销毁；另实测 `Path(...).write_text()` 把归档里另一个包截断成 3 字节 |
+| 2 | 重跑会把**新**七元组当成「旧值」，覆盖掉真正的旧身份快照 —— **属实** | 把 P11 按片 2 的样子重新生成（指纹换新、代数换 2），再跑 `read_legacy_rows`，读回来的三行全是 `schema_version=2` + 新指纹，被原样当成「旧值」 |
+
+⭐ **第 2 条还揭穿了我写在计划里的一句错话**：我声称「把读取排在重建之前，次序就成了构造保证」。
+实测证明我保证的是「读在重建之前」，而 spec 要的是「读在 **P11 被重新生成**之前」——两者不是一回事。
+那句话在计划里**有两份副本**（Task 5 开头、交接段），已**两处都订正**。
+
+⛔ **它没能跑起来什么**：codex 的沙箱**只读、且没装 pglast**，所以它审的是「判据站不站得住」，
+**没有**执行过本计划里的任何代码。上面那两条的复现是我在本机跑的，不是它跑的。
+
+⇒ 修法见 Task 5（代数闸 + `read_old_snapshot` + `rebuild_all` 改为接收 `old_rows`）与
+Task 6（统一路径闸 `assert_write_target_is_safe` + 验证目录改用全新临时目录 + 清单拒绝覆盖 + 两条正向对照）。
+
+---
 
 ## 已知残留（本片交付时仍在）
 
 - ⛔ 库存 3 个产物仍是第 1 代，NAS 上的 `api` 容器**仍在运行**（实测 2026-09-28：`Up 4 weeks`，宿主 `127.0.0.1:8010` 有监听）—— 停它归片 3 的 R0。
 - ⛔ `ReadOnlyConn` 是**证据**不是保险：不走 SQL 文本的写入路径（如 `copy_records_to_table`）它看不见。本片靠「实际发出的语句集合」这条用例兜住。
 - ⛔ 片 1 的测试全部跑在假连接 + 合成 bundle 上，**没有碰过真源库** —— 「在真数据上算出的右端等于权威值」要到片 3 真跑时才验得到。
+- ⛔⛔ **`assemble_from_windows` 自带的那道「没逃出 output_dir」守卫，挡不住符号链接** —— 实测坐实：
+  它比的是 `output_dir.resolve()` 与 `zip_path.resolve().parents`，而 `.resolve()` 会跟着符号链接走，
+  于是「一个指向别处的符号链接目录」两边都被解析到同一个地方，判定「没逃出去」为真、放行。
+  ⚠️ 这与本仓记过的硬链接那条是**同一形状**：越围着「非普通路径」打磨，越想不到「被解析之后它就是个普通目录」。
+  **本片在调用方这一侧拦住了它**（`assert_write_target_is_safe`），但**没有改那个生产函数本身** ——
+  它还被 `generate_batch` 等路径调用，改它属于行为变更、要走自己的评审。
+  ⇒ 这是一条**明确交出去的发现**，不是被忘掉的；片 3 或一个独立小 PR 决定要不要修。
