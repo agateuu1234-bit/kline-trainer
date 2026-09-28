@@ -239,6 +239,37 @@ _UNRESOLVED = "\x00"
 _COLS_MARKERS = (_UNRESOLVED, "{", "%", "$")
 
 
+#: ⛔⛔ **最后一张网：完全不解析间隔。**
+#:
+#: `_heads` / `_split_name_heads` / `_nonliteral_targets` **三者共用同一个 `_skip_gap`**
+#: —— 它只跳空白与 SQL 注释。间隔里一出现**宿主拼接痕迹**（引号 / 续行反斜杠），
+#: 三张网就**一起落空** ⇒ 语句静默消失。实测两条（bash 现场吐出参数 + pglast 核实，
+#: 都是合法 SQL 且列清单确实缺 `schema_version`）：
+#:     psql -c "INSERT "" INTO training_sets (…) VALUES (…);"
+#:     psql -c "INSERT \<换行> INTO training_sets (…) VALUES (…);"
+#:
+#: ⭐ 这与「粗网和精确网共用间隔解析器 ⇒ 所谓兜底根本不存在」是**同一条根**：
+#:   只要所有网都靠同一个间隔解析器，它坏掉时就没有地板。
+#: ⇒ 这张网**只认三个词**，中间允许任何字符，⛔ 但不许跨 `(` `)` `;`。
+#:   不许跨括号是被干净树上的误报逼出来的：
+#:       INSERT INTO p15_targets (id) SELECT id FROM training_sets
+#:   这是往**另一张表**写的合法语句，中间的 `(id)` 正好把它排除掉。
+#: ⚠️ 它只用来报「判不了」，不参与「通过」的判定 ⇒ 宁可宽一点。
+#: ⚠️ 只用于**没解码**的宿主（`.py` 已由 `ast` 正面解开，再补一遍会重复报）。
+#: ⚠️ 先量后做：实测在非 `.py` 宿主的干净树上**多报 0 条**。
+_LR_SPAN = r"(?:(?![(;)])[\s\S])"
+#: 表名被劈开时中间只可能是「下划线 / 空白 / 宿主引号 / `+` / 续行反斜杠」。
+#: ⛔ 这里**不能**用 `_LR_SPAN`（任意字符）—— 实测它会把 runbook 里的**文件路径**
+#:    `/data/training-sets/000001.SZ_….zip` 当成表名（中间是连字符）。
+_LR_NAME = r"[\s_\"'+\\]"
+_LAST_RESORT_RE = re.compile(
+    # ⚠️ 窗口 400/200 是实测定出来的：干净树上多报 0 条。
+    rf"insert{_LR_SPAN}{{1,400}}?into{_LR_SPAN}{{0,200}}?training{_LR_NAME}{{0,12}}?sets"
+    r"(?![A-Za-z0-9_$])",          # ⛔ 词边界：否则 `training_sets_audit` 也被拖下水
+    re.I,
+)
+
+
 def _py_units(text: str):
     """`.py` 源码 → `[(运行时字符串, 起始行号)]`；⛔ 解析不了返回 None。
 
@@ -280,6 +311,16 @@ def _py_units(text: str):
                     out.append(_UNRESOLVED)          # ⛔ 插值的子树不消费
             consumed.add(id(node))
             return "".join(out)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "join" and len(node.args) == 1
+                and isinstance(node.args[0], (ast.Tuple, ast.List))):
+            # `sep.join((a, b, …))`：分隔符与各段都算得出来就折起来（精度）；
+            # 算不出来的段放哨兵 —— 与 `+` 的处理一致。
+            sep = fold(node.func.value)
+            if sep is not None:
+                parts = [fold(e) for e in node.args[0].elts]
+                consumed.add(id(node))
+                return sep.join(_UNRESOLVED if x is None else x for x in parts)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             # ⛔ 求不出来的操作数**放哨兵**而不是返回 None（codex 第二轮）：
             #    返回 None 的话，`"INSERT INTO training_" + suffix + " (…)"` 整体折不起来，
@@ -290,15 +331,31 @@ def _py_units(text: str):
                     + (_UNRESOLVED if rhs is None else rhs))
         return None                                  # ⛔ 不消费 ⇒ 子树继续单独扫
 
+    # ⛔⛔ **「提及」豁免必须看 AST 上下文，不能只看「字面量恰好到表名为止」。**
+    #    豁免是**消音**规则 —— 放宽一点就是一个洞。实测（codex 第五轮，评级 high）：
+    #        Q = "".join(("INSERT INTO training_sets", " (stock_code, …) VALUES (…)"))
+    #    第一段碎片恰好到表名为止 ⇒ 被当成「提及」消音 ⇒ **静默放行**
+    #    （守恒判据也发现不了：原文与解码各有 1 条表头，数目相等）。
+    # ⇒ 只有**真正的成员测试**（`if "INSERT INTO training_sets" in query:`）才豁免 ——
+    #   那是作用域里三处合法提及的真实形状。
+    mention_ok = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and any(
+                isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            mention_ok.add(id(node.left))
+
     units = []
     for node in ast.walk(tree):
         if id(node) in consumed:
             continue
-        if isinstance(node, (ast.JoinedStr, ast.BinOp)) or (
+        # ⛔ `ast.Call` 也要进来 —— 否则 `fold` 的 `join` 分支**根本不会被调用到**，
+        #    折出来的整串从没变成单元，两段碎片反而各自成了单元（实测：join 那条
+        #    只报「判不了」而不是「缺字段」，就是这个原因）。
+        if isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Call)) or (
                 isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
             value = fold(node)
             if value is not None:
-                units.append((value, node.lineno))
+                units.append((value, node.lineno, id(node) in mention_ok))
     return units
 
 
@@ -617,7 +674,7 @@ def _scan(files, root):
         #       ⛔ 不能当成「这个文件没有字符串」—— 那是把解析失败伪装成检查通过。
         decoded_units = _py_units(text) if q.suffix == ".py" else None
         if decoded_units is None:
-            units = [(text, None)]          # None = 行号现场数
+            units = [(text, None, False)]   # None = 行号现场数；原文扫描不走 AST 豁免
         else:
             units = decoded_units
 
@@ -631,7 +688,7 @@ def _scan(files, root):
         # ⚠️ 先量后做：干净树上「解码后表头变少」的 `.py` 文件 = 0 个。
         if decoded_units is not None:
             _raw_n = len(_heads(text)[0])
-            _dec_n = sum(len(_heads(u)[0]) for u, _ in units)
+            _dec_n = sum(len(_heads(u)[0]) for u, _l, _m in units)
             if _dec_n < _raw_n:
                 unknown.append(
                     f"{rel}（解码后可见的表头从 {_raw_n} 条减到 {_dec_n} 条 —— "
@@ -640,7 +697,7 @@ def _scan(files, root):
         expected_hits = 0
         bucketed = 0
 
-        for utext, uline in units:
+        for utext, uline, mention_ok in units:
             _hits, _unterminated = _heads(utext)
             if _unterminated:
                 # ⛔ 未闭合的块注释会把其后全部内容屏蔽掉 ⇒ 真语句静默消失。必须**响**。
@@ -653,7 +710,7 @@ def _scan(files, root):
                 where = f"{rel}:{lineno}"
                 kind, cols = _classify(utext, m.start(), m.end())
                 bucketed += 1      # ⛔ 四类**都要**计数，含「提及」—— 否则等式对不上
-                if kind == "unknown" and uline is not None \
+                if kind == "unknown" and mention_ok \
                         and not utext[m.end():].strip():
                     # ⛔ 解码后的字面量**恰好到表名为止** ⇒ 这是**提及**，不是语句。
                     #    `if "INSERT INTO training_sets" in query:` 这种分派谓词就是
@@ -704,6 +761,14 @@ def _scan(files, root):
                     continue
                 lineno = text.count(chr(10), 0, st) + 1
                 unknown.append(f"{rel}:{lineno}（表名被宿主引号/拼接劈开，判不了）")
+            # ⛔ **最后一张网**（见上）：前三张网共用 `_skip_gap`，间隔里出现宿主
+            #    拼接痕迹时它们会**一起落空**。这张网不解析间隔，正是为此存在。
+            _claimed = _raw_starts | set(_split_name_heads(text))
+            for mm in _LAST_RESORT_RE.finditer(text):
+                if mm.start() in _claimed:
+                    continue
+                lineno = text.count(chr(10), 0, mm.start()) + 1
+                unknown.append(f"{rel}:{lineno}（间隔里有宿主拼接痕迹，判不了）")
 
         if bucketed != expected_hits:
             lost.append(f"{rel}：表头命中 {expected_hits} 条，却只有 {bucketed} 条被判过")
@@ -1082,6 +1147,20 @@ _HOST_CASES = (
     ("py 常量相加劈开表名", ".py",
      'Q = "INSERT INTO training_" + "sets (stock_code, file_path) VALUES ($1,$2)"\n'),
     # ── `.sh`：引号拼接劈开表名 ────────────────────────────────────────────
+    # ⛔⛔ **间隔里塞宿主拼接痕迹** —— 自查挖出的三条静默绕过，根因是
+    #    `_heads` / `_split_name_heads` / `_nonliteral_targets` **三者共用同一个
+    #    `_skip_gap`**：它只跳空白与 SQL 注释，间隔里一出现宿主引号 / 续行反斜杠，
+    #    三张网**一起落空** ⇒ 一言不发。
+    #    ⭐ 这与「粗网和精确网共用间隔解析器 ⇒ 所谓兜底根本不存在」是同一条根 ——
+    #      解法只能是一张**完全不解析间隔**的网。
+    #    （运行时用 bash 实测过：三条都是合法 SQL 且列清单确实缺 schema_version。）
+    ("sh 间隔塞引号（INSERT 与 INTO 之间）", ".sh",
+     'psql -c "INSERT "" INTO training_sets (stock_code, file_path) VALUES (1,2);"\n'),
+    ("sh 间隔用反斜杠续行", ".sh",
+     'psql -c "INSERT \\\n INTO training_sets (stock_code, file_path) VALUES (1,2);"\n'),
+    # ⚠️ `.yml` 的等价写法**没放进来**：本测试的预言机②只让 bash 吐出 `psql` 的参数，
+    #    对 `.yml` 无能为力 ⇒ 那条用例会**空转**（防空转断言当场抓到了，已撤）。
+    #    同一条代码路径由上面两条 `.sh` 用例覆盖。
     ("sh 引号拼接劈开表名（间隔注释含左括号）", ".sh",
      'psql -c "INSERT /* (x) */ INTO training_""sets '
      '(stock_code, file_path) VALUES (1,2);"\n'),
@@ -1124,6 +1203,11 @@ _HOST_UNDECIDABLE = (
      'Q = "INSERT INTO {t} (stock_code, file_path) VALUES ($1,$2)".format(t=TBL)\n'),
     ("py 与变量相加拼表名", ".py",
      'Q = "INSERT INTO " + TBL + " (stock_code, file_path) VALUES ($1,$2)"\n'),
+    # ⛔ 碎片**恰好到表名为止**、且**不是**成员测试（在列表里等着被 join）。
+    #    「提及」豁免若退回「只看位置」，这一条会被消音 ⇒ 静默放行。
+    #    ⚠️ 没有这一条，那个变异**零红**（实测）。
+    ("py 碎片到表名为止、在列表里（不是成员测试）", ".py",
+     'QS = ["INSERT INTO training_sets", cols]\n'),
     ("py % 格式化变量表名", ".py",
      'Q = "INSERT INTO %s (stock_code, file_path) VALUES ($1,$2)" % TBL\n'),
     # ⛔ **部分动态**：表名有字面量前缀、后半截是插值。codex 第一轮实测的静默绕过 ——
@@ -1161,9 +1245,20 @@ def _oracle_runtime_sql(suffix: str, src: str) -> list[str]:
         def _fold(node):
             if isinstance(node, _ast.Constant) and isinstance(node.value, str):
                 return node.value
+            if isinstance(node, _ast.Constant) and isinstance(node.value, bytes):
+                return node.value.decode("utf-8", "replace")
             if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
                 a, b = _fold(node.left), _fold(node.right)
                 return None if a is None or b is None else a + b
+            # ⛔ `sep.join((a, b, …))` —— 这里模拟的是 **Python 的语义**，
+            #    ⛔ 不是照抄守卫的实现（否则预言机与被测对象循环依赖、判别力归零）。
+            if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "join" and len(node.args) == 1
+                    and isinstance(node.args[0], (_ast.Tuple, _ast.List))):
+                sep = _fold(node.func.value)
+                parts = [_fold(e) for e in node.args[0].elts]
+                if sep is not None and all(x is not None for x in parts):
+                    return sep.join(parts)
             return None
 
         out = []
@@ -1315,6 +1410,15 @@ _MUST_STAY_QUIET = (
      "本节讲的是 `INSERT INTO`：它后面跟表名。\n"),
     ("py 注释里提到 INSERT INTO 而已", ".py",
      "# 这里原本要 INSERT INTO 另一张表，后来改了\nX = 1\n"),
+    # ⛔ 这两条钉住**兜底网不许过宽**，都是变异逼出来的（没有它们，两个变异零红）：
+    ("sh 插的是前缀相同的另一张表", ".sh",
+     'psql -c "INSERT INTO training_sets_audit (stock_code, file_path) VALUES (1,2);"\n'),
+    # ⚠️ 这一条**不能**在 `INTO` 与路径之间放括号 —— 兜底网本来就不许跨 `(`，
+    #    放了括号它根本走不到表名跨度那一步，于是「表名跨度用任意字符」那个变异会零红。
+    #    （实测踩过：第一版写成 `VALUES ('000001.SZ', '/data/training-sets/…')` ⇒ 零红。）
+    ("md 插别的表、同一段里出现 training-sets 路径且不隔括号", ".md",
+     "```sh\npsql -c \"INSERT INTO p11_expected SELECT "
+     "'/data/training-sets/a.zip';\"\n```\n"),
 )
 
 
@@ -1406,6 +1510,12 @@ _MUST_NOT_VANISH = (
     ("f-string 插值表达式里的 SQL", ".py",
      "Q = f\"{'INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)'"
      " if flag else ''}\"\n"),
+    # ⛔ `"".join(...)`：碎片 `INSERT INTO training_sets` 恰好到表名为止，
+    #    被「提及」豁免当成非语句 ⇒ 静默放行（codex 第五轮，评级 high）。
+    #    ⭐ 豁免是**消音**规则 —— 消音规则放宽一点就是一个洞。
+    ("join 拼接（碎片恰好到表名为止）", ".py",
+     'Q = "".join(("INSERT INTO training_sets",'
+     ' " (stock_code, file_path) VALUES (1,2)"))\n'),
     # ⛔ **bytes 字面量**：旧守卫（扫原文）本来报得出它，而我改成扫解码单元之后
     #    它整条消失 —— 这是**我引入的退化**（codex 第四轮）。
     ("bytes 字面量 .decode()", ".py",
@@ -1431,33 +1541,21 @@ def test_sql_literals_inside_unresolvable_expressions_do_not_vanish(tmp_path):
         "求不出来的表达式里的 SQL 字面量**整条消失**了 —— 这是最坏的结果："
         "既没判对也没说判不了，没人知道该去看一眼：\n  " + "\n  ".join(vanished))
     # ⛔ 防空转：这些样本里**确实**各有一条写 training_sets 且缺字段的 SQL。
-    #    用 pglast 现场确认，⛔ 不由人写期望值。
+    #    ⚠️ 候选串既要含**单个字面量**（`.format()` / 列表 / 三元 那几条的 SQL 就在
+    #       某一个字面量里），也要含**折叠后的整体**（`join` 那条的两段单独都不是
+    #       合法 SQL，只有拼起来才是）。少一半这条防空转就会误判成「用例空转」。
     import ast as _ast
-    import pglast
-    for label, _suffix, src in _MUST_NOT_VANISH:
-        found = False
+    for label, suffix, src in _MUST_NOT_VANISH:
+        cands = list(_oracle_runtime_sql(suffix, src))
         for node in _ast.walk(_ast.parse(src)):
             if not isinstance(node, _ast.Constant):
                 continue
             raw = node.value
-            if isinstance(raw, bytes):        # ⛔ bytes 字面量也算 —— 它 `.decode()` 之后就是 SQL
+            if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", "replace")
-            if not isinstance(raw, str):
-                continue
-            try:
-                tree = pglast.parse_sql(raw)
-            except Exception:
-                continue
-            for raw in tree:
-                stmt = raw.stmt
-                if type(stmt).__name__ != "InsertStmt":
-                    continue
-                if stmt.relation is None or stmt.relation.relname != "training_sets":
-                    continue
-                cols = [c.name for c in (stmt.cols or []) if getattr(c, "name", None)]
-                if cols and "schema_version" not in cols:
-                    found = True
-        assert found, (
+            if isinstance(raw, str):
+                cands.append(raw)
+        assert _oracle_truth(cands) is False, (
             f"这条样本里并没有「写 training_sets 且缺 schema_version」的合法 SQL，"
             f"用例是空转的：{label}")
 
@@ -1473,6 +1571,24 @@ _MUST_NAME_THE_MISSING_FIELD = (
      '.decode("ascii")\n'),
     ("普通字面量", ".py",
      'Q = "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
+    # ⛔ `join` 折叠是**精度**改进：不折叠时兜底/豁免收窄会把它兜成「判不了」——
+    #    仍然红，但报文从「缺 schema_version」降级成「要人再看一遍」。
+    #    ⚠️ 没有这一条，「不折叠 join」那个变异**零红**（实测）。
+    ("join 拼接", ".py",
+     'Q = "".join(("INSERT INTO training_sets",'
+     ' " (stock_code, file_path) VALUES (1,2)"))\n'),
+    # ⛔ 下面三条钉住「**只消费真正被折进结果的节点**」是**精度**改进：
+    #    守恒判据（地板）已经能把它们兜成「判不了」，于是那处修复本身**没人钉**
+    #    —— 实测两个变异（Add 分支整棵子树消费 / f-string 插值子树也消费）零红。
+    #    有了这三条，它们才会红。
+    (".format() 结果再接一段", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"'
+     '.format() + ";"\n'),
+    ("f-string 插值表达式里的 SQL", ".py",
+     "Q = f\"{'INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)'"
+     " if flag else ''}\"\n"),
+    ("列表里的 SQL 与另一个列表相加", ".py",
+     'QS = ["INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"] + EXTRA\n'),
 )
 
 

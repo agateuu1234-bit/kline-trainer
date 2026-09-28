@@ -119,12 +119,13 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" &&
 
 ---
 
-**A6** —— 期望：打印 `本片改了 3 个文件`，且下面**恰好**是这三个：
+**A6** —— 期望：打印 `本片改了 4 个文件`，且下面**恰好**是这四个：
 
 ```
 backend/tests/test_insert_schema_version_guard.py
 docs/acceptance/2026-09-28-insert-guard-host-decoding-a4.sh
 docs/acceptance/2026-09-28-insert-guard-host-decoding-acceptance.md
+docs/acceptance/2026-09-28-insert-guard-host-decoding-mutations.py
 ```
 
 > 为什么要看这个：本片**没有动任何生产代码**（改的是一个测试文件 + 两份验收材料），
@@ -139,11 +140,40 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" &&
 
 ---
 
+---
+
+**A7 —— 证明「每一处修复都真有测试钉着」**
+
+期望：最后一行是 `全部变红 ✅（共 23 组）`，且**没有任何一行**以 `⛔` 开头
+
+> 它干的事：把本片的**每一处**修复逐条「改回去」（23 处），每次都跑一遍守卫测试，
+> 确认**对症的那一条**会变红，然后改回来。
+>
+> 为什么需要这一条：测试全绿只说明「现在没问题」，**不说明这些测试真的在管事**。
+> 本片实测过 6 次「某处修复改回去，测试却全绿」—— 说明那处修复当时**没人钉着**，
+> 补了对应的正向/精度对照之后才红。
+>
+> ⚠️ 脚本会临时改守卫文件，改完立刻还原，收尾用 git 复核；
+> ⛔ 开工前工作树不干净时它会拒绝运行。
+> ⚠️ 如果某一行报「**该变异未执行**（锚点命中 0 次）」，说明守卫代码被重构过、
+> 脚本的锚点失效了 —— 那**不是通过**，需要把锚点改对再跑。
+
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" docs/acceptance/2026-09-28-insert-guard-host-decoding-mutations.py; echo "退出码=$?"
+```
+
+> ⚠️ 这一条**故意不用管道**（`| tail`）—— 管道会把真正的退出码吞掉，只看最后几行
+> 可能被骗（本仓踩过这个坑，本片写这条时也差点踩）。期望 `退出码=0`。
+
+□ 通过　□ 不通过
+
+---
+
 ## 这一片**没有**做什么（别误以为做了）
 
 - ⛔ **没有**动数据库。`schema_version` 的 `DEFAULT 1` 还在 —— 忘记填字段时数据库
   **仍然不会报错**。真正让它报错是下一片（TS1-R1）的事。
-- ⛔ **没有**动任何生产代码 —— 改的是一个测试文件，加两份验收材料（清单本身和 A4 脚本）。
+- ⛔ **没有**动任何生产代码 —— 改的是一个测试文件，加三份验收材料（清单本身、A4 脚本、变异脚本）。
 - ⛔ **不代表手机上能用了**。库存的 3 个训练组仍是第 1 代产物、App 读取端也还钉在第 1 代。
 
 ## 仍然挡不住什么（实测过，不是猜的）
