@@ -82,9 +82,11 @@ func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor)
 | ③ | `!hasKnownFutureEnumValues` + `!hasKnownFutureFields` | D61 | **要**。改锚点是「部分改写」，与删整条性质不同（删除面不查这两道门正是因为它不产生部分抹除） |
 | ④ | `drawings[i].anchors.indices.contains(anchorIndex)` | **本接口新增** | Swift 数组越界是 trap（进程崩），`do/catch` 接不住。⚠️ 同时是 Q24 的**部分**兜底（见 §11） |
 | ⑤ | `anchor.period == old.period` | D29 周期绑定 + N8 | 引擎侧兜底。混周期锚点 = 后续所有 `candleIndex` 被按错误周期解释的坏数据 |
-| ⑥ | `updated != old` → 返 `true` 且**零副作用** | D80 | 拖回原处再松手不得触发一次无谓写盘，更不得把撤销栈里那条真编辑挤掉 |
+| ⑥ | **内容未变**（`updated == old`）→ 返 `true` 且**零副作用**（不写数组、不入栈、`drawingsRevision` **不**递增）。⚠️ **内容变了则必须走完整的写入路径**，⛔ 不得短路 | D80 | 拖回原处再松手不得触发一次无谓写盘，更不得把撤销栈里那条真编辑挤掉 |
 
 **⛔ 本接口不含、也不声称含几何门。** 引擎没有 `mapper`（`deleteDrawing(id:)` 的头注逐字：「引擎判不了几何、也不声称挡几何」）。夹回边界（D137）发生在界面层，本接口只守它守得住的那几道。
+
+> ⚠️ **门 ⑥ 的条件方向**（本 spec 第 1 轮评审 R1-medium 修正）：生产范式是 `guard updated != old else { return true }`（`TrainingEngine.swift:1212`）—— 即**短路的条件是「相等」**。写反成「不相等就短路」会**恰好覆盖所有真正改变锚点的拖动**：松手报告成功却什么都没写，瞬时覆盖一清，线**当场弹回原处**；而真正该短路的「拖回原处」反倒去写了一次。⛔ 这条方向必须由 §8-**T7b** 的**两档**分别钉死，不得只测一档。
 
 **成功路径**照四个既有写入面的范式：`drawings[i] = updated` → `recordDrawingUndoDelta(.replaced(before:after:at:))`（`TrainingEngine.swift:1554`）→ `drawingsRevision += 1`。
 **构造 `updated` 时逐字段拷贝**，只换 `anchors`。⚠️ `isExtended` 由 `lineSubType` 派生、**不由锚点派生**（`Models.swift:260` / `:320-322`），故拷贝即可；`period` 显式传 `old.period`（⛔ 不让 `init` 从 `anchors.first` 现取——那会让门 ⑤ 变成摆设）。
@@ -99,6 +101,21 @@ func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor)
 **为什么不是「松手作废回弹」**（user 2026-09-28 拍板）：夹取让「拖出一条 `visibleGeometry == nil` 的幽灵线」**结构上不可能**，而不是靠又一道守卫去拦；拖动全程线一直看得见、连续可预测；且不需要维护第二条「作废回弹」的状态路径（本仓纪律：新增一层状态自带三个新失效点）。
 
 **代价**：想把线放到比当前屏幕更高的价位，得先缩放 / 平移把那个价位转进屏幕。⚠️ 这与今天「点一下落锚」只能落在图内**完全一致**，不是新限制。
+
+**⛔⛔ 夹取的判据是「夹完之后 `visibleGeometry != nil`」这个**后置条件**，⛔ 不是「落进可见窗口」**（第 1 轮评审探索轨迹逼出，本 spec 自核确认）：
+
+`.ray` 的右缘是**严格 fail-closed** 的 —— `anchorX >= frame.maxX` 即整条线返回 nil（`HorizontalLineTool.swift:57-58`，注释逐字：「落点在右缘【上或外】→ 零长度/不可见段」）。
+而 `indexToX(startIndex + visibleCount - 1)`（可见窗口的**最后一根** K 线）**完全可能恰好落在 `frame.maxX` 上或之外** —— 它等于 `(visibleCount - 1) × candleStep + pixelShift`，与 `mainChartFrame.maxX` 之间**没有任何不变量保证**大小关系。
+
+⇒ 「把 `candleIndex` 夹进 `[startIndex, startIndex + visibleCount - 1]`」这条朴素写法，对 `.ray` **会造出恰恰要禁止的幽灵线**：节点贴着右边框、线却整条消失、随后既看不见也选不中。
+
+**因此本 spec 钉死的是后置条件，不是公式**：
+
+1. 夹取函数的**后置条件**是「对**该条线的实际子类型**，`HorizontalLineTool.visibleGeometry(for:mapper:) != nil`」；
+2. 实现必须**逐子类型**验证该后置条件（`.straight` / `.ray` 各一档；`.segment` 恒不可渲染 ⇒ 在探针层就该被 `isVisible` 挡住，根本进不来拖动）；
+3. ⛔ **不得**假设「夹进可见窗口」就够了 —— 这正是本条要禁止的那个朴素写法。
+
+⚠️ §8-N7 的判据（真调一次 `visibleGeometry` 断言非 nil）与本条是**同一件事的两面**：本条规定实现的义务，N7 规定证据的形状。**两者必须都在**，缺任何一个这条都会静默失守。
 
 **⛔ 夹取是界面层的一个独立纯函数**（与 `DrawingNodeGeometry` 并排，仅依赖 CoreGraphics ⇒ host `swift test` 全覆盖），签名形如
 `clampedAnchor(at point: CGPoint, mapper: CoordinateMapper, period: Period) -> DrawingAnchor`。
@@ -287,7 +304,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **N4** | **一次拖动 = 一条撤销记录**：`.began` → `.changed` × N（N ≥ 3）→ `.ended` 后，撤销栈深度**恰好 1**；点 ↩ 一次，锚点**整个**回到拖动前的值 | host | ⭐ 上游明令**同时断言深度和回滚后坐标**（只断深度会撞空栈假绿）。⚠️ 再加一条：断言拖动后的锚点**确实 ≠** 拖动前（否则「撤销后等于拖前」会因为压根没改而恒真）。另断言 `drawingsRevision` 相对基线恰好 **+1** |
 | **N5** | **引擎写入点穷尽性守卫同步**：`DrawingUndoSourceGuardTests` 的 U-G4 表 **10 → 11**，新接口在表里**有自己的一行**；L12b 总数同步 | host | 该守卫已有双向自检（`test_uG4_scanner_is_not_vacuous`：合成「写入被挪进表外私有 helper」的样本必须被判出来）。本片**确认它覆盖新接口的形状**并实跑，⛔ 不重复造一份自检 |
 | **N6** | **锁定的线拖不动** | host | ⭐ **两层各一条**：① **探针层**——锁定的线上按下，探针回答「没有」（⇒ 按住即平移，D139）；② **引擎层**——直接调新接口，返 `false` 且 `drawings` / `drawingsRevision` 零改动。⚠️ 两层都要正向对照：解锁后 ① 回答「有」、② 返 `true` |
-| **N7** | **拖出可见范围**：拖到主图外任意远 → 锚点被夹回，且**不产生** `visibleGeometry == nil` 的幽灵线 | host | ⭐ 判据必须**真的调一次 `HorizontalLineTool.visibleGeometry` 断言非 nil**，⛔ 不得断言「价位落在 priceRange 内」（四舍五入在那之后，D137）。四个方向（上/下/左/右）各一档 + **恰好压在边界上**一档。⚠️ **另配一档「框内不夹」**：拖在框内时锚点一个字节不改——否则「恒夹到边界」的实现也会全绿 |
+| **N7** | **拖出可见范围**：拖到主图外任意远 → 锚点被夹回，且**不产生** `visibleGeometry == nil` 的幽灵线 | host | ⭐ 判据必须**真的调一次 `HorizontalLineTool.visibleGeometry` 断言非 nil**，⛔ 不得断言「价位落在 priceRange 内」（四舍五入在那之后，D137）。四个方向（上/下/左/右）各一档 + **恰好压在边界上**一档。⭐ **`.straight` 与 `.ray` 必须各跑一遍全部档位** —— `.ray` 的右缘是严格 fail-closed（D137），朴素的「夹进可见窗口」写法**只在 `.ray` 上失守**，只测 `.straight` 会全绿。⚠️ **另配一档「框内不夹」**：拖在框内时锚点一个字节不改——否则「恒夹到边界」的实现也会全绿 |
 | **N8** | **拖动中切周期**：拖到一半周期变了 → 拖动作废，`drawings` 一个字节没变、撤销栈无新记录 | host | ⛔ 必须用 `engineMultiPeriod()` + `.toSmaller`（理由同 N1）。⚠️ 正向对照：**不**切周期时同一串回调**确实**写入了一条。另一档：**转屏（视口变、周期不变）→ 拖动继续**，且夹取用**新**视口的边界 |
 
 ### 8.2 本片新增的 T 系列
@@ -300,7 +317,8 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **T4** | **第二根手指落下 → 就地定住**（D138）：走与抬手同一条收尾路径，1 条撤销记录 | host | 断言定住的锚点 **≠** 拖动起点的锚点 |
 | **T5** | **Q25 的像素证据**：同一根 K 线、同一个价位上既有成交标记又有选中节点 → 节点中心那一点是**节点的颜色**（日间纯黑 / 夜间纯白） | Catalyst | ⭐ 正向对照：**移走标记**后同一点仍是节点颜色（证明不是恒真）。⚠️ 变异「把 `drawSelectionNodes` 挪到 `drawMarkers` 之前」必须让**本条**变红，且必须与第 2 片 T13（源码顺序，`Tests/.../Render/SelectionNodeDrawOrderGuardTests.swift:36`）**分别确认红的是哪一条** |
 | **T6** | **拖动中一次盘都不写**（D135）：`.began` 到最后一个 `.changed` 期间 `drawingsRevision` **一次都没变** | host | ⭐ 正向对照：`.ended` 之后它 **+1**。这条直接守住「每秒 60 次写盘」那个缺陷 |
-| **T7** | **新写入面的门逐条**（D136 的 ⓪①②②b③④⑤⑥ 共 8 档） | host | ⭐ **每档都配一个「把这道门拿掉就会放行」的对照**，⛔ 不得只断言「返回 false」——恒返 false 的实现会全绿。门 ⑥ 那一档必须同时断言 `drawingsRevision` **没变**（返 `true` 不等于零副作用） |
+| **T7** | **新写入面的门逐条**（D136 的 ⓪①②②b③④⑤ 共 7 道拒收门） | host | ⭐ **每档都配一个「把这道门拿掉就会放行」的对照**，⛔ 不得只断言「返回 false」——恒返 false 的实现会全绿 |
+| **T7b** | **门 ⑥ 的方向，两档分别钉死**：① **相等档**（新锚点 == 原锚点）→ 返 `true`、`drawingsRevision` **不变**、撤销栈**不变**；② **不相等档**（真的拖动过）→ 返 `true`、`drawings` 里那条**确实变成了新锚点**、`drawingsRevision` **+1**、撤销栈**恰好多一条** | host | ⭐ **必须两档都写**。只写相等档 ⇒ 条件写反时全绿（第 1 轮评审 R1 实证的正是这个方向）；只写不相等档 ⇒ 无条件写入的实现也全绿。⛔ 不相等档**不得只断言返回值** —— 返 `true` 不等于真的写了 |
 | **T8** | **作废之后手势不回落成平移**（D138 末段）：周期变化作废后，同一手势的后续 `.changed / .ended` **不产生任何 pan emission、不产生 periodSwipe** | host | 正向对照：**没有**进入过节点拖动的同一串回调**确实**产生 pan emission |
 
 ### 8.3 源码守卫（G 系列）
@@ -327,6 +345,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | 探针对 `locked` 的拒绝拿掉 | **N6** 的探针档 |
 | 夹取整个拿掉（锚点原样写出） | **N7** 的四个方向档 |
 | 夹取改成「恒夹到边界」 | **N7** 的「框内不夹」档 |
+| 夹取改成朴素的「把 `candleIndex` 夹进可见窗口」（不看后置条件） | **N7** 的 **`.ray` 右缘**档 ⭐ ⚠️ `.straight` 档**预期不红**（它横贯全图、不看锚点 x）—— 若 `.straight` 也红，说明测试串了，要查 |
 | 拖动中直接改 `engine.drawings` | **T6** |
 | 收尾改成每帧入一条记录 | **N4** 的深度档 |
 | 周期变化时不作废、照常写入 | **N8** |
@@ -336,6 +355,8 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | 「就地定住」改成「作废回弹」 | **T4** |
 | 新接口的 `anchorIndex` 范围门拿掉 | **T7** 的 ④ 档（⚠️ 越界是 trap，该档会**崩**而不是失败——如实登记预期形态） |
 | 新接口的 `period` 门拿掉 | **T7** 的 ⑤ 档 |
+| **门 ⑥ 的短路条件写反**（改成 `updated != old` 时短路） | **T7b** 的不相等档 + **N4**（压根没写进去 ⇒ 撤销栈是空的）⭐ 第 1 轮评审抓到的那条，必须有测试接得住 |
+| 门 ⑥ 整个拿掉（内容没变也照写） | **T7b** 的相等档 |
 | 把 G2 守卫的切片锚点改名 | **G2 自身**（必须 `Issue.record` 红，⛔ 不得静默绿） |
 
 ---
