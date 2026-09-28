@@ -21,7 +21,7 @@
 
 ---
 
-## 1. 决策（D134–D144）
+## 1. 决策（D134–D144，含 D134b）
 
 ### D134　分叉发生在手指按下那一刻，判据是「这一点有没有可拖的节点」；⛔ 起手路径上不问线（Q19 的答案）
 
@@ -39,9 +39,40 @@
 
 1. 会话存在且 `mode == .select`（`DrawingSession.swift:41-42`）—— 画线态下点图表是落锚、恒不做命中判定（D38），节点也不存在；
 2. **本面板就是 `selectedPanel`** —— 选中是 `(selectedPanel, selectedDrawingID)` **二元组**（D41）。上下两个面板各有一套仲裁器；选中在上面板时，**下面板的探针必须回答「没有」**，否则在下面板按住同一屏幕位置也会拖动上面板的线；
-3. 那条线在**本面板的** `visibleDrawings` 里唯一存在（结构性可见）；
-4. `!locked`（D139）；
-5. `DrawingNodeGeometry.hitTestNode` 在该点返回非 nil（几何性可见 + 在命中半径内）。
+3. **`DrawingEditRouter.editableIgnoringGeometry(engine:)` 为真**（`DrawingEditRouter.swift:76-84`）；
+4. `DrawingNodeGeometry.hitTestNode` 在该点返回非 nil（几何性可见 + 在命中半径内）。
+
+### D134b　探针的非几何前置条件 ≡ 引擎新接口的非几何门，且**靠复用同一个函数**保证，⛔ 不靠两处同步
+
+**这是第 2 轮评审 R1-medium 逼出的修正，而且它与 D139 是同一族缺陷 —— 我在 D139 里替 `locked` 一条禁掉了「能拖、松手被拒」，却没有按判据本身穷尽整族。**
+
+**症状**（评审原文核实为真）：一条带**未来顶层字段**的水平线、或一条**全局 id 重复**（一条可见一条隐藏）的线，在上一稿的探针下**会进入拖动并实时跟手**，而松手时必被引擎的门 ①/③ 拒 ⇒ 瞬时覆盖一清，**线当场弹回原处、用户的调整全部丢失**。这与 D139 明令禁止的坏体验**逐字相同**。
+
+**修法不是把漏掉的几条补进探针的清单** —— 那只是把「两份清单」从差 4 项变成差 0 项，下一次仍会漂。**改为复用引擎侧那份唯一真相**：
+
+`DrawingEditRouter.editableIgnoringGeometry(engine:)`（`:76-84`）的七个分量与 D136 的门 **⓪①②②b③ 逐条相等**：
+
+| 该函数的分量 | 对应 D136 的门 |
+|---|---|
+| `flow.mode != .review` | ⓪ |
+| `uniqueSelected != nil`（**可见域**唯一 + 结构性可见） | 选中生命期前提 |
+| `idIsGloballyUnique` | ①（**全局**唯一，与上一行**刻意分开**，见该文件 `:64-70` 头注） |
+| `!locked` | ② |
+| `isEditableToolType` | ②b |
+| `!hasKnownFutureEnumValues` + `!hasKnownFutureFields` | ③ |
+
+⇒ **探针直接调它**，`private` 改 `internal` 即可（⛔ 不改它的函数体、不加参数）。该函数被抽出来的理由（`DrawingEditRouter.swift:72-74` 头注逐字）就是「让两条路径**只在几何这一点上不同**；若各写一份，早晚有一天两边的非几何分量会漂移」—— 本片是第**三**条消费它的路径，理由原样适用。
+
+**引擎侧剩下的三道门为什么可以不进探针**（逐条给理由，⛔ 不笼统说「兜底」）：
+
+| 门 | 为什么探针不问 |
+|---|---|
+| ④ `anchorIndex` 在范围内 | **构造保证**：探针的返回值就是 `hitTestNode` 给的原下标，它来自 `marks()` 对 `anchors` 的 `enumerated()`（`DrawingNodeGeometry.swift:39-41`）⇒ 恒在范围内。引擎侧保留它是**防越界 trap**（Swift 数组越界是进程崩、`do/catch` 接不住），不是防用户 |
+| ⑤ `anchor.period == old.period` | **构造保证 + 事件兜底**：夹取函数拿的就是本面板当前周期；周期一变就整个作废（D138）。引擎侧保留它是防「构造保证日后被改坏」 |
+| ⑥ 内容未变 | **不是拒收门**，是零副作用短路。拖回原处是合法操作，探针当然要放行 |
+
+⇒ **不变量**：「探针放行 ⇒ 引擎的**非几何**门必然全过」。⛔ 唯一允许的松手失败是**几何**原因（那一类由 D137 的夹取在结构上消灭）。
+⇒ 违反它的症状恒为「拖得动、松手弹回」，而 §8-N6 那一族测试就是照这条不变量写的。
 
 **拖动全程与结束后选中都保持不变** —— 拖动不改变选中，用户抬手后仍可直接点 ↩ / 🔒 / 🗑。
 
@@ -140,6 +171,8 @@ func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor)
 
 **⛔ 不得做成「能进拖动、松手被引擎拒」**：那样用户会看到线跟着手指走、一松手又弹回原处——比「拖不动」糟得多。D136 的门 ② 是**第二层**兜底，不是第一层。
 
+⚠️ **本条只是 D134b 那条不变量的一个实例**（第 2 轮评审 R1 的教训）：`locked` 不特殊，**引擎所有不需要 mapper 就能判的拒收门**都必须在探针里先答「没有」。⛔ 不得再按单条补 —— 按 D134b 复用同一个函数。
+
 ### D140　起手必须先「刹车」，顺序与落锚逐字相同
 
 单指 `.began` 若路由到节点拖动，界面层必须按 **① `settleDeceleration` → ② `rebuildRenderState` → ③ 读 viewport → ④ 建 `CoordinateMapper`** 的顺序走，与 `handleDrawingTap`（`Render/ChartContainerView.swift:325` 起，`:333` 是 settle）**逐字相同**。
@@ -233,6 +266,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 2. **拖动实时跟随**（D135）：拖动中该线几何实时更新，**不碰** `engine.drawings`、**不写盘**。
 3. **锚点双轴跟随**（user 2026-09-28 拍板）：价位与 `candleIndex` 都跟手指走，与第 4 片起的多锚工具**同一套语义**。
 4. **引擎第 5 个写入面**（D136）+ U-G4 穷尽性守卫同步 10 → 11（N5）。
+4b. **`DrawingEditRouter.editableIgnoringGeometry` 的访问级别 `private` → `internal`**（D134b）——⛔ **只改访问级别，不改函数体、不加参数、不改任何分量**。这是本片对 `DrawingEditRouter.swift` 的**唯一**改动，理由见 D134b。
 5. **夹回边界**（D137）：一个 host 可测的纯函数 + 「夹完必须仍可见」的硬断言。
 6. **一次拖动 = 一条撤销记录**（D141，构造保证）。
 7. **Q25 的像素证据**（§2.4 + §8-T5）：补第 2 片欠下的那一条。
@@ -303,7 +337,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **N3** | **落在未选中线的节点位置上**：另一条**未选中**的线恰好在起手点有个锚点 → 不进入拖动 | host | ⚠️ 必须配对照：把那条线改成**选中** → 同一点进入拖动。没有它，「不进入」可能只是探针恒返「没有」 |
 | **N4** | **一次拖动 = 一条撤销记录**：`.began` → `.changed` × N（N ≥ 3）→ `.ended` 后，撤销栈深度**恰好 1**；点 ↩ 一次，锚点**整个**回到拖动前的值 | host | ⭐ 上游明令**同时断言深度和回滚后坐标**（只断深度会撞空栈假绿）。⚠️ 再加一条：断言拖动后的锚点**确实 ≠** 拖动前（否则「撤销后等于拖前」会因为压根没改而恒真）。另断言 `drawingsRevision` 相对基线恰好 **+1** |
 | **N5** | **引擎写入点穷尽性守卫同步**：`DrawingUndoSourceGuardTests` 的 U-G4 表 **10 → 11**，新接口在表里**有自己的一行**；L12b 总数同步 | host | 该守卫已有双向自检（`test_uG4_scanner_is_not_vacuous`：合成「写入被挪进表外私有 helper」的样本必须被判出来）。本片**确认它覆盖新接口的形状**并实跑，⛔ 不重复造一份自检 |
-| **N6** | **锁定的线拖不动** | host | ⭐ **两层各一条**：① **探针层**——锁定的线上按下，探针回答「没有」（⇒ 按住即平移，D139）；② **引擎层**——直接调新接口，返 `false` 且 `drawings` / `drawingsRevision` 零改动。⚠️ 两层都要正向对照：解锁后 ① 回答「有」、② 返 `true` |
+| **N6** | **「拖得动、松手弹回」这一族恒不存在**（D134b 的不变量；上游 N6 的「锁定的线拖不动」是其中一档）。逐档：① `locked`；② 携带**未来顶层字段**；③ 携带**未来枚举值**；④ **全局 id 重复**（一条可见 + 一条隐藏，⚠️ 必须这么造——可见域唯一而全局不唯一，正是 `DrawingEditRouter.swift:64-70` 区分两种唯一性的理由）；⑤ **不可编辑的工具类型**；⑥ `flow.mode == .review` | host | ⭐ **每档都要两层 + 一个正向对照**：**探针层**答「没有」**且手势照常走图表平移**（⛔ 只断言「没进拖动」不够——要证明它真的去平移了，否则「什么都没发生」也全绿）；**引擎层**直接调新接口返 `false` 且 `drawings` / `drawingsRevision` 零改动；**正向对照**把该档的成因去掉后两层都放行。⚠️ ⑥ 复盘档的正向对照要换 `flow.mode`，⛔ 不要顺手改别的分量 |
 | **N7** | **拖出可见范围**：拖到主图外任意远 → 锚点被夹回，且**不产生** `visibleGeometry == nil` 的幽灵线 | host | ⭐ 判据必须**真的调一次 `HorizontalLineTool.visibleGeometry` 断言非 nil**，⛔ 不得断言「价位落在 priceRange 内」（四舍五入在那之后，D137）。四个方向（上/下/左/右）各一档 + **恰好压在边界上**一档。⭐ **`.straight` 与 `.ray` 必须各跑一遍全部档位** —— `.ray` 的右缘是严格 fail-closed（D137），朴素的「夹进可见窗口」写法**只在 `.ray` 上失守**，只测 `.straight` 会全绿。⚠️ **另配一档「框内不夹」**：拖在框内时锚点一个字节不改——否则「恒夹到边界」的实现也会全绿 |
 | **N8** | **拖动中切周期**：拖到一半周期变了 → 拖动作废，`drawings` 一个字节没变、撤销栈无新记录 | host | ⛔ 必须用 `engineMultiPeriod()` + `.toSmaller`（理由同 N1）。⚠️ 正向对照：**不**切周期时同一串回调**确实**写入了一条。另一档：**转屏（视口变、周期不变）→ 拖动继续**，且夹取用**新**视口的边界 |
 
@@ -329,6 +363,9 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **G2** | **起手路径上不得出现 `DrawingHitTester`**（D134 的结构不变量）：探针实现所在函数体内不引用该类型 | ⚠️ 切片锚点找不到时必须 `Issue.record` 当场红（⛔ 不得静默通过）；且必须配**防切片为空**的正向断言（体内确实含 `hitTestNode(`）。⚠️ 判据的**文本来源是判据的一部分**：读仓内源文件本体、先剥注释 |
 | **G3** | **拖节点起手的顺序契约**（D140）：`settleDeceleration` → `rebuildRenderState` → 读 viewport → `CoordinateMapper` → 探针，五者顺序 | 与既有 `drawingTapSettlesBeforeMapping`（`DrawingGestureSourceGuardTests.swift:62`）同款写法。⚠️ 五个锚点**缺任何一个都要显式报错**，⛔ 不得当作通过 |
 
+| **G4** | **探针不得自己重写那份非几何清单**（D134b 的结构保证）：探针实现所在函数体内**不出现** `locked` / `hasKnownFuture` / `isEditableToolType` / `flow.mode` 任一字面量，且**确实调用了** `editableIgnoringGeometry(` | ⚠️ 两个方向都要：只写「不出现」⇒ 探针整个不查也全绿（撞空转）；只写「调用了」⇒ 又调又自己抄一份也全绿。⚠️ 切片锚点找不到必须 `Issue.record` 当场红；先剥注释再匹配（注释里必然提到这些词） |
+| **G5** | **`editableIgnoringGeometry` 的函数体未被本片改动**（只许改访问级别）：取该函数体的**归一化文本**（逐行剥行尾注释 → 压连续空白 → 去首尾空格 → 丢空行 → 以 `\|` 连接），**整串相等**于下面这个期望值（`private` 一词由本片改成 `internal`，⇒ 期望串的首行相应为 `internal static func …`）：<br><br>`internal static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {` \| `guard engine.flow.mode != .review else { return false }` \| `guard let d = uniqueSelected(engine: engine) else { return false }` \| `guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }` \| `guard !d.locked else { return false }` \| `guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }` \| `return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])` \| `&& !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])` \| `}` | ⛔ **必须整串相等，不得只数分量个数**（改一个分量名个数不变，撞「存在性检查表达不了穷尽性」那一族）。⚠️ 期望串写死在测试里 ⇒ 本片**故意**让「日后有人动这个函数」变成当场红；真要动它的人必须同时解释为什么本片这三条消费路径不受影响。⚠️ 归一化函数自身要配双向自检（喂一段改了分量的样本必须**不**相等） |
+
 ### 8.4 变异验证纪律
 
 - **先提交实现、再跑变异**；复原一律 `cp` 往返，⛔ **禁止 `git checkout <file>`**；
@@ -342,7 +379,8 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | 变异 | 期望变红 |
 |---|---|
 | 探针改成「先问线，线命中就返回没有」 | **T1** ⭐（不红 = Q19 无人看守） |
-| 探针对 `locked` 的拒绝拿掉 | **N6** 的探针档 |
+| 探针改成只查 `locked`（即第 2 轮评审报的那一稿：不调 `editableIgnoringGeometry`） | **N6** 的 ②③④⑤⑥ 五档的**探针层** ⭐ 第 2 轮评审抓到的那条。⚠️ ① `locked` 档**预期不红**（它本来就查）——若它也红说明测试串了 |
+| 探针整个不查非几何门（连 `locked` 也不查） | **N6** 全部六档的探针层 |
 | 夹取整个拿掉（锚点原样写出） | **N7** 的四个方向档 |
 | 夹取改成「恒夹到边界」 | **N7** 的「框内不夹」档 |
 | 夹取改成朴素的「把 `candleIndex` 夹进可见窗口」（不看后置条件） | **N7** 的 **`.ray` 右缘**档 ⭐ ⚠️ `.straight` 档**预期不红**（它横贯全图、不看锚点 x）—— 若 `.straight` 也红，说明测试串了，要查 |
