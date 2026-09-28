@@ -250,55 +250,51 @@ def _py_units(text: str):
     except SyntaxError:
         return None
 
+    consumed = set()
+
     def fold(node):
-        """能算出运行时值就返回它，算不出返回 None。"""
+        """能算出运行时值就返回它，算不出返回 None。
+
+        ⛔⛔ **只把【真正被折进结果】的节点记进 `consumed`。**
+           上一版对整棵子树无差别标记 —— 于是 `"…SQL…".format() + ";"` 折成
+           `<哨兵>;` 之后，`.format()` 里那条**真 SQL 字面量再也不会被单独扫到**
+           ⇒ 整条消失（codex 第三轮实测的静默绕过，评级 high）。
+           ⭐ 这是本仓成文教训「**抹除是破坏性的，破坏的代价是漏报（瞎）**」的又一副
+             面孔：我以为自己只是在「折叠」，实际上把**没被代表**的子树抹掉了。
+           ⇒ 求不出来的操作数**不消费**，它的子树留给外层循环继续单独扫。
+        """
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            consumed.add(id(node))
             return node.value
         if isinstance(node, ast.JoinedStr):          # f-string
-            return "".join(
-                p.value if isinstance(p, ast.Constant) and isinstance(p.value, str)
-                else _UNRESOLVED
-                for p in node.values)
+            out = []
+            for part in node.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    consumed.add(id(part))
+                    out.append(part.value)
+                else:
+                    out.append(_UNRESOLVED)          # ⛔ 插值的子树不消费
+            consumed.add(id(node))
+            return "".join(out)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            # ⛔ **求不出来的操作数放哨兵，不要返回 None**（codex 第二轮实测的静默绕过）：
+            # ⛔ 求不出来的操作数**放哨兵**而不是返回 None（codex 第二轮）：
             #    返回 None 的话，`"INSERT INTO training_" + suffix + " (…)"` 整体折不起来，
-            #    两个常量碎片会被**各自当成一个单元** —— 而碎片 `INSERT INTO training_`
-            #    里**没有任何标记**，「表名不是字面量」那条判据也认不出它 ⇒ 一言不发。
-            # ⇒ 折成 `INSERT INTO training_<哨兵> (…)`，哨兵落在表名区段里 ⇒ 报「判不了」。
+            #    碎片 `INSERT INTO training_` 里没有任何标记 ⇒ 一言不发。
             lhs, rhs = fold(node.left), fold(node.right)
-            return (_UNRESOLVED if lhs is None else lhs) + (_UNRESOLVED if rhs is None else rhs)
-        return None
+            consumed.add(id(node))
+            return ((_UNRESOLVED if lhs is None else lhs)
+                    + (_UNRESOLVED if rhs is None else rhs))
+        return None                                  # ⛔ 不消费 ⇒ 子树继续单独扫
 
-    units, consumed = [], set()
-    # 先吃能整体折起来的 `+` 表达式（`"INSERT INTO training_" + "sets (…)"`），
-    # 免得它的两半被拆成两个单元、表头正好卡在接缝上。
-    for node in ast.walk(tree):
-        # ⛔ **必须先查 `consumed`**：`ast.walk` 是广度优先，`Add(Add(a,b), c)` 里
-        #    外层先被访问并标记内层已消费，但如果这里不查，**内层那个 Add 也会被
-        #    当成一个单元发出** —— 而它是「半条语句」（括号没配平）⇒ 被报「判不了」
-        #    ⇒ 三段以上常量相加的**合法代码变红**（codex 第一轮实测的误报）。
-        if id(node) in consumed:
-            continue
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            v = fold(node)
-            if v is not None:
-                units.append((v, node.lineno))
-                for p in ast.walk(node):
-                    if p is not node:
-                        consumed.add(id(p))
-    # f-string 的内部零件不要再单独当成一个单元
-    for node in ast.walk(tree):
-        if isinstance(node, ast.JoinedStr):
-            for p in ast.walk(node):
-                if p is not node:
-                    consumed.add(id(p))
+    units = []
     for node in ast.walk(tree):
         if id(node) in consumed:
             continue
-        if isinstance(node, ast.JoinedStr):
-            units.append((fold(node), node.lineno))
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            units.append((node.value, node.lineno))
+        if isinstance(node, (ast.JoinedStr, ast.BinOp)) or (
+                isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            value = fold(node)
+            if value is not None:
+                units.append((value, node.lineno))
     return units
 
 
@@ -1364,6 +1360,76 @@ def test_guard_says_cannot_tell_when_the_column_list_has_unresolved_interpolatio
         'Q = f"INSERT INTO training_sets (stock_code, schema_version) VALUES ({a},{b})"\n')
     assert ok["checked"] == 1 and not ok["missing"] and not ok["unknown"], (
         f"插值只在 VALUES 里是正常写法，守卫却报了问题：{ok}")
+
+
+#: ⛔⛔ **求不出来的表达式里的 SQL 字面量，不许消失。**
+#:
+#: codex 第三轮实测的**静默绕过（high）**，而且是我第二轮修法的**直接后果**：
+#: 第二轮我让 `fold` 对求不出来的操作数放哨兵 —— 但同时把**整棵子树**都标成
+#: 「已消费」。于是 `"…SQL…".format() + "\n"` 折成 `<哨兵>\n`，
+#: 而 `.format()` 里那条**真 SQL 字面量再也不会被单独扫到** ⇒ 整条消失。
+#:
+#: ⭐ 这是本仓成文教训「**抹除是破坏性的，破坏的代价是漏报（瞎）**」的又一副面孔 ——
+#:    我以为自己只是「折叠」，实际上把没被代表的子树**抹掉**了。
+#: ⇒ 只消费**真正被折进结果**的节点；求不出来的操作数，其子树要继续单独扫。
+_MUST_NOT_VANISH = (
+    ("调用结果再接一段（.format() + 后缀）", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, file_path) VALUES ($1,$2)"'
+     '.format() + ";"\n'),
+    ("列表里的 SQL 与另一个列表相加", ".py",
+     'QS = ["INSERT INTO training_sets (stock_code, file_path) VALUES ($1,$2)"] + EXTRA\n'),
+    ("三元表达式里的 SQL", ".py",
+     'Q = ("INSERT INTO training_sets (stock_code, file_path) VALUES ($1,$2)"\n'
+     '     if flag else OTHER)\n'),
+    # ⛔ SQL 字面量嵌在 **f-string 的插值表达式**里。若插值的子树也被无差别消费，
+    #    这条同样会整条消失 —— 与 `.format()` 那条是同一个根，只是换了个容器。
+    ("f-string 插值表达式里的 SQL", ".py",
+     "Q = f\"{'INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)'"
+     " if flag else ''}\"\n"),
+    ("SQL 字面量作为函数实参", ".py",
+     'run("INSERT INTO training_sets (stock_code, file_path) VALUES ($1,$2)" + tail)\n'),
+)
+
+
+def test_sql_literals_inside_unresolvable_expressions_do_not_vanish(tmp_path):
+    """求不出来的表达式**里面**的 SQL 字面量，守卫必须仍然看得见。
+
+    ⛔ 最低要求是**不许一言不发** —— 判得出就报缺字段，判不出就报判不了，
+       但绝不能整条从视野里消失。
+    """
+    vanished = []
+    for label, suffix, src in _MUST_NOT_VANISH:
+        got = _guard_on_source(tmp_path, suffix, src)
+        if got["silent"]:
+            vanished.append(f"{label}（checked={got['checked']}）")
+    assert not vanished, (
+        "求不出来的表达式里的 SQL 字面量**整条消失**了 —— 这是最坏的结果："
+        "既没判对也没说判不了，没人知道该去看一眼：\n  " + "\n  ".join(vanished))
+    # ⛔ 防空转：这些样本里**确实**各有一条写 training_sets 且缺字段的 SQL。
+    #    用 pglast 现场确认，⛔ 不由人写期望值。
+    import ast as _ast
+    import pglast
+    for label, _suffix, src in _MUST_NOT_VANISH:
+        found = False
+        for node in _ast.walk(_ast.parse(src)):
+            if not (isinstance(node, _ast.Constant) and isinstance(node.value, str)):
+                continue
+            try:
+                tree = pglast.parse_sql(node.value)
+            except Exception:
+                continue
+            for raw in tree:
+                stmt = raw.stmt
+                if type(stmt).__name__ != "InsertStmt":
+                    continue
+                if stmt.relation is None or stmt.relation.relname != "training_sets":
+                    continue
+                cols = [c.name for c in (stmt.cols or []) if getattr(c, "name", None)]
+                if cols and "schema_version" not in cols:
+                    found = True
+        assert found, (
+            f"这条样本里并没有「写 training_sets 且缺 schema_version」的合法 SQL，"
+            f"用例是空转的：{label}")
 
 
 def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
