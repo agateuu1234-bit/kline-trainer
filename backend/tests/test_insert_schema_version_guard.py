@@ -30,6 +30,7 @@
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -205,6 +206,162 @@ _OPEN_PAREN = re.compile(r"[\s\"'\\+,)]*\(")
 _QUOTES = "\"'`"
 
 _SELF = Path(__file__).resolve()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⭐⭐⭐ 宿主解码层：`_scan` 喂给 `_heads` 的必须是**运行时字符串**，不是源码原文
+#
+# `.py` / `.sh` / `.yml` / `.md` 里的 SQL 是**字符串**，而源码原文与运行时真正
+# 交给 PostgreSQL 的字符串不是一回事。实测（三个预言机逐条核实，见
+# `test_guard_sees_the_runtime_sql_not_the_source_text`）**10 条缺陷**：
+#   · 8 条【整条消失】—— `_heads` 连表头都没找到（相邻字面量在 INSERT/INTO 后断开、
+#     劈开表名、`\n` 转义、`--` 配转义换行、常量相加劈开表名、shell 引号拼接劈开表名）；
+#   · 1 条【假通过】—— 块注释定界符被劈成 `/"` + `"*`，假注释里含 `schema_version`
+#     字样，源码上按逗号切 token 会把它当成真列名；
+#   · 1 条【误报】—— 合法的 `(stock_code, sch" "ema_version, file_path)` 被报缺字段。
+#
+# ⛔ **`.py` 不猜、直接解**：用 Python 自己的语法树把字面量解出来 —— `ast` 会把
+#    相邻字面量**折叠成一个常量**、把转义序列还原，得到的就是运行时那串字符。
+#    这不是「多认一种写法」，是把问题从**猜**变成**解**。
+# ⚠️ `ast` 解不动的（f-string 的变量部分、`.format()`、`%`、与变量相加）**不会静默
+#    消失**：由 `_nonliteral_targets` 报「判不了」（吵），不是「瞎」。
+# ⛔ **`.sh` / `.yml` / `.md` 不做解码** —— 那些宿主没有便宜的精确解，而「跑一遍
+#    shell 让它自己拼」在守卫里是**绝对不可以**的（有副作用）。那一侧只补
+#    `_split_name_heads`：把「表名被宿主引号/拼接劈开」认出来并报「判不了」。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: f-string 等**求不出来**的插值的占位。取一个绝不会出现在 SQL 标识符里的字符，
+#: 于是它自然落进「`INSERT INTO` 后面不是字面量表名」那条判据。
+_UNRESOLVED = "\x00"
+
+
+def _py_units(text: str):
+    """`.py` 源码 → `[(运行时字符串, 起始行号)]`；⛔ 解析不了返回 None。
+
+    调用方**必须**把 None 当成「退回扫原文」，⛔ 不能当成「没有字符串」——
+    那是把解析失败伪装成检查通过（本仓成文教训：报 0 违反要先证明能报非 0）。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+
+    def fold(node):
+        """能算出运行时值就返回它，算不出返回 None。"""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):          # f-string
+            return "".join(
+                p.value if isinstance(p, ast.Constant) and isinstance(p.value, str)
+                else _UNRESOLVED
+                for p in node.values)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            lhs, rhs = fold(node.left), fold(node.right)
+            return None if lhs is None or rhs is None else lhs + rhs
+        return None
+
+    units, consumed = [], set()
+    # 先吃能整体折起来的 `+` 表达式（`"INSERT INTO training_" + "sets (…)"`），
+    # 免得它的两半被拆成两个单元、表头正好卡在接缝上。
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            v = fold(node)
+            if v is not None:
+                units.append((v, node.lineno))
+                for p in ast.walk(node):
+                    consumed.add(id(p))
+    # f-string 的内部零件不要再单独当成一个单元
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for p in ast.walk(node):
+                if p is not node:
+                    consumed.add(id(p))
+    for node in ast.walk(tree):
+        if id(node) in consumed:
+            continue
+        if isinstance(node, ast.JoinedStr):
+            units.append((fold(node), node.lineno))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            units.append((node.value, node.lineno))
+    return units
+
+
+#: 宿主拼接留下的痕迹：引号 / `+` / 续行反斜杠 —— 它们永远不属于 SQL 标识符。
+_HOST_ARTIFACT = set("\"'+\\ \t\r\n")
+
+
+def _split_name_heads(text: str) -> list[int]:
+    r"""找出「表名被**宿主引号/拼接**劈开」的表头起点。
+
+    ⛔ 只用来报「判不了」，不参与「通过」的判定 —— 所以它宁可宽一点。
+    实测这两种 shell 写法此前**整条消失**（`_ident` 读到 `training_` 就放弃）：
+        psql -c "INSERT /* (x) */ INTO training_""sets (…) VALUES (…);"
+        psql -c "INSERT -- x;\nINTO training_""sets (…) VALUES (…);"
+    ⚠️ 读取到 `(` / `;` 即止、且最多 80 个字符，免得把「插另一张表、只是碰巧
+       `SELECT … FROM training_sets`」那种合法语句拖下水（那一条实测仍不匹配：
+       `INSERT INTO p15_targets (id) SELECT id FROM training_sets` 剥完是
+       `p15_targets`，不等于 `training_sets`）。
+    """
+    out = []
+    for km in _INSERT_KW.finditer(text):
+        i = _skip_gap(text, km.end())
+        if i is None:
+            continue
+        m_into = _INTO_KW.match(text, i)
+        if not m_into:
+            continue
+        i = _skip_gap(text, m_into.end())
+        if i is None:
+            continue
+        buf, j, n = [], i, len(text)
+        while j < n and j - i < 80:
+            ch = text[j]
+            if ch in "(;":
+                break
+            if ch.isalnum() or ch in "_$":
+                buf.append(ch)
+            elif ch in _HOST_ARTIFACT:
+                pass                      # 拼接痕迹，跳过但继续读
+            else:
+                break
+            j += 1
+        if "".join(buf).lower() == "training_sets":
+            out.append(km.start())
+    return out
+
+
+def _nonliteral_targets(text: str) -> list[int]:
+    r"""找出「`INSERT INTO` 之后**不是字面量表名**」的表头起点。
+
+    ⛔ 这是本守卫此前**最后一个静默盲区**：表名来自 f-string 变量 / `.format()` /
+       `%` 格式化 / 与变量相加时，源码里根本没有 `training_sets` 这几个字，
+       三张网**一个都够不着**，而守卫**一言不发** —— 往作用域里加这样一条写入
+       即可静默拿到 `DEFAULT 1`。
+    ⚠️ 这等于把**所有**动态表名的写入都报出来，不只是 `training_sets` 的。
+       ⛔ 所以是**先量后做**：实测干净树上这类 INSERT = **0 条**，零代价。
+       将来真要做动态写入，必须显式在这里认领并说明理由。
+    """
+    out = []
+    for km in _INSERT_KW.finditer(text):
+        i = _skip_gap(text, km.end())
+        if i is None:
+            continue
+        m_into = _INTO_KW.match(text, i)
+        if not m_into:
+            continue
+        i = _skip_gap(text, m_into.end())
+        if i is None:
+            continue
+        name, _end = _ident(text, i)
+        if name is not None:
+            continue
+        # ⛔ **不是「取不到标识符就报」** —— 那样 `.md` 散文里「INSERT INTO 表」
+        #    这种中文字样也会响（`_IDENT_BARE` 要求首字符是 ASCII 字母/下划线）。
+        #    ⇒ 只认**可枚举的模板/变量标记**，外加「字面量到此为止」：
+        #      `{` = `.format()` · `%` = 百分号格式化 · `$` = shell 变量 ·
+        #      哨兵 = f-string 的插值 · 到末尾 = 与变量相加（`"INSERT INTO " + TBL`）。
+        if i >= len(text) or text[i] in "{%$" or text[i] == _UNRESOLVED:
+            out.append(km.start())
+    return out
 
 
 def _iter_files():
@@ -424,33 +581,75 @@ def _scan(files, root):
         #    ⭐ 本仓成文教训：「『这几个各自存在』抓不到『多出来的第五个』⇒ 用集合等式」。
         # ⚠️ `expected_hits` 必须是**独立的第二次扫描**（故意用 `findall`，⛔ 不复用下面的
         #    `finditer` 结果）—— 两个来源互不依赖，一处编辑才改不掉两边。
-        _hits, _unterminated = _heads(text)
-        if _unterminated:
-            # ⛔ 未闭合的块注释会把其后全部内容屏蔽掉 ⇒ 真语句静默消失。必须**响**。
-            bad_comment.append(rel)
-        expected_hits = len(_hits)
+        # ⛔ **扫的是运行时字符串，不是源码原文**（见上方 `_py_units` 的长注释）。
+        #    `.py` 用 `ast` 逐个字面量解出来；其它宿主没有便宜的精确解 ⇒ 原文一整块。
+        #    ⚠️ `_py_units` 返回 None（语法错）必须**退回扫原文**，
+        #       ⛔ 不能当成「这个文件没有字符串」—— 那是把解析失败伪装成检查通过。
+        decoded_units = _py_units(text) if q.suffix == ".py" else None
+        if decoded_units is None:
+            units = [(text, None)]          # None = 行号现场数
+        else:
+            units = decoded_units
+
+        expected_hits = 0
         bucketed = 0
 
-        for m in _heads(text)[0]:
-            where = f"{rel}:{text.count(chr(10), 0, m.start()) + 1}"
-            kind, cols = _classify(text, m.start(), m.end())
-            bucketed += 1          # ⛔ 四类**都要**计数，含「提及」—— 否则等式对不上
-            if kind == "mention":
-                continue
-            if kind == "nocols":
-                positional.append(where)
-            elif kind == "unknown":
-                unknown.append(where)
-            else:
-                checked += 1
-                for _d in _SCOPE_DIRS:
-                    if q.is_relative_to(_d):
-                        _cell = (_d.relative_to(REPO_ROOT).as_posix(), q.suffix)
-                        if _cell in per_cell:
-                            per_cell[_cell] += 1
-                        break
-                if "schema_version" not in _column_names(cols):
-                    missing.append(f"{where}  列清单={cols.strip()[:120]}")
+        for utext, uline in units:
+            _hits, _unterminated = _heads(utext)
+            if _unterminated:
+                # ⛔ 未闭合的块注释会把其后全部内容屏蔽掉 ⇒ 真语句静默消失。必须**响**。
+                bad_comment.append(rel)
+            expected_hits += len(_hits)
+
+            for m in _heads(utext)[0]:
+                lineno = (uline if uline is not None
+                          else utext.count(chr(10), 0, m.start()) + 1)
+                where = f"{rel}:{lineno}"
+                kind, cols = _classify(utext, m.start(), m.end())
+                bucketed += 1      # ⛔ 四类**都要**计数，含「提及」—— 否则等式对不上
+                if kind == "unknown" and uline is not None \
+                        and not utext[m.end():].strip():
+                    # ⛔ 解码后的字面量**恰好到表名为止** ⇒ 这是**提及**，不是语句。
+                    #    `if "INSERT INTO training_sets" in query:` 这种分派谓词就是
+                    #    它。`_classify` 的「两侧都是引号」判据只在**原文**上成立 ——
+                    #    解码之后引号已经不在了，必须在这里补回等价判断，否则三处
+                    #    合法提及会变成【认不出的形状】⇒ 误报。
+                    #    ⚠️ 单独一条 `INSERT INTO training_sets` **不是合法 SQL**
+                    #       （没有 VALUES/SELECT），所以这样收不会放过真语句。
+                    kind = "mention"
+                if kind == "mention":
+                    continue
+                if kind == "nocols":
+                    positional.append(where)
+                elif kind == "unknown":
+                    unknown.append(where)
+                else:
+                    checked += 1
+                    for _d in _SCOPE_DIRS:
+                        if q.is_relative_to(_d):
+                            _cell = (_d.relative_to(REPO_ROOT).as_posix(), q.suffix)
+                            if _cell in per_cell:
+                                per_cell[_cell] += 1
+                            break
+                    if "schema_version" not in _column_names(cols):
+                        missing.append(f"{where}  列清单={cols.strip()[:120]}")
+
+            # ⛔ 「`INSERT INTO` 后面不是字面量表名」按**单元**判：`.py` 要看解码后的
+            #    哨兵/`{}`，其它宿主看原文里的 `$VAR`。这一类**判不了**，但绝不许沉默。
+            for st in _nonliteral_targets(utext):
+                lineno = (uline if uline is not None
+                          else utext.count(chr(10), 0, st) + 1)
+                unknown.append(f"{rel}:{lineno}（表名不是字面量，判不了）")
+
+        # ⛔ 「表名被宿主引号/拼接劈开」只对**没解码**的宿主补 —— `.py` 已经由 `ast`
+        #    正面解开了，再补一遍会把同一条语句重复报成「判不了」⇒ 合法写法被误报。
+        if decoded_units is None:
+            _raw_starts = {m.start() for m in _heads(text)[0]}
+            for st in _split_name_heads(text):
+                if st in _raw_starts:
+                    continue
+                lineno = text.count(chr(10), 0, st) + 1
+                unknown.append(f"{rel}:{lineno}（表名被宿主引号/拼接劈开，判不了）")
 
         if bucketed != expected_hits:
             lost.append(f"{rel}：表头命中 {expected_hits} 条，却只有 {bucketed} 条被判过")
@@ -842,6 +1041,13 @@ _HOST_CASES = (
     ("py 正向·相邻字面量拼接且字段在场", ".py",
      'Q = ("INSERT INTO training_sets (stock_code, sch"\n'
      '     "ema_version, file_path) VALUES ($1,$2,$3)")\n'),
+    # ⛔ **表名被劈开、但字段在场**的合法写法 —— 这一条是变异逼出来的：
+    #    把 `_split_name_heads` 的「只对没解码的宿主补」那道 gate 去掉，
+    #    `.py` 里同一条语句会被**重复报成「判不了」** ⇒ 合法代码变红。
+    #    实测：没有这条对照时，那个变异**零红**（正向对照里缺了这一种形态）。
+    ("py 正向·相邻字面量劈开表名且字段在场", ".py",
+     'Q = ("INSERT INTO training_"\n'
+     '     "sets (stock_code, schema_version, file_path) VALUES ($1,$2,$3)")\n'),
     ("sh 正向·heredoc 里字段在场", ".sh",
      'psql <<SQL\nINSERT INTO training_sets (stock_code, schema_version, file_path)\n'
      '  VALUES (1,2,3);\nSQL\n'),
@@ -1014,6 +1220,39 @@ def test_guard_sees_the_runtime_sql_not_the_source_text(tmp_path):
         f"守卫看的是**源码原文**、而 PostgreSQL 看的是**运行时字符串**，共 "
         f"{len(wrong)} 条不一致：\n  " + "\n  ".join(wrong)
     )
+
+
+#: ⛔ 反向：**不该响**的内容。「表名不是字面量」那条判据只认**可枚举的模板/变量标记**
+#:    （`{` `%` `$` / f-string 哨兵 / 字面量到此为止）—— 若退化成「取不到标识符就报」，
+#:    `.md` 散文里的中文表名字样也会响（`_IDENT_BARE` 要求首字符是 ASCII 字母/下划线）。
+#: ⚠️ 这一条也是变异逼出来的：把那个判据放宽成「取不到就报」时，实测**零红** ——
+#:    干净树上恰好没有会误触的内容，于是那个收紧**没有任何东西钉着**。
+_MUST_STAY_QUIET = (
+    ("md 中文散文提到往哪张表写", ".md",
+     "P9 烟测：往 INSERT INTO 训练组表 里写一行，然后核对返回的 id。\n"),
+    ("md 散文里 INTO 后面是标点", ".md",
+     "本节讲的是 `INSERT INTO`：它后面跟表名。\n"),
+    ("py 注释里提到 INSERT INTO 而已", ".py",
+     "# 这里原本要 INSERT INTO 另一张表，后来改了\nX = 1\n"),
+)
+
+
+def test_guard_stays_quiet_on_prose_that_merely_mentions_insert_into(tmp_path):
+    """⛔ 守卫不许变成噪音源：只是**提到** `INSERT INTO` 的散文不得被报出来。
+
+    一道会在合法内容上变红的守卫等于给实施者发放宽许可证（人很快就开始无视它）。
+    本仓成文教训：守卫必须在当前树上就是绿的。
+    """
+    noisy = []
+    for label, suffix, src in _MUST_STAY_QUIET:
+        got = _guard_on_source(tmp_path, suffix, src)
+        if not got["silent"]:
+            noisy.append(
+                f"{label}：unknown={got['unknown']} missing={got['missing']} "
+                f"positional={got['positional']}")
+    assert not noisy, (
+        "只是提到 `INSERT INTO` 的散文被守卫报出来了 —— 这是噪音，不是严格：\n  "
+        + "\n  ".join(noisy))
 
 
 def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
