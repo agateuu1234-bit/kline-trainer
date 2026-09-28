@@ -21,7 +21,7 @@
 
 ---
 
-## 1. 决策（D134–D144，含 D134b / D134c / D134d）
+## 1. 决策（D134–D144，含 D134b / D134c / D134d / D140b）
 
 ### D134　分叉发生在手指按下那一刻，判据是「这一点有没有可拖的节点」；⛔ 起手路径上不问线（Q19 的答案）
 
@@ -62,7 +62,7 @@
 
 | 用途 | 取值 | 为什么 |
 |---|---|---|
-| **路由**（问探针的那一点） | **重建的起手点** = `location(in:) - translation(in:)` | `translation` 的定义就是「自**手指按下**以来的累计位移」⇒ 这个减法是**精确重建**，不是近似 |
+| ~~**路由**（问探针的那一点）~~ | ~~重建的起手点 = `location - translation`~~ | ⚠️ **本行已被 D140b 取代（第 5 轮评审 R1）**，⛔ 不得再照此实现。重建出来的是**手指按下的屏幕坐标**没错，但把它拿去查**刹车之后**的视口是错的配对：按下到 `.began` 之间惯性仍在移动视口，`settleDeceleration` 本身还会夹回 overscroll 并 propagate 联动（`TrainingEngine.swift:872-876`）⇒ 节点早已不在那个坐标上。⇒ 正确解法是**在真正按下的那一刻就把候选节点捕获下来**，见 D140b |
 | **拖动位移** | **`translation(in:)`**，且**直接换算成锚点的增量**（见 D134d），⛔ 不经过任何屏幕投影 | ⛔ **不得**把 `location` 直接当成节点的目标位置。那会在 `.began` 把节点**瞬间吸到手指底下**（丢掉抓取偏移，最大可跳 11pt），而且跳多远取决于 deadzone ⇒ 行为挂在 Apple 的内部常数上 |
 
 ⇒ **节点位移 ≡ 手指位移**，起手时用户握住黑点的相对关系全程保持；deadzone 在两条规则里**都被消掉**。
@@ -229,13 +229,38 @@ func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor)
 
 ⚠️ **本条只是 D134b 那条不变量的一个实例**（第 2 轮评审 R1 的教训）：`locked` 不特殊，**引擎所有不需要 mapper 就能判的拒收门**都必须在探针里先答「没有」。⛔ 不得再按单条补 —— 按 D134b 复用同一个函数。
 
-### D140　起手必须先「刹车」，顺序与落锚逐字相同
+### D140　路由到拖动之后才「刹车」，顺序与落锚逐字相同
 
-单指 `.began` 若路由到节点拖动，界面层必须按 **① `settleDeceleration` → ② `rebuildRenderState` → ③ 读 viewport → ④ 建 `CoordinateMapper`** 的顺序走，与 `handleDrawingTap`（`Render/ChartContainerView.swift:325` 起，`:333` 是 settle）**逐字相同**。
+单指 `.began` **若已路由到节点拖动**，界面层必须按 **① `settleDeceleration` → ② `rebuildRenderState` → ③ 读 viewport → ④ 建 `CoordinateMapper`** 的顺序走，与 `handleDrawingTap`（`Render/ChartContainerView.swift:325` 起，`:333` 是 settle）**逐字相同**。这一步是为**拖动本身**准备一个稳定视口。
 
-**为什么**：图表可能正在惯性滑动。在滑动中进入拖节点，视口会在手指底下继续移动 ⇒ 反算出来的 `candleIndex` 会漂。这与 1a-iv 修 `handleDrawingTap` 时的理由是同一条（那里已有源码顺序守卫 `drawingTapSettlesBeforeMapping`，`DrawingGestureSourceGuardTests.swift:62-63`）。本片给拖节点配一条同款（§8-G3）。
+**为什么**：图表可能正在惯性滑动。在滑动中拖节点，视口会在手指底下继续移动 ⇒ 每帧换算出来的增量会漂。这与 1a-iv 修 `handleDrawingTap` 时的理由是同一条（那里已有源码顺序守卫 `drawingTapSettlesBeforeMapping`，`DrawingGestureSourceGuardTests.swift:62-63`）。本片给拖节点配一条同款（§8-G3）。
 
-⚠️ **探针本身也要在刹车之后**：探针要用 mapper 才能算节点位置。⇒ 顺序是「刹车 → 重建 → 建 mapper → 问探针 → 定路由」，全部发生在 `.began` 这一次回调内。
+⛔ **探针不在这里跑**（上一稿写反了，第 5 轮评审 R1）——见 D140b。
+
+### D140b　候选节点在**手指真正按下那一刻**捕获，⛔ 不在 `.began` 用刹车后的视口现查
+
+**第 5 轮评审 R1-medium 逼出。它是 D134c 那条修复的二阶缺口：起手**坐标**重建对了，配对的**视口**却是错的那一帧。**
+
+**已核实的两条视口移动**（按下 → `.began` 之间都会发生）：
+
+1. **惯性仍在跑**：`beginPan` 才「先停本面板进行中的减速」（`TrainingEngine.swift:890` 注释逐字「标准惯性滚动语义：手指落下即截住惯性」），而它挂在 `.began` 上 —— **`.began` 比手指落下晚一个 deadzone**（D134c）；
+2. **刹车本身会再移一次**：`settleDeceleration`（`:872-876`）对**两个**面板 `interruptDeceleration`（夹回 overscroll），再 `propagateLinkage`。函数头注自陈它会「把上面板的 offset 改掉 —— 图当场跳一下」。
+
+⇒ 「按下时的屏幕坐标」× 「刹车后的视口」是**错配**：用户按住的节点可能早已移出 11pt，或者另一个节点刚好移进来。
+
+**改为：在真正的触摸按下那一刻捕获候选。**
+
+| 时刻 | 做什么 | 硬约束 |
+|---|---|---|
+| **`touchesBegan`（单指、且此刻没有在途候选）** | 用 **`view.renderState.viewport`**（= 屏幕上**正在显示**的那一帧，就是用户看着按下去的那一帧）建 mapper → 跑探针 → 记下候选 `(drawingID, anchorIndex)` + 按下点 | ⛔⛔ **零 engine 写入**：不 `settleDeceleration`、不 `rebuildRenderState`、不改任何状态，**纯只读**。理由见下 |
+| **pan `.began`** | 路由**完全由候选决定**，⛔ **不重新做任何几何命中**。路由到拖动后才走 D140 的四步 | 路由前对候选做一次 **fail-closed 复核**：那条线仍在、`editableIgnoringGeometry` 仍为真。⛔ **复核不含几何命中**（那正是本决策要避免的重查） |
+| **`touchesEnded` / `touchesCancelled`，或第二根手指在 `.began` 前落下** | 清候选 | fail-closed |
+
+**⛔ 为什么 `touchesBegan` 里绝不能顺手刹车**（这条是 load-bearing 的）：今天惯性要到 `.began` 才被 `beginPan` 截住。在 `touchesBegan` 里刹车会让**每一次触摸**（包括纯平移、纯点击）都提前截停惯性 —— 那是对 D32 既有行为的**改动**，直接违反 N1「没有可拖节点时行为逐字不变」。本片**只读**那一帧，不碰它。
+
+**落点**：`KLineView` 新增一个回调钩子（与既有的 `onBoundsChange`（`Render/KLineView.swift:31`）**同一范式**），由 `touchesBegan` 在**单点**触摸时触发。⚠️ 手势识别器与视图**并行**收触摸，`touchesBegan` 照常被调用（`delaysTouchesBegan` 默认 false）。
+
+**⚠️ 仍然存在、且本 spec 明确接受的误差**：`view.renderState` 是**上一帧**渲染的结果，惯性快速滑动时它与手指落下那一瞬的画面最多差**一帧**。⛔ 不得声称「精确」。这是 UIKit 触摸模型下的下界（我们拿不到「正在显示的这一帧」之外的东西），且它替代的是一个**最多差一个 deadzone + 一次 overscroll 夹取**的误差 —— 数量级小一到两个档。**如实登记，不粉饰。**
 
 ### D141　撤销粒度：不动 `performDrawingAction`
 
@@ -322,6 +347,7 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 2. **拖动实时跟随**（D135）：拖动中该线几何实时更新，**不碰** `engine.drawings`、**不写盘**。
 3. **锚点双轴跟随**（user 2026-09-28 拍板）：价位与 `candleIndex` 都跟手指走，与第 4 片起的多锚工具**同一套语义**。
 4. **引擎第 5 个写入面**（D136）+ U-G4 穷尽性守卫同步 10 → 11（N5）。
+4c. **`KLineView` 新增一个触摸按下的回调钩子**（D140b）——与既有 `onBoundsChange`（`KLineView.swift:31`）同一范式；⛔ 钩子里**零 engine 写入**。
 4b. **`DrawingEditRouter.editableIgnoringGeometry` 的访问级别 `private` → `internal`**（D134b）——⛔ **只改访问级别，不改函数体、不加参数、不改任何分量**。这是本片对 `DrawingEditRouter.swift` 的**唯一**改动，理由见 D134b。
 5. **夹回边界**（D137）：一个 host 可测的纯函数 + 「夹完必须仍可见」的硬断言。
 6. **一次拖动 = 一条撤销记录**（D141，构造保证）。
@@ -409,7 +435,8 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | **T6** | **拖动中一次盘都不写**（D135）：`.began` 到最后一个 `.changed` 期间 `drawingsRevision` **一次都没变** | host | ⭐ 正向对照：`.ended` 之后它 **+1**。这条直接守住「每秒 60 次写盘」那个缺陷 |
 | **T7** | **新写入面的门逐条**（D136 的 ⓪①②②b③④⑤ 共 7 道拒收门） | host | ⭐ **每档都配一个「把这道门拿掉就会放行」的对照**，⛔ 不得只断言「返回 false」——恒返 false 的实现会全绿 |
 | **T7b** | **门 ⑥ 的方向，两档分别钉死**：① **相等档**（新锚点 == 原锚点）→ 返 `true`、`drawingsRevision` **不变**、撤销栈**不变**；② **不相等档**（真的拖动过）→ 返 `true`、`drawings` 里那条**确实变成了新锚点**、`drawingsRevision` **+1**、撤销栈**恰好多一条** | host | ⭐ **必须两档都写**。只写相等档 ⇒ 条件写反时全绿（第 1 轮评审 R1 实证的正是这个方向）；只写不相等档 ⇒ 无条件写入的实现也全绿。⛔ 不相等档**不得只断言返回值** —— 返 `true` 不等于真的写了 |
-| **T9** | **起手点的重建**（D134c），四档：① 起手**在**节点半径内、`.began` 时 `translation` 已把当前点带**出**半径 → **必须进拖动**；② 起手**在**半径外、`.began` 时当前点已落**进**半径 → **必须不进拖动**、且照常走图表手势；③ `translation == .zero` 的退化档 → 与今天行为一致；④ **锚点增量 ≡ `translation` 的换算值**（D134d 的两个公式）：给定一串 `translation`，锚点的价位增量逐帧等于 `-translation.y × span / height`、下标增量等于 `translation.x / candleStep` 取整 | host | ⭐ ①② 是**互为对照**的一对，⛔ 缺一不可：只写 ① ⇒ 「探针恒答有」全绿；只写 ② ⇒ 「探针恒答没有」全绿。④ 必须断言增量**非零**且**不等于** `location` 直接当目标时的值（两者只在 `translation != .zero` 时才分得开 ⇒ 该档的 `.began` translation **必须非零**，⛔ 不得用 0） |
+| **T9** | **起手点的重建**（D134c），四档：① 按下**在**节点半径内、`.began` 时 `translation` 已把当前点带**出**半径 → **必须进拖动**（⇒ 路由不看 `.began` 的当前点）；② 按下**在**半径外、`.began` 时当前点已落**进**半径 → **必须不进拖动**、且照常走图表手势；③ `translation == .zero` 的退化档 → 与今天行为一致；④ **锚点增量 ≡ `translation` 的换算值**（D134d 的两个公式）：给定一串 `translation`，锚点的价位增量逐帧等于 `-translation.y × span / height`、下标增量等于 `translation.x / candleStep` 取整 | host | ⭐ ①② 是**互为对照**的一对，⛔ 缺一不可：只写 ① ⇒ 「探针恒答有」全绿；只写 ② ⇒ 「探针恒答没有」全绿。④ 必须断言增量**非零**且**不等于** `location` 直接当目标时的值（两者只在 `translation != .zero` 时才分得开 ⇒ 该档的 `.began` translation **必须非零**，⛔ 不得用 0） |
+| **T11** | **视口在「按下 → `.began`」之间移动**（D140b），四档：① 按下时节点在指下、之后**惯性把节点移出** 11pt → **仍必须进拖动**；② 按下时指下**没有**节点、惯性把某节点**移进**指下 → **必须不进拖动**且照常走图表手势；③ `settleDeceleration` **夹回 overscroll** 致投影移动 → 同 ①；④ 候选在按下与 `.began` 之间**失效**（线被删 / 选中被清 / 被锁 / 进复盘）→ fail-closed **不进拖动** | host | ⭐ ①② **互为对照，缺一不可**：只写 ① ⇒「候选恒有效」全绿；只写 ② ⇒「恒不进拖动」全绿。⚠️ ③ **必须断言 overscroll 确实被夹过**（构造一个真的 overscroll 的面板并在前后比对 offset），否则该档退化成 ① 的复制品。⚠️ ④ 的四个成因**各跑一档**，⛔ 不得只测其中一个就宣称覆盖 |
 | **T10** | **零位移恒等 + 纯横拖不改价位**（D134d），三档：① `translation == .zero` → 新锚点**逐字段 `==`** 原锚点（`price` 用 `==`，⛔ 不用近似比较）；② **纯横拖**（`translation.y == 0`、x 非零）→ `price` **逐位不变**，只有 `candleIndex` 变；③ **拖走再拖回**（translation 回到 `.zero`）→ 走门 ⑥ ⇒ 返 `true`、`drawingsRevision` **不变**、撤销栈里那条**原有记录还在** | host | ⭐ **必须用投影落在非整像素上的价位**（如 `displayScale=3`、主图高 401pt、价区 `10…23.7` 下的 `15.123456`）—— 用恰好落在整像素的价位，投影往返**碰巧**恒等 ⇒ 三档全绿而缺陷原样存在。⚠️ ③ 的「原有记录还在」必须断言**记录内容**，⛔ 不是只断言栈非空（撞空栈那一族） |
 | **T8** | **作废之后手势不回落成平移**（D138 末段）：周期变化作废后，同一手势的后续 `.changed / .ended` **不产生任何 pan emission、不产生 periodSwipe** | host | 正向对照：**没有**进入过节点拖动的同一串回调**确实**产生 pan emission |
 
@@ -419,9 +446,11 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 |---|---|---|
 | **G1** | 既有两条手势守卫**继续绿**：`handleSinglePan` 体内无 `drawingMode`；`GestureClassifiers` 里无 `drawingTakesOver` / `DrawingModePanPolicy` / `panPolicyInDrawingMode` | 既有守卫自带「防切片为空」的正向断言（`#expect(body.contains("singlePanStep("))`）。本片**只需确认它们仍绿**，⛔ 不得因为「挡路」去改它们 |
 | **G2** | **起手路径上不得出现 `DrawingHitTester`**（D134 的结构不变量）：探针实现所在函数体内不引用该类型 | ⚠️ 切片锚点找不到时必须 `Issue.record` 当场红（⛔ 不得静默通过）；且必须配**防切片为空**的正向断言（体内确实含 `hitTestNode(`）。⚠️ 判据的**文本来源是判据的一部分**：读仓内源文件本体、先剥注释 |
-| **G3** | **拖节点起手的顺序契约**（D140）：`settleDeceleration` → `rebuildRenderState` → 读 viewport → `CoordinateMapper` → 探针，五者顺序；**且喂给探针的是重建的起手点**（体内出现 `translation` 参与的减法，D134c） | 与既有 `drawingTapSettlesBeforeMapping`（`DrawingGestureSourceGuardTests.swift:62`）同款写法。⚠️ 五个锚点**缺任何一个都要显式报错**，⛔ 不得当作通过 |
+| **G3** | **两条时序契约**（D140 / D140b）：① 触摸按下的处理函数体内**不得出现** `settleDeceleration` / `rebuildRenderState` / 任何 engine mutator —— 它必须是**纯只读**的（D140b 的 load-bearing 约束）；② pan `.began` 路由到拖动的那一支里，`settleDeceleration` → `rebuildRenderState` → 读 viewport → `CoordinateMapper` 四者顺序 | 与既有 `drawingTapSettlesBeforeMapping`（`DrawingGestureSourceGuardTests.swift:62`）同款写法。⚠️ 五个锚点**缺任何一个都要显式报错**，⛔ 不得当作通过 |
 
 | **G4** | **探针不得自己重写那份非几何清单**（D134b 的结构保证）：探针实现所在函数体内**不出现** `locked` / `hasKnownFuture` / `isEditableToolType` / `flow.mode` 任一字面量，且**确实调用了** `editableIgnoringGeometry(` | ⚠️ 两个方向都要：只写「不出现」⇒ 探针整个不查也全绿（撞空转）；只写「调用了」⇒ 又调又自己抄一份也全绿。⚠️ 切片锚点找不到必须 `Issue.record` 当场红；先剥注释再匹配（注释里必然提到这些词） |
+| **G6** | **`.began` 路由不得重做几何命中**（D140b）：pan `.began` 的路由分支体内**不出现** `hitTestNode(` / `marks(`；而触摸按下的处理函数体内**必须出现** `hitTestNode(` | ⚠️ 两个方向缺一不可：只写「`.began` 里没有」⇒ 探针整个没接也全绿；只写「按下里有」⇒ 两处都查也全绿。⚠️ 切片锚点失配必须 `Issue.record` 当场红 |
+| **G7** | **触摸钩子只在单点触摸时发**（D140b）：`touchesBegan` 的实现体内出现「触摸数 == 1」这一判据 | ⚠️ 必须配行为测试：喂两点触摸 ⇒ 不产生候选。⛔ 只做源码守卫不够——判据写成 `>= 1` 源码上照样「出现」 |
 | **G5** | **`editableIgnoringGeometry` 的函数体未被本片改动**（只许改访问级别）：取该函数体的**归一化文本**（逐行剥行尾注释 → 压连续空白 → 去首尾空格 → 丢空行 → 以 `\|` 连接），**整串相等**于下面这个期望值（`private` 一词由本片改成 `internal`，⇒ 期望串的首行相应为 `internal static func …`）：<br><br>`internal static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {` \| `guard engine.flow.mode != .review else { return false }` \| `guard let d = uniqueSelected(engine: engine) else { return false }` \| `guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }` \| `guard !d.locked else { return false }` \| `guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }` \| `return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])` \| `&& !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])` \| `}` | ⛔ **必须整串相等，不得只数分量个数**（改一个分量名个数不变，撞「存在性检查表达不了穷尽性」那一族）。⚠️ 期望串写死在测试里 ⇒ 本片**故意**让「日后有人动这个函数」变成当场红；真要动它的人必须同时解释为什么本片这三条消费路径不受影响。⚠️ 归一化函数自身要配双向自检（喂一段改了分量的样本必须**不**相等） |
 
 ### 8.4 变异验证纪律
@@ -439,6 +468,9 @@ D135 已经让拖动全程只写一次 ⇒ 撤销记录天然是一条，**不�
 | 探针改成「先问线，线命中就返回没有」 | **T1** ⭐（不红 = Q19 无人看守） |
 | 位移改回「原锚点投影 + `translation` 再反算」 | **T10** 的 ①②③ 三档 ⭐ 第 4 轮评审抓到的那条。⚠️ 必须用非整像素价位造样本，否则全绿 |
 | `priceDelta` 的负号写掉 | **T9** 的 ④ 档（价位增量符号反了）。⚠️ **T10 的 ② 档预期不红** —— 纯横拖 `translation.y == 0`，负号乘 0 没有差别；**若 ② 也红说明测试串了，要查**。⛔ 两条预期都由 plan 实跑确认，不得推理 |
+| **探针改到 `.began` 才跑**（用刹车后的视口现查） | **T11** 的 ①②③ 三档 ⭐ 第 5 轮评审抓到的那条 |
+| 在触摸按下的钩子里加 `settleDeceleration` | **G3** 的 ① 分支 + **N1** 的「惯性期间行为不变」档（⚠️ 后者 plan 须先确认自己写得出这一档，写不出就如实登记只有 G3 接得住） |
+| 候选的 fail-closed 复核拿掉 | **T11** 的 ④ 档（四个成因各自应红） |
 | 路由改用 `.began` 的 `location`（不减 `translation`） | **T9** 的 ①② 两档 ⭐ 第 3 轮评审抓到的那条 |
 | 节点目标位置改用 `location` 直接当目标（丢掉抓取偏移） | **T9** 的 ④ 档 |
 | 探针改成只查 `locked`（即第 2 轮评审报的那一稿：不调 `editableIgnoringGeometry`） | **N6** 的 ②③④⑤⑥ 五档的**探针层** ⭐ 第 2 轮评审抓到的那条。⚠️ ① `locked` 档**预期不红**（它本来就查）——若它也红说明测试串了 |
