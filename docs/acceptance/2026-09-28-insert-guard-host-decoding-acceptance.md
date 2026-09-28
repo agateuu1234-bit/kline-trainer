@@ -80,8 +80,14 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host" &&
 > 从输出上看完全一样 —— 必须先证明它**能**报错，它报的「没问题」才有意义。
 
 ```
-bash /tmp/insert-guard-a4.sh
+bash "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host/docs/acceptance/2026-09-28-insert-guard-host-decoding-a4.sh"
 ```
+
+> ⚠️ 这个脚本**在仓库里**（跟本清单同一个目录），不是临时文件 —— 换台机器、重启之后照样能跑。
+> ⚠️ 它的判别方式是**直接调守卫的检查函数、读它抛出的报错消息**，
+> ⛔ 不是去 `grep` 测试输出 —— 第一版就是那么写的，实测**被证伪**：
+> 把守卫改成「什么都不报」之后，它照样打印「变红了 ✅」（因为 pytest 的回溯会把守卫
+> **源码里**的字样一起打印出来）。现在这一版已实测：守卫恒绿时它会打印「⛔ 没变红」。
 
 □ 通过　□ 不通过
 
