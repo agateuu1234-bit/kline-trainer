@@ -32,12 +32,15 @@ Python 运行时会把它们**粘成一句**再交给数据库。而守卫看的
 
 ---
 
-**A1** —— 期望：最后一行是 `7 passed in N.NNs`（⛔ 读 `passed` **前面的数字**，不读别的字样）
+**A1** —— 期望：最后一行是 `10 passed in N.NNs`（⛔ 读 `passed` **前面的数字**，不读别的字样）
 
-> 这 7 条分别钉住：①合成小树上守卫真会抛错 ②真仓里每条写入都带字段
+> 这 10 条分别钉住：①合成小树上守卫真会抛错 ②真仓里每条写入都带字段
 > ③守卫与**真 PostgreSQL 解析器**逐条一致 ④**守卫看的是运行时字符串**（本片新增）
 > ⑤只是提到 `INSERT INTO` 的散文**不许**被报（本片新增）⑥表名拼出来时**不许沉默**（本片新增）
 > ⑦列清单里有拼接占位时必须说「**判不了**」、⛔ 不许说「缺字段」（本片新增）
+> ⑧求不出来的表达式**里面**的 SQL 不许消失（本片新增）
+> ⑨判得出的写法不许降级成「判不了」（本片新增）
+> ⑩**解码不许让可见的语句变少**（本片新增，整条解码路线的地板）
 
 ```
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/insert-guard-host/backend" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest tests/test_insert_schema_version_guard.py -q | tail -1

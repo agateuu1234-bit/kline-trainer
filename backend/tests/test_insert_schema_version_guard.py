@@ -263,9 +263,13 @@ def _py_units(text: str):
              面孔：我以为自己只是在「折叠」，实际上把**没被代表**的子树抹掉了。
            ⇒ 求不出来的操作数**不消费**，它的子树留给外层循环继续单独扫。
         """
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
             consumed.add(id(node))
-            return node.value
+            # ⛔ **bytes 字面量也要收**：`b"INSERT INTO …".decode()` 运行时就是 SQL。
+            #    只收 `str` 的话它整条消失 —— 而**旧守卫（扫原文）本来报得出它**，
+            #    等于我的改动造成了退化（codex 第四轮）。
+            return (node.value.decode("utf-8", "replace")
+                    if isinstance(node.value, bytes) else node.value)
         if isinstance(node, ast.JoinedStr):          # f-string
             out = []
             for part in node.values:
@@ -291,7 +295,7 @@ def _py_units(text: str):
         if id(node) in consumed:
             continue
         if isinstance(node, (ast.JoinedStr, ast.BinOp)) or (
-                isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
             value = fold(node)
             if value is not None:
                 units.append((value, node.lineno))
@@ -616,6 +620,22 @@ def _scan(files, root):
             units = [(text, None)]          # None = 行号现场数
         else:
             units = decoded_units
+
+        # ⛔⛔ **地板：解码不许让可见的语句【变少】。**
+        #    把 `.py` 从「扫原文」改成「扫解码单元」，等于把扫描面**收窄**了 ——
+        #    凡是解码器没建模的东西（bytes 字面量、将来某种新写法……）在解码单元里
+        #    **根本不存在** ⇒ 整条消失 ⇒ 一言不发。codex 第四轮就是从这里进来的，
+        #    而那一条**旧守卫本来报得出** —— 我的改动造成了**退化**。
+        # ⇒ 逐个补类型是打地鼠。这里用**守恒判据**：原文里看得见几条表头，
+        #    解码后就不许少于几条。它对**所有**将来的解码器缺口都成立。
+        # ⚠️ 先量后做：干净树上「解码后表头变少」的 `.py` 文件 = 0 个。
+        if decoded_units is not None:
+            _raw_n = len(_heads(text)[0])
+            _dec_n = sum(len(_heads(u)[0]) for u, _ in units)
+            if _dec_n < _raw_n:
+                unknown.append(
+                    f"{rel}（解码后可见的表头从 {_raw_n} 条减到 {_dec_n} 条 —— "
+                    f"解码器漏掉了某种写法，判不了）")
 
         expected_hits = 0
         bucketed = 0
@@ -1386,6 +1406,11 @@ _MUST_NOT_VANISH = (
     ("f-string 插值表达式里的 SQL", ".py",
      "Q = f\"{'INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)'"
      " if flag else ''}\"\n"),
+    # ⛔ **bytes 字面量**：旧守卫（扫原文）本来报得出它，而我改成扫解码单元之后
+    #    它整条消失 —— 这是**我引入的退化**（codex 第四轮）。
+    ("bytes 字面量 .decode()", ".py",
+     'Q = b"INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"'
+     '.decode("ascii")\n'),
     ("SQL 字面量作为函数实参", ".py",
      'run("INSERT INTO training_sets (stock_code, file_path) VALUES ($1,$2)" + tail)\n'),
 )
@@ -1412,10 +1437,15 @@ def test_sql_literals_inside_unresolvable_expressions_do_not_vanish(tmp_path):
     for label, _suffix, src in _MUST_NOT_VANISH:
         found = False
         for node in _ast.walk(_ast.parse(src)):
-            if not (isinstance(node, _ast.Constant) and isinstance(node.value, str)):
+            if not isinstance(node, _ast.Constant):
+                continue
+            raw = node.value
+            if isinstance(raw, bytes):        # ⛔ bytes 字面量也算 —— 它 `.decode()` 之后就是 SQL
+                raw = raw.decode("utf-8", "replace")
+            if not isinstance(raw, str):
                 continue
             try:
-                tree = pglast.parse_sql(node.value)
+                tree = pglast.parse_sql(raw)
             except Exception:
                 continue
             for raw in tree:
@@ -1430,6 +1460,63 @@ def test_sql_literals_inside_unresolvable_expressions_do_not_vanish(tmp_path):
         assert found, (
             f"这条样本里并没有「写 training_sets 且缺 schema_version」的合法 SQL，"
             f"用例是空转的：{label}")
+
+
+#: ⛔ 这些写法**旧守卫（扫原文）本来就能给出确定结论**（「缺 schema_version」）。
+#:    换成扫解码单元之后，不许降级成「判不了」—— 那对使用者是**退化**：
+#:    「判不了」要人手工再看一遍，「缺字段」是直接可行动的。
+#: ⚠️ 这一条是变异逼出来的：守恒判据（地板）会把 bytes 那条接成「判不了」，
+#:    于是「收不收 bytes」**没有任何东西钉着** —— 实测把它改回只收 `str`，零红。
+_MUST_NAME_THE_MISSING_FIELD = (
+    ("bytes 字面量 .decode()", ".py",
+     'Q = b"INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"'
+     '.decode("ascii")\n'),
+    ("普通字面量", ".py",
+     'Q = "INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
+)
+
+
+def test_precision_does_not_regress_to_cannot_tell(tmp_path):
+    """判得出的写法必须报「缺 schema_version」，⛔ 不许降级成「判不了」。"""
+    punted = []
+    for label, suffix, src in _MUST_NAME_THE_MISSING_FIELD:
+        got = _guard_on_source(tmp_path, suffix, src)
+        if not got["missing"]:
+            punted.append(
+                f"{label}：missing={got['missing']} unknown={got['unknown']} "
+                f"checked={got['checked']}")
+    assert not punted, (
+        "这些写法**判得出**缺 schema_version，守卫却没给出确定结论 —— "
+        "对使用者是退化（「判不了」要人再看一遍）：\n  " + "\n  ".join(punted))
+
+
+def test_decoding_must_not_reduce_what_the_raw_scan_can_see(tmp_path):
+    """⛔⛔ **解码不许让可见的语句【变少】** —— 这是整条解码路线的**地板**。
+
+    把 `.py` 从「扫原文」改成「扫解码单元」，等于把扫描面**收窄**了：
+    凡是我的解码器没建模的东西（bytes 字面量、将来某种新写法……），
+    在解码单元里**根本不存在** ⇒ 整条消失 ⇒ 一言不发。
+    codex 第四轮就是从这里进来的（bytes 字面量），而那一条**旧守卫本来报得出**
+    —— 也就是说我的改动造成了**退化**。
+
+    ⇒ 逐个补类型是打地鼠。这里改成一条**守恒判据**：
+      **原文里看得见几条表头，解码后就不许少于几条。** 少了就报「判不了」。
+      它对**所有**将来的解码器缺口都成立，不必预见具体写法。
+    ⚠️ 先量后做：干净树上「解码后表头变少」的 `.py` 文件 = **0 个**，零代价。
+    """
+    # SQL 藏在**注释**里：原文扫得到，解码单元里根本没有注释 ⇒ 守恒判据必须响。
+    src = ("# INSERT INTO training_sets (stock_code, file_path) VALUES (1,2)\n"
+           "X = 1\n")
+    got = _guard_on_source(tmp_path, ".py", src)
+    assert not got["silent"], (
+        "原文里看得见一条表头、解码后一条都不剩，守卫却一言不发 —— "
+        f"解码器的任何缺口都会变成静默漏扫：{got}")
+    # ⛔ 防空转：这条用例的前提是「原文看得见、解码看不见」。
+    raw_heads = len(_heads(src)[0])
+    dec_heads = sum(len(_heads(u)[0]) for u, _ in (_py_units(src) or []))
+    assert raw_heads > dec_heads, (
+        f"这条用例的前提不成立（原文 {raw_heads} 条 / 解码 {dec_heads} 条），"
+        f"它没在验守恒判据")
 
 
 def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
