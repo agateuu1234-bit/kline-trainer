@@ -313,6 +313,7 @@ from __future__ import annotations
 import json
 import random
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -1152,7 +1153,8 @@ git commit -m "feat: 确定性自证 + 新旧两栏清单（旧七元组由真�
   - `def _resolve_v1_archive() -> Path`
   - `def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path`
   - `def publish_manifest(manifest_path: Path, payload: str) -> None`（原子发布，目标已存在即失败）
-  - `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个）、`--verify-determinism`）
+  - `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个））
+    ⛔ **没有**跳过确定性自证的开关 —— 它是无条件的（见 Task 6 实现里的注释）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1259,17 +1261,9 @@ def test_publish_manifest_writes_when_destination_is_free(tmp_path):
     assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
 
 
-def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monkeypatch):
-    """⭐ codex 评审第 2 轮那条：预检与真正写盘之间隔着**整轮重建**（几分钟）。
-
-    这里让「重建」那一步自己在窗口期内把清单建出来，模拟另一个进程
-    （操作者以为卡住了、在另一个终端又跑了一次）。
-    ⛔ 预检必然放行 —— 它早就跑完了。拦住它的只能是 `publish_manifest` 的原子发布。
-    """
+def _stub_asyncpg(monkeypatch):
+    """把 asyncpg 换成一个什么都不做的替身（`main` 里是函数内 import，所以换 sys.modules）。"""
     import types
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
-    man = tmp_path / "m.json"
 
     class _StubConn:
         async def close(self):
@@ -1280,8 +1274,76 @@ def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monke
 
     monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
 
+
+def test_cli_always_verifies_determinism_even_without_any_flag(tmp_path, monkeypatch):
+    """⛔ 确定性自证是**无条件**的（spec §3.4 R2 / §7 判据 9① / 变异 B54）。
+
+    ⭐ 判据是「`rebuild_all` 被调了**两次**、且两次落在**不同目录**」——
+    只断言「跑完了」抓不住「只跑了一遍」；两次落同一个目录的话，逐字节比对是**恒真**的。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    _stub_asyncpg(monkeypatch)
+    man = tmp_path / "m.json"
+    calls = []
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        calls.append(Path(output_dir))
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
+        return {"new": [], "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
+
+    assert rc == 0, "合法输入却失败了"
+    assert len(calls) == 2, f"只重建了 {len(calls)} 遍 —— 确定性自证被跳过了"
+    assert calls[0] != calls[1], "两遍产出到了同一个目录 ⇒ 逐字节比对是恒真的，判别力为零"
+    assert json.loads(man.read_text(encoding="utf-8"))["determinism_verified_against"]
+
+
+def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, monkeypatch):
+    """两轮字节不一致 ⇒ ⛔ 不发布清单、退出码非 0。
+
+    ⭐ 这条是上一条的**反向**：没有它，一个「调了两次但从不比较」的实现照样能让上一条绿。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    _stub_asyncpg(monkeypatch)
+    man = tmp_path / "m.json"
+    n = {"i": 0}
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        n["i"] += 1
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(
+            b"ROUND-1-BYTES" if n["i"] == 1 else b"ROUND-2-DIFFERENT")
+        return {"new": [], "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
+
+    assert rc != 0, "两轮不一致却报成功了"
+    assert not man.exists(), "两轮不一致却还是把清单发布了"
+
+
+def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monkeypatch):
+    """⭐ codex 评审第 2 轮那条：预检与真正写盘之间隔着**整轮重建**（几分钟）。
+
+    这里让「重建」那一步自己在窗口期内把清单建出来，模拟另一个进程
+    （操作者以为卡住了、在另一个终端又跑了一次）。
+    ⛔ 预检必然放行 —— 它早就跑完了。拦住它的只能是 `publish_manifest` 的原子发布。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "qmt_trial_out").mkdir()
+    _stub_asyncpg(monkeypatch)
+    man = tmp_path / "m.json"
+
     async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
         man.write_bytes(b"FIRST-RUN-SNAPSHOT")      # ← 窗口期内被别的进程建出来
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
         return {"new": [], "old": old_rows}
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
@@ -1454,8 +1516,6 @@ def main(argv=None) -> int:
                     help="【首轮用】现有 p11 SQL 的路径；⛔ P11 已被片 2 重新生成后不可再用")
     ap.add_argument("--old-snapshot",
                     help="【重跑用】首轮清单 JSON 的路径，旧身份从它取")
-    ap.add_argument("--verify-determinism", action="store_true",
-                    help="连跑两次并断言两批 zip 逐字节相同")
     args = ap.parse_args(argv)
 
     if bool(args.p11_sql) == bool(args.old_snapshot):
@@ -1501,15 +1561,22 @@ def main(argv=None) -> int:
         conn = ReadOnlyConn(await asyncpg.connect(args.dsn))
         try:
             man = await rebuild_all(conn, PINNED_TARGETS, out, old_rows=old_rows)
-            if args.verify_determinism:
-                # ⭐ 用**全新的临时目录**，⛔ 不再用 `out.parent / (out.name + "-verify")`：
-                #    那个名字可能早就被一个【指向归档的符号链接】占着（finding 1 实测）。
-                #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
-                second = Path(tempfile.mkdtemp(prefix="rebuild-verify-"))
-                assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
-                await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
-                assert_byte_identical(out, second)
-                man["determinism_verified_against"] = str(second)
+            # ⛔ **确定性自证是无条件的，不是开关**（codex 评审第 3 轮）：
+            #    spec §3.4 R2 写的是「⭐ 确定性自证：同一输入【连跑两次】」，
+            #    §7 判据 9① 写的是「这是『随时可重来』的唯一依据」，变异 B54 专门盯它。
+            #    上一版把它做成 `--verify-determinism`（默认关）⇒ 只给必填参数跑一次
+            #    就会发布正式清单并返回成功。**而后面 R6 收口闸比的全是「产出 vs 这份清单」**，
+            #    两边同源、必然自洽 ⇒ 真有非确定性也照样全绿，直到恢复时重建的包对不上
+            #    已发布的指纹才暴露 —— 那时已经没有退路了。
+            #    ⛔ 不得加回任何跳过它的开关（本仓教训：同一类缺陷反复上移 ⇒ 塌层 + 去开关）。
+            # ⭐ 用**全新的临时目录**，⛔ 不用 `out.parent / (out.name + "-verify")`：
+            #    那个名字可能早就被一个【指向归档的符号链接】占着（第 1 轮 finding 1 实测）。
+            #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
+            second = Path(tempfile.mkdtemp(prefix="rebuild-verify-"))
+            assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
+            await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
+            assert_byte_identical(out, second)          # 不一致 → 抛错 → 清单不发布
+            man["determinism_verified_against"] = str(second)
             man["statements_issued"] = len(conn.statements)
             return man
         finally:
@@ -1557,7 +1624,8 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 5. 用真解析器读出的旧三行指纹 == `851f9444` / `32892a5f` / `150d8d6c` 且 `schema_version` 全是 `1`；
 6. 命令行入口对下面每一种都拒绝、退出码非 0：产出目录落在归档里 / **清单落在归档里** /
    **清单已存在** / **产出目录已存在** / `--p11-sql` 与 `--old-snapshot` 都给或都不给 /
-   **清单在重建途中被别的进程建出来**（这一条拦住它的不是预检，是原子发布）；
+   **清单在重建途中被别的进程建出来**（这一条拦住它的不是预检，是原子发布）/
+   **两轮重建字节不一致**（此时清单必须**没有**被创建出来）；
 7. ⭐ **两条正向对照各跑一次并确认是绿的**：合法路径能通过路径闸、合法的首轮清单能通过旧快照校验。
    ⛔ 少了这两条，上面那一串「拒了」掩盖得住一个**恒抛**的守卫 —— 那是本仓点名的头号假绿形态；
 8. ⭐ 亲手确认一次：把清单指向归档里的某个 zip 跑一遍，**那个 zip 的字节数跑完仍然没变**。
@@ -1627,6 +1695,25 @@ Task 6（统一路径闸 `assert_write_target_is_safe` + 验证目录改用全�
 补 1 条模拟窗口期被抢占的用例 + 1 条正向对照。
 
 ⛔ **它这一轮同样没有执行任何代码**（沙箱只读、无 pglast）。上表的复现是我在本机跑的。
+
+### 第 3 轮 · `codex:adversarial-review`（2026-09-28，同上口径，**未传 focus**）
+
+判决仍是 **needs-attention**，账本**未写入**（退出码 7）。**1 条，且降到 `medium`**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 确定性自证被我写成了可跳过的开关 —— **属实** | 回 spec 原文核对：§3.4 R2 写「⭐ 确定性自证：同一输入【连跑两次】」、§7 判据 9① 写「这是『随时可重来』的**唯一依据**」、§4 变异 **B54** 专门盯「R2 不做自证」。**三处都没有「可选」的意思**，是我把硬要求降级成了 `--verify-determinism`（默认关）|
+
+⭐ **为什么这条比看起来严重**：R6 收口闸比的全是「产出 vs **R2 自己的清单**」——两边同源、必然自洽。
+所以真有非确定性时，闸门照样全绿，一直到**恢复时重建的包对不上已发布的指纹**才暴露，而那时已经没有退路。
+这正是 spec 在 R2 ⓑ2 里点名过的那个形状。
+
+⇒ 修法：**删掉那个开关**，第二轮重建与逐字节比对改为**无条件**、且排在清单发布**之前**；
+补 2 条用例 —— ①不带任何开关也必须重建两遍、且两遍落在**不同目录**
+（落同一个目录的话逐字节比对是恒真的）；②两轮不一致时**清单必须没有被创建出来**且退出码非 0。
+⛔ 计划里写明：不得加回任何跳过它的开关（本仓教训：同一类缺陷反复上移 ⇒ 塌层 + 去开关）。
+
+⛔ **它这一轮仍然没有执行任何代码**。
 
 ---
 
