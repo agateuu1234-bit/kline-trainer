@@ -42,6 +42,12 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 - **红的是哪一句**：`len(calls) == 2` 这句**先通过**（确实调了两次），红在**紧跟着**的 `calls[0] != calls[1]`（`assert PosixPath('.../out') != PosixPath('.../out')`）——两个 `PosixPath` 打印出来是同一个路径。这证明了这句断言**自己**（不是靠前一句短路挡住）能抓住"两遍落到同一个目录、逐字节比对恒真"这个退化场景。
 - **复原后是否回绿**：是。改回 `mkdtemp(...)` 那一行，`grep -n "MUTATION-6-1b"` 零命中，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
 
+**T6-1c（同一条测试第 4 句断言，同样单独证明）**：`test_cli_always_verifies_determinism_even_without_any_flag` 最后还有一句 `assert json.loads(man.read_text(...))["determinism_verified_against"]`。把实现里 `man["determinism_verified_against"] = str(second)` 那一行的键名故意打错成 `man["determinism_verified"] = str(second)`。
+
+- **怎么证明落地**：`grep -n "MUTATION-6-1c"` 命中新插入的注释；改动前后该变量名 `grep -c "determinism_verified_against"` 从这一行的角度看少了赋值那一处（读取那处仍在测试文件里，计数变化仅体现在实现文件这一行的键名字面量上）。
+- **单独跑**：同一条测试单独执行。前三句（`rc == 0`、`len(calls) == 2`、`calls[0] != calls[1]`）**全部通过**，红在第四句：`KeyError: 'determinism_verified_against'`——证明这句断言独立地在守着"清单里必须真的记下验证对象"这件事，不是靠前面三句陪跑。
+- **复原后是否回绿**：是。键名改回 `determinism_verified_against`，`grep -n "MUTATION-6-1c"` 零命中，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
+
 ### T6-2 —— 清单路径漏挡一个写入目标
 
 **约束**：路径闸必须对每一个写入目标都跑一遍，只挡一个等于没挡。
