@@ -35,6 +35,13 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 
 **复原后是否回绿**：是。改回后 `grep -c "rebuild-verify-"` 回到 1，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
 
+**T6-1b（针对同一条测试里第二句断言单独做的补充变异，⭐ 按本仓"多句断言必须逐句 deselect 单独证明判别力"的规矩）**：上面 T6-1 的改法会让 `len(calls) == 2` 那句先红，`test_cli_always_verifies_determinism_even_without_any_flag` 里紧跟着的 `calls[0] != calls[1]` 那句根本没被执行到——这句本身的判别力没有被单独证明过。于是另做一组更精细的改法：把 `second = Path(tempfile.mkdtemp(prefix="rebuild-verify-", dir=scratch_root))` 改成 `second = out`，但**保留**后面真正调用 `rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)` 那一行（第二轮**仍然真跑**，只是落在跟第一轮同一个目录）。
+
+- **怎么证明落地**：`grep -n "MUTATION-6-1b"` 命中新插入的注释。
+- **单独跑**：`pytest tests/test_rebuild_training_sets.py::test_cli_always_verifies_determinism_even_without_any_flag -v`。
+- **红的是哪一句**：`len(calls) == 2` 这句**先通过**（确实调了两次），红在**紧跟着**的 `calls[0] != calls[1]`（`assert PosixPath('.../out') != PosixPath('.../out')`）——两个 `PosixPath` 打印出来是同一个路径。这证明了这句断言**自己**（不是靠前一句短路挡住）能抓住"两遍落到同一个目录、逐字节比对恒真"这个退化场景。
+- **复原后是否回绿**：是。改回 `mkdtemp(...)` 那一行，`grep -n "MUTATION-6-1b"` 零命中，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
+
 ### T6-2 —— 清单路径漏挡一个写入目标
 
 **约束**：路径闸必须对每一个写入目标都跑一遍，只挡一个等于没挡。
