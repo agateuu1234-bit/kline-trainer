@@ -1073,24 +1073,36 @@ def test_read_legacy_rows_refuses_a_regenerated_p11(tmp_path):
     assert "已经被重新生成过" in str(ei.value)
 
 
+#: 每一项 = (怎么改坏, **期望命中的那条规则的原话片段**)。
+#: ⭐ 钉住「红的理由」而不只是「红了」—— 本仓记过：一个被**别的**规则抢先拒掉的用例
+#: 看起来是绿的（测试通过），实际上它要验的那条规则**一次都没执行过**。
+#: 实测过：早先那版「目标对不上」被 file_path 规则抢先拒、「行数是 4」被指纹重复规则抢先拒。
 _HOLES = {
-    "缺 content_hash（P11b 身份闸的输入）": lambda rows: [r.pop("content_hash") for r in rows],
-    "缺 file_path": lambda rows: [r.pop("file_path") for r in rows],
-    "缺 stock_name": lambda rows: [r.pop("stock_name") for r in rows],
-    "缺 stock_code": lambda rows: [r.pop("stock_code") for r in rows],
-    "content_hash 是空串": lambda rows: rows[0].__setitem__("content_hash", ""),
-    "指纹是大写": lambda rows: rows[0].__setitem__("content_hash", "AAAA1111"),
+    "缺 content_hash（P11b 身份闸的输入）":
+        (lambda rows: [r.pop("content_hash") for r in rows], "字段集合不对"),
+    "缺 file_path": (lambda rows: [r.pop("file_path") for r in rows], "字段集合不对"),
+    "缺 stock_name": (lambda rows: [r.pop("stock_name") for r in rows], "字段集合不对"),
+    "缺 stock_code": (lambda rows: [r.pop("stock_code") for r in rows], "字段集合不对"),
+    "多出一个字段": (lambda rows: [r.__setitem__("extra", 1) for r in rows], "字段集合不对"),
+    "content_hash 是空串":
+        (lambda rows: rows[0].__setitem__("content_hash", ""), "不是非空字符串"),
+    "指纹是大写":
+        (lambda rows: rows[0].__setitem__("content_hash", "AAAA1111"), "不是 8 位小写十六进制"),
     "三行共用同一个【小写】指纹":
-        lambda rows: [r.__setitem__("content_hash", "deadbeef") for r in rows],
+        (lambda rows: [r.__setitem__("content_hash", "deadbeef") for r in rows],
+         "个不同的 content_hash"),
     "两行指纹相撞":
-        lambda rows: rows[0].__setitem__("content_hash", rows[1]["content_hash"]),
-    "多出一个字段": lambda rows: [r.__setitem__("extra", 1) for r in rows],
+        (lambda rows: rows[0].__setitem__("content_hash", rows[1]["content_hash"]),
+         "个不同的 content_hash"),
     "file_path 与自己的身份不符":
-        lambda rows: rows[0].__setitem__("file_path", "/data/training-sets/WRONG.zip"),
+        (lambda rows: rows[0].__setitem__("file_path", "/data/training-sets/WRONG.zip"),
+         "与它自己的身份对不上"),
+    "stock_name 与 stock_code 不同":
+        (lambda rows: rows[0].__setitem__("stock_name", "平安银行"), "!= stock_code"),
     "start_datetime 是字符串":
-        lambda rows: rows[0].__setitem__("start_datetime", "1756656000"),
+        (lambda rows: rows[0].__setitem__("start_datetime", "1756656000"), "不是整数"),
     "schema_version 变成 2":
-        lambda rows: [r.__setitem__("schema_version", 2) for r in rows],
+        (lambda rows: [r.__setitem__("schema_version", 2) for r in rows], "schema_version 是"),
 }
 
 
@@ -1120,12 +1132,16 @@ def test_seven_tuple_shape_rejects_each_known_hole(label):
 
     ⛔ 上一版只查「行数 / 代数 / (code,start,end) 集合」三样，
     下面这些**当时全部通过**，其中「缺 stock_code」还抛的是 KeyError（命令行接不住）。
+    ⭐ 每条都断言**红的理由**，⛔ 不只断言「红了」—— 见 `_HOLES` 的注释。
     """
+    mutate, expected_reason = _HOLES[label]
     rows = _legacy_shaped_rows()
-    _HOLES[label](rows)
-    with pytest.raises(r.RebuildMismatch):
+    mutate(rows)
+    with pytest.raises(r.RebuildMismatch) as ei:
         r.assert_seven_tuple_shape(rows, where="残缺快照",
                                    expect_schema_version=r.LEGACY_SCHEMA_VERSION)
+    assert expected_reason in str(ei.value), (
+        f"红了，但红的理由不对 —— 期望命中「{expected_reason}」，实际是：{ei.value}")
 
 
 def test_read_old_snapshot_rejects_an_incomplete_snapshot_file(tmp_path):
@@ -1637,49 +1653,55 @@ def test_cli_requires_exactly_one_old_value_source(tmp_path, monkeypatch):
                           "--old-snapshot", str(tmp_path / "s.json")]) != 0   # 都给
 
 
-def _valid_snapshot() -> dict:
-    return {"old": [{"stock_code": t.stock_code, "stock_name": t.stock_code,
-                     "start_datetime": t.start_datetime,
-                     "end_datetime": t.expected_end_datetime,
-                     "schema_version": r.LEGACY_SCHEMA_VERSION,
-                     "file_path": r.container_file_path(t.stock_code, t.start_datetime),
-                     "content_hash": "deadbeef"}
-                    for t in r.PINNED_TARGETS]}
+def _write_snapshot(tmp_path, rows) -> "Path":
+    s = tmp_path / "s.json"
+    s.write_text(json.dumps({"old": rows}), encoding="utf-8")
+    return s
 
 
 def test_read_old_snapshot_accepts_a_valid_first_round_manifest(tmp_path):
-    """⭐ 正向对照（同上：防一套全是拒了的用例掩盖恒抛守卫）。"""
-    s = tmp_path / "s.json"
-    s.write_text(json.dumps(_valid_snapshot()), encoding="utf-8")
-    assert len(r.read_old_snapshot(s)) == len(r.PINNED_TARGETS)
+    """⭐ 正向对照（防一套全是「拒了」的用例掩盖一个**恒抛**的校验器）。
+
+    ⛔ 用 `_legacy_shaped_rows()`（三个**真**指纹）——
+    上一版这里自己另造了一份「三行都填 deadbeef」的样本，
+    在「三个指纹必须互不相同」那条规则落地之后**必然失败**（codex 评审第 5 轮实测）。
+    ⇒ 合法样本只许有**一份**，⛔ 不许各处各造一份。
+    """
+    assert len(r.read_old_snapshot(_write_snapshot(tmp_path, _legacy_shaped_rows()))) \
+        == len(r.PINNED_TARGETS)
 
 
 def test_read_old_snapshot_refuses_a_second_generation_snapshot(tmp_path):
-    d = _valid_snapshot()
-    for row in d["old"]:
+    rows = _legacy_shaped_rows()
+    for row in rows:
         row["schema_version"] = 2
-    s = tmp_path / "s.json"
-    s.write_text(json.dumps(d), encoding="utf-8")
-    with pytest.raises(r.RebuildMismatch):
-        r.read_old_snapshot(s)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_old_snapshot(_write_snapshot(tmp_path, rows))
+    assert "schema_version 是" in str(ei.value), f"红的理由不对：{ei.value}"
 
 
 def test_read_old_snapshot_refuses_when_targets_do_not_match(tmp_path):
-    d = _valid_snapshot()
-    d["old"][0]["start_datetime"] += 1
-    s = tmp_path / "s.json"
-    s.write_text(json.dumps(d), encoding="utf-8")
-    with pytest.raises(r.RebuildMismatch):
-        r.read_old_snapshot(s)
+    """⚠️ 起点改了，`file_path` **必须跟着改** —— 否则会被「file_path 与身份不符」
+    那条**抢先**拒掉，而本用例要验的「目标集合」规则一次都不会执行（实测过）。"""
+    rows = _legacy_shaped_rows()
+    rows[0]["start_datetime"] += 1
+    rows[0]["file_path"] = r.container_file_path(
+        rows[0]["stock_code"], rows[0]["start_datetime"])
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_old_snapshot(_write_snapshot(tmp_path, rows))
+    assert "与钉死的目标对不上" in str(ei.value), f"红的理由不对：{ei.value}"
 
 
 def test_read_old_snapshot_refuses_wrong_row_count(tmp_path):
-    d = _valid_snapshot()
-    d["old"].append(d["old"][-1])
-    s = tmp_path / "s.json"
-    s.write_text(json.dumps(d), encoding="utf-8")
-    with pytest.raises(r.RebuildMismatch):
-        r.read_old_snapshot(s)
+    """⚠️ 多出来那一行的指纹**必须与前三行都不同** —— 否则会被「指纹重复」
+    那条抢先拒掉，而本用例要验的「行数」规则一次都不会执行（实测过）。"""
+    rows = _legacy_shaped_rows()
+    extra = dict(rows[-1])
+    extra["content_hash"] = "aabbccdd"
+    rows.append(extra)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_old_snapshot(_write_snapshot(tmp_path, rows))
+    assert "应有" in str(ei.value) and "行" in str(ei.value), f"红的理由不对：{ei.value}"
 ```
 
 ```python
@@ -2051,6 +2073,30 @@ Codex did not return valid structured JSON.
 我另外用**小写**指纹单独验过一次，去重规则确实会红（三行共用、两行相撞都拦住）。
 
 ⇒ **第 5 轮必须重跑**：上面这些是我自查的结果，**不是评审结论**。
+
+### 第 5 轮（重跑，2026-09-29 额度恢复后）· `codex:adversarial-review`
+
+判决仍是 **needs-attention**，账本**未写入**（退出码 7）。**1 条 `medium`，而且是我上一轮修复自己引入的新伤**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 合法快照样本用了重复指纹，正向用例**必然失败** —— **属实，而且不止一处** | 我把四条用例逐条跑了一遍，看**红的理由**：①正向对照被「指纹重复」拒（本该通过）；②代数用例命中「代数」✅；③**「目标对不上」被「file_path 与身份不符」抢先拒** —— 它要验的「目标集合」规则一次都没执行；④**「行数是 4」被「指纹重复」抢先拒** —— 「行数」规则一次都没执行 |
+
+⭐ **根因**：我在 Task 5 新加了「三个指纹必须互不相同」，却**没回头看 Task 6 里那个早就存在的合法样本**（三行都填 `deadbeef`）。
+⇒ 同一事实的**两份副本**，订正只落在其中一份 —— 本仓记过的那条，这次栽在我自己身上。
+
+⭐ **比「样本写错了」更值钱的一层**：③④ 是 **PR #200 第 14 轮那条教训的复刻** ——
+**「红得看起来对，其实红的理由是错的」**。测试通过了，但它要验的那条规则被**别的**规则抢先拒掉、一次都没执行。
+
+⇒ 修法两条：
+1. **合法样本只留一份**（`_legacy_shaped_rows()`，三个真指纹），⛔ 不许各处各造；
+2. **把「红的理由」写进断言** —— `_HOLES` 每一项都带上「期望命中哪条规则的原话片段」，
+   负向用例只改待验条件（起点改了就同步改 `file_path`；多加的那行用不重复的指纹）。
+
+**实测**：13 条变异**全部命中它该命中的那条规则**（不合格 0 条）、正向对照通过、
+Task 6 三条负向用例分别命中「代数」「目标集合」「行数」。
+
+⛔ **它这一轮仍然没有执行任何代码**。
 
 ---
 
