@@ -41,4 +41,126 @@ public enum DrawingNodeDrag {
         guard rawIndex.isFinite, abs(rawIndex) < CGFloat(Int.max / 2) else { return nil }
         return AnchorDelta(price: priceDelta, index: Int(rawIndex))
     }
+
+    /// D137 的**唯一后置条件**：该锚点在 `marks()` 里产出 `.real`。
+    ///
+    /// ⛔ **不要退回「`visibleGeometry != nil`」**：`.straight` 的几何完全不看锚点 x
+    /// （`HorizontalLineTool.swift:54-55`）⇒ 锚点被夹到右缘之外时**线照常可见**，而 `marks`
+    /// 会把越界的 x 转成 `.proxy`（`DrawingNodeGeometry.swift:73-74`）、`hitTestNode` 又把 proxy
+    /// 排除在命中集合之外（`:104`）⇒ **线还在、黑点却再也抓不住**。那条判据在 `.straight` 上
+    /// 被**空洞地满足**（spec 第 12 轮实证）。
+    ///
+    /// 本条**蕴含**另外两件事：① 线可见（`marks` 在 `isVisible == false` 时直接返回空数组，`:41`）；
+    /// ② 节点还抓得住（D131：命中集合 ≡ 渲染集合里的 `.real`）。
+    public static func producesRealNode(anchor: DrawingAnchor, in drawing: DrawingObject,
+                                        anchorIndex: Int, mapper: CoordinateMapper,
+                                        tool: any DrawingTool) -> Bool {
+        guard drawing.anchors.indices.contains(anchorIndex) else { return false }
+        var anchors = drawing.anchors
+        anchors[anchorIndex] = anchor
+        // ⚠️ `DrawingObject` **没有** `withAnchors`（实测）⇒ 就地用完整成员 init 逐字段拷贝，
+        //    照 `setDrawingLocked`（`TrainingEngine.swift:1230` 起）的范式。
+        //    ⛔ 不要为此给 `DrawingObject` 加新 API（YAGNI，且会扩大本片对 Models 的改动面）。
+        //    ⚠️ `period` **显式传** `drawing.period`：init 的默认行为是从 `anchors.first?.period` 现取，
+        //       候选锚点若周期不同会静默改掉整条线的周期。
+        let candidate = DrawingObject(
+            id: drawing.id, toolType: drawing.toolType, anchors: anchors,
+            isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
+            revealTick: drawing.revealTick, period: drawing.period,
+            lineSubType: drawing.lineSubType, lineStyle: drawing.lineStyle,
+            thickness: drawing.thickness, colorToken: drawing.colorToken,
+            labelMode: drawing.labelMode, locked: drawing.locked,
+            text: drawing.text, fontSize: drawing.fontSize,
+            textColorToken: drawing.textColorToken, textForm: drawing.textForm,
+            tailAnchor: drawing.tailAnchor)
+        let marks = DrawingNodeGeometry.marks(
+            for: candidate, mapper: mapper,
+            isVisible: tool.isVisible(drawing: candidate, mapper: mapper),
+            maxAnchors: tool.requiredAnchors.upperBound)
+        return marks.contains { if case .real(let i, _) = $0 { return i == anchorIndex }; return false }
+    }
+
+    /// D134d + D137：把一次位移变成**已夹取**的新锚点。
+    ///
+    /// ⭐⭐ **夹取是一个幂等的投影**：候选若已满足后置条件 ⇒ **原样返回、一个字节不改**；
+    /// 只有不满足时才修正。幂等性直接给出三条保证：零位移恒等 / 纯横拖不改价 / 拖走再拖回逐位
+    /// 恢复。⛔ **绝不无条件夹**：可见性按**像素舍入之后**的 y 判（`priceToY` 先舍入、`marks` 再比较），
+    /// 比「价位落在 priceRange 内」更宽。实测（spec D137）：价位 23.701 已超区间上限，投影 y = -0.0293
+    /// 舍入到 -0.0 ⇒ 仍是 `.real`；无条件夹会把它改成 23.7，**即使手指纵向一动没动**。
+    ///
+    /// 修正时**必须在像素舍入之后的坐标空间里选边界**，⛔ 不得直接用 `startIndex + visibleCount - 1`：
+    /// 实测 candleStep=4.0025 / pixelShift=4 / 右缘 320.2 时，第 79 根舍入到 320.3333 已越界，
+    /// 合法最大下标是 78。
+    ///
+    /// 返回 `nil` = 连边界都找不到合法位置（fail-closed；调用方丢弃本帧，⛔ 不得写出不合法锚点）。
+    public static func draggedAnchor(drawing: DrawingObject, anchorIndex: Int, translation: CGPoint,
+                                     mapper: CoordinateMapper, tool: any DrawingTool) -> DrawingAnchor? {
+        guard drawing.anchors.indices.contains(anchorIndex) else { return nil }
+        let old = drawing.anchors[anchorIndex]
+        guard let d = anchorDelta(translation: translation, mapper: mapper) else { return nil }
+        let (rawIndex, overflow) = old.candleIndex.addingReportingOverflow(d.index)
+        let candidateIndex = overflow ? (d.index > 0 ? Int.max : Int.min) : rawIndex
+        let candidate = DrawingAnchor(period: old.period, candleIndex: candidateIndex,
+                                      price: old.price + d.price)
+        // ① 幂等：已经合法就原样返回
+        if producesRealNode(anchor: candidate, in: drawing, anchorIndex: anchorIndex,
+                            mapper: mapper, tool: tool) {
+            return candidate
+        }
+        // ② 不合法才修正：先把价位调到最近的合法值，再把下标调到最近的合法下标
+        let priced = clampPrice(candidate, in: drawing, anchorIndex: anchorIndex,
+                                mapper: mapper, tool: tool)
+        return clampIndex(priced, in: drawing, anchorIndex: anchorIndex, mapper: mapper, tool: tool)
+    }
+
+    /// 价位方向的修正：在 `[priceRange.min, priceRange.max]` 内二分找最接近候选、且 y 落在框内的值。
+    /// ⚠️ 判据用 `priceToY` **舍入之后**的结果比较（与 `marks` 同一判据），⛔ 不比较价位本身。
+    ///
+    /// ⚠️ **本函数与简报草稿的差异**：草稿版 lo/hi 更新分支是反的（对着一个 y **随价位递减**的函数，
+    /// 却按「递增函数」的方向二分）⇒ 会收敛到**错误的那一侧**边界。实测钉死（脚本重放同一 candleStep /
+    /// frame / priceRange）：`target = frame.minY`（应收敛到 price ≈ priceRange.max = 23.7）时，
+    /// 反向版本收敛到 10.0（= priceRange.min，整整跑到对面）；`target = frame.maxY` 时反向版本又收敛
+    /// 到 23.7。两侧都错，且给定的 `clampKeepsNodeReal` 测试**测不出来**——因为两侧本身都满足
+    /// 「投影仍在 [minY,maxY] 内」而产出 `.real`，判据只问「还是不是 .real」，不问「夹到了哪一侧」。
+    /// 这正是本片反复强调的「空洞成立」在这个函数内部的翻版：外部测试的判别力覆盖不到内部方向。
+    private static func clampPrice(_ a: DrawingAnchor, in drawing: DrawingObject, anchorIndex: Int,
+                                   mapper: CoordinateMapper, tool: any DrawingTool) -> DrawingAnchor {
+        let frame = mapper.viewport.mainChartFrame
+        let y = mapper.priceToY(a.price)
+        guard !(y.isFinite && y >= frame.minY && y <= frame.maxY) else { return a }
+        let target = y < frame.minY ? frame.minY : frame.maxY
+        var lo = mapper.viewport.priceRange.min, hi = mapper.viewport.priceRange.max
+        // 目标 y 对应的价位方向：y 越小价位越大 ⇒ y 是价位的**递减**函数。
+        // 标准二分（递减函数找 f(p)=target）：my < target ⇒ p 已经太大 ⇒ 收窄上界 hi；
+        // 否则 p 还不够大 ⇒ 收窄下界 lo。
+        var best = mapper.yToPrice(target)
+        for _ in 0..<64 {                       // 定次数二分：避免浮点比较写出死循环
+            let mid = (lo + hi) / 2
+            let my = mapper.priceToY(mid)
+            if my.isFinite && my >= frame.minY && my <= frame.maxY { best = mid }
+            if my < target { hi = mid } else { lo = mid }
+        }
+        return DrawingAnchor(period: a.period, candleIndex: a.candleIndex, price: best)
+    }
+
+    /// 下标方向的修正：**在像素舍入之后的空间里**，从候选往回找最近的合法下标。
+    /// ⛔ 不得直接用 `startIndex + visibleCount - 1`（实测它可能已越界，见本类型头注）。
+    private static func clampIndex(_ a: DrawingAnchor, in drawing: DrawingObject, anchorIndex: Int,
+                                   mapper: CoordinateMapper, tool: any DrawingTool) -> DrawingAnchor? {
+        if producesRealNode(anchor: a, in: drawing, anchorIndex: anchorIndex,
+                            mapper: mapper, tool: tool) { return a }
+        let vp = mapper.viewport
+        let lo = vp.startIndex, hi = vp.startIndex + max(0, vp.visibleCount - 1)
+        guard lo <= hi else { return nil }
+        let start = min(max(a.candleIndex, lo), hi)
+        // 从夹进窗口的那个下标出发，向**窗口内**双向扫，取第一个真正产出 .real 的
+        for step in 0...(hi - lo) {
+            for cand in [start - step, start + step] where cand >= lo && cand <= hi {
+                let t = DrawingAnchor(period: a.period, candleIndex: cand, price: a.price)
+                if producesRealNode(anchor: t, in: drawing, anchorIndex: anchorIndex,
+                                    mapper: mapper, tool: tool) { return t }
+            }
+        }
+        return nil                               // fail-closed：整个窗口都没有合法位置
+    }
 }
