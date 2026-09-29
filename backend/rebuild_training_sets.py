@@ -11,10 +11,15 @@
 """
 from __future__ import annotations
 
+import argparse
+import asyncio
 import filecmp
 import json
+import os
 import random
 import re
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -448,3 +453,196 @@ async def rebuild_all(conn, targets, output_dir: Path, *, old_rows) -> dict:
             f"源库在重建前后发生了变化 —— ⛔ 停下来查清楚\n  前：{before}\n  后：{after}")
     return {"new": new_rows, "old": old_rows,
             "source_counts_before": before, "source_counts_after": after}
+
+
+def _resolve_v1_archive() -> Path:
+    """v1 审计归档的真实路径。⚠️ 读 `HOME` —— 测试里可以 monkeypatch 它。"""
+    return Path(os.path.expanduser("~/qmt_trial_out")).resolve()
+
+
+def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path:
+    """**任何**要写的路径，写之前都必须过这一道。返回解析后的真实路径。
+
+    ⛔ **对每一个写入目标都要跑一遍**（产出目录 / 验证目录 / 清单）——
+       只挡其中一个等于没挡（codex 评审第 1 轮 finding 1：原来只挡了产出目录）。
+    ⭐ 判据用 `.resolve()` 是**故意的**：它会跟着符号链接走，而这正是需要的 ——
+       实测一个指向归档的符号链接能让 `assemble_from_windows` 自带的守卫放行。
+    """
+    q = Path(path)
+    real = q.resolve()
+    archive = _resolve_v1_archive()
+    if real == archive or archive in real.parents:
+        raise RebuildMismatch(
+            f"{kind} 的真实路径 {real} 落在 v1 审计归档 {archive} 之内"
+            f"（给进来的是 {q}）—— 那里逐字节不得改动，⛔ 拒绝写入")
+    if must_not_exist and (q.exists() or q.is_symlink()):
+        raise RebuildMismatch(
+            f"{kind} {q} 已经存在 —— ⛔ 拒绝覆盖。首轮清单里的【旧身份快照】"
+            f"一旦被盖掉就再也取不回来（那时 P11 已经是第 2 代了）")
+    # ⚠️ `must_not_exist` 这一支是**早失败**（给操作者一个好看的错误），
+    #    **不是**保证 —— 它与真正写盘之间隔着整轮重建。承重的那道在 `publish_manifest`
+    #    的 `os.link`（codex 评审第 2 轮）。⛔ 不要因为有了这里就把那里放宽。
+    return real
+
+
+def publish_manifest(manifest_path: Path, payload: str) -> None:
+    """**原子发布**清单：先写临时文件并落盘，再用「目标已存在就失败」的方式挂上去。
+
+    ⛔ **不能用 `write_text()`**（codex 评审第 2 轮）：它是 `O_CREAT|O_TRUNC`，
+       会**截断**既有文件。而 `main` 里那道「清单不得已存在」的预检与这里之间
+       隔着**整轮重建**（几分钟）—— 窗口期内另一个进程（比如操作者以为卡住了、
+       在另一个终端重跑了一次）把清单建出来，预检**拦不住**，随后就被截断。
+       实测：首轮那份 22 字节的快照被覆盖成新内容，**旧身份从此取不回来**。
+    ⭐ `os.link` 在目标已存在时抛 `FileExistsError` 且**一个字节都不碰**（实测坐实），
+       这一步本身是原子的 —— 预检只是「早点给出好看的错误信息」，
+       **真正的保证在这里**。⛔ 不要因为有了预检就把这里退回 `write_text`。
+    ⚠️ 这里用硬链接是**取它「已存在即失败」这一条性质**，与本仓记过的
+       「硬链接能穿过守卫写到仓外」是两回事：那里的路径来自外部，这里的目标由我们自己算出、
+       且刚刚过完路径闸。
+    """
+    d = manifest_path.parent
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".manifest.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, manifest_path)
+        except FileExistsError:
+            raise RebuildMismatch(
+                f"清单 {manifest_path} 在本轮重建期间被别的东西创建了 —— "
+                f"⛔ 拒绝覆盖，一个字节都没动。"
+                f"（首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来）") from None
+        # 改名/挂链接的原子性 **不等于** 目录项已经落盘（spec §3.4 R4 同一条道理）
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        os.unlink(tmp)      # 成功时目标已是同一 inode 的另一个名字，删临时名无损
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="切片一 P4 R2：按钉死的起点重建 3 个训练组（只读源库）")
+    ap.add_argument("--dsn", required=True, help="源库连接串（⛔ 必须是源库的只读副本）")
+    ap.add_argument("--out-dir", required=True, help="产出目录（⛔ 必须【不存在】，由本命令新建）")
+    ap.add_argument("--scratch-dir", required=True,
+                    help="临时工作根（⛔ 必须【已存在】；⛔ 没有默认值、没有环境变量回退）")
+    ap.add_argument("--manifest", required=True, help="清单写到哪里（JSON，⛔ 不得已存在）")
+    ap.add_argument("--p11-sql",
+                    help="【首轮用】现有 p11 SQL 的路径；⛔ P11 已被片 2 重新生成后不可再用")
+    ap.add_argument("--old-snapshot",
+                    help="【重跑用】首轮清单 JSON 的路径，旧身份从它取")
+    args = ap.parse_args(argv)
+
+    if bool(args.p11_sql) == bool(args.old_snapshot):
+        print("拒绝：--p11-sql 与 --old-snapshot 必须【恰好给一个】——"
+              " 首轮给 --p11-sql（那时 P11 还是第 1 代），重跑给 --old-snapshot"
+              "（P11 已被片 2 改过，再从它取会取到【新】值）", file=sys.stderr)
+        return 2
+
+    try:
+        # ⭐⭐ **第一件事：把临时工作根钉死。** 这是第 7 轮之后的【塌层】做法。
+        #
+        # 为什么不能再「校验系统临时目录」了（codex 第 6 → 7 轮，两轮实测）：
+        #   ① 写盘的不止我们自己 —— `assemble_from_windows` 里的
+        #      `tempfile.TemporaryDirectory()`（`generate_training_sets.py:468`）
+        #      用同一个根；`mkdtemp` 还是**先把目录建出来**再返回，闸门只能事后发现。
+        #   ② 更要命：**校验动作本身就会写**。冷缓存时 `tempfile.gettempdir()` 走
+        #      `_get_default_tempdir()`，它对每个候选目录做
+        #      `open` → `write(b'blat')` → `unlink` —— 实测在归档里真的建过又删过一个探针文件，
+        #      **事后看目录什么都看不见**。
+        #   ⚠️ 说准：那三个 zip 的**字节始终没被动过**；破的是「⛔ 不得写入归档」这条边界，
+        #      外加「中途被打断，残渣留在归档里」。
+        #
+        # ⇒ 同一个根连着三轮冒头（第 1 / 6 / 7 轮），按本仓停止规则：**塌层 + 去开关**，
+        #   ⛔ 不再枚举「还有哪条路径会写到归档里」——路径来源是环境决定的，数不完。
+        #   塌成一条：**根由命令行显式给定**（必填），⛔ 无默认值、⛔ 无环境变量回退、
+        #   ⛔ 全程不调用任何会做「发现」的函数；校验通过后立刻把 `tempfile` **钉**在它上面，
+        #   于是下游那个 `TemporaryDirectory()` 也只能落在这里。
+        scratch_root = assert_write_target_is_safe(args.scratch_dir, kind="临时工作根")
+        if not scratch_root.is_dir():
+            raise RebuildMismatch(
+                f"临时工作根 {scratch_root} 不存在或不是目录 —— ⛔ 请先建好，"
+                f"本命令不替你建（建了就等于又引入一次『先动手、后校验』）")
+        tempfile.tempdir = str(scratch_root)    # ⛔ 必须排在任何分配之前
+
+        out = assert_write_target_is_safe(args.out_dir, kind="产出目录")
+        manifest_path = Path(args.manifest)
+        assert_write_target_is_safe(manifest_path, kind="清单", must_not_exist=True)
+        if out in manifest_path.resolve().parents:
+            raise RebuildMismatch(
+                f"清单 {manifest_path} 落在产出目录 {out} 里 —— ⛔ 输入输出不得混放")
+        # `publish_manifest` 的临时文件要建在清单的上级目录里；上级不存在的话
+        # `mkstemp` 抛的是 FileNotFoundError，会变成一个没人接的崩溃栈而不是干净的退出码。
+        if not manifest_path.parent.is_dir():
+            raise RebuildMismatch(
+                f"清单 {manifest_path} 的上级目录不存在 —— ⛔ 请先把它建好")
+        old_rows = (read_legacy_rows(Path(args.p11_sql)) if args.p11_sql
+                    else read_old_snapshot(Path(args.old_snapshot)))
+        # ⭐ 用 `os.mkdir`（⛔ **不加** `exist_ok`）把产出目录**原子地占下来**。
+        #   spec §3.4 R2 要的本来就是「产出到一个【新目录】」，所以「必须不存在」
+        #   比「必须为空」更贴合，而且顺手关掉了与清单同型的那个窗口：
+        #   「先检查是不是空的、再往里写」拦不住两个进程同时开工，`mkdir` 拦得住
+        #   （实测：第二次 mkdir 抛 FileExistsError）。
+        try:
+            os.mkdir(out)
+        except FileExistsError:
+            raise RebuildMismatch(
+                f"产出目录 {out} 已经存在 —— spec §3.4 R2 要求产出到一个【新目录】，"
+                f"⛔ 请换一个不存在的路径") from None
+        except FileNotFoundError:
+            raise RebuildMismatch(
+                f"产出目录 {out} 的上级目录不存在 —— ⛔ 请先把上级目录建好") from None
+    except RebuildMismatch as exc:
+        print(f"重建中止：{exc}", file=sys.stderr)
+        return 2
+
+    async def _run():
+        conn = ReadOnlyConn(await connect_read_only(args.dsn))
+        try:
+            man = await rebuild_all(conn, PINNED_TARGETS, out, old_rows=old_rows)
+            # ⛔ **确定性自证是无条件的，不是开关**（codex 评审第 3 轮）：
+            #    spec §3.4 R2 写的是「⭐ 确定性自证：同一输入【连跑两次】」，
+            #    §7 判据 9① 写的是「这是『随时可重来』的唯一依据」，变异 B54 专门盯它。
+            #    上一版把它做成 `--verify-determinism`（默认关）⇒ 只给必填参数跑一次
+            #    就会发布正式清单并返回成功。**而后面 R6 收口闸比的全是「产出 vs 这份清单」**，
+            #    两边同源、必然自洽 ⇒ 真有非确定性也照样全绿，直到恢复时重建的包对不上
+            #    已发布的指纹才暴露 —— 那时已经没有退路了。
+            #    ⛔ 不得加回任何跳过它的开关（本仓教训：同一类缺陷反复上移 ⇒ 塌层 + 去开关）。
+            # ⭐ 用**全新的临时目录**，⛔ 不用 `out.parent / (out.name + "-verify")`：
+            #    那个名字可能早就被一个【指向归档的符号链接】占着（第 1 轮 finding 1 实测）。
+            #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
+            second = Path(tempfile.mkdtemp(prefix="rebuild-verify-", dir=scratch_root))
+            assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
+            await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
+            assert_byte_identical(out, second)          # 不一致 → 抛错 → 清单不发布
+            man["determinism_verified_against"] = str(second)
+            man["statements_issued"] = len(conn.statements)
+            man["scratch_root"] = str(scratch_root)
+            return man
+        finally:
+            await conn.inner.close()
+
+    try:
+        manifest = asyncio.run(_run())
+    except RebuildMismatch as exc:
+        print(f"重建中止：{exc}", file=sys.stderr)
+        return 1
+    try:
+        publish_manifest(
+            manifest_path,
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except RebuildMismatch as exc:
+        print(f"清单发布失败：{exc}", file=sys.stderr)
+        return 1
+    print(f"清单已写到 {manifest_path}；发出的 SQL 共 {manifest['statements_issued']} 条，"
+          f"全部为读")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
