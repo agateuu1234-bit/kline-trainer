@@ -748,12 +748,27 @@ def test_cli_refuses_an_existing_out_dir(tmp_path, scratch, monkeypatch):
     assert r.main(_cli(tmp_path, scratch)) != 0
 
 
-def test_cli_requires_exactly_one_old_value_source(tmp_path, scratch, monkeypatch):
-    """首轮给 --p11-sql、重跑给 --old-snapshot，⛔ 不得都给也不得都不给。"""
+def test_cli_refuses_when_neither_old_value_source_is_given(tmp_path, scratch, monkeypatch):
+    """⛔ `--p11-sql` 与 `--old-snapshot` 都不给 ⇒ 拒绝。
+
+    ⭐ **拆自原来的单条 `test_cli_requires_exactly_one_old_value_source`**（Ruling ⑬）：
+    本仓已经在这个形状上栽过三次（Task 3 两句断言只有第一句有判别力、Task 5 同一条规矩
+    两份副本只订正一份、Task 6/T6-2 用例被替身崩溃「红」掉），这是第四次——两个子场景
+    挤在一条用例里，"都给"那个子场景的判别力在正常运行中不可见（前一句先抛异常，
+    `assert` 语句根本走不到后一句）。⇒ 拆成两条独立用例，让两个子场景各自的判据
+    在**每一次**正常运行里都看得见，不必等人手工 deselect 才知道。
+    """
     _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
     _stub_rebuild_all(monkeypatch)
     assert r.main(_cli(tmp_path, scratch, p11_sql=None)) != 0
+
+
+def test_cli_refuses_when_both_old_value_sources_are_given(tmp_path, scratch, monkeypatch):
+    """⛔ `--p11-sql` 与 `--old-snapshot` 都给 ⇒ 拒绝（见上一条的拆分说明）。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    _stub_rebuild_all(monkeypatch)
     assert r.main(_cli(tmp_path, scratch,
                        old_snapshot=tmp_path / "s.json")) != 0
 

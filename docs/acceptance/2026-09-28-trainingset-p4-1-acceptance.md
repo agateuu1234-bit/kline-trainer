@@ -50,7 +50,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/back
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py -v
 ```
 
-**期望看到**：实测共 **55 条**，每一条前面都是 `PASSED`；末行 `55 passed`。
+**期望看到**：实测共 **56 条**，每一条前面都是 `PASSED`；末行 `56 passed`。
 
 ⚠️ **这个 55 是实测数字，不是钉死不变的**：其中一组检查（`test_seven_tuple_shape_rejects_each_known_hole`）是「批量」写的——列了一份「已知的残缺样子」清单，以后谁往这份清单里再加一条新的残缺样子，这个数字就会往上涨。所以验收时不要死抠「必须正好是 55」，只要**这一条命令里没有任何一行不是 `PASSED`**、末行没有 `failed`，就算通过。
 
@@ -141,7 +141,7 @@ for row in rows:
 | 2 | 清单指向归档里一个还不存在的路径，且归档目录里一个新文件都不会多出来 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_manifest_inside_the_v1_archive -v` | 末行 `1 passed` |
 | 3 | 清单文件已经存在，且已有的旧内容没被覆盖 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_to_overwrite_an_existing_manifest -v` | 末行 `1 passed` |
 | 4 | 产出目录已经存在（哪怕是空文件夹） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_an_existing_out_dir -v` | 末行 `1 passed` |
-| 5 | `--p11-sql` 与 `--old-snapshot` 都给了、或者都没给 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_requires_exactly_one_old_value_source -v` | 末行 `1 passed` |
+| 5 | `--p11-sql` 与 `--old-snapshot` 都给了、或者都没给（拆成两条独立检查，各自单独可见：都没给会崩出一个已知的裸错误提示，这是本片记录在案、暂不修的已知残留；都给了则是一条干净的拒绝） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_when_neither_old_value_source_is_given tests/test_rebuild_training_sets.py::test_cli_refuses_when_both_old_value_sources_are_given -v` | 末行 `2 passed` |
 | 6 | 清单文件在重建进行到一半时被别的东西建了出来（模拟两个人同时操作） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_does_not_clobber_a_manifest_created_after_preflight -v` | 末行 `1 passed` |
 | 7 | 偷偷跑的两遍重建，字节结果不一致（此时清单文件必须**没有**被建出来） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_does_not_publish_when_the_two_rounds_differ -v` | 末行 `1 passed` |
 | 8 | `--scratch-dir`（临时工作根）指进了归档，而且全程一次都没有在归档里尝试建过文件 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_a_scratch_dir_inside_the_archive_without_writing_anything -v` | 末行 `1 passed` |

@@ -109,18 +109,22 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖�
 
 **约束**：两者必须恰好给一个，不能都给也不能都不给。
 
+**Ruling ⑬：拆成两条独立用例**——原来那条 `test_cli_requires_exactly_one_old_value_source` 把"两者都不给"与"两者都给"两个子场景挤在同一个函数体的两句 `assert` 里，第一句一旦抛出未被接住的裸异常，第二句就永远走不到、它的判别力在正常运行中不可见。这是本片**同一个形状第四次出现**（Task 3 两句断言只有第一句有判别力／Task 5 同一条规矩两份副本只订正一份／Task 6 T6-2 用例被替身崩溃"红"掉／本条），按"同一类缺陷反复出现 ⇒ 修这一类，不是修这一处"的规矩拆开，且拆分本身不是外来结构——计划自己在 Task 5 的 `_HOLES` 就用过 `parametrize` 这种"一份判据、多个独立可见结果"的写法。拆成两条：
+- `test_cli_refuses_when_neither_old_value_source_is_given`（子场景 A：两者都不给）
+- `test_cli_refuses_when_both_old_value_sources_are_given`（子场景 B：两者都给）
+
 **改了什么**：把 `if bool(args.p11_sql) == bool(args.old_snapshot):` 换成 `if False:`（恒不触发）。
 
 **怎么证明落地**：`grep -n "bool(args.p11_sql) == bool(args.old_snapshot)"` 改前命中该行，改后命中 0。
 
-⚠️ **补上 `_stub_rebuild_all` 重做后，这一组的真相比 T6-2/T6-4 更细一层，分两个子场景**：
+**红的是哪条（拆开后，两条各自独立跑出的真相）**：
 
-1. **两者都不给**（`_cli(..., p11_sql=None)`，`old_snapshot` 也未设）：检查失效后代码走到 `else read_old_snapshot(Path(args.old_snapshot))`，`args.old_snapshot` 是 `None`，`Path(None)` 直接抛 `TypeError: expected str, bytes or os.PathLike object, not NoneType`——**这次崩溃不是替身不完整造成的**（根本没走到数据库那一步），而是移除检查之后代码真的会在这里崩，是这条变异**本身**的真实后果。但它的**形态**仍然是一次没被 `main()` 接住的裸异常，不是一条干净的 `assert rc != 0`——这与控制者已经裁定"`main()` 只捕 `RebuildMismatch`、其它异常裸抛是计划原文规定、本轮不改"的已知残留是**同一件事**在这里的具体表现。
-2. **两者都给**（`_cli(..., old_snapshot=tmp_path/"s.json")`）：检查失效后代码走 `if args.p11_sql:` 分支，`read_legacy_rows` 正常读出真实 p11 SQL、成功返回，`main()` 一路跑完、返回 **0**——**独立验证过**（脱离 pytest、单独跑一遍这个场景）：`main()` 返回 0，与"应该非 0"直接矛盾，是一条**干净**的、不涉及任何崩溃的红。
+- **子场景 A（两者都不给）**：`pytest ...::test_cli_refuses_when_neither_old_value_source_is_given -v` → **FAILED**，但不是干净的 `assert rc != 0`——检查失效后代码走到 `else read_old_snapshot(Path(args.old_snapshot))`，`args.old_snapshot` 是 `None`，`Path(None)` 直接抛 `TypeError: expected str, bytes or os.PathLike object, not NoneType`，`main()` 只捕 `RebuildMismatch`，这个 `TypeError` 直接穿出去。⚠️ **这次崩溃不是替身不完整造成的**（根本没走到数据库那一步），是移除检查之后代码真实会崩在这里——它是控制者已经裁定"`main()` 只捕 `RebuildMismatch`、其它异常裸抛是计划原文规定、本轮不改"这条**已知残留**在这里的具体表现，⛔ 照实写，不粉饰成"这条也有干净的判别力"。
+- **子场景 B（两者都给）**：`pytest ...::test_cli_refuses_when_both_old_value_sources_are_given -v` → **FAILED**，`AssertionError: assert 0 != 0`——检查失效后代码走 `if args.p11_sql:` 分支，`read_legacy_rows` 正常读出真实 p11 SQL、成功返回，`main()` 一路跑完返回 0。**这是一条干净的红**，且拆开之后**在每一次正常的 pytest 运行里都直接可见**——不再需要靠独立脚本才能补验出来（拆分之前，这条子场景的判别力被子场景 A 的裸异常挡住，从未在真实 pytest 运行里出现过）。
 
-**红的是哪条（重做后）**：`pytest -v` 只针对这条用例，整体仍是 **FAILED**——但红在**第一句**（子场景 1 的裸 `TypeError`），因为两句 `assert` 顺序执行、第一句一崩、第二句根本没轮到。⇒ 子场景 2 那条"干净的红"**没有在这次 pytest 运行里真正被看到**，是用独立脚本补验出来的，不是这条测试用例本身展示出来的。如实记下这个结构性限制：两句断言挤在一条测试函数里、用的又是会跳出 `assert` 语义的裸异常，导致子场景 2 的判别力**在这条测试的实际执行中不可见**，只在独立复现里确认过。本轮未拆分这条用例（拆分会改变 brief 给定的测试结构，且子场景 1 的裸异常问题已被控制者列为不改的已知残留），照实记录。
+两条实测结果与控制者裁决消息里给出的预判**完全吻合**（B 干净、A 崩溃属已知残留），已按实测原样记录，未做任何粉饰或改写。
 
-**复原后是否回绿**：是。改回 `if bool(...) == bool(...):`，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`；随后跑了一次完整 `git diff --stat -- backend/rebuild_training_sets.py`，本任务的各组变异全部复原后与提交前只有本任务的新增内容、没有任何遗留标记（`grep -n "MUTATION"` 两个文件均为 0 命中）。
+**复原后是否回绿**：是。改回 `if bool(...) == bool(...):`，`pytest tests/test_rebuild_training_sets.py -q -rs` → `56 passed`（拆分后比之前多 1 条）；随后跑了一次完整 `git diff --stat -- backend/rebuild_training_sets.py`，本任务的各组变异全部复原后与提交前只有本任务的新增内容、没有任何遗留标记（`grep -n "MUTATION"` 两个文件均为 0 命中）。
 
 ---
 
