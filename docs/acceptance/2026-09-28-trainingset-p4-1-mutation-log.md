@@ -336,3 +336,53 @@ C1 核实：`grep -rn "撕成两半\|同一提交时点" --include="*.py" --incl
 1. **A2 的措辞需要额外处理，不是原样照抄 `{exc}` 就够**：brief 给的示例代码 `f"...门控输入读不出来（{exc}）—— ..."` 若原样照抄，会把 `load_gating_inputs` 那一支"无覆盖 artifact"分支原始消息里的字面「跳过」也带出来，导致"消息里不含跳过"这条断言本身不成立（实测：第一次照抄后跑 `test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch`，`assert "跳过" not in str(ei.value)` 失败）。⇒ 加了一行 `.replace()` 剥离该词。`assemble_from_windows` 那一支不需要这个处理（它的原始消息本就不含"跳过"）。这不是对 brief 判断的反对，是补一个 brief 没写但实测会撞到的细节，如实记录。
 2. **C2 的机制描述与实测不完全相符**：brief 说"谁往里加一句 `r.LEGACY_SCHEMA_VERSION` 都会拿到 dict、炸一个莫名其妙的 `AttributeError`"。用一个模拟当前代码结构（lambda 包列表推导式）的独立探针实测：Python 3 的列表推导式有自己的作用域，推导式里的 `r` **不会**泄漏到外层，探针里紧跟着执行的 `r.LEGACY_SCHEMA_VERSION` 依然正常返回模块属性，没有炸出 `AttributeError`。⇒ 这条改名仍然做了（指示明确、且是无风险的防御性清理——防将来有人把推导式换成 `for` 语句那种真的会泄漏作用域的写法），但机制描述本身以实测为准，不认可"目前就会炸"这个具体说法，供裁决。
 
+## park 残留修复（Ruling ⑭/⑮，user 拍板）
+
+最终整支评审收尾时留了两条低 severity 的 park 残留（见本文档所在计划的 `progress.md`「残留裁决（无第二次修复波）」一节），user 拍板要求修掉后重跑 codex attest。⛔ 本节只动这两条，其余代码原样未碰。
+
+### Ruling ⑭ —— 收尾成功打印硬编码「3 个 zip」
+
+**改了什么**：`main()` 收尾成功的 `print` 里，`带着 3 个 zip` 改成 `带着 {len(PINNED_TARGETS)} 个 zip`——数字从 `PINNED_TARGETS` 现算，不再是字面量。
+
+**判据**：新增 `test_cli_success_message_zip_count_follows_pinned_targets`。猴补（monkeypatch）把 `PINNED_TARGETS` 缩到只剩前 2 个目标（连带 `--old-snapshot` 也换成只含这 2 个目标的快照，避免撞上「新旧目标集合必须一致」这道无关的闸），断言提示里说的是「2 个 zip」而不是写死的「3 个 zip」。
+
+**变异**：把修好的那一行换回 `带着 3 个 zip`（字面量，附 `# MUTATION-RULING14` 注释）。
+- **落地证据**：`grep -n "MUTATION-RULING14" rebuild_training_sets.py` 命中。
+- **红的是哪条**：单跑 `test_cli_success_message_zip_count_follows_pinned_targets` —— `assert "2 个 zip" in out` 失败，提示里仍然是「3 个 zip」。**同时核实**：单跑近邻的 `test_cli_success_message_mentions_the_leftover_verify_dir`（不改 `PINNED_TARGETS`，本来就该看到「3」）仍然 `PASSED`——证明这组变异精确命中「数字跟不跟着 `PINNED_TARGETS` 走」这条判据，不是误伤了别的东西。
+- **复原后是否回绿**：是。`grep -n "MUTATION-RULING14"` 复原后零命中；两条单独重跑都 `PASSED`。
+
+### Ruling ⑮ —— `.replace("跳过","")` 全局替换是隐性契约（重点）
+
+**改了什么**：`rebuild_one` 里 gating 分支把 `GenerateSkipException` 转成 `RebuildMismatch` 那一处，`reason = str(exc).replace("，跳过", "").replace("跳过", "")` 改成只剥离**句尾**：
+```python
+reason = str(exc)
+for _suffix in ("，跳过", "跳过"):
+    if reason.endswith(_suffix):
+        reason = reason[: -len(_suffix)]
+        break
+```
+句中出现的「跳过」不再被剥离；已核实的 6 条可达消息（`load_gating_inputs` 5 条 + `assemble_from_windows` 1 条）里唯一含「跳过」的那条（`stock_coverage` 无覆盖 artifact，句尾）转换后照样不含「跳过」，与现有断言的既定事实一致。assembly 分支（`:141` 一带）本来就没有 `.replace()`，未改动。
+
+**判据**：新增 `test_rebuild_one_gating_skip_keeps_a_mid_sentence_skip_word`——猴补 `load_gating_inputs` 抛一条「跳过」出现在**句中**（非结尾）的伪造 `GenerateSkipException`（`"测试用：跳过这一支后仍继续处理其余候选，未发现异常"`），断言这段文字在转换后的 `RebuildMismatch` 消息里**原样还在**。
+
+**变异**：把新写的句尾剥离逻辑换回旧的全局 `.replace("，跳过", "").replace("跳过", "")  # MUTATION-RULING15`。
+- **落地证据**：`grep -n "MUTATION-RULING15" rebuild_training_sets.py` 命中。
+- **红的是哪条**：单跑 `test_rebuild_one_gating_skip_keeps_a_mid_sentence_skip_word` —— `assert "跳过这一支后仍继续处理其余候选，未发现异常" in str(ei.value)` 失败，实际消息变成「测试用：这一支后仍继续处理其余候选，未发现异常」（句中的「跳过」被吃掉了）。**同时核实**：单跑近邻的 `test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch`（验的是真实那条句尾带「跳过」的消息）在同一处变异下仍然 `PASSED`——说明这组变异精确命中「句中 vs 句尾」这条边界，没有连带破坏既有保证。
+- **复原后是否回绿**：是。`grep -n "MUTATION-RULING15"` 复原后零命中；两条单独重跑都 `PASSED`。
+
+### 跑了什么，结果如何
+
+```
+cd backend && find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py -q -rs
+→ 76 passed（74 + 本节新增 2 条）
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_insert_schema_version_guard.py -q -rs
+→ 3 passed（未受影响）
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/ -q -rs
+→ 1697 passed（1695 + 本节新增 2 条）；0 skipped / 0 failed / 0 error
+```
+
+### 不同意的判断
+
+无。两条 Ruling 都按 user 拍板的方向原样落地；`.replace()` 的修法（只剥句尾）与 user 给的方向一致，未做出偏离决定。
+

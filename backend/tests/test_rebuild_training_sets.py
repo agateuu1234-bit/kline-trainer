@@ -193,6 +193,25 @@ def test_rebuild_one_wraps_assembly_skip_into_rebuild_mismatch(bundle, tmp_path,
     assert "跳过" not in str(ei.value), f"消息里还留着「跳过」字样：{ei.value}"
 
 
+def test_rebuild_one_gating_skip_keeps_a_mid_sentence_skip_word(bundle, tmp_path, monkeypatch):
+    """Ruling ⑮：剥离「跳过」二字只该动【结尾】那一份——句中出现的「跳过」不是本函数
+    要清除的误导性措辞，必须原样保留。当年那行 `.replace("，跳过","").replace("跳过","")`
+    是**全局文本替换**，会把句中的「跳过」也一起吃掉；用一条「跳过」出现在句中（不在
+    结尾）的伪造 `GenerateSkipException` 证明：转换后的消息里这段文字必须完整还在。"""
+    import asyncio
+
+    async def _boom(conn, stock_code):
+        raise g.GenerateSkipException(
+            "测试用：跳过这一支后仍继续处理其余候选，未发现异常")
+
+    monkeypatch.setattr(r, "load_gating_inputs", _boom)
+    target = _target_for(bundle)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
+    assert "跳过这一支后仍继续处理其余候选，未发现异常" in str(ei.value), (
+        f"句中的「跳过」被静默剥掉了：{ei.value}")
+
+
 @pytest.mark.parametrize("bad", [
     "INSERT INTO training_sets(stock_code, schema_version) VALUES ('X', 1)",
     "UPDATE training_sets SET schema_version = 1",
@@ -1026,7 +1045,7 @@ def test_cli_prints_a_retry_hint_when_failing_after_out_dir_is_already_built(
 
 def test_cli_success_message_mentions_the_leftover_verify_dir(
         tmp_path, scratch, monkeypatch, capsys):
-    """C4：成功收尾的 print 里要提一下第二轮验证目录的位置——它带着 3 个 zip
+    """C4：成功收尾的 print 里要提一下第二轮验证目录的位置——它带着本轮全部 zip
     永久留在 scratch 里，本命令不清理，操作者应该知道去哪儿删。"""
     _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
@@ -1039,6 +1058,32 @@ def test_cli_success_message_mentions_the_leftover_verify_dir(
     assert r.main(_cli(tmp_path, scratch)) == 0
     out = capsys.readouterr().out
     assert "验证目录" in out and "zip" in out, f"成功提示里没有提到验证目录：{out}"
+
+
+def test_cli_success_message_zip_count_follows_pinned_targets(
+        tmp_path, scratch, monkeypatch, capsys):
+    """Ruling ⑭：成功提示里的 zip 个数必须**跟着 `PINNED_TARGETS` 的实际长度走**，
+    ⛔ 不能是写死的字面量——猴补（monkeypatch）把 `PINNED_TARGETS` 缩到只剩 2 个目标
+    （连带旧快照也换成只含这 2 个目标的样子，改走 `--old-snapshot`，避免撞上
+    「新旧目标集合必须一致」这道跟本条无关的闸），提示里就该说「2 个 zip」；
+    如果还说着不存在的「3」，说明数字仍然是写死的。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    short = r.PINNED_TARGETS[:2]
+    monkeypatch.setattr(r, "PINNED_TARGETS", short)
+    snapshot = _write_snapshot(tmp_path, _legacy_shaped_rows())
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        (Path(output_dir) / f"{short[0].stock_code}_{short[0].start_datetime}.zip"
+         ).write_bytes(b"SAME-BYTES")
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+    args = _cli(tmp_path, scratch, p11_sql=None, old_snapshot=str(snapshot))
+    assert r.main(args) == 0
+    out = capsys.readouterr().out
+    assert "2 个 zip" in out, f"提示里的 zip 个数没跟着缩到 2：{out}"
+    assert "3 个 zip" not in out, f"提示里还留着写死的旧数字「3」：{out}"
 
 
 # ---------- 旧身份快照 ----------

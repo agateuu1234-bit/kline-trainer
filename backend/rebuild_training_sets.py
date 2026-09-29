@@ -113,10 +113,17 @@ async def rebuild_one(conn, target: RebuildTarget, output_dir: Path,
         gi = await load_gating_inputs(conn, target.stock_code)
     except GenerateSkipException as exc:
         # ⚠️ `load_gating_inputs` 有一支原始措辞里带字面「跳过」（stock_coverage
-        #    无覆盖 artifact 那一支）——那是它自己「换一个候选」的语义，不是这里
+        #    无覆盖 artifact 那一支，句尾）——那是它自己「换一个候选」的语义，不是这里
         #    RebuildMismatch「停下来查清楚」的语义，不能把「跳过」这个词也一并
         #    带进最终消息，否则操作者读到的还是「跳过」两个字。
-        reason = str(exc).replace("，跳过", "").replace("跳过", "")
+        #    ⛔ 只剥离**句尾**那一份：这是全局文本替换会误伤的隐性契约（Ruling ⑮）——
+        #    `.replace("跳过", "")` 会把「跳过」出现在**句中**的任何未来消息也一并
+        #    吃掉，而那些消息里的「跳过」可能是诊断信息本身的一部分。
+        reason = str(exc)
+        for _suffix in ("，跳过", "跳过"):
+            if reason.endswith(_suffix):
+                reason = reason[: -len(_suffix)]
+                break
         raise RebuildMismatch(
             f"{target.stock_code}: 门控输入读不出来（{reason}）—— 源库与当初不同，"
             f"⛔ 停下来查清楚，不得继续") from exc
@@ -700,9 +707,11 @@ def main(argv=None) -> int:
         print(f"清单发布失败：{exc}", file=sys.stderr)
         print(_out_dir_hint, file=sys.stderr)
         return 1
+    # Ruling ⑭：这里带的 zip 个数不能写死——它必须等于 `PINNED_TARGETS` 的实际长度，
+    # 否则数量一变这句提示就会静默过期。
     print(f"清单已写到 {manifest_path}；发出的 SQL 共 {manifest['statements_issued']} 条，"
-          f"全部为读。第二轮验证目录 {manifest['determinism_verified_against']} 带着 3 个 zip "
-          f"永久留在 scratch 里（本命令不清理，磁盘紧张时请自行删除）。")
+          f"全部为读。第二轮验证目录 {manifest['determinism_verified_against']} 带着"
+          f" {len(PINNED_TARGETS)} 个 zip 永久留在 scratch 里（本命令不清理，磁盘紧张时请自行删除）。")
     return 0
 
 
