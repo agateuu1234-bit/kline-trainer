@@ -150,6 +150,49 @@ public final class DrawingSession {
     /// D31/D42：pending 锚的**归属面板** = 落锚时被点击的面板。**与 activePanel 无关**。
     public private(set) var pendingAnchorPanel: PanelId?
 
+    /// D135（P1c 第 3 片）：节点拖动的**瞬时态**，与 `pendingAnchors` 同族 —— 瞬时、**绝不落盘**、
+    /// 退出画线即清。⛔ 拖动期间**不碰** `engine.drawings`：`drawingsRevision` 每 +1 就触发一次
+    /// `autosave(immediate: true)`（`UI/TrainingView.swift:49-50`）⇒ 逐帧写正式数组 = 每秒约 60 次写盘。
+    ///
+    /// **按「写入频率」拆两半**（⭐ 不是把同一个事实存两份：归属是**每次手势**一个事实，
+    /// 当前锚点是**每帧**一个事实，两者不相交）：
+    public struct NodeDragOwner: Equatable, Sendable {
+        public let panel: PanelId
+        public let drawingID: DrawingID
+        public let anchorIndex: Int
+        /// D134e：盾判据要用的**按下点**（本面板局部坐标）
+        public let grabPoint: CGPoint
+        public init(panel: PanelId, drawingID: DrawingID, anchorIndex: Int, grabPoint: CGPoint) {
+            self.panel = panel; self.drawingID = drawingID
+            self.anchorIndex = anchorIndex; self.grabPoint = grabPoint
+        }
+    }
+
+    /// **参与 observation**：每次拖动只写 2 次（占槽 / 清槽）⇒ 建得起 SwiftUI 依赖、又不会造成
+    /// 「写 → 失效 → 再更新 → 再写」的循环。D135d 的五个 `...Enabled` 谓词读的就是它。
+    public private(set) var nodeDragOwner: NodeDragOwner?
+
+    /// **`@ObservationIgnored` 是 load-bearing 的**：每帧都写，理由与 `viewportMappers`（`:57-59`）逐字相同。
+    @ObservationIgnored public private(set) var nodeDragCurrent: DrawingAnchor?
+
+    /// 占槽。**两半同时赋值**（G15 钉死「同生同死」）。
+    func beginNodeDrag(_ owner: NodeDragOwner, anchor: DrawingAnchor) {
+        nodeDragOwner = owner
+        nodeDragCurrent = anchor
+    }
+
+    /// 每帧更新。⛔ 没占槽时 no-op —— fail-closed：「有 current 没有 owner」这个坏状态不可表达。
+    func updateNodeDragCurrent(_ anchor: DrawingAnchor) {
+        guard nodeDragOwner != nil else { return }
+        nodeDragCurrent = anchor
+    }
+
+    /// 清槽。**两半同时清**（G15）。幂等。
+    func endNodeDrag() {
+        nodeDragOwner = nil
+        nodeDragCurrent = nil
+    }
+
     /// 1a-iii：设置卡片写入的「下一条线」默认样式（单一真相，提交路径读它）。
     public private(set) var defaultStyle = DrawingDefaultStyle()
 
