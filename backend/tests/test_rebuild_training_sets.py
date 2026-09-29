@@ -159,26 +159,74 @@ def test_rebuild_one_refuses_when_end_datetime_differs_from_authority(bundle, tm
         "右端断言失败时不应该已经把 zip 写到盘上 —— 断言必须排在装配之前")
 
 
-def test_write_detector_reports_nonzero_on_a_planted_write():
+def test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch(bundle, tmp_path):
+    """A2：`load_gating_inputs` 抛的 `GenerateSkipException`（语义「这个候选不行，换一个」）
+    必须被 `rebuild_one` 转成 `RebuildMismatch`（语义「停下来查清楚，不得继续」），
+    ⛔ 消息里不能再带字面「跳过」——那会让操作者误以为只是少了一只股，
+    而实际是一个包都没产出、清单也没发布。用一个没有 stock_coverage 行的替身连接触发。"""
+    import asyncio
+    bars = {p: pd.DataFrame(bundle.records[p]).sort_values("datetime").reset_index(drop=True)
+            for p in g.PERIODS}
+    conn = _FakeConn(_CODE, bars, None)      # 没有 stock_coverage 行
+    target = _target_for(bundle)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        asyncio.run(r.rebuild_one(conn, target, tmp_path))
+    assert "跳过" not in str(ei.value), f"消息里还留着「跳过」字样：{ei.value}"
+
+
+def test_rebuild_one_wraps_assembly_skip_into_rebuild_mismatch(bundle, tmp_path, monkeypatch):
+    """A2：`assemble_from_windows` 抛的 `GenerateSkipException`（比如装配路径逃出
+    output_dir 的信任边界校验）同样必须被转成 `RebuildMismatch`，⛔ 不带字面「跳过」。
+    `build_pinned_windows` 早就做了这个转换，这两处（:105/:119）此前没做。"""
+    import asyncio
+
+    def _boom(*a, **kw):
+        # ⚠️ 与真实 `assemble_from_windows` 的措辞同形（它本身不含「跳过」二字，
+        # 见 generate_training_sets.py:460-461）——伪造成含「跳过」的消息只会测出
+        # 「外层没有主动加词」，测不出「外层是否老实转述了内层」这件事。
+        raise g.GenerateSkipException("测试用：装配路径逃出 output_dir（拒绝写入，信任边界校验）")
+
+    monkeypatch.setattr(r, "assemble_from_windows", _boom)
+    target = _target_for(bundle)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
+    assert "跳过" not in str(ei.value), f"消息里还留着「跳过」字样：{ei.value}"
+
+
+@pytest.mark.parametrize("bad", [
+    "INSERT INTO training_sets(stock_code, schema_version) VALUES ('X', 1)",
+    "UPDATE training_sets SET schema_version = 1",
+    "DELETE FROM klines",
+    "CREATE TABLE t(x int)",
+    "ALTER TABLE klines ADD COLUMN x int",
+    "TRUNCATE training_sets",
+    "DROP TABLE klines",
+    "WITH changed AS (UPDATE training_sets SET schema_version = 1"
+    " RETURNING id) SELECT count(*) FROM changed",
+    "SELECT 1; UPDATE training_sets SET schema_version = 1",
+    "SELECT FROM WHERE (((",
+    "SELECT * INTO newtab FROM klines",
+    "SELECT stock_code FROM training_sets FOR UPDATE",
+], ids=[
+    "insert", "update", "delete", "create_table", "alter_table", "truncate", "drop_table",
+    "with_cte_update", "multi_statement_select_then_update", "unparsable",
+    "select_into", "select_for_update",
+])
+def test_write_detector_reports_nonzero_on_a_planted_write(bad):
     """⭐ 先证明这个检测器**能报出非 0**，再让它去报 0。
 
-    ⭐ 后三条是**按首词判**会漏掉的（codex 评审第 4 轮实测复现）：
-    前两条首词分别是 `WITH` / `SELECT`，第三条根本解析不了。
+    ⭐ 中间那几条是**按首词判**会漏掉的（codex 评审第 4 轮实测复现）：
+    两条首词分别是 `WITH` / `SELECT`，一条根本解析不了；
+    末两条顶层同样是 `SelectStmt`（`SELECT … INTO` 其实是 CREATE TABLE AS，
+    `SELECT … FOR UPDATE` 要行锁），白名单本身看不见，需额外显式排除（A3）。
+
+    ⭐ 换成 `parametrize`（关掉延后项 4）：⛔ 原来的 `for` 循环里 `pytest.raises`
+    一旦提前失败会当场停下，排在它后面的坏样本永远不会被跑到；`parametrize` 让
+    每一条坏样本各自独立跑、独立可见。
     """
-    for bad in ["INSERT INTO training_sets(stock_code, schema_version) VALUES ('X', 1)",
-                "UPDATE training_sets SET schema_version = 1",
-                "DELETE FROM klines",
-                "CREATE TABLE t(x int)",
-                "ALTER TABLE klines ADD COLUMN x int",
-                "TRUNCATE training_sets",
-                "DROP TABLE klines",
-                "WITH changed AS (UPDATE training_sets SET schema_version = 1"
-                " RETURNING id) SELECT count(*) FROM changed",
-                "SELECT 1; UPDATE training_sets SET schema_version = 1",
-                "SELECT FROM WHERE ((("]:
-        with pytest.raises(r.RebuildMismatch) as ei:
-            r.assert_no_write_statements(["SELECT 1", bad])
-        assert bad[:40] in str(ei.value), "错误信息里没点名是哪一条"
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.assert_no_write_statements(["SELECT 1", bad])
+    assert bad[:40] in str(ei.value), "错误信息里没点名是哪一条"
 
 
 def test_write_detector_passes_on_reads_only():
@@ -241,7 +289,13 @@ def test_connect_read_only_accepts_a_read_only_session(monkeypatch):
 
 
 def test_rebuild_one_issues_no_write_statements(bundle, tmp_path):
-    """真跑一次重建，断言发出去的每一条 SQL 都是读。"""
+    """真跑一次重建，断言发出去的每一条 SQL 都是读，且**恰好是**这两类。
+
+    A4：评审实测——存在性检查表达不了穷尽性。往 `rebuild_one` 插一条
+    `SELECT pg_try_advisory_lock(...)`（文本上看仍是一条干净的 SELECT，
+    `assert_no_write_statements` 看不出它是取锁）后，本文件全套用例照样全绿。
+    ⇒ 判据须是**集合等式**：钉住实际发出的那几类语句，而不是「都是读就行」。
+    """
     import asyncio
     conn = r.ReadOnlyConn(_conn(bundle))
     target = _target_for(bundle)
@@ -249,6 +303,12 @@ def test_rebuild_one_issues_no_write_statements(bundle, tmp_path):
 
     assert conn.statements, "一条 SQL 都没记到 ⇒ 这个判据是空转的，⛔ 不算通过"
     r.assert_no_write_statements(conn.statements)
+    assert set(conn.statements) == {
+        "SELECT dense_1m_start_date, dense_1m_end_date, dropped_1m_dates, dense_day_count "
+        "FROM stock_coverage WHERE stock_code=$1",
+        f"SELECT {g._KLINE_SELECT_COLS} FROM klines "
+        "WHERE stock_code=$1 AND period=$2 ORDER BY datetime",
+    }, f"实际发出的语句集合与预期不同（多了/少了什么）：{set(conn.statements)}"
     assert conn.inner.registered == [], (
         "假 training_sets 存储里出现了登记行 —— 重建路径调到了 _register_training_set")
 
@@ -318,12 +378,26 @@ def test_read_legacy_rows_refuses_a_regenerated_p11(tmp_path):
 
 def test_read_legacy_rows_refuses_a_missing_file(tmp_path):
     """评审 Important：文件读不出来（`FileNotFoundError` ⊂ `OSError`）⇒ 判不了 ⇒ 拒绝，
-    ⛔ 不能让裸 `OSError` 漏出去（命令行接不住）。消息里必须带上那个路径。"""
+    ⛔ 不能让裸 `OSError` 漏出去（命令行接不住）。消息里必须带上那个路径**和理由词**
+    （关掉延后项 7：上一版只断言了路径，没断言"错误信息说清楚了失败的理由是什么"）。"""
     missing = tmp_path / "does-not-exist.sql"
     assert not missing.exists()
     with pytest.raises(r.RebuildMismatch) as ei:
         r.read_legacy_rows(missing)
     assert str(missing) in str(ei.value)
+    assert "读不出来" in str(ei.value), f"消息里没有理由词「读不出来」：{ei.value}"
+
+
+def test_read_legacy_rows_refuses_an_undecodable_file(tmp_path):
+    """A1：`read_legacy_rows` 漏 `UnicodeDecodeError`（同一形状第三次发作）——姊妹函数
+    `read_old_snapshot` 早就接住了 `(OSError, ValueError)`，这里此前只接 `OSError`。
+    ⭐ `UnicodeDecodeError` ⊂ `ValueError`：喂一份编码坏掉的 p11 副本（非法 UTF-8 字节），
+    必须抛 `RebuildMismatch` 且消息里带理由词，⛔ 不能让裸 `UnicodeDecodeError` 逃出去。"""
+    q = tmp_path / "p11-bad-encoding.sql"
+    q.write_bytes(b"\xff\xfe\x00INSERT INTO p11_expected VALUES (\xff\xff);")
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_legacy_rows(q)
+    assert "读不出来" in str(ei.value), f"消息里没有理由词「读不出来」：{ei.value}"
 
 
 def test_read_legacy_rows_refuses_unparsable_sql(tmp_path):
@@ -352,6 +426,7 @@ def test_read_legacy_rows_refuses_a_non_integer_column(tmp_path):
     with pytest.raises(r.RebuildMismatch) as ei:
         r.read_legacy_rows(q)
     assert "schema_version" in str(ei.value)
+    assert "不是整数" in str(ei.value), f"消息里没有理由词「不是整数」：{ei.value}"
 
 
 #: 每一项 = (怎么改坏, **期望命中的那条规则的原话片段**)。
@@ -360,17 +435,17 @@ def test_read_legacy_rows_refuses_a_non_integer_column(tmp_path):
 #: 实测过：早先那版「目标对不上」被 file_path 规则抢先拒、「行数是 4」被指纹重复规则抢先拒。
 _HOLES = {
     "缺 content_hash（P11b 身份闸的输入）":
-        (lambda rows: [r.pop("content_hash") for r in rows], "字段集合不对"),
-    "缺 file_path": (lambda rows: [r.pop("file_path") for r in rows], "字段集合不对"),
-    "缺 stock_name": (lambda rows: [r.pop("stock_name") for r in rows], "字段集合不对"),
-    "缺 stock_code": (lambda rows: [r.pop("stock_code") for r in rows], "字段集合不对"),
-    "多出一个字段": (lambda rows: [r.__setitem__("extra", 1) for r in rows], "字段集合不对"),
+        (lambda rows: [row.pop("content_hash") for row in rows], "字段集合不对"),
+    "缺 file_path": (lambda rows: [row.pop("file_path") for row in rows], "字段集合不对"),
+    "缺 stock_name": (lambda rows: [row.pop("stock_name") for row in rows], "字段集合不对"),
+    "缺 stock_code": (lambda rows: [row.pop("stock_code") for row in rows], "字段集合不对"),
+    "多出一个字段": (lambda rows: [row.__setitem__("extra", 1) for row in rows], "字段集合不对"),
     "content_hash 是空串":
         (lambda rows: rows[0].__setitem__("content_hash", ""), "不是非空字符串"),
     "指纹是大写":
         (lambda rows: rows[0].__setitem__("content_hash", "AAAA1111"), "不是 8 位小写十六进制"),
     "三行共用同一个【小写】指纹":
-        (lambda rows: [r.__setitem__("content_hash", "deadbeef") for r in rows],
+        (lambda rows: [row.__setitem__("content_hash", "deadbeef") for row in rows],
          "个不同的 content_hash"),
     "两行指纹相撞":
         (lambda rows: rows[0].__setitem__("content_hash", rows[1]["content_hash"]),
@@ -383,8 +458,11 @@ _HOLES = {
     "start_datetime 是字符串":
         (lambda rows: rows[0].__setitem__("start_datetime", "1756656000"), "不是整数"),
     "schema_version 变成 2":
-        (lambda rows: [r.__setitem__("schema_version", 2) for r in rows], "schema_version 是"),
+        (lambda rows: [row.__setitem__("schema_version", 2) for row in rows], "schema_version 是"),
 }
+#: C2：上面的推导式变量此前叫 `r`，与文件顶部 `import rebuild_training_sets as r` 撞名——
+#: 目前可用（lambda 体从不引用模块 `r`），但谁往里加一句 `r.LEGACY_SCHEMA_VERSION`
+#: 都会拿到 dict、炸一个莫名其妙的 `AttributeError`。已改成 `row`，纯改名不改行为。
 
 
 def _legacy_shaped_rows() -> list[dict]:
@@ -557,6 +635,24 @@ def _cli(tmp_path, scratch, **over) -> list:
     return flat
 
 
+def _fake_rebuild_all_dict(old_rows) -> dict:
+    """给『替身 rebuild_all』用的**完整**假返回值（四个键都给全，不只是 `new`/`old`）
+    ——好让 B2 新增的『发布出去的清单键集』等式断言，在这类替身场景下验的是
+    `rebuild_all` 真实会给的键集合，而不是被替身自己漏掉的两个键（`source_counts_*`）
+    误判成生产代码漏了。"""
+    return {"new": _fake_pinned_new_rows(), "old": old_rows,
+            "source_counts_before": {}, "source_counts_after": {}}
+
+
+def _fake_pinned_new_rows() -> list[dict]:
+    """B1：一份满足 `assert_matches_pinned_targets` 的假『新清单』——只给它检查的那
+    三个字段（stock_code/start_datetime/end_datetime），让下面这些用『假 rebuild_all』
+    替身走完整个 main() 的 CLI 测试，在 B1 新增的这道闸下继续原样验各自要验的东西，
+    而不是被这道新闸提前拦下、悄悄短路掉它们本来要覆盖的代码路径。"""
+    return [{"stock_code": t.stock_code, "start_datetime": t.start_datetime,
+             "end_datetime": t.expected_end_datetime} for t in r.PINNED_TARGETS]
+
+
 def _stub_connection(monkeypatch):
     """把「连源库」整个换成替身 —— 本组用例验的是命令行的闸门，不是数据库。
 
@@ -658,7 +754,7 @@ def test_cli_pins_tempfile_to_the_validated_scratch_root(tmp_path, scratch, monk
     async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
         seen["tempdir"] = tempfile.tempdir
         (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
-        return {"new": [], "old": old_rows}
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
     assert r.main(_cli(tmp_path, scratch)) == 0
@@ -791,6 +887,24 @@ def test_publish_manifest_writes_when_destination_is_free(tmp_path):
     assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
 
 
+def test_publish_manifest_wraps_a_non_exists_oserror_from_os_link(tmp_path, monkeypatch):
+    """B3：`os.link` 在跨设备或不支持硬链接的挂载点（SMB/NFS/exFAT）抛的是
+    `EXDEV`/`EPERM`/`ENOTSUP`，不是 `FileExistsError`——`main()` 只捕
+    `RebuildMismatch`，这里不转换的话会裸崩，而此时两轮重建已经跑完、清单却丢了。
+    ⭐ 用 monkeypatch 让 `os.link` 抛 `OSError(errno.EXDEV, ...)` 来模拟。"""
+    import errno
+
+    def _boom_link(src, dst):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "link", _boom_link)
+    dest = tmp_path / "m.json"
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.publish_manifest(dest, '{"new": []}\n')
+    assert "挂不上去" in str(ei.value), f"消息里没有理由词「挂不上去」：{ei.value}"
+    assert not dest.exists(), "目标不该被创建出来"
+
+
 # ---------- 确定性自证 ----------
 
 def test_cli_always_verifies_determinism_even_without_any_flag(
@@ -808,14 +922,40 @@ def test_cli_always_verifies_determinism_even_without_any_flag(
     async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
         calls.append(Path(output_dir))
         (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
-        return {"new": [], "old": old_rows}
+        return _fake_rebuild_all_dict(old_rows)
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
     assert r.main(_cli(tmp_path, scratch)) == 0, "合法输入却失败了"
     assert len(calls) == 2, f"只重建了 {len(calls)} 遍 —— 确定性自证被跳过了"
     assert calls[0] != calls[1], "两遍产出到了同一个目录 ⇒ 逐字节比对恒真，判别力为零"
-    assert json.loads(man.read_text(encoding="utf-8"))["determinism_verified_against"]
+    published = json.loads(man.read_text(encoding="utf-8"))
+    assert published["determinism_verified_against"]
+    # B2：**钉住发布物的键集合**（`test_rebuild_all_end_to_end…` 钉的是 `rebuild_all`
+    # 的返回值，不是最终发布出去的这份清单）。⚠️ 计划 `:2045` 交给片 2 的「清单 JSON
+    # 结构」此前写的是 5 个键，与这里实测的 7 个键不符（第 3 轮加无条件自证、第 7 轮加
+    # 显式 `--scratch-dir` 之后过期，两次订正都没回头改交接段那一行）——已在计划里同步
+    # 订正（见该文件交接段第 3 条）。片 2 若按旧的 5 键集合等式校验器写，会当场拒掉真清单。
+    assert set(published) == {
+        "new", "old", "source_counts_before", "source_counts_after",
+        "determinism_verified_against", "statements_issued", "scratch_root",
+    }, f"发布的清单键集与交接给片 2 的既定事实不符：{sorted(published)}"
+
+
+def test_cli_refuses_when_new_manifest_does_not_match_pinned_targets(
+        tmp_path, scratch, monkeypatch):
+    """B1：`main()` 必须真的对本轮产出的【新清单】跑 `assert_matches_pinned_targets`——
+    不能只是**构造性成立**（`rebuild_all` 内部用的就是 `PINNED_TARGETS`，天然吻合）。
+    用一份『行数不对』的假新清单（0 行，应有 3 行）证明：这道闸真的在执行，不是摆设。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+
+    async def _fake_wrong_new(conn, targets, output_dir, *, old_rows):
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
+        return {"new": [], "old": old_rows}      # 应有 3 行，这里给 0 行
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_wrong_new)
+    assert r.main(_cli(tmp_path, scratch)) != 0
 
 
 def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, scratch, monkeypatch):
@@ -832,7 +972,7 @@ def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, scratch, monk
         n["i"] += 1
         (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(
             b"ROUND-1-BYTES" if n["i"] == 1 else b"ROUND-2-DIFFERENT")
-        return {"new": [], "old": old_rows}
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
@@ -854,12 +994,51 @@ def test_cli_does_not_clobber_a_manifest_created_after_preflight(
     async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
         man.write_bytes(b"FIRST-RUN-SNAPSHOT")      # ← 窗口期内被别的进程建出来
         (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
-        return {"new": [], "old": old_rows}
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
     assert r.main(_cli(tmp_path, scratch)) != 0
     assert man.read_bytes() == b"FIRST-RUN-SNAPSHOT", "首轮快照被覆盖了"
+
+
+def test_cli_prints_a_retry_hint_when_failing_after_out_dir_is_already_built(
+        tmp_path, scratch, monkeypatch, capsys):
+    """C4：`main()` 失败时 `out` 目录已经被 `os.mkdir` 建出来、且本命令不回滚——
+    而它必须【不存在】才能重跑。复用『两轮不一致』这个失败场景，确认 stderr 里
+    带着这条提示，不必让操作者自己去猜「为什么原样重跑又立刻被拒」。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    n = {"i": 0}
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        n["i"] += 1
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(
+            b"ROUND-1-BYTES" if n["i"] == 1 else b"ROUND-2-DIFFERENT")
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+    rc = r.main(_cli(tmp_path, scratch))
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "已经建出" in err and "换一个新路径" in err, f"stderr 里没有产出目录重试提示：{err}"
+
+
+def test_cli_success_message_mentions_the_leftover_verify_dir(
+        tmp_path, scratch, monkeypatch, capsys):
+    """C4：成功收尾的 print 里要提一下第二轮验证目录的位置——它带着 3 个 zip
+    永久留在 scratch 里，本命令不清理，操作者应该知道去哪儿删。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
+        return {"new": _fake_pinned_new_rows(), "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+    assert r.main(_cli(tmp_path, scratch)) == 0
+    out = capsys.readouterr().out
+    assert "验证目录" in out and "zip" in out, f"成功提示里没有提到验证目录：{out}"
 
 
 # ---------- 旧身份快照 ----------

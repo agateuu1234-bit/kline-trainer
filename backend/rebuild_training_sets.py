@@ -102,7 +102,24 @@ async def rebuild_one(conn, target: RebuildTarget, output_dir: Path,
     次序是硬的：**先断言右端等于权威值，再装配**。反过来会在断言失败时已经把
     zip 写到盘上，留下一个「看起来产出成功了」的残渣。
     """
-    gi = await load_gating_inputs(conn, target.stock_code)
+    # ⚠️ A2：`GenerateSkipException` 的语义是「这个候选不行，换一个」，
+    #    `RebuildMismatch` 的语义是「停下来查清楚，不得继续」（见本文件顶部
+    #    `RebuildMismatch` 的 docstring）。`load_gating_inputs` 与 `assemble_from_windows`
+    #    都可能抛前者（门控输入读不出来 / 装配路径信任边界被破）—— 若不转换，
+    #    它会带着字面「跳过」逃出 `rebuild_one`，让操作者误以为只是少了一只股，
+    #    而实际是一个包都没产出、清单也没发布。`build_pinned_windows` 已经做了
+    #    同款转换，这两处照抄同一模式。
+    try:
+        gi = await load_gating_inputs(conn, target.stock_code)
+    except GenerateSkipException as exc:
+        # ⚠️ `load_gating_inputs` 有一支原始措辞里带字面「跳过」（stock_coverage
+        #    无覆盖 artifact 那一支）——那是它自己「换一个候选」的语义，不是这里
+        #    RebuildMismatch「停下来查清楚」的语义，不能把「跳过」这个词也一并
+        #    带进最终消息，否则操作者读到的还是「跳过」两个字。
+        reason = str(exc).replace("，跳过", "").replace("跳过", "")
+        raise RebuildMismatch(
+            f"{target.stock_code}: 门控输入读不出来（{reason}）—— 源库与当初不同，"
+            f"⛔ 停下来查清楚，不得继续") from exc
     start, windows = build_pinned_windows(
         gi.period_bars, gi.month_boundaries, start_datetime=target.start_datetime,
         dense_dates=gi.dense_dates, trading_dates=gi.trading_dates,
@@ -116,10 +133,14 @@ async def rebuild_one(conn, target: RebuildTarget, output_dir: Path,
             f" {after_end}，而旧产物的权威值是 {target.expected_end_datetime}"
             f" —— 源库数据或月边界与当初不同，⛔ 停下来查清楚，不得继续")
 
-    return assemble_from_windows(
-        output_dir, stock_code=target.stock_code,
-        stock_name=_stock_name_of(target.stock_code),
-        start_datetime=int(start), end_datetime=int(after_end), windows=windows)
+    try:
+        return assemble_from_windows(
+            output_dir, stock_code=target.stock_code,
+            stock_name=_stock_name_of(target.stock_code),
+            start_datetime=int(start), end_datetime=int(after_end), windows=windows)
+    except GenerateSkipException as exc:
+        raise RebuildMismatch(
+            f"{target.stock_code}: 装配失败（{exc}）—— ⛔ 停下来查清楚，不得继续") from exc
 
 
 async def connect_read_only(dsn: str):
@@ -154,8 +175,14 @@ def assert_no_write_statements(statements) -> None:
        `WITH changed AS (UPDATE … RETURNING id) SELECT …` 首词是 `WITH` ⇒ 放行；
        `SELECT 1; UPDATE …` 首词是 `SELECT` ⇒ 放行。而它们改的是 `schema_version`，
        **不动行数也不动 `max(id)`** ⇒ 「跑前跑后计数一致」那条同样发现不了。
-    ⭐ 判据写成**白名单**（只许 `SelectStmt`），⛔ 不枚举「危险写法」——
-       攻击面枚举永远漏，合法面枚举不会。
+    ⭐ 判据写成**白名单**（只许 `SelectStmt`），⛔ 不枚举「危险写法」——攻击面枚举永远漏。
+    ⚠️ **但白名单本身不等于「纯读」**（评审实测证伪过一次，上一版这里写的是
+       「合法面枚举不会漏」，那句话不准确，已订正）：`SELECT * INTO newtab FROM klines`
+       其实是 `CREATE TABLE AS`、`SELECT … FOR UPDATE/SHARE` 要行锁，两者顶层同样是
+       `SelectStmt`，会被这道白名单放行 —— 所以额外显式排除 `intoClause` 与
+       `lockingClause` 这两种白名单看不见的形状。⚠️ 数据安全上没有洞（第一道
+       `connect_read_only()` 挡得住这两条），这里补的是**证据可信度**：不让一条
+       DDL 在 A4 的证据里被登记成「纯读」。
     ⚠️ **解析不了 ⇒ 判不了 ⇒ 拒绝**，⛔ 不得当成「看起来没问题」。
     ⚠️ 它**看不见**函数副作用 —— 那一类由 `connect_read_only()` 兜住。
     """
@@ -182,6 +209,12 @@ def assert_no_write_statements(statements) -> None:
         top = parsed[0].stmt.__class__.__name__
         if top != "SelectStmt":
             bad.append((sql, f"顶层是 {top}，不是 SelectStmt"))
+            continue
+        if parsed[0].stmt.intoClause is not None:
+            bad.append((sql, "带 INTO（它是 CREATE TABLE AS，不是纯读）"))
+            continue
+        if parsed[0].stmt.lockingClause:
+            bad.append((sql, "带 FOR UPDATE/SHARE（要行锁，不是纯读）"))
             continue
         v = _Collect()
         v(parsed[0])
@@ -373,7 +406,11 @@ def read_legacy_rows(p11_sql_path) -> list[dict]:
 
     try:
         text = Path(p11_sql_path).read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ⚠️ A1：`UnicodeDecodeError` ⊂ `ValueError`（文字编码坏掉时 `read_text` 抛的
+        #    正是它）。姊妹函数 `read_old_snapshot` 早就接住了 `(OSError, ValueError)`，
+        #    这里只接 `OSError` 是同一形状的第三次漏网（评审实测：喂一份编码坏掉的
+        #    p11 副本，这里会让裸 `UnicodeDecodeError` 逃出去）。
         raise RebuildMismatch(f"{p11_sql_path} 读不出来：{exc}") from None
     # `\set` 等 psql 元命令不是 SQL，parse_sql 会拒；逐行剔除后再解析。
     sql = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("\\"))
@@ -514,6 +551,14 @@ def publish_manifest(manifest_path: Path, payload: str) -> None:
                 f"清单 {manifest_path} 在本轮重建期间被别的东西创建了 —— "
                 f"⛔ 拒绝覆盖，一个字节都没动。"
                 f"（首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来）") from None
+        except OSError as exc:
+            # ⚠️ B3：`os.link` 在跨设备或不支持硬链接的挂载点（SMB/NFS/exFAT）抛的是
+            #    `EXDEV`/`EPERM`/`ENOTSUP` 一类 —— **不是** `FileExistsError`。`main()`
+            #    只捕 `RebuildMismatch`，不转换的话这里会裸崩，而此时两轮重建已经跑完、
+            #    清单却丢了。片 2/3 要在 NAS 语境下跑，这条很可能真踩到。
+            raise RebuildMismatch(
+                f"清单挂不上去（{exc}）—— 换一个本地文件系统上的 --manifest 路径"
+                ) from None
         # 改名/挂链接的原子性 **不等于** 目录项已经落盘（spec §3.4 R4 同一条道理）
         dfd = os.open(d, os.O_RDONLY)
         try:
@@ -605,6 +650,11 @@ def main(argv=None) -> int:
         conn = ReadOnlyConn(await connect_read_only(args.dsn))
         try:
             man = await rebuild_all(conn, PINNED_TARGETS, out, old_rows=old_rows)
+            # ⚠️ B1：spec §7 判据 9③「新一批的 (stock_code, start_datetime) 与旧三个
+            #    逐一相同」此前只是**构造性成立**（`rebuild_all` 内部用的就是
+            #    `PINNED_TARGETS`，天然吻合），从未被真正断言过。补上这一行让它
+            #    真的被检验，而不是靠实现细节侥幸一致。
+            assert_matches_pinned_targets(man["new"], where="本轮产出的新清单")
             # ⛔ **确定性自证是无条件的，不是开关**（codex 评审第 3 轮）：
             #    spec §3.4 R2 写的是「⭐ 确定性自证：同一输入【连跑两次】」，
             #    §7 判据 9① 写的是「这是『随时可重来』的唯一依据」，变异 B54 专门盯它。
@@ -617,6 +667,10 @@ def main(argv=None) -> int:
             #    那个名字可能早就被一个【指向归档的符号链接】占着（第 1 轮 finding 1 实测）。
             #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
             second = Path(tempfile.mkdtemp(prefix="rebuild-verify-", dir=scratch_root))
+            # ⚠️ C3：这道闸在**构造上恒通过**——`second` 是已校验过的 `scratch_root`
+            #    自己的子目录（`mkdtemp` 建在其内），不可能落进归档。态度是对的（纵深防御），
+            #    但它不是一道会拦下什么的**活闸**，只是防将来代码改动（比如改成别的父目录）
+            #    时不至于悄悄绕开路径闸，⛔ 不要误以为这里正在验证什么真实风险。
             assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
             await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
             assert_byte_identical(out, second)          # 不一致 → 抛错 → 清单不发布
@@ -627,10 +681,16 @@ def main(argv=None) -> int:
         finally:
             await conn.inner.close()
 
+    # ⚠️ C4：`out` 这时已经用 `os.mkdir` 建出来了，本命令**不回滚**——而它必须
+    #    【不存在】才能重跑。下面两处失败出口都发生在这之后，各自都要提醒一句。
+    _out_dir_hint = (f"⚠️ 产出目录 {out} 已经建出、不会自动清理，而它必须【不存在】"
+                     f"才能重跑 —— 重试前请换一个新路径，或先手动删掉它。")
+
     try:
         manifest = asyncio.run(_run())
     except RebuildMismatch as exc:
         print(f"重建中止：{exc}", file=sys.stderr)
+        print(_out_dir_hint, file=sys.stderr)
         return 1
     try:
         publish_manifest(
@@ -638,9 +698,11 @@ def main(argv=None) -> int:
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except RebuildMismatch as exc:
         print(f"清单发布失败：{exc}", file=sys.stderr)
+        print(_out_dir_hint, file=sys.stderr)
         return 1
     print(f"清单已写到 {manifest_path}；发出的 SQL 共 {manifest['statements_issued']} 条，"
-          f"全部为读")
+          f"全部为读。第二轮验证目录 {manifest['determinism_verified_against']} 带着 3 个 zip "
+          f"永久留在 scratch 里（本命令不清理，磁盘紧张时请自行删除）。")
     return 0
 
 

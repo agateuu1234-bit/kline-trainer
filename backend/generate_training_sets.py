@@ -581,7 +581,10 @@ class GatingInputs:
 async def load_gating_inputs(conn, stock_code: str) -> GatingInputs:
     """读 coverage + 六周期 bars，重建交易日历并与权威天数交叉校验，求月边界。
 
-    ⛔ **只读**：全部是 SELECT，且包在 repeatable_read + readonly 的快照事务里。
+    ⛔ **只读**：全部是 SELECT，且包在 repeatable_read + readonly 的快照事务里
+       —— coverage 与六周期 bars 分属两次读，`repeatable_read` 让它们看到**同一个
+       提交时点**的快照，不会被并发写者（比如同时在跑的 B1 导入）撕成两半
+       （coverage 是新写的、bars 还是旧的，或反过来）。
     ⛔ 不含 `_fetch_existing_starts` —— 那是生产路径独有的「起点去重」，P4 重建要的
        恰恰是【已登记的那三个起点】，带上它会把目标起点自己排除掉。
     """
@@ -665,7 +668,6 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把
         # 每只股票的六个周期全历史 `SELECT ... FROM klines` 读进 pandas 再扔掉——
         # 这条检查只需要 stock_coverage 那一行是否存在，不依赖 period_bars 里的任何东西。
-        #
         gi = await load_gating_inputs(conn, stock_code)
         period_bars = gi.period_bars
         trading_dates = gi.trading_dates
