@@ -1439,28 +1439,88 @@ git commit -m "feat: 确定性自证 + 新旧两栏清单（旧七元组由真�
   - `def _resolve_v1_archive() -> Path`
   - `def assert_write_target_is_safe(path, *, kind: str, must_not_exist: bool = False) -> Path`
   - `def publish_manifest(manifest_path: Path, payload: str) -> None`（原子发布，目标已存在即失败）
-  - `def main(argv=None) -> int`（参数：`--dsn`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个））
+  - `def main(argv=None) -> int`（参数：`--dsn`、`--scratch-dir`、`--out-dir`、`--manifest`、`--p11-sql` **或** `--old-snapshot`（恰好给一个））
     ⛔ **没有**跳过确定性自证的开关 —— 它是无条件的（见 Task 6 实现里的注释）
 
 - [ ] **Step 1: 写失败的测试**
 
-⚠️ 这一组是 **codex 评审第 1 轮 finding 1** 逼出来的。原来只校验了 `--out-dir` 一个入口，
-而这个流程实际会往**三个**地方写：产出目录、验证目录、清单文件。**只挡其中一个等于没挡** ——
-本仓管这叫「同一判据的正交绕法」。下面每条都实测复现过。
+⚠️ 这一组经过 codex 第 1 / 2 / 3 / 4 / 6 / 7 轮反复打磨。⭐ **第 7 轮之后做了一次「塌层」**：
+「临时工作根」不再从环境里发现，改成**命令行必填、开跑前一次性校验**——
+理由见 Step 3 的实现注释（同一个根连三轮冒头 ⇒ 按本仓停止规则塌层，⛔ 不再打第三个补丁）。
+
+⛔ **本任务的测试只有这一块**。上一版曾同时留着一份**旧的**（断言「输出目录空着就行」），
+与新版**互相矛盾** —— 那正是本片被咬过三次的「同一事实两份副本」，已删。
 
 ```python
-def test_write_gate_rejects_a_symlink_pointing_into_the_archive(tmp_path, monkeypatch):
-    """⭐ 最要命的一条：一个【指向归档的符号链接】目录。
+@pytest.fixture
+def scratch(tmp_path):
+    """已存在的临时工作根。⛔ 每个用例都要显式给 `--scratch-dir` —— 它没有默认值。"""
+    d = tmp_path / "scratch"
+    d.mkdir()
+    return d
 
-    实测（2026-09-28）：`assemble_from_windows` **自带**的那道「没逃出 output_dir」守卫
-    会**放行** —— 它比的是 `output_dir.resolve()` 与 `zip_path.resolve().parents`，
-    而 `.resolve()` 会跟着符号链接走，两边都被解析进了归档 ⇒ 判定「没逃出去」为真
+
+def _cli(tmp_path, scratch, **over) -> list:
+    """拼命令行参数。⭐ **只此一份** —— ⛔ 不在每个用例里各抄一遍。
+
+    `over` 里给 `None` 表示**去掉**那个参数（用来造「少给了参数」的用例）。
+    """
+    args = {
+        "--dsn": "postgresql://x/y",
+        "--scratch-dir": str(scratch),
+        "--out-dir": str(tmp_path / "out"),
+        "--manifest": str(tmp_path / "m.json"),
+        "--p11-sql": str(_repo_root() / _P11),
+    }
+    for k, v in over.items():
+        key = "--" + k.replace("_", "-")
+        if v is None:
+            args.pop(key, None)
+        else:
+            args[key] = str(v)
+    flat = []
+    for k, v in args.items():
+        flat += [k, v]
+    return flat
+
+
+def _stub_connection(monkeypatch):
+    """把「连源库」整个换成替身 —— 本组用例验的是命令行的闸门，不是数据库。
+
+    ⭐ 换的是 `connect_read_only` 本身：如果哪天 `main` 绕过它去裸连数据库，
+    这些用例会去真连 `postgresql://x/y` 然后炸掉 —— 等于顺带钉住了「必须走只读连接」。
+    """
+    class _StubConn:
+        async def close(self):
+            pass
+
+    async def _connect(dsn):
+        return _StubConn()
+
+    monkeypatch.setattr(r, "connect_read_only", _connect)
+
+
+def _archive(tmp_path, monkeypatch):
+    """造一个假的 v1 归档，并把 HOME 指过去。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    a = tmp_path / "qmt_trial_out"
+    a.mkdir()
+    (a / "000001.SZ_1756656000.zip").write_bytes(b"V1-ORIGINAL-BYTES")
+    return a
+
+
+# ---------- 路径闸本身 ----------
+
+def test_write_gate_rejects_a_symlink_pointing_into_the_archive(tmp_path, monkeypatch):
+    """⭐ 一个【指向归档的符号链接】目录（codex 第 1 轮）。
+
+    实测：`assemble_from_windows` **自带**的「没逃出 output_dir」守卫会**放行** ——
+    它比的是 `output_dir.resolve()` 与 `zip_path.resolve().parents`，而 `.resolve()`
+    会跟着符号链接走，两边都被解析进了归档 ⇒ 判定「没逃出去」为真
     ⇒ 归档里那个同名 zip 被 `ZipFile(..., "w")` 就地截断（实测原始 17 字节被销毁）。
     ⇒ 所以这道闸必须在**我们自己这一侧**拦住，⛔ 不能指望下游守卫。
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    archive = tmp_path / "qmt_trial_out"
-    archive.mkdir()
+    archive = _archive(tmp_path, monkeypatch)
     link = tmp_path / "newbatch-verify"
     link.symlink_to(archive, target_is_directory=True)
     with pytest.raises(r.RebuildMismatch) as ei:
@@ -1470,89 +1530,124 @@ def test_write_gate_rejects_a_symlink_pointing_into_the_archive(tmp_path, monkey
 
 def test_write_gate_accepts_a_normal_target(tmp_path, monkeypatch):
     """⭐ 正向对照：⛔ 一套全是「拒了」的用例掩盖得住一个恒抛的守卫 ——
-    那是本仓点名的头号假绿形态（真栽过：五组判据一次都没执行，429 测试 + 14 轮评审全漏）。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+    那是本仓点名的头号假绿形态。"""
+    _archive(tmp_path, monkeypatch)
     got = r.assert_write_target_is_safe(tmp_path / "newbatch", kind="产出目录")
     assert got == (tmp_path / "newbatch").resolve()
 
 
-def test_cli_refuses_when_the_temp_root_points_into_the_archive(tmp_path, monkeypatch):
-    """⛔ `TMPDIR` 指进归档时必须**在动手之前**就拒绝（codex 评审第 6 轮）。
+# ---------- 临时工作根（第 6/7 轮，已塌层） ----------
 
-    ⭐ 判据的后半截才是关键：**归档里不许多出任何东西**。
-    只断言「退出码非 0」抓不住这条 —— `mkdtemp` 是**先建目录再返回**的，
-    事后才发现的话，目录已经建在归档里了（实测过）。
+def test_cli_refuses_a_scratch_dir_inside_the_archive_without_writing_anything(
+        tmp_path, monkeypatch):
+    """⛔ `--scratch-dir` 指进归档 ⇒ 拒绝，**而且全程一个字节都不许往归档里写**。
+
+    ⭐ 判据用**记录 `os.open` 调用**，⛔ 不是「跑完之后看目录里有没有多东西」：
+    上一版就是那么写的，抓不住 —— 实测 `tempfile` 的发现逻辑会
+    `open` → `write(b'blat')` → `unlink`，探针文件**建过又删了**，事后看目录什么都没有。
+    ⭐ 同时把 `tempfile.tempdir` 清成 `None`（冷缓存），逼出真正的失败路径：
+    上一版用例直接给 `tempfile.tempdir` 赋值，**会跳过发现逻辑**，所以它根本没走到那条路。
     """
-    import tempfile as _tf
-    monkeypatch.setenv("HOME", str(tmp_path))
-    archive = tmp_path / "qmt_trial_out"
-    archive.mkdir()
-    (archive / "000001.SZ_1756656000.zip").write_bytes(b"V1-ORIGINAL-BYTES")
-    before = sorted(q.name for q in archive.iterdir())
-
-    monkeypatch.setattr(_tf, "tempdir", str(archive))   # 等价于 TMPDIR 指进归档
+    archive = _archive(tmp_path, monkeypatch)
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(archive))
     _stub_connection(monkeypatch)
 
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11),
-                 "--manifest", str(tmp_path / "m.json")])
+    attempted = []
+    real_open = os.open
 
+    def spy_open(path, flags, *a, **kw):
+        try:
+            if archive.resolve() in Path(path).resolve().parents:
+                attempted.append(str(path))
+        except Exception:
+            pass
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(os, "open", spy_open)
+
+    rc = r.main(_cli(tmp_path, archive))     # scratch 就指向归档本身
     assert rc != 0
-    assert sorted(q.name for q in archive.iterdir()) == before, (
-        "归档里多出了东西 —— 说明校验发生在分配之后，而不是之前")
+    assert attempted == [], f"归档里被尝试创建过文件：{attempted}"
 
 
-def test_cli_refuses_out_dir_inside_the_v1_archive(tmp_path, monkeypatch):
+def test_cli_pins_tempfile_to_the_validated_scratch_root(tmp_path, scratch, monkeypatch):
+    """⭐ 正向对照 + 一条更强的断言：校验通过之后，`tempfile` 必须被**钉**在这个根上。
+
+    ⛔ 不钉住的话，生成器内部那个 `TemporaryDirectory()`
+    （`generate_training_sets.py:468`）仍会自己去发现临时目录 —— 而发现本身就会写盘。
+    """
+    _archive(tmp_path, monkeypatch)
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    _stub_connection(monkeypatch)
+    seen = {}
+
+    async def _fake_rebuild_all(conn, targets, output_dir, *, old_rows):
+        seen["tempdir"] = tempfile.tempdir
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
+        return {"new": [], "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
+    assert r.main(_cli(tmp_path, scratch)) == 0
+    assert seen["tempdir"] == str(scratch.resolve()), (
+        f"tempfile 没被钉在已校验的根上：{seen['tempdir']}")
+
+
+def test_cli_refuses_a_missing_scratch_dir(tmp_path, monkeypatch):
+    """⛔ 临时工作根必须**已经存在** —— 不存在就拒，⛔ 不替操作者悄悄建。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    assert r.main(_cli(tmp_path, tmp_path / "nope")) != 0
+
+
+# ---------- 产出目录 / 清单 ----------
+
+def test_cli_refuses_out_dir_inside_the_v1_archive(tmp_path, scratch, monkeypatch):
     """⛔ spec §3.4 R2 ⓒ：不得写入 ~/qmt_trial_out/（v1 审计归档，逐字节不得改）。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    archive = tmp_path / "qmt_trial_out"
-    archive.mkdir()
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(archive),
-                 "--p11-sql", str(_repo_root() / _P11),
-                 "--manifest", str(tmp_path / "m.json")])
-    assert rc != 0
+    archive = _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    assert r.main(_cli(tmp_path, scratch, out_dir=archive)) != 0
 
 
-def test_cli_refuses_manifest_inside_the_v1_archive(tmp_path, monkeypatch):
-    """清单路径也要过同一道闸 —— 实测 `Path(...).write_text()` 会把归档里的包**截断成 3 字节**。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    archive = tmp_path / "qmt_trial_out"
-    archive.mkdir()
+def test_cli_refuses_manifest_inside_the_v1_archive(tmp_path, scratch, monkeypatch):
+    """清单路径也要过同一道闸 —— 实测 `write_text()` 会把归档里的包**截断成 3 字节**。"""
+    archive = _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
     victim = archive / "000001.SZ_1756656000.zip"
-    victim.write_bytes(b"V1-ORIGINAL-BYTES")
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(victim)])
-    assert rc != 0
+    assert r.main(_cli(tmp_path, scratch, manifest=victim)) != 0
     assert victim.read_bytes() == b"V1-ORIGINAL-BYTES", "归档里的文件被动过了"
 
 
-def test_cli_refuses_to_overwrite_an_existing_manifest(tmp_path, monkeypatch):
-    """⛔ 首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来（P11 那时已是第 2 代）。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+def test_cli_refuses_to_overwrite_an_existing_manifest(tmp_path, scratch, monkeypatch):
+    """⛔ 首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来（那时 P11 已是第 2 代）。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
     man.write_text('{"old": "首轮快照"}', encoding="utf-8")
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
-    assert rc != 0
+    assert r.main(_cli(tmp_path, scratch)) != 0
     assert "首轮快照" in man.read_text(encoding="utf-8"), "已有清单被覆盖了"
 
 
-def test_cli_refuses_an_existing_out_dir(tmp_path, monkeypatch):
+def test_cli_refuses_an_existing_out_dir(tmp_path, scratch, monkeypatch):
     """产出目录必须【不存在】（spec §3.4 R2 要的就是一个新目录）。
 
     ⭐ 这比「必须为空」强：`os.mkdir` 是原子的，两个进程同时开工时后来者当场失败；
     而「先看是不是空的、再往里写」拦不住它们（与清单那条是同一个窗口）。
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
     out = tmp_path / "out"
     out.mkdir()                       # 已经存在，哪怕是空的也要拒
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(out),
-                 "--p11-sql", str(_repo_root() / _P11),
-                 "--manifest", str(tmp_path / "m.json")])
-    assert rc != 0
+    assert r.main(_cli(tmp_path, scratch)) != 0
+
+
+def test_cli_requires_exactly_one_old_value_source(tmp_path, scratch, monkeypatch):
+    """首轮给 --p11-sql、重跑给 --old-snapshot，⛔ 不得都给也不得都不给。"""
+    _archive(tmp_path, monkeypatch)
+    _stub_connection(monkeypatch)
+    assert r.main(_cli(tmp_path, scratch, p11_sql=None)) != 0
+    assert r.main(_cli(tmp_path, scratch,
+                       old_snapshot=tmp_path / "s.json")) != 0
 
 
 def test_publish_manifest_refuses_an_existing_destination(tmp_path):
@@ -1573,30 +1668,16 @@ def test_publish_manifest_writes_when_destination_is_free(tmp_path):
     assert not list(tmp_path.glob(".manifest.*")), "临时文件没清干净"
 
 
-def _stub_connection(monkeypatch):
-    """把「连源库」整个换成替身 —— 本组用例验的是命令行的闸门，不是数据库。
+# ---------- 确定性自证 ----------
 
-    ⭐ 换的是 `connect_read_only` 本身：如果哪天 `main` 绕过它去裸连数据库，
-    这些用例会去真连 `postgresql://x/y` 然后炸掉 —— 等于顺带钉住了「必须走只读连接」。
-    """
-    class _StubConn:
-        async def close(self):
-            pass
-
-    async def _connect(dsn):
-        return _StubConn()
-
-    monkeypatch.setattr(r, "connect_read_only", _connect)
-
-
-def test_cli_always_verifies_determinism_even_without_any_flag(tmp_path, monkeypatch):
+def test_cli_always_verifies_determinism_even_without_any_flag(
+        tmp_path, scratch, monkeypatch):
     """⛔ 确定性自证是**无条件**的（spec §3.4 R2 / §7 判据 9① / 变异 B54）。
 
     ⭐ 判据是「`rebuild_all` 被调了**两次**、且两次落在**不同目录**」——
     只断言「跑完了」抓不住「只跑了一遍」；两次落同一个目录的话，逐字节比对是**恒真**的。
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+    _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
     calls = []
@@ -1608,22 +1689,18 @@ def test_cli_always_verifies_determinism_even_without_any_flag(tmp_path, monkeyp
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
-
-    assert rc == 0, "合法输入却失败了"
+    assert r.main(_cli(tmp_path, scratch)) == 0, "合法输入却失败了"
     assert len(calls) == 2, f"只重建了 {len(calls)} 遍 —— 确定性自证被跳过了"
-    assert calls[0] != calls[1], "两遍产出到了同一个目录 ⇒ 逐字节比对是恒真的，判别力为零"
+    assert calls[0] != calls[1], "两遍产出到了同一个目录 ⇒ 逐字节比对恒真，判别力为零"
     assert json.loads(man.read_text(encoding="utf-8"))["determinism_verified_against"]
 
 
-def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, monkeypatch):
+def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, scratch, monkeypatch):
     """两轮字节不一致 ⇒ ⛔ 不发布清单、退出码非 0。
 
     ⭐ 这条是上一条的**反向**：没有它，一个「调了两次但从不比较」的实现照样能让上一条绿。
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+    _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
     n = {"i": 0}
@@ -1636,22 +1713,18 @@ def test_cli_does_not_publish_when_the_two_rounds_differ(tmp_path, monkeypatch):
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
-
-    assert rc != 0, "两轮不一致却报成功了"
+    assert r.main(_cli(tmp_path, scratch)) != 0, "两轮不一致却报成功了"
     assert not man.exists(), "两轮不一致却还是把清单发布了"
 
 
-def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monkeypatch):
-    """⭐ codex 评审第 2 轮那条：预检与真正写盘之间隔着**整轮重建**（几分钟）。
+def test_cli_does_not_clobber_a_manifest_created_after_preflight(
+        tmp_path, scratch, monkeypatch):
+    """⭐ codex 第 2 轮那条：预检与真正写盘之间隔着**整轮重建**（几分钟）。
 
-    这里让「重建」那一步自己在窗口期内把清单建出来，模拟另一个进程
-    （操作者以为卡住了、在另一个终端又跑了一次）。
+    这里让「重建」那一步自己在窗口期内把清单建出来，模拟另一个进程。
     ⛔ 预检必然放行 —— 它早就跑完了。拦住它的只能是 `publish_manifest` 的原子发布。
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
+    _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
     man = tmp_path / "m.json"
 
@@ -1662,24 +1735,13 @@ def test_cli_does_not_clobber_a_manifest_created_after_preflight(tmp_path, monke
 
     monkeypatch.setattr(r, "rebuild_all", _fake_rebuild_all)
 
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-                 "--p11-sql", str(_repo_root() / _P11), "--manifest", str(man)])
-    assert rc != 0
+    assert r.main(_cli(tmp_path, scratch)) != 0
     assert man.read_bytes() == b"FIRST-RUN-SNAPSHOT", "首轮快照被覆盖了"
 
 
-def test_cli_requires_exactly_one_old_value_source(tmp_path, monkeypatch):
-    """首轮给 --p11-sql、重跑给 --old-snapshot，⛔ 不得都给也不得都不给。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "qmt_trial_out").mkdir()
-    base = ["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
-            "--manifest", str(tmp_path / "m.json")]
-    assert r.main(base) != 0                                        # 都不给
-    assert r.main(base + ["--p11-sql", str(_repo_root() / _P11),
-                          "--old-snapshot", str(tmp_path / "s.json")]) != 0   # 都给
+# ---------- 旧身份快照 ----------
 
-
-def _write_snapshot(tmp_path, rows) -> "Path":
+def _write_snapshot(tmp_path, rows):
     s = tmp_path / "s.json"
     s.write_text(json.dumps({"old": rows}), encoding="utf-8")
     return s
@@ -1690,7 +1752,7 @@ def test_read_old_snapshot_accepts_a_valid_first_round_manifest(tmp_path):
 
     ⛔ 用 `_legacy_shaped_rows()`（三个**真**指纹）——
     上一版这里自己另造了一份「三行都填 deadbeef」的样本，
-    在「三个指纹必须互不相同」那条规则落地之后**必然失败**（codex 评审第 5 轮实测）。
+    在「三个指纹必须互不相同」那条规则落地之后**必然失败**（codex 第 5 轮实测）。
     ⇒ 合法样本只许有**一份**，⛔ 不许各处各造一份。
     """
     assert len(r.read_old_snapshot(_write_snapshot(tmp_path, _legacy_shaped_rows()))) \
@@ -1728,28 +1790,6 @@ def test_read_old_snapshot_refuses_wrong_row_count(tmp_path):
     with pytest.raises(r.RebuildMismatch) as ei:
         r.read_old_snapshot(_write_snapshot(tmp_path, rows))
     assert "应有" in str(ei.value) and "行" in str(ei.value), f"红的理由不对：{ei.value}"
-```
-
-```python
-def test_cli_refuses_to_write_into_the_v1_archive(tmp_path, monkeypatch):
-    """⛔ spec §3.4 R2 ⓒ：不得写入 ~/qmt_trial_out/（那是 v1 审计归档，逐字节不得改）。"""
-    import os
-    archive = tmp_path / "qmt_trial_out"
-    archive.mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path))
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(archive),
-                 "--p11-sql", _P11, "--manifest", str(tmp_path / "m.json")])
-    assert rc != 0
-
-
-def test_cli_requires_empty_out_dir(tmp_path):
-    """输出目录里已有 zip ⇒ 拒绝，⛔ 不得把旧产物和新产物混在一起。"""
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "stale.zip").write_bytes(b"x")
-    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(out),
-                 "--p11-sql", _P11, "--manifest", str(tmp_path / "m.json")])
-    assert rc != 0
 ```
 
 - [ ] **Step 2: 跑它，确认是红的**（`has no attribute 'main'`）
@@ -1831,6 +1871,8 @@ def main(argv=None) -> int:
         description="切片一 P4 R2：按钉死的起点重建 3 个训练组（只读源库）")
     ap.add_argument("--dsn", required=True, help="源库连接串（⛔ 必须是源库的只读副本）")
     ap.add_argument("--out-dir", required=True, help="产出目录（⛔ 必须【不存在】，由本命令新建）")
+    ap.add_argument("--scratch-dir", required=True,
+                    help="临时工作根（⛔ 必须【已存在】；⛔ 没有默认值、没有环境变量回退）")
     ap.add_argument("--manifest", required=True, help="清单写到哪里（JSON，⛔ 不得已存在）")
     ap.add_argument("--p11-sql",
                     help="【首轮用】现有 p11 SQL 的路径；⛔ P11 已被片 2 重新生成后不可再用")
@@ -1845,19 +1887,30 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        # ⭐ **第一件事**：先把【系统临时目录】校验掉（codex 评审第 6 轮，实测复现）。
-        #   两条路径都用它，而且都在我们的路径闸之前就动手：
-        #   ① `tempfile.mkdtemp(...)` —— 它是**先把目录建出来**再返回，闸门只能事后发现；
-        #   ② `assemble_from_windows` 里的 `tempfile.TemporaryDirectory()`
-        #      （`generate_training_sets.py:468`）—— 中间那个 SQLite 文件写在同一个根下。
-        #   实测：把 `TMPDIR` 指进 `~/qmt_trial_out/`，两者都真的在归档里建了东西。
-        #   ⚠️ 准确说法：那三个 zip 的**字节没被动过**（「逐字节不得改动」没破），
-        #      破的是「⛔ 不得写入归档」这条边界，而且**中途被打断会把残渣留在里面**。
-        # ⭐ 调用 `gettempdir()` 本身还有个副作用是我们要的：它会把结果**缓存**进
-        #   `tempfile.tempdir`（实测：不手动清掉它，改 `TMPDIR` 都不生效）⇒ 校验过之后，
-        #   下游那个 `TemporaryDirectory()` 拿到的必然是**同一个已校验的根**。
-        scratch_root = Path(tempfile.gettempdir())
-        assert_write_target_is_safe(scratch_root, kind="系统临时目录")
+        # ⭐⭐ **第一件事：把临时工作根钉死。** 这是第 7 轮之后的【塌层】做法。
+        #
+        # 为什么不能再「校验系统临时目录」了（codex 第 6 → 7 轮，两轮实测）：
+        #   ① 写盘的不止我们自己 —— `assemble_from_windows` 里的
+        #      `tempfile.TemporaryDirectory()`（`generate_training_sets.py:468`）
+        #      用同一个根；`mkdtemp` 还是**先把目录建出来**再返回，闸门只能事后发现。
+        #   ② 更要命：**校验动作本身就会写**。冷缓存时 `tempfile.gettempdir()` 走
+        #      `_get_default_tempdir()`，它对每个候选目录做
+        #      `open` → `write(b'blat')` → `unlink` —— 实测在归档里真的建过又删过一个探针文件，
+        #      **事后看目录什么都看不见**。
+        #   ⚠️ 说准：那三个 zip 的**字节始终没被动过**；破的是「⛔ 不得写入归档」这条边界，
+        #      外加「中途被打断，残渣留在归档里」。
+        #
+        # ⇒ 同一个根连着三轮冒头（第 1 / 6 / 7 轮），按本仓停止规则：**塌层 + 去开关**，
+        #   ⛔ 不再枚举「还有哪条路径会写到归档里」——路径来源是环境决定的，数不完。
+        #   塌成一条：**根由命令行显式给定**（必填），⛔ 无默认值、⛔ 无环境变量回退、
+        #   ⛔ 全程不调用任何会做「发现」的函数；校验通过后立刻把 `tempfile` **钉**在它上面，
+        #   于是下游那个 `TemporaryDirectory()` 也只能落在这里。
+        scratch_root = assert_write_target_is_safe(args.scratch_dir, kind="临时工作根")
+        if not scratch_root.is_dir():
+            raise RebuildMismatch(
+                f"临时工作根 {scratch_root} 不存在或不是目录 —— ⛔ 请先建好，"
+                f"本命令不替你建（建了就等于又引入一次『先动手、后校验』）")
+        tempfile.tempdir = str(scratch_root)    # ⛔ 必须排在任何分配之前
 
         out = assert_write_target_is_safe(args.out_dir, kind="产出目录")
         manifest_path = Path(args.manifest)
@@ -1937,7 +1990,8 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 ```
 
-⚠️ 顶部补 `import argparse, asyncio, json, os, sys, tempfile`（`tempfile` 是验证目录用的）。
+⚠️ 顶部补 `import argparse, asyncio, json, os, re, sys, tempfile`。
+⚠️ 测试文件顶部还要补 `import os` 与 `import tempfile`（记录 `os.open` 调用、清 `tempfile.tempdir` 用）。
 ⚠️ `import asyncpg` 放在 `connect_read_only` 里（⛔ 不放模块顶部）—— 否则测试 `import rebuild_training_sets` 就会拉 asyncpg，而本片其它用例根本不需要它。`pglast` 同理（放在用到它的函数里）。
 
 - [ ] **Step 4: 跑全套后端测试**
@@ -1960,7 +2014,9 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
    **清单已存在** / **产出目录已存在** / `--p11-sql` 与 `--old-snapshot` 都给或都不给 /
    **清单在重建途中被别的进程建出来**（这一条拦住它的不是预检，是原子发布）/
    **两轮重建字节不一致**（此时清单必须**没有**被创建出来）/
-   **`TMPDIR` 指进归档**（此时归档里必须**一个新条目都不多**）；
+   **`--scratch-dir` 指进归档**（判据是**全程没有尝试在归档里创建过文件**，
+   ⛔ 不是「跑完看目录里有没有多东西」—— 探针文件会被删掉，事后看不见）/
+   **`--scratch-dir` 不存在**；
 7. ⭐ **两条正向对照各跑一次并确认是绿的**：合法路径能通过路径闸、合法的首轮清单能通过旧快照校验。
    ⛔ 少了这两条，上面那一串「拒了」掩盖得住一个**恒抛**的守卫 —— 那是本仓点名的头号假绿形态；
 8. ⭐ 亲手确认一次：把清单指向归档里的某个 zip 跑一遍，**那个 zip 的字节数跑完仍然没变**。
@@ -2159,6 +2215,8 @@ Task 6 三条负向用例分别命中「代数」「目标集合」「行数」�
 （实测：不手动清掉它，改 `TMPDIR` 都不生效）⇒ 校验之后，下游那个 `TemporaryDirectory()`
 拿到的**必然是同一个已校验的根**，⛔ 不必去改生产代码。
 
+⛔ **这个修法在第 7 轮被推翻了**（它自己就会往归档里写）—— 见下一轮。
+
 **实测**：这道闸有判别力 —— 临时根指进归档就拒、正常临时目录就放行。
 新用例的判据是**两截**：退出码非 0 **且归档里一个新条目都不多**
 （⛔ 只断言退出码抓不住它 —— `mkdtemp` 是先建再返回的）。
@@ -2167,6 +2225,47 @@ Task 6 三条负向用例分别命中「代数」「目标集合」「行数」�
 
 ---
 
+
+### 第 7 轮 · `codex:adversarial-review`（2026-09-29，同上口径，**未传 focus**）
+
+判决仍是 **needs-attention**，账本**未写入**（退出码 7）。**1 条 `medium`，打的是第 6 轮那个修法本身**：
+
+| # | 结论 | 怎么证实的 |
+|---|---|---|
+| 1 | 「用 `gettempdir()` 来校验」这个动作**自己就往归档里写** —— **属实** | `tempfile._get_default_tempdir()` 源码逐字：`_os.open(...)` → `_os.write(fd, b'blat')` → `_os.unlink(...)`。冷缓存 + `TMPDIR` 指进假归档实测：探针文件**真的建在归档里**，随后被删 ⇒ **事后看目录什么都看不见**。⭐ 而且我第 6 轮那条用例**直接给 `tempfile.tempdir` 赋值**，实测**会跳过发现逻辑** ⇒ 它根本走不到真正的失败路径，等于白写 |
+
+## ⭐⭐ 这是同一个根第三次冒头 —— 按停止规则**塌层**，⛔ 不打第三个补丁
+
+| 轮次 | 表现 | 根 |
+|---|---|---|
+| 1 | 符号链接目录 + 清单路径未校验 | **归档写入边界** |
+| 6 | 临时目录不在边界内 | **归档写入边界** |
+| 7 | **校验动作自己就往归档里写** | **归档写入边界** |
+
+这三轮一直在做同一件事：**枚举「还有哪条路径会写到归档里」，然后一条条堵**。
+而路径来源是**环境决定**的（`TMPDIR`、符号链接、发现逻辑），开放且数不完 —— 每堵一条就冒出下一条。
+
+⇒ **塌层 + 去开关**：临时工作根改成 **`--scratch-dir` 命令行必填**，
+⛔ 无默认值、⛔ 无环境变量回退、⛔ 全程不调用任何做「发现」的函数；
+校验通过后立刻把 `tempfile` **钉**在它上面，于是生成器内部那个 `TemporaryDirectory()`
+也只能落在这里。**没有发现逻辑就没有探针写入；没有隐式回退就没有意外的根。**
+
+**实测**：这条路径全程**零写入** —— 根落在归档里时，拒绝发生在任何 `os.open` 之前。
+
+新用例的判据换成**记录 `os.open` 调用**（⛔ 不是「跑完看目录里有没有多东西」——探针会被删掉），
+并把 `tempfile.tempdir` 清成 `None` 逼出真正的失败路径；另加两条：
+「校验通过后 `tempfile` 确实被钉在该根上」（正向对照）与「`--scratch-dir` 不存在要拒」。
+
+## ⭐ 本轮我自查另发现一处（codex 没报）
+
+Task 6 里有**两份**测试块 —— 第 1 轮重写时**漏删了旧的那一份**，而且两者**互相矛盾**：
+旧的断言「输出目录空着就行」，新的要求「必须不存在」。
+⇒ 正是本片已经被咬过三次的「同一事实 N 份副本」。已整块重写删掉旧副本，
+并把命令行参数收进**唯一**的 `_cli()` 助手，杜绝再长出第二份。
+
+⛔ **它这一轮仍然没有执行任何代码**。
+
+---
 
 ## 已知残留（本片交付时仍在）
 
