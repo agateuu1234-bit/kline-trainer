@@ -110,3 +110,42 @@ def test_pinned_start_that_fails_gates_is_refused(bundle):
             gi.period_bars, gi.month_boundaries, start_datetime=bad,
             dense_dates=gi.dense_dates, trading_dates=gi.trading_dates,
             dropped=gi.dropped, rng=random.Random(0))
+
+
+def _target_for(bundle, *, expected_end: int | None = None) -> r.RebuildTarget:
+    """拿本 fixture 的第一个合格起点造一个 RebuildTarget（右端由真实现现算）。"""
+    import asyncio
+    gi = _gating(bundle)
+    start = _eligible_starts(gi)[0]
+    idx = [int(b) for b in gi.month_boundaries].index(start)
+    real_end = g.compute_after_end(gi.month_boundaries, idx)
+    return r.RebuildTarget(_CODE, start, real_end if expected_end is None else expected_end)
+
+
+def test_rebuild_one_produces_a_real_zip_with_schema_version_2(bundle, tmp_path):
+    import asyncio
+    target = _target_for(bundle)
+    gts = asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
+
+    assert gts.start_datetime == target.start_datetime
+    assert gts.end_datetime == target.expected_end_datetime
+    assert gts.schema_version == g.SCHEMA_VERSION
+    assert gts.stock_name == g._stock_name_of(_CODE)
+
+    zip_path = tmp_path / f"{_CODE}_{target.start_datetime}.zip"
+    assert zip_path.exists(), f"没产出 {zip_path.name}"
+    assert gts.content_hash == g.crc32_hex(zip_path.read_bytes()), (
+        "登记的 content_hash 与磁盘上 zip 字节的真实 CRC32 不一致")
+
+
+def test_rebuild_one_refuses_when_end_datetime_differs_from_authority(bundle, tmp_path):
+    """右端与权威值不符 ⇒ 抛 RebuildMismatch，且错误信息里**两个值都要有**
+    （只说『对不上』的话，操作者不知道该去查哪一边）。"""
+    import asyncio
+    target = _target_for(bundle, expected_end=1)
+    with pytest.raises(r.RebuildMismatch) as ei:
+        asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
+    msg = str(ei.value)
+    assert "1" in msg and str(_target_for(bundle).expected_end_datetime) in msg
+    assert not list(tmp_path.glob("*.zip")), (
+        "右端断言失败时不应该已经把 zip 写到盘上 —— 断言必须排在装配之前")

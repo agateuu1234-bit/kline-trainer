@@ -85,3 +85,30 @@ def build_pinned_windows(period_bars, month_boundaries, *, start_datetime: int,
         raise RebuildMismatch(
             f"钉死的起点失效：要求 {start_datetime}，实际返回 {start}")
     return int(start), windows
+
+
+async def rebuild_one(conn, target: RebuildTarget, output_dir: Path,
+                      *, rng: Optional[random.Random] = None) -> GeneratedTrainingSet:
+    """重建一个训练组。⛔ 只读源库；⛔ 不登记；⛔ 不取 B2 生成锁。
+
+    次序是硬的：**先断言右端等于权威值，再装配**。反过来会在断言失败时已经把
+    zip 写到盘上，留下一个「看起来产出成功了」的残渣。
+    """
+    gi = await load_gating_inputs(conn, target.stock_code)
+    start, windows = build_pinned_windows(
+        gi.period_bars, gi.month_boundaries, start_datetime=target.start_datetime,
+        dense_dates=gi.dense_dates, trading_dates=gi.trading_dates,
+        dropped=gi.dropped, rng=rng)
+
+    idx = [int(b) for b in gi.month_boundaries].index(int(start))
+    after_end = compute_after_end(gi.month_boundaries, idx)
+    if int(after_end) != int(target.expected_end_datetime):
+        raise RebuildMismatch(
+            f"{target.stock_code}@{target.start_datetime}: 算出的 end_datetime ="
+            f" {after_end}，而旧产物的权威值是 {target.expected_end_datetime}"
+            f" —— 源库数据或月边界与当初不同，⛔ 停下来查清楚，不得继续")
+
+    return assemble_from_windows(
+        output_dir, stock_code=target.stock_code,
+        stock_name=_stock_name_of(target.stock_code),
+        start_datetime=int(start), end_datetime=int(after_end), windows=windows)
