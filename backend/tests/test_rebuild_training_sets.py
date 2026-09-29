@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -114,7 +115,6 @@ def test_pinned_start_that_fails_gates_is_refused(bundle):
 
 def _target_for(bundle, *, expected_end: int | None = None) -> r.RebuildTarget:
     """拿本 fixture 的第一个合格起点造一个 RebuildTarget（右端由真实现现算）。"""
-    import asyncio
     gi = _gating(bundle)
     start = _eligible_starts(gi)[0]
     idx = [int(b) for b in gi.month_boundaries].index(start)
@@ -147,7 +147,11 @@ def test_rebuild_one_refuses_when_end_datetime_differs_from_authority(bundle, tm
         asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
     msg = str(ei.value)
     real_end = _target_for(bundle).expected_end_datetime
-    assert f"算出的 end_datetime = {real_end}" in msg, f"消息里没有『算出来的值』：{msg}"
-    assert f"权威值是 {target.expected_end_datetime}" in msg, f"消息里没有『权威值』：{msg}"
+    # (?!\d)：数字边界——防止子串包含把 "权威值是 1" 误判成命中了 "权威值是 1690819199"
+    # （子串是前缀关系，纯 `in` 判断分不清「独立数字 1」与「以 1 开头的别的数字」）。
+    assert re.search(rf"算出的 end_datetime = {real_end}(?!\d)", msg), (
+        f"消息里没有『算出来的值』（须是独立数字，不能只是某数字的前缀）：{msg}")
+    assert re.search(rf"权威值是 {target.expected_end_datetime}(?!\d)", msg), (
+        f"消息里没有『权威值』（须是独立数字，不能只是某数字的前缀）：{msg}")
     assert not list(tmp_path.glob("*.zip")), (
         "右端断言失败时不应该已经把 zip 写到盘上 —— 断言必须排在装配之前")
