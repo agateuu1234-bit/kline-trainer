@@ -46,3 +46,52 @@ struct DrawingNodeDragSessionTests {
         #expect(s.nodeDragCurrent?.price == 16.5)
     }
 }
+
+@MainActor
+@Suite("P1c-3 拖动进行中点击不改选中（D135c）")
+struct NodeDragSelectionGateTests {
+
+    static func armedSession() -> DrawingSession {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.setMode(.select)
+        s.setSelection(id: "A", panel: .upper)
+        s.beginNodeDrag(.init(panel: .upper, drawingID: "A", anchorIndex: 0,
+                              grabPoint: CGPoint(x: 10, y: 20)),
+                        anchor: DrawingAnchor(period: .m15, candleIndex: 40, price: 15.5))
+        return s
+    }
+
+    @Test("T14① 拖动中 setSelection ⇒ 选中**仍是 A**（正面断言，⛔ 不是「没崩」）")
+    func tapSelectionIsBlockedDuringDrag() {
+        let s = Self.armedSession()
+        s.setSelection(id: "B", panel: .lower)
+        #expect(s.selectedDrawingID == "A")
+        #expect(s.selectedPanel == .upper)
+        #expect(s.nodeDragOwner != nil)          // 拖动态没被顺手清掉
+    }
+
+    @Test("T14④ 抬手之后再选 B ⇒ 这时选中**才**变（①的对照，缺了它「选中整个坏掉」也全绿）")
+    func tapSelectionWorksAfterDragEnds() {
+        let s = Self.armedSession()
+        s.endNodeDrag()
+        s.setSelection(id: "B", panel: .lower)
+        #expect(s.selectedDrawingID == "B")
+        #expect(s.selectedPanel == .lower)
+    }
+
+    @Test("T14b 生命周期清理连带丢弃拖动态：退画线 / setMode / clearSelection 各一档")
+    func lifecycleCleanupDiscardsDrag() {
+        for trigger in ["deactivate", "setMode", "clearSelection"] {
+            let s = Self.armedSession()
+            #expect(s.nodeDragOwner != nil)      // ⭐ 正面对照：先证明它确实建立过
+            switch trigger {
+            case "deactivate":     s.deactivate()
+            case "setMode":        s.setMode(.draw)
+            default:               s.clearSelection()
+            }
+            #expect(s.nodeDragOwner == nil, "\(trigger) 之后拖动态没被丢弃")
+            #expect(s.nodeDragCurrent == nil, "\(trigger) 之后 current 没被丢弃")
+        }
+    }
+}
