@@ -745,6 +745,25 @@ def _scan(files, root):
                     if "schema_version" not in _column_names(cols):
                         missing.append(f"{where}  列清单={cols.strip()[:120]}")
 
+            # ⛔⛔ **最后一张网按【单元】跑，解码单元与原文一视同仁。**
+            #    `_heads` / `_split_name_heads` / `_nonliteral_targets` 三者**共用
+            #    `_skip_gap`**，间隔里一出现它不认的东西（宿主引号、续行反斜杠、
+            #    或解码后的哨兵）三张网就**一起落空** —— 那时只有这张不解析间隔的网
+            #    还在。⛔ 此前我把它**只开给非 `.py` 宿主**，于是 `.py` 这边没有地板：
+            #        gap = " "; Q = f"INSERT{gap}INTO training_sets (…)"
+            #    解码成 `INSERT<哨兵>INTO …` ⇒ 三网全空、守恒判据也过（两边都是 0 条）
+            #    ⇒ 静默放行（codex 第六轮，评级 high）。
+            #    ⭐ 教训：**地板只铺一半等于没铺**。
+            #    ⚠️ 先量后做：解码单元上跑这张网，干净树**多报 0 条**。
+            _unit_claimed = ({h.start() for h in _heads(utext)[0]}
+                             | set(_split_name_heads(utext)))
+            for mm in _LAST_RESORT_RE.finditer(utext):
+                if mm.start() in _unit_claimed:
+                    continue
+                lineno = (uline if uline is not None
+                          else utext.count(chr(10), 0, mm.start()) + 1)
+                unknown.append(f"{rel}:{lineno}（间隔里有拼接痕迹或未解析插值，判不了）")
+
             # ⛔ 「`INSERT INTO` 后面不是字面量表名」按**单元**判：`.py` 要看解码后的
             #    哨兵/`{}`，其它宿主看原文里的 `$VAR`。这一类**判不了**，但绝不许沉默。
             for st in _nonliteral_targets(utext):
@@ -761,14 +780,6 @@ def _scan(files, root):
                     continue
                 lineno = text.count(chr(10), 0, st) + 1
                 unknown.append(f"{rel}:{lineno}（表名被宿主引号/拼接劈开，判不了）")
-            # ⛔ **最后一张网**（见上）：前三张网共用 `_skip_gap`，间隔里出现宿主
-            #    拼接痕迹时它们会**一起落空**。这张网不解析间隔，正是为此存在。
-            _claimed = _raw_starts | set(_split_name_heads(text))
-            for mm in _LAST_RESORT_RE.finditer(text):
-                if mm.start() in _claimed:
-                    continue
-                lineno = text.count(chr(10), 0, mm.start()) + 1
-                unknown.append(f"{rel}:{lineno}（间隔里有宿主拼接痕迹，判不了）")
 
         if bucketed != expected_hits:
             lost.append(f"{rel}：表头命中 {expected_hits} 条，却只有 {bucketed} 条被判过")
@@ -1220,6 +1231,17 @@ _HOST_UNDECIDABLE = (
      'Q = f"INSERT INTO {sch}.training_sets (stock_code, file_path) VALUES ($1,$2)"\n'),
     ("sh 部分动态表名（shell 变量拼后半截）", ".sh",
      'psql -c "INSERT INTO training_${SUF} (stock_code, file_path) VALUES (1,2);"\n'),
+    # ⛔⛔ codex 第六轮实测的静默绕过（high）：插值落在**关键字之间的间隔**里。
+    #    解码后是 `INSERT<哨兵>INTO training_sets (…)` —— `_heads` 与
+    #    `_nonliteral_targets` **都靠 `_skip_gap`**，而它不认哨兵 ⇒ 两者一起落空；
+    #    守恒判据也过（原文与解码各 0 条表头）；而兜底网当时**只开给非 `.py` 宿主**
+    #    ⇒ `.py` 这边根本没有地板。
+    #    ⭐ 这就是我自己在非 `.py` 侧已经认过的那条根 —— 我把网只开了一半。
+    ("py 插值落在关键字之间的间隔里", ".py",
+     'gap = " "\n'
+     'Q = f"INSERT{gap}INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
+    ("py 变量落在关键字之间的间隔里（`+` 拼接）", ".py",
+     'Q = "INSERT" + gap + "INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
     # ⛔ codex 第二轮实测的静默绕过：`fold` 对**含变量的 `Add`** 返回 None，
     #    于是碎片被各自当成单元 —— 而碎片 `INSERT INTO training_` 里**没有任何标记**，
     #    「表名不是字面量」那条判据也就认不出它。

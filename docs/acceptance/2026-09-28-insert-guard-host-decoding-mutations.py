@@ -111,7 +111,12 @@ MUTATIONS: dict[str, tuple[str, str]] = {
         "                elif False:  # MUT"),
     # ── 兜底网（地板之二） ────────────────────────────────────────────────
     "M20 兜底网摘掉": (
-        "            for mm in _LAST_RESORT_RE.finditer(text):", "            for mm in []:  # MUT"),
+        "            for mm in _LAST_RESORT_RE.finditer(utext):", "            for mm in []:  # MUT"),
+    # ⛔ 「地板只铺一半」—— 兜底网**只开给非 `.py` 宿主**（codex 第六轮的那处退化）。
+    "M24 兜底网只开给非 `.py` 宿主（地板只铺一半）": (
+        "            for mm in _LAST_RESORT_RE.finditer(utext):",
+        "            for mm in (_LAST_RESORT_RE.finditer(utext)"
+        " if uline is None else []):  # MUT"),
     "M21 兜底网去掉「禁跨括号」": (
         '_LR_SPAN = r"(?:(?![(;)])[\\s\\S])"', '_LR_SPAN = r"[\\s\\S]"  # MUT'),
     "M22 兜底网去掉词边界": (
