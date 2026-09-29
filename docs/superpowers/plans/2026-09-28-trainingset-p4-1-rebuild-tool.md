@@ -2042,10 +2042,11 @@ git commit -m "feat: 重建入口命令行 + 非程序员验收清单 + 变异�
    ⚠️ **上一版这里写「次序约束（B68）已由片 1 的 `rebuild_all` 构造性保证」—— 那句话是错的**，已订正（同 Task 5 开头那段）。
    真正的保证是：`read_legacy_rows` 在 P11 不是第 1 代时**失败即拒**，`read_old_snapshot` 对首轮清单做三项验证，且清单**拒绝覆盖**。
 2. ⛔ **片 2 把 P11 重新生成之后，任何重跑 R2 都必须带 `--old-snapshot <首轮清单>`**，⛔ 不得再用 `--p11-sql`（用了会当场被拒，这是设计如此）。
-2. 清单 JSON 的结构：`{"new": [七元组×3], "old": [七元组×3], "source_counts_before": {...}, "source_counts_after": {...}, "statements_issued": N}`。
-3. ⛔ **`B2_GENERATION_LOCK_KEY` 要在 NAS 的生产库 `kline_trainer` 上取，不是在 Mac 的源库副本上** —— PostgreSQL 的 advisory lock 是**每个数据库各一套**的，在源库上持锁对生产端零约束。这条归片 3。
-4. 片 1 ⛔ 未覆盖：R0 静默期、R1 源库副本的制作、R3 三份 SQL、R4 部署、R5 写库、R6 收口闸、崩溃恢复演练、runbook P7 与 `2026-08-14-…-design.md` 的文字订正、旧指纹全仓 grep 闸、文案守卫。
-5. ⛔ **P11 本轮生成但不执行** —— 这条已知残留要一路带到片 3 的验收清单里。
+3. 清单 JSON 的结构（⚠️ 最终整支评审订正——上一版这里写的是 5 个键，与实际发布的清单不符，此为按实测重写，第六次「同一事实多份副本」）：
+   `{"new": [七元组×3], "old": [七元组×3], "source_counts_before": {...}, "source_counts_after": {...}, "determinism_verified_against": "<第二轮验证目录路径>", "statements_issued": N, "scratch_root": "<临时工作根路径>"}`——共 **7** 个键。`determinism_verified_against` / `scratch_root` 是第 3 轮把确定性自证改成无条件、第 7 轮把临时工作根改成显式参数之后新增的，这一行当时没跟着改，已按 `rebuild_all()` 与 `main()` 的真实返回值核实并订正（不是照抄评审给的数字）。
+4. ⛔ **`B2_GENERATION_LOCK_KEY` 要在 NAS 的生产库 `kline_trainer` 上取，不是在 Mac 的源库副本上** —— PostgreSQL 的 advisory lock 是**每个数据库各一套**的，在源库上持锁对生产端零约束。这条归片 3。
+5. 片 1 ⛔ 未覆盖：R0 静默期、R1 源库副本的制作、R3 三份 SQL、R4 部署、R5 写库、R6 收口闸、崩溃恢复演练、runbook P7 与 `2026-08-14-…-design.md` 的文字订正、旧指纹全仓 grep 闸、文案守卫。
+6. ⛔ **P11 本轮生成但不执行** —— 这条已知残留要一路带到片 3 的验收清单里。
 
 ## 评审记录
 
