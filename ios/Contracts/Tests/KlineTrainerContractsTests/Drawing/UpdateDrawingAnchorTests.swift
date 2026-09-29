@@ -91,9 +91,18 @@ struct UpdateDrawingAnchorTests {
 
     // ── ①a 空 id ──
 
+    /// 修复环第 2 轮：不能像 `engineWithOneLine()` 那样造一条 id 为 `"A"` 的线再传 `id:""` 去调——
+    /// 那样 `id != "A"` 会先被 ①b 的 `matches.count == 1`（这里是 0）拦下，跟 ①a 存不存在无关：
+    /// 把 ①a 那一整行删掉，`filter` 还是 0 条匹配，测试照样绿，对 ①a 零判别力。
+    /// 必须让「调用传的 id」与「线自身的 id」**都**是空字符串，让 ①b 的唯一性判据在 `id==""` 时
+    /// 成立，才轮到 ①a 单独拦。这不是人为场景：D66 头注写明 resume 路径（引擎 `init` 里整体赋值
+    /// `drawings`）不经 `appendDrawing` 的门，磁盘上一条坏 id 的线能解码进 `drawings`——这正是
+    /// ①a 存在的理由。`injectDrawingsForTesting` 同样绕过该门，用来注入这类坏状态。
     @Test("T7-①a 违规：id 为空 → updateDrawingAnchor 拒绝，逐字段不变")
     func emptyIdRejectsAnchorEdit() throws {
-        let (e, line) = Self.engineWithOneLine()
+        let e = TrainingEngine.preview()
+        let line = makeStyledHLine(id: "")
+        e.injectDrawingsForTesting([line])
         let before = e.drawings
         let rev = e.drawingsRevision
         let newAnchor = DrawingAnchor(period: line.period, candleIndex: 10, price: 99)
@@ -101,6 +110,9 @@ struct UpdateDrawingAnchorTests {
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
+    /// 与上面违规档对称：调用传的 id 与线自身的 id **一起**从空字符串换成真实值
+    /// （`engineWithOneLine()` 造的线 id 正是 `"A"`），其余（工具/锁定/lossy/anchorIndex/period）
+    /// 完全一致——只去掉「id 为空」这一个成因。
     @Test("T7-①a 对照：换成真实 id、其余一致 → 改锚点成功")
     func realIdAcceptsAnchorEdit() throws {
         let (e, line) = Self.engineWithOneLine()
