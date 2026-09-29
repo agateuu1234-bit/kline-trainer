@@ -146,6 +146,8 @@ def test_rebuild_one_refuses_when_end_datetime_differs_from_authority(bundle, tm
     with pytest.raises(r.RebuildMismatch) as ei:
         asyncio.run(r.rebuild_one(_conn(bundle), target, tmp_path))
     msg = str(ei.value)
-    assert "1" in msg and str(_target_for(bundle).expected_end_datetime) in msg
+    real_end = _target_for(bundle).expected_end_datetime
+    assert f"算出的 end_datetime = {real_end}" in msg, f"消息里没有『算出来的值』：{msg}"
+    assert f"权威值是 {target.expected_end_datetime}" in msg, f"消息里没有『权威值』：{msg}"
     assert not list(tmp_path.glob("*.zip")), (
         "右端断言失败时不应该已经把 zip 写到盘上 —— 断言必须排在装配之前")
