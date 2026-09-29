@@ -11,7 +11,10 @@
 """
 from __future__ import annotations
 
+import filecmp
+import json
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -234,3 +237,202 @@ async def snapshot_source_counts(conn) -> dict:
         out[f"{t}.count"] = int(await conn.fetchval(f"SELECT count(*) FROM {t}"))
     out["training_sets.max_id"] = await conn.fetchval("SELECT max(id) FROM training_sets")
     return out
+
+
+def container_file_path(stock_code: str, start_datetime: int) -> str:
+    return f"{CONTAINER_TRAINING_SETS_DIR}/{stock_code}_{int(start_datetime)}.zip"
+
+
+def manifest_row(gts: GeneratedTrainingSet) -> dict:
+    """spec §3.4 R2 的【新清单】一行 = 完整七元组。"""
+    return {
+        "stock_code": gts.stock_code,
+        "stock_name": gts.stock_name,
+        "start_datetime": int(gts.start_datetime),
+        "end_datetime": int(gts.end_datetime),
+        "schema_version": int(gts.schema_version),
+        "file_path": container_file_path(gts.stock_code, gts.start_datetime),
+        "content_hash": gts.content_hash,
+    }
+
+
+def assert_byte_identical(dir_a: Path, dir_b: Path) -> None:
+    """两个目录里的 zip 必须逐字节相同（文件名集合也必须相同）。"""
+    a = sorted(p.name for p in Path(dir_a).glob("*.zip"))
+    b = sorted(p.name for p in Path(dir_b).glob("*.zip"))
+    if a != b or not a:
+        raise RebuildMismatch(f"两次产出的文件名集合不同或为空：{a} vs {b}")
+    for name in a:
+        if not filecmp.cmp(Path(dir_a) / name, Path(dir_b) / name, shallow=False):
+            raise RebuildMismatch(
+                f"{name} 两次产出的字节不同 —— 确定性压缩失效，"
+                f"⛔『随时可以重来』这条恢复前提当场不成立")
+
+
+_P11_EXPECTED_COLUMNS = ("stock_code", "stock_name", "start_datetime", "end_datetime",
+                         "schema_version", "file_path", "content_hash")
+
+#: 库存 3 个产物在迁移【之前】的代数。⚠️ 这是一条**历史事实**（实测 p11 SQL 现为 1），
+#: 不是可配置常量；它的作用是让「P11 已被重新生成」这件事**当场可判**。
+LEGACY_SCHEMA_VERSION = 1
+
+#: `content_hash` 的形状：8 位**小写**十六进制。与 PG 侧约束
+#: `ck_content_hash_crc32_lowercase` 同一口径（⛔ 不是随手定的）。
+_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
+
+
+def assert_seven_tuple_shape(rows, *, where: str, expect_schema_version: int,
+                             regenerated_hint: bool = False) -> None:
+    """校验**完整七元组契约**：字段集合、类型、指纹形状、身份自洽、代数、指纹互不相同。
+
+    ⛔ **这是一份判据，不是几条顺手的检查**（codex 评审第 5 轮的线索，实测复现）：
+       上一版只查了「行数 / 代数 / (code,start,end) 集合」三样，于是 —— 逐条实测过 ——
+       每行都缺 `content_hash` / 缺 `file_path` / 缺 `stock_name` **全部通过**，
+       `content_hash` 是空串**通过**，三行共用同一个大写指纹**通过**，
+       缺 `stock_code` 则抛 `KeyError`（命令行接不住，裸崩）。
+       而 `content_hash` 正是 **P11b 身份闸的输入** —— 残缺的旧快照会被原样抄进新清单。
+    ⭐ 用**集合等式**判字段（`set(row) != set(_P11_EXPECTED_COLUMNS)`），
+       ⛔ 不用「这几个键各自在不在」—— 后者抓不住「多出来的第八个」。
+    ⭐ `file_path` **由身份现算再比对**，⛔ 不单独相信文件里写的那一串。
+    ⭐ 指纹互不相同这条有来历：`…-p15-….sql` 文件头自述，「三行共用同一期望指纹」
+       正是它 R2 版被打回的原因（当时闸门还通过了、还打印 PASS）。
+    ⚠️ 本函数**不**管行数与目标集合 —— 那是 `assert_matches_pinned_targets` 的事：
+       `rebuild_all` 可能只跑一个目标（单测），而「必须是那三个」只对命令行成立。
+    """
+    if not isinstance(rows, list) or not rows:
+        raise RebuildMismatch(f"{where}: 一行都没有")
+    for i, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or set(row) != set(_P11_EXPECTED_COLUMNS):
+            got = sorted(row) if isinstance(row, dict) else type(row).__name__
+            raise RebuildMismatch(
+                f"{where} 第 {i} 行的字段集合不对\n  实际：{got}\n"
+                f"  应为：{sorted(_P11_EXPECTED_COLUMNS)}")
+        for k in ("start_datetime", "end_datetime", "schema_version"):
+            if not isinstance(row[k], int) or isinstance(row[k], bool):
+                raise RebuildMismatch(f"{where} 第 {i} 行的 {k} 不是整数：{row[k]!r}")
+        for k in ("stock_code", "stock_name", "file_path", "content_hash"):
+            if not isinstance(row[k], str) or not row[k]:
+                raise RebuildMismatch(
+                    f"{where} 第 {i} 行的 {k} 不是非空字符串：{row[k]!r}")
+        if not _CONTENT_HASH_RE.match(row["content_hash"]):
+            raise RebuildMismatch(
+                f"{where} 第 {i} 行的 content_hash 不是 8 位小写十六进制："
+                f"{row['content_hash']!r}")
+        if row["stock_name"] != row["stock_code"]:
+            raise RebuildMismatch(
+                f"{where} 第 {i} 行 stock_name({row['stock_name']!r}) "
+                f"!= stock_code({row['stock_code']!r})")
+        want_fp = container_file_path(row["stock_code"], row["start_datetime"])
+        if row["file_path"] != want_fp:
+            raise RebuildMismatch(
+                f"{where} 第 {i} 行的 file_path 与它自己的身份对不上\n"
+                f"  实际：{row['file_path']}\n  应为：{want_fp}")
+    seen = sorted({r["schema_version"] for r in rows})
+    if seen != [expect_schema_version]:
+        extra = ("—— 说明这份 P11 已经被重新生成过，⛔ 旧身份不能再从它取"
+                 "（取到的会是【新】值）。重跑请改用 --old-snapshot 指向【首轮】清单。"
+                 if regenerated_hint else "")
+        raise RebuildMismatch(
+            f"{where}: schema_version 是 {seen}，应为 [{expect_schema_version}] {extra}")
+    hashes = {r["content_hash"] for r in rows}
+    if len(hashes) != len(rows):
+        raise RebuildMismatch(
+            f"{where}: {len(rows)} 行却只有 {len(hashes)} 个不同的 content_hash —— "
+            f"「三行共用一个指纹」正是 p15 当初被打回的原因，⛔ 拒绝")
+
+
+def assert_matches_pinned_targets(rows, *, where: str) -> None:
+    """行数与 `(stock_code, start_datetime, end_datetime)` 集合必须与 `PINNED_TARGETS` 相同。"""
+    if len(rows) != len(PINNED_TARGETS):
+        raise RebuildMismatch(
+            f"{where}: 应有 {len(PINNED_TARGETS)} 行，实际 {len(rows)} 行")
+    got = {(r["stock_code"], r["start_datetime"], r["end_datetime"]) for r in rows}
+    want = {(t.stock_code, t.start_datetime, t.expected_end_datetime)
+            for t in PINNED_TARGETS}
+    if got != want:
+        raise RebuildMismatch(
+            f"{where}: 与钉死的目标对不上\n  实际：{sorted(got)}\n  应为：{sorted(want)}")
+
+
+def read_legacy_rows(p11_sql_path) -> list[dict]:
+    """用 pglast（真 PostgreSQL 解析器）从 p11 SQL 里取出 `p11_expected` 的三行。
+
+    ⛔ 不用正则、不人手抄：旧值**由机器从那份文件里读出来**，才谈得上可检验。
+    ⛔ **只有在 P11 还是第 1 代时才许用它取旧值**：片 2 会把 P11 整份重新生成，
+       之后再从它取，取到的是**新**值 —— 实测会被原样当成「旧值」写进清单
+       （codex 评审第 1 轮 finding 2）。所以下面那道代数检查是**失败即拒**的，
+       ⛔ 不得放宽成警告。重跑请改用 `read_old_snapshot()` 读【首轮】清单。
+    """
+    from pglast import parse_sql
+    from pglast.stream import RawStream
+
+    text = Path(p11_sql_path).read_text(encoding="utf-8")
+    # `\set` 等 psql 元命令不是 SQL，parse_sql 会拒；逐行剔除后再解析。
+    sql = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("\\"))
+    rows: list[dict] = []
+    for stmt in parse_sql(sql):
+        node = stmt.stmt
+        if node.__class__.__name__ != "InsertStmt":
+            continue
+        if node.relation.relname != "p11_expected":
+            continue
+        for row in node.selectStmt.valuesLists:
+            vals = []
+            for item in row:
+                rendered = RawStream()(item)
+                vals.append(rendered.strip().strip("'"))
+            if len(vals) != len(_P11_EXPECTED_COLUMNS):
+                raise RebuildMismatch(
+                    f"p11_expected 的一行有 {len(vals)} 个值，"
+                    f"而列清单有 {len(_P11_EXPECTED_COLUMNS)} 个 —— 结构变了，停下来查清楚")
+            d = dict(zip(_P11_EXPECTED_COLUMNS, vals))
+            for k in ("start_datetime", "end_datetime", "schema_version"):
+                d[k] = int(d[k])
+            rows.append(d)
+    if not rows:
+        raise RebuildMismatch(f"{p11_sql_path} 里没找到 p11_expected 的 INSERT")
+    assert_seven_tuple_shape(rows, where=str(p11_sql_path),
+                             expect_schema_version=LEGACY_SCHEMA_VERSION,
+                             regenerated_hint=True)
+    assert_matches_pinned_targets(rows, where=str(p11_sql_path))
+    return rows
+
+
+def read_old_snapshot(path) -> list[dict]:
+    """重跑时从【首轮清单】取旧身份，并逐项验证它确实是迁移前那一代。
+
+    ⛔ 三条验证缺一不可：代数、目标集合、行数。少一条就可能把一份**新**清单
+       当成旧快照接受，而那正是 finding 2 要堵的那个洞。
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RebuildMismatch(f"{path} 读不出来或不是合法 JSON：{exc}") from None
+    rows = data.get("old") if isinstance(data, dict) else None
+    where = f"{path} 的 old 段"
+    assert_seven_tuple_shape(rows, where=where,
+                             expect_schema_version=LEGACY_SCHEMA_VERSION)
+    assert_matches_pinned_targets(rows, where=where)
+    return rows
+
+
+async def rebuild_all(conn, targets, output_dir: Path, *, old_rows) -> dict:
+    """R2 全流程：快照源库计数 → 逐个重建 → 再快照计数并比对。
+
+    ⛔ `old_rows` **由调用方传进来**，本函数不自己去读 P11（codex 评审第 1 轮 finding 2）：
+       「旧值必须来自迁移前的来源」这条判据，由 `read_legacy_rows` / `read_old_snapshot`
+       各自**失败即拒**地守住；写成「在这里先读一次」只保证了『读在重建之前』，
+       **保证不了**『读在 P11 被重新生成之前』。
+    """
+    before = await snapshot_source_counts(conn)
+    new_rows = []
+    for t in targets:
+        new_rows.append(manifest_row(await rebuild_one(conn, t, output_dir)))
+    assert_seven_tuple_shape(new_rows, where="本轮产出的新清单",
+                             expect_schema_version=SCHEMA_VERSION)
+    after = await snapshot_source_counts(conn)
+    if before != after:
+        raise RebuildMismatch(
+            f"源库在重建前后发生了变化 —— ⛔ 停下来查清楚\n  前：{before}\n  后：{after}")
+    return {"new": new_rows, "old": old_rows,
+            "source_counts_before": before, "source_counts_after": after}
