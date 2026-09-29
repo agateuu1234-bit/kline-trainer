@@ -293,7 +293,7 @@ D134c 上一稿写的是「目标屏幕点 = 原锚点的**投影** + `translati
 
 **用户可见代价**（写进验收清单的已知限制）：手指按着拖黑点时，底栏 🗑 / 🔒 / ↩ / ↪ 与样式面板**都是灰的**；松手后立刻恢复。
 
-　引擎第 5 个 `drawings` 写入面：`updateDrawingAnchor(id:anchorIndex:anchor:)`
+### D136　引擎第 5 个 `drawings` 写入面：`updateDrawingAnchor(id:anchorIndex:anchor:)`
 
 ```
 @discardableResult
