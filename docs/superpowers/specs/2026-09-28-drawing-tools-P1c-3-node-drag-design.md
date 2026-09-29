@@ -21,7 +21,7 @@
 
 ---
 
-## 1. 决策（D134–D144，含 D134b / D134c / D134d / D140b / D140c）
+## 1. 决策（D134–D144，含 D134b / D134c / D134d / D134e / D140b / D140c）
 
 ### D134　分叉发生在手指按下那一刻，判据是「这一点有没有可拖的节点」；⛔ 起手路径上不问线（Q19 的答案）
 
@@ -35,13 +35,36 @@
 
 **为什么「只问节点、不问线」**（Q19 的实体）：节点在几何上**必然**落在它那条线上（水平线的节点 y ≡ 线的 y）。任何形如「先解析这一点下面最上层是什么」的写法，只要线参与了这次解析，线就恒赢 ⇒ 节点**永远拖不动**，而第 2 片的任何测试都不会变红（Q19 原文）。
 
-**探针必须逐条满足的前置条件**（任一不满足即回答「没有」，fail-closed）：
+**探针的非几何前置条件落在 `nodeDragPreconditions(engine:panel:)` 这一个具名函数里**（D134e），⛔ **不是一张散文清单** —— 下表是它的内容，不是给调用方各自照抄的：
 
 1. 会话存在且 `mode == .select`（`DrawingSession.swift:41-42`）—— 画线态下点图表是落锚、恒不做命中判定（D38），节点也不存在；
 2. **本面板就是 `selectedPanel`** —— 选中是 `(selectedPanel, selectedDrawingID)` **二元组**（D41）。上下两个面板各有一套仲裁器；选中在上面板时，**下面板的探针必须回答「没有」**，否则在下面板按住同一屏幕位置也会拖动上面板的线；
 3. **该点没被面板盖住**：`session.shield` 三态按 `handleDrawingTap`（`ChartContainerView.swift:341-345`，三支在 `:342` / `:343` / `:344`）**逐字同判据** —— `.pending` 一律拒、`.rect` 区内拒。⛔ 不得省略：常驻样式面板盖着的地方不该拖得动线，而 `.pending` 那个「面板已挂载、几何未收敛」的窗口期正是 fail-closed 存在的理由；
 4. **`DrawingEditRouter.editableIgnoringGeometry(engine:)` 为真**（`DrawingEditRouter.swift:76-84`）；
-5. `DrawingNodeGeometry.hitTestNode` 在该点返回非 nil（几何性可见 + 在命中半径内）。
+5. `DrawingNodeGeometry.hitTestNode` 在该点返回非 nil（几何性可见 + 在命中半径内）—— **⛔ 这一条不在那个函数里**，它是几何层，只有探针问，`.began` 的复核**绝不重问**（D140b）。
+
+### D134e　那四条非几何前置条件是**一个具名函数**，复核与探针**调同一个**；复核另加一条身份比对
+
+**第 7 轮评审 R1-medium 逼出。⚠️ 根因是我在 D134b 只把「引擎那份门」去重了，却把探针自己的前置条件留成了一张散文清单 —— 于是 D140b 的 `.began` 复核引用了那张清单的一个**子集**，**第二份更弱的副本**又出现了一次。**
+
+**症状**（评审给的场景，已核实为真）：
+
+- `editableIgnoringGeometry` 内部经 `uniqueSelected` 读的是 **`session` 此刻的选中**（`DrawingEditRouter.swift:36-40`），**完全不认识候选的 `drawingID`**；
+- 上下面板**各有一套仲裁器**（`Render/ChartContainerView.swift:56`，一个 Coordinator 一个）⇒ 一根手指按住**上**面板 A 的节点（候选已捕获），另一根手指去点**下**面板选中 B —— 那次触摸落在**另一个** `KLineView` 上，上面板的 `touchesBegan` **根本收不到** ⇒ D140c 的「≥2 个触摸就清」**管不到跨面板**，候选原样留着；
+- 此时 A 仍存在、谓词因为 **B 可编辑**而返回 `true` ⇒ 按上一稿会路由到 **A 的拖动**，而 `selectedPanel` 早已是下面板。
+
+⇒ **改掉了用户已经取消选中的那条线**，且绕开了 D134 前置条件 2（本面板 == `selectedPanel`）。
+
+**修法（与 D134b 同一副药，这次吃全）**：
+
+| 谁 | 调什么 |
+|---|---|
+| **探针**（`touchesBegan`） | `nodeDragPreconditions(engine:panel:)` + `hitTestNode` |
+| **`.began` 的复核** | `nodeDragPreconditions(engine:panel:)` + **`session.selectedDrawingID == candidate.drawingID`**。⛔ **不重做几何命中**（D140b） |
+
+**不变量**：捕获那一刻 `selectedDrawingID == candidate.drawingID` **由构造成立**（探针只对选中的那一条做命中）⇒ 复核里那条比对的含义精确地是「选中**没有换成别的线**」。
+
+**⛔ 明确不采用「事件驱动清候选」**（例如「另一面板选中一变就去清上面板的候选」）：D64 的论点原样适用 —— **能从状态算出来的就不要靠事件传递**。跨面板、跨 Coordinator 的事件接线会留下「漏接一处就静默放行」的缝，而复核是**每次路由都跑**的状态判据，结构上漏不掉。
 
 ### D134c　`.began` **不是**手指按下那一刻：路由用**重建出来的起手点**，位移用 `translation`
 
@@ -254,7 +277,7 @@ func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor)
 | 时刻 | 做什么 | 硬约束 |
 |---|---|---|
 | **`touchesBegan`（单指、且此刻没有在途候选）** | 用 **`view.renderState.viewport`**（= 屏幕上**正在显示**的那一帧，就是用户看着按下去的那一帧）建 mapper → 跑探针 → 记下候选 `(drawingID, anchorIndex)` + 按下点 | ⛔⛔ **零 engine 写入**：不 `settleDeceleration`、不 `rebuildRenderState`、不改任何状态，**纯只读**。理由见下 |
-| **pan `.began`** | 路由**完全由候选决定**，⛔ **不重新做任何几何命中**。路由到拖动后才走 D140 的四步 | 路由前对候选做一次 **fail-closed 复核**：那条线仍在、`editableIgnoringGeometry` 仍为真。⛔ **复核不含几何命中**（那正是本决策要避免的重查） |
+| **pan `.began`** | 路由**完全由候选决定**，⛔ **不重新做任何几何命中**。路由到拖动后才走 D140 的四步 | 路由前对候选做一次 **fail-closed 复核** = `nodeDragPreconditions(engine:panel:)` **且** `selectedDrawingID == candidate.drawingID`（D134e）。⛔ **复核不含几何命中**（那正是本决策要避免的重查） |
 | **新的单指 `touchesBegan`** | **直接覆盖**旧候选（重新捕获） | 见 D140c |
 | **`touchesBegan` 时同时有 ≥2 个触摸** | 清候选 | fail-closed |
 | **拖动手势走到终止相位**（`.ended` / `.cancelled`），或 `.began` 路由完毕 | 候选被消费 / 清掉 | — |
