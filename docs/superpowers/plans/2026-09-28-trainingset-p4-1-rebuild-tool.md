@@ -1477,6 +1477,32 @@ def test_write_gate_accepts_a_normal_target(tmp_path, monkeypatch):
     assert got == (tmp_path / "newbatch").resolve()
 
 
+def test_cli_refuses_when_the_temp_root_points_into_the_archive(tmp_path, monkeypatch):
+    """⛔ `TMPDIR` 指进归档时必须**在动手之前**就拒绝（codex 评审第 6 轮）。
+
+    ⭐ 判据的后半截才是关键：**归档里不许多出任何东西**。
+    只断言「退出码非 0」抓不住这条 —— `mkdtemp` 是**先建目录再返回**的，
+    事后才发现的话，目录已经建在归档里了（实测过）。
+    """
+    import tempfile as _tf
+    monkeypatch.setenv("HOME", str(tmp_path))
+    archive = tmp_path / "qmt_trial_out"
+    archive.mkdir()
+    (archive / "000001.SZ_1756656000.zip").write_bytes(b"V1-ORIGINAL-BYTES")
+    before = sorted(q.name for q in archive.iterdir())
+
+    monkeypatch.setattr(_tf, "tempdir", str(archive))   # 等价于 TMPDIR 指进归档
+    _stub_connection(monkeypatch)
+
+    rc = r.main(["--dsn", "postgresql://x/y", "--out-dir", str(tmp_path / "out"),
+                 "--p11-sql", str(_repo_root() / _P11),
+                 "--manifest", str(tmp_path / "m.json")])
+
+    assert rc != 0
+    assert sorted(q.name for q in archive.iterdir()) == before, (
+        "归档里多出了东西 —— 说明校验发生在分配之后，而不是之前")
+
+
 def test_cli_refuses_out_dir_inside_the_v1_archive(tmp_path, monkeypatch):
     """⛔ spec §3.4 R2 ⓒ：不得写入 ~/qmt_trial_out/（v1 审计归档，逐字节不得改）。"""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1819,6 +1845,20 @@ def main(argv=None) -> int:
         return 2
 
     try:
+        # ⭐ **第一件事**：先把【系统临时目录】校验掉（codex 评审第 6 轮，实测复现）。
+        #   两条路径都用它，而且都在我们的路径闸之前就动手：
+        #   ① `tempfile.mkdtemp(...)` —— 它是**先把目录建出来**再返回，闸门只能事后发现；
+        #   ② `assemble_from_windows` 里的 `tempfile.TemporaryDirectory()`
+        #      （`generate_training_sets.py:468`）—— 中间那个 SQLite 文件写在同一个根下。
+        #   实测：把 `TMPDIR` 指进 `~/qmt_trial_out/`，两者都真的在归档里建了东西。
+        #   ⚠️ 准确说法：那三个 zip 的**字节没被动过**（「逐字节不得改动」没破），
+        #      破的是「⛔ 不得写入归档」这条边界，而且**中途被打断会把残渣留在里面**。
+        # ⭐ 调用 `gettempdir()` 本身还有个副作用是我们要的：它会把结果**缓存**进
+        #   `tempfile.tempdir`（实测：不手动清掉它，改 `TMPDIR` 都不生效）⇒ 校验过之后，
+        #   下游那个 `TemporaryDirectory()` 拿到的必然是**同一个已校验的根**。
+        scratch_root = Path(tempfile.gettempdir())
+        assert_write_target_is_safe(scratch_root, kind="系统临时目录")
+
         out = assert_write_target_is_safe(args.out_dir, kind="产出目录")
         manifest_path = Path(args.manifest)
         assert_write_target_is_safe(manifest_path, kind="清单", must_not_exist=True)
@@ -1865,12 +1905,13 @@ def main(argv=None) -> int:
             # ⭐ 用**全新的临时目录**，⛔ 不用 `out.parent / (out.name + "-verify")`：
             #    那个名字可能早就被一个【指向归档的符号链接】占着（第 1 轮 finding 1 实测）。
             #    mkdtemp 保证是新建的，根本不存在「被占着」这回事。
-            second = Path(tempfile.mkdtemp(prefix="rebuild-verify-"))
+            second = Path(tempfile.mkdtemp(prefix="rebuild-verify-", dir=scratch_root))
             assert_write_target_is_safe(second, kind="验证目录")   # 纵深防御
             await rebuild_all(conn, PINNED_TARGETS, second, old_rows=old_rows)
             assert_byte_identical(out, second)          # 不一致 → 抛错 → 清单不发布
             man["determinism_verified_against"] = str(second)
             man["statements_issued"] = len(conn.statements)
+            man["scratch_root"] = str(scratch_root)
             return man
         finally:
             await conn.inner.close()
@@ -1918,7 +1959,8 @@ cd .dev/worktree/trainingset-p4-1/backend && PYTHONDONTWRITEBYTECODE=1 "$PY" -m 
 6. 命令行入口对下面每一种都拒绝、退出码非 0：产出目录落在归档里 / **清单落在归档里** /
    **清单已存在** / **产出目录已存在** / `--p11-sql` 与 `--old-snapshot` 都给或都不给 /
    **清单在重建途中被别的进程建出来**（这一条拦住它的不是预检，是原子发布）/
-   **两轮重建字节不一致**（此时清单必须**没有**被创建出来）；
+   **两轮重建字节不一致**（此时清单必须**没有**被创建出来）/
+   **`TMPDIR` 指进归档**（此时归档里必须**一个新条目都不多**）；
 7. ⭐ **两条正向对照各跑一次并确认是绿的**：合法路径能通过路径闸、合法的首轮清单能通过旧快照校验。
    ⛔ 少了这两条，上面那一串「拒了」掩盖得住一个**恒抛**的守卫 —— 那是本仓点名的头号假绿形态；
 8. ⭐ 亲手确认一次：把清单指向归档里的某个 zip 跑一遍，**那个 zip 的字节数跑完仍然没变**。
