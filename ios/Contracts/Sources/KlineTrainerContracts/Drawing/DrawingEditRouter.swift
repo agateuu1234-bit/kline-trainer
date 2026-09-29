@@ -73,7 +73,7 @@ enum DrawingEditRouter {
     ///   不是「这条线能不能改」的属性，由 `applyStyle` 逐次传播失败。）
     /// **抽出来是为了让「现算」与「读提示」两条路径只在几何这一点上不同**（PD2）——
     /// 若各写一份，早晚有一天两边的非几何分量会漂移。
-    private static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+    internal static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
         guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }
@@ -81,6 +81,33 @@ enum DrawingEditRouter {
         guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }
         return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])
             && !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])
+    }
+
+    /// D134e：节点拖动的**非几何前置条件**，探针与 `.began` 的复核**调同一个**。
+    ///
+    /// ⛔ **这是唯一一份清单** —— 上一稿把它写成散文让调用方各自照抄，于是复核只引用了一个
+    /// **子集**，「第二份更弱的副本」立刻长了出来（spec 第 7 轮评审）。
+    ///
+    /// ⛔ **本函数不做几何命中**（`hitTestNode`）：那是几何层，只有探针问，复核**绝不重问**（D140b）。
+    ///
+    /// `point` 的契约（D134e）：探针传**那一次触摸的按下点**，复核传**候选记下的那个按下点**
+    /// ——⇒ 同一个点。坐标空间一律是**本面板视图的局部坐标**，与 `PanelShield.rect`
+    /// （`DrawingSession.swift:168` 注释「面板局部坐标」）和 `handleDrawingTap` 拿到的 `point` 同一空间。
+    static func nodeDragPreconditions(engine: TrainingEngine, panel: PanelId, point: CGPoint) -> Bool {
+        let session = engine.drawingSession
+        // ① 选择态：画线态下点图表是落锚、恒不做命中判定（D38），节点也不存在
+        guard session.drawingModeActive, session.mode == .select else { return false }
+        // ② 本面板就是 selectedPanel：选中是 (selectedPanel, selectedDrawingID) 二元组（D41）。
+        //    ⛔ 少了它，选中在上面板时下面板按同一屏幕位置也会拖动上面板的线。
+        guard session.selectedPanel == panel else { return false }
+        // ③ 盾：与 handleDrawingTap（ChartContainerView.swift:342-344）**逐字同判据**
+        switch session.shield[panel == .upper ? 0 : 1] ?? .unshielded {
+        case .unshielded:       break
+        case .pending:          return false
+        case .rect(let shield): if shield.contains(point) { return false }
+        }
+        // ④ 引擎所有**不需要 mapper 就能判**的拒收门 —— ⛔ 不在这里重抄一份（D134b）
+        return editableIgnoringGeometry(engine: engine)
     }
 
     /// 「删除可用」的**非几何分量** —— 与上者共享 review / 唯一 / `locked` 三个分量，
