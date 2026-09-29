@@ -3,6 +3,7 @@
 # 纯装配层：全部 in-memory bars + 本地临时文件，不连 PostgreSQL（PG 壳由 B3/NAS 集成测试覆盖，D1）。
 from __future__ import annotations
 
+import json
 import random
 import sqlite3
 import zipfile
@@ -1058,3 +1059,47 @@ def test_zip_member_name_is_db_basename(tmp_path):
     zip_and_hash(db, zp)
     with _z.ZipFile(zp) as zf:
         assert zf.namelist() == ["600519.SH_1762099200.db"]
+
+
+def test_generate_one_training_set_uses_shared_load_gating_inputs(monkeypatch, tmp_path):
+    """判据 = 提取之后，生产路径 generate_one_training_set 确实调到了模块级的
+    load_gating_inputs（而不是留着一份自己的副本）。
+
+    本切片的根缺陷就是「同一件事两边各写一份、各自漂移」，所以这条必须钉住
+    【同一个函数对象】被两个调用方共用，而不只是「有这么个函数存在」。
+    """
+    import asyncio
+    import random
+
+    import generate_training_sets as g
+    from tests._qmt_fixtures import gen_valid_sources
+    from tests.test_b2_reconnect_integration import _FakeConn
+    from qmt_ingest import build_stock_import
+
+    code = "000001.SZ"
+    s1, sd, e1, ed = gen_valid_sources(code)
+    bundle = build_stock_import(s1, sd, stock_code=code, stock_name="平安",
+                                entry_1m=e1, entry_daily=ed)
+    bars = {p: pd.DataFrame(bundle.records[p]).sort_values("datetime").reset_index(drop=True)
+            for p in g.PERIODS}
+    cov = bundle.coverage
+    conn = _FakeConn(code, bars, {
+        "dense_1m_start_date": cov.start_date,
+        "dense_1m_end_date": cov.end_date,
+        "dropped_1m_dates": json.dumps([d.isoformat() for d in cov.dropped_dates]),
+        "dense_day_count": cov.dense_day_count,
+    })
+
+    seen = []
+    real = g.load_gating_inputs
+
+    async def spy(c, sc):
+        seen.append(sc)
+        return await real(c, sc)
+
+    monkeypatch.setattr(g, "load_gating_inputs", spy)
+    asyncio.run(g.generate_one_training_set(conn, code, tmp_path, random.Random(0)))
+
+    assert seen == [code], (
+        f"generate_one_training_set 没有调到模块级的 load_gating_inputs（记录到 {seen}）"
+        " —— 说明它还留着一份自己的读库副本，两份会各自漂移")
