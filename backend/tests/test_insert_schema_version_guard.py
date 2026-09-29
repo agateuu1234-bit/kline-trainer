@@ -804,7 +804,14 @@ def _scan(files, root):
 
             # ⛔ 「间隔或表名求不出来」——**这一条不要求表名**（见 `_unresolved_insert_spans`
             #    的长注释）。它是「间隔和表名同时是插值」时唯一还站着的判据。
-            _already = {h.start() for h in _heads(utext)[0]} | set(_nonliteral_targets(utext))
+            # ⛔⛔ **去重只按「已报过的不确定性」，绝不按「已认出的表头」**（codex 第八轮）：
+            #    认出表头**不等于**这条语句的结构是确定的。实测的静默放行 ——
+            #        comment = "*/ (stock_code, file_path) VALUES (1,2); --"
+            #        Q = f"INSERT INTO training_sets /* {comment} */ (stock_code, schema_version) …"
+            #    运行时那段插值里的 `*/` **提前闭合注释**，真实列清单变成不带字段的那一份
+            #    （pglast 核实：`['stock_code', 'file_path']`）；而源码上注释规规矩矩、
+            #    `schema_version` 在场 ⇒ 守卫判「通过」。上一版按表头去重，正好把它跳过了。
+            _already = set(_nonliteral_targets(utext))
             for st in _unresolved_insert_spans(utext):
                 if st in _already:
                     continue
@@ -1283,6 +1290,17 @@ _HOST_UNDECIDABLE = (
      'Q = f"INSERT{gap}INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
     ("py 变量落在关键字之间的间隔里（`+` 拼接）", ".py",
      'Q = "INSERT" + gap + "INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
+    # ⛔⛔ codex 第八轮：插值藏在**列清单之前的注释里**。
+    #    运行时那段插值里的 `*/` 会**提前闭合注释**，把真实列清单换成不带字段的那一份
+    #    （pglast 核实：运行时列清单 = ['stock_code', 'file_path']，**真缺字段**），
+    #    而源码上看起来注释规规矩矩、列清单里 `schema_version` 在场 ⇒ 守卫判「通过」。
+    #    ⭐ 根因是我那条去重写错了：**「`_heads` 认出来了就跳过不确定性检查」** ——
+    #      认出表头**不等于**这条语句的结构是确定的。去重该按「已报过的不确定性」，
+    #      ⛔ 不是按「已认出的表头」。
+    ("py 插值藏在列清单之前的注释里", ".py",
+     'comment = "*/ (stock_code, file_path) VALUES (1,2); --"\n'
+     'Q = f"INSERT INTO training_sets /* {comment} */'
+     ' (stock_code, schema_version) VALUES (1,2)"\n'),
     # ⛔⛔ codex 第七轮（high）：**间隔和表名同时**是插值。
     #    解码成 `INSERT<哨兵>INTO <哨兵> (…)` —— 兜底网要求字面量 `training…sets`（够不着），
     #    `_nonliteral_targets` 又被间隔里的哨兵挡住（`_skip_gap` 走不过去）⇒ 两者皆空；
@@ -1715,8 +1733,12 @@ def test_decoding_must_not_reduce_what_the_raw_scan_can_see(tmp_path):
         f"它没在验守恒判据")
 
 
-def test_guard_never_stays_silent_on_a_non_literal_table_name(tmp_path):
-    """表名来自变量时，运行时字符串取不出来 ⇒ 必须**明说判不了**，⛔ 不许沉默。
+def test_guard_never_stays_silent_when_something_is_unresolved(tmp_path):
+    """源码里有**求不出来**的东西时，必须**明说判不了**，⛔ 不许沉默。
+
+    ⚠️ 本测试原名 `…_on_a_non_literal_table_name`，已改名 —— 它管的不只是表名：
+       间隔里的插值、列清单之前注释里的插值，同样属于「求不出来」。
+       名字不准会让人以为别的形态没人管（本仓成文教训：不实陈述比缺陷更坏）。
 
     ⚠️ 这一类**无法**判对（表名到底是不是 `training_sets`，源码里没写）。
        但「判不了」与「沉默」是两件完全不同的事：前者让测试红、有人来看，

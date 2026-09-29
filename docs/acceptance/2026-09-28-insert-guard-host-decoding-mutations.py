@@ -134,6 +134,11 @@ MUTATIONS: dict[str, tuple[str, str]] = {
         '        if _INTO_KW.search(span) and any(mk in span for mk in _COLS_MARKERS):',
         '        if (_INTO_KW.search(span) and "training_sets" in span.lower()\n'
         '                and any(mk in span for mk in _COLS_MARKERS)):  # MUT'),
+    # ⛔ 「认出表头就跳过不确定性检查」—— codex 第八轮的那处退化。
+    "M28 不确定性检查按【已认出的表头】去重": (
+        "            _already = set(_nonliteral_targets(utext))",
+        "            _already = ({h.start() for h in _heads(utext)[0]}\n"
+        "                        | set(_nonliteral_targets(utext)))  # MUT"),
     "M23 兜底网的表名跨度用任意字符": (
         '_LR_NAME = r"[\\s_\\"\'+\\\\]"', "_LR_NAME = _LR_SPAN  # MUT"),
 }
