@@ -112,3 +112,125 @@ async def rebuild_one(conn, target: RebuildTarget, output_dir: Path,
         output_dir, stock_code=target.stock_code,
         stock_name=_stock_name_of(target.stock_code),
         start_datetime=int(start), end_datetime=int(after_end), windows=windows)
+
+
+async def connect_read_only(dsn: str):
+    """【第一道】连源库，让**数据库自己**进只读，并当场自证它真的只读了。
+
+    ⭐ 这是唯一挡得住**函数副作用**的一道 —— 一次性 PG 实测：只读会话下
+       `SELECT sneaky_write()`（函数体里有 `UPDATE`）被 PG 拒为
+       `cannot execute UPDATE in a read-only transaction`，而**任何纯文本解析
+       都看不见它**（语法上它就是个普通 SELECT）。
+    ⭐ 自证不是走过场：实测对照过 —— 只读连接这句返回 `'on'`、普通连接返回 `'off'`
+       ⇒ 这条判据**有判别力**，不是恒返回 `on`。
+    ⚠️ 用 `SELECT current_setting(...)` 而**不是** `SHOW ...`：后者的语法树顶层不是
+       `SelectStmt`，会被第二道自己拦下来。
+    """
+    import asyncpg
+    conn = await asyncpg.connect(
+        dsn, server_settings={"default_transaction_read_only": "on"})
+    mode = await conn.fetchval("SELECT current_setting('transaction_read_only')")
+    if mode != "on":
+        await conn.close()
+        raise RebuildMismatch(
+            f"连上了，但这个会话不是只读的（transaction_read_only = {mode!r}）"
+            f" —— ⛔ 拒绝在这种连接上跑重建")
+    return conn
+
+
+def assert_no_write_statements(statements) -> None:
+    """【第二道】每条 SQL 都必须是**单条纯 SELECT**：解析得动、只有一条、顶层是
+    `SelectStmt`、且语法树里不出现别的语句节点。不合格就逐条点名并抛错。
+
+    ⛔ **不许按首个关键字判**（codex 评审第 4 轮，两个洞都实测复现过）：
+       `WITH changed AS (UPDATE … RETURNING id) SELECT …` 首词是 `WITH` ⇒ 放行；
+       `SELECT 1; UPDATE …` 首词是 `SELECT` ⇒ 放行。而它们改的是 `schema_version`，
+       **不动行数也不动 `max(id)`** ⇒ 「跑前跑后计数一致」那条同样发现不了。
+    ⭐ 判据写成**白名单**（只许 `SelectStmt`），⛔ 不枚举「危险写法」——
+       攻击面枚举永远漏，合法面枚举不会。
+    ⚠️ **解析不了 ⇒ 判不了 ⇒ 拒绝**，⛔ 不得当成「看起来没问题」。
+    ⚠️ 它**看不见**函数副作用 —— 那一类由 `connect_read_only()` 兜住。
+    """
+    from pglast import parse_sql
+    from pglast.visitors import Visitor
+
+    class _Collect(Visitor):
+        def __init__(self):
+            self.tags = []
+
+        def visit(self, ancestors, node):
+            self.tags.append(node.__class__.__name__)
+
+    bad = []
+    for sql in statements:
+        try:
+            parsed = parse_sql(sql)
+        except Exception as exc:
+            bad.append((sql, f"解析不了（{exc}）⇒ 判不了 ⇒ 拒绝"))
+            continue
+        if len(parsed) != 1:
+            bad.append((sql, f"一次发了 {len(parsed)} 条语句"))
+            continue
+        top = parsed[0].stmt.__class__.__name__
+        if top != "SelectStmt":
+            bad.append((sql, f"顶层是 {top}，不是 SelectStmt"))
+            continue
+        v = _Collect()
+        v(parsed[0])
+        others = sorted({x for x in v.tags
+                         if x.endswith("Stmt") and x not in ("SelectStmt", "RawStmt")})
+        if others:
+            bad.append((sql, f"语法树里有非 SELECT 的语句节点：{others}"))
+    if bad:
+        listed = "\n".join(f"  · {s.strip()[:160]}\n      ↳ {why}" for s, why in bad)
+        raise RebuildMismatch(
+            f"源库只读被破坏：{len(bad)} 条语句不是纯读 —— ⛔ 停下来查清楚\n{listed}")
+
+
+class ReadOnlyConn:
+    """包住一个 asyncpg 风格连接：记录每条 SQL，非纯读**当场拒绝**。
+
+    ⚠️ 它是**第二道 + 证据**，不是保险 —— 真正兜底的是 `connect_read_only()` 让
+    数据库自己拒绝。本片重建路径只用 fetch / fetchrow / fetchval / transaction 四样，
+    由 `test_rebuild_one_issues_no_write_statements` 钉住实际发出的语句集合。
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.statements: list[str] = []
+
+    def _record(self, sql: str):
+        self.statements.append(sql)
+        assert_no_write_statements([sql])
+
+    def transaction(self, *, isolation=None, readonly=False):
+        return self.inner.transaction(isolation=isolation, readonly=readonly)
+
+    async def fetch(self, query: str, *args):
+        self._record(query)
+        return await self.inner.fetch(query, *args)
+
+    async def fetchrow(self, query: str, *args):
+        self._record(query)
+        return await self.inner.fetchrow(query, *args)
+
+    async def fetchval(self, query: str, *args):
+        self._record(query)
+        return await self.inner.fetchval(query, *args)
+
+    async def execute(self, query: str, *args):
+        self._record(query)
+        return await self.inner.execute(query, *args)
+
+
+#: spec §7 判据 9②：跑前跑后必须完全一致的那几个数
+_COUNT_TABLES = ("klines", "stock_coverage", "stocks", "training_sets")
+
+
+async def snapshot_source_counts(conn) -> dict:
+    """四张表行数 + training_sets 的 max(id)。⛔ 全是 SELECT。"""
+    out = {}
+    for t in _COUNT_TABLES:
+        out[f"{t}.count"] = int(await conn.fetchval(f"SELECT count(*) FROM {t}"))
+    out["training_sets.max_id"] = await conn.fetchval("SELECT max(id) FROM training_sets")
+    return out

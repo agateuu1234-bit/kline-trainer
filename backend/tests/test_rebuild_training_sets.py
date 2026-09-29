@@ -155,3 +155,97 @@ def test_rebuild_one_refuses_when_end_datetime_differs_from_authority(bundle, tm
         f"消息里没有『权威值』（须是独立数字，不能只是某数字的前缀）：{msg}")
     assert not list(tmp_path.glob("*.zip")), (
         "右端断言失败时不应该已经把 zip 写到盘上 —— 断言必须排在装配之前")
+
+
+def test_write_detector_reports_nonzero_on_a_planted_write():
+    """⭐ 先证明这个检测器**能报出非 0**，再让它去报 0。
+
+    ⭐ 后三条是**按首词判**会漏掉的（codex 评审第 4 轮实测复现）：
+    前两条首词分别是 `WITH` / `SELECT`，第三条根本解析不了。
+    """
+    for bad in ["INSERT INTO training_sets(stock_code, schema_version) VALUES ('X', 1)",
+                "UPDATE training_sets SET schema_version = 1",
+                "DELETE FROM klines",
+                "CREATE TABLE t(x int)",
+                "ALTER TABLE klines ADD COLUMN x int",
+                "TRUNCATE training_sets",
+                "DROP TABLE klines",
+                "WITH changed AS (UPDATE training_sets SET schema_version = 1"
+                " RETURNING id) SELECT count(*) FROM changed",
+                "SELECT 1; UPDATE training_sets SET schema_version = 1",
+                "SELECT FROM WHERE ((("]:
+        with pytest.raises(r.RebuildMismatch) as ei:
+            r.assert_no_write_statements(["SELECT 1", bad])
+        assert bad[:40] in str(ei.value), "错误信息里没点名是哪一条"
+
+
+def test_write_detector_passes_on_reads_only():
+    """⭐ 正向对照：本片真正会发出的那几条，一条都不许误报。"""
+    r.assert_no_write_statements([
+        "SELECT period, datetime FROM klines WHERE stock_code=$1 AND period=$2"
+        " ORDER BY datetime",
+        "SELECT dense_1m_start_date FROM stock_coverage WHERE stock_code=$1",
+        "SELECT count(*) FROM training_sets",
+        "SELECT max(id) FROM training_sets",
+    ])
+
+
+def test_connect_read_only_refuses_a_session_that_is_not_read_only(monkeypatch):
+    """⛔ 连上了但会话不是只读 ⇒ 拒绝并把连接关掉。
+
+    ⭐ 这条自证**有判别力**，不是恒返回 `on`：一次性 PG 上实测过对照 ——
+    只读连接返回 `'on'`、普通连接返回 `'off'`。
+    """
+    import asyncio
+    import types
+    closed = {"n": 0}
+
+    class _Conn:
+        async def fetchval(self, q):
+            return "off"
+
+        async def close(self):
+            closed["n"] += 1
+
+    async def _connect(dsn, **kw):
+        assert kw.get("server_settings", {}).get(
+            "default_transaction_read_only") == "on", "连接时没有要求数据库进入只读"
+        return _Conn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+    with pytest.raises(r.RebuildMismatch):
+        asyncio.run(r.connect_read_only("postgresql://x/y"))
+    assert closed["n"] == 1, "拒绝时没有把连接关掉"
+
+
+def test_connect_read_only_accepts_a_read_only_session(monkeypatch):
+    """⭐ 正向对照：⛔ 没有它，一个**恒抛**的 connect_read_only 也能让上一条绿。"""
+    import asyncio
+    import types
+
+    class _Conn:
+        async def fetchval(self, q):
+            return "on"
+
+        async def close(self):
+            raise AssertionError("不该关掉一个合法的只读连接")
+
+    async def _connect(dsn, **kw):
+        return _Conn()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=_connect))
+    got = asyncio.run(r.connect_read_only("postgresql://x/y"))
+    assert isinstance(got, _Conn)
+
+
+def test_rebuild_one_issues_no_write_statements(bundle, tmp_path):
+    """真跑一次重建，断言发出去的每一条 SQL 都是读。"""
+    import asyncio
+    conn = r.ReadOnlyConn(_conn(bundle))
+    target = _target_for(bundle)
+    asyncio.run(r.rebuild_one(conn, target, tmp_path))
+
+    assert conn.statements, "一条 SQL 都没记到 ⇒ 这个判据是空转的，⛔ 不算通过"
+    r.assert_no_write_statements(conn.statements)
+    assert conn.inner.registered == [], (
+        "假 training_sets 存储里出现了登记行 —— 重建路径调到了 _register_training_set")
