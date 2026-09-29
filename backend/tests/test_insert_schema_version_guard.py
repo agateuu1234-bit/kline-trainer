@@ -263,8 +263,13 @@ _LR_SPAN = r"(?:(?![(;)])[\s\S])"
 #:    `/data/training-sets/000001.SZ_….zip` 当成表名（中间是连字符）。
 _LR_NAME = r"[\s_\"'+\\]"
 _LAST_RESORT_RE = re.compile(
-    # ⚠️ 窗口 400/200 是实测定出来的：干净树上多报 0 条。
-    rf"insert{_LR_SPAN}{{1,400}}?into{_LR_SPAN}{{0,200}}?training{_LR_NAME}{{0,12}}?sets"
+    # ⛔ **间隔不设字符上限。** 原先是 400/200 —— 间隔一长就够不着 ⇒ 静默放行。
+    #    ⚠️ 「420 个字符的间隔很荒谬」**不是判据**：我上一片第 15 轮就是判断
+    #      「关键字之间放嵌套注释很荒谬」而漏掉了真缺陷。窗口大小本身就是个
+    #      「数不完」的参数 —— 去掉它才是结构性的。
+    #    ⚠️ 实测：去掉上限后干净树**多报 0 条**，全量扫描（16145 个单元）耗时
+    #      与有上限时**相同**（28ms）—— 真正约束跨度的是「禁跨 `(` `)` `;`」那一条。
+    rf"insert{_LR_SPAN}+?into{_LR_SPAN}*?training{_LR_NAME}{{0,12}}?sets"
     r"(?![A-Za-z0-9_$])",          # ⛔ 词边界：否则 `training_sets_audit` 也被拖下水
     re.I,
 )
@@ -399,6 +404,32 @@ def _split_name_heads(text: str) -> list[int]:
                 break
             j += 1
         if "".join(buf).lower() == "training_sets":
+            out.append(km.start())
+    return out
+
+
+def _unresolved_insert_spans(text: str) -> list[int]:
+    r"""`INSERT` 到第一个 `(` / `;` 之间**既含 `INTO`、又含「求不出来」的标记** ⇒ 判不了。
+
+    ⛔⛔ **这条判据【不要求表名】** —— 这是它存在的全部理由。
+       codex 第七轮实测的静默绕过（high）：**间隔和表名同时**是插值 ——
+           gap = " "; table = "training_sets"
+           Q = f"INSERT{gap}INTO {table} (…)"
+       解码成 `INSERT<哨兵>INTO <哨兵> (…)`：
+         · 兜底网要求字面量 `training…sets` ⇒ 够不着；
+         · `_nonliteral_targets` 要靠 `_skip_gap` 走到表名 ⇒ 被间隔里的哨兵挡住；
+         · 守恒判据也过（原文与解码**各 0 条**表头）。
+       ⇒ 三道都建立在「能认出表名」或「能走过间隔」之上。**必须有一条两者都不依赖的。**
+    ⚠️ 这等于把**所有**「表名或间隔求不出来」的 INSERT 都报出来，不只是本表的。
+       ⛔ 所以先量后做：干净树上这条判据**多报 0 条**。
+    """
+    out, n = [], len(text)
+    for km in _INSERT_KW.finditer(text):
+        k = km.end()
+        while k < n and text[k] not in "(;":     # 到列清单/语句末为止
+            k += 1
+        span = text[km.end():k]
+        if _INTO_KW.search(span) and any(mk in span for mk in _COLS_MARKERS):
             out.append(km.start())
     return out
 
@@ -770,6 +801,16 @@ def _scan(files, root):
                 lineno = (uline if uline is not None
                           else utext.count(chr(10), 0, st) + 1)
                 unknown.append(f"{rel}:{lineno}（表名不是字面量，判不了）")
+
+            # ⛔ 「间隔或表名求不出来」——**这一条不要求表名**（见 `_unresolved_insert_spans`
+            #    的长注释）。它是「间隔和表名同时是插值」时唯一还站着的判据。
+            _already = {h.start() for h in _heads(utext)[0]} | set(_nonliteral_targets(utext))
+            for st in _unresolved_insert_spans(utext):
+                if st in _already:
+                    continue
+                lineno = (uline if uline is not None
+                          else utext.count(chr(10), 0, st) + 1)
+                unknown.append(f"{rel}:{lineno}（间隔或表名求不出来，判不了）")
 
         # ⛔ 「表名被宿主引号/拼接劈开」只对**没解码**的宿主补 —— `.py` 已经由 `ast`
         #    正面解开了，再补一遍会把同一条语句重复报成「判不了」⇒ 合法写法被误报。
@@ -1242,6 +1283,23 @@ _HOST_UNDECIDABLE = (
      'Q = f"INSERT{gap}INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
     ("py 变量落在关键字之间的间隔里（`+` 拼接）", ".py",
      'Q = "INSERT" + gap + "INTO training_sets (stock_code, file_path) VALUES (1,2)"\n'),
+    # ⛔⛔ codex 第七轮（high）：**间隔和表名同时**是插值。
+    #    解码成 `INSERT<哨兵>INTO <哨兵> (…)` —— 兜底网要求字面量 `training…sets`（够不着），
+    #    `_nonliteral_targets` 又被间隔里的哨兵挡住（`_skip_gap` 走不过去）⇒ 两者皆空；
+    #    守恒判据也过（原文与解码各 0 条表头）⇒ 静默。
+    #    ⇒ 需要一条**根本不要求表名**的判据：`INSERT` 到第一个 `(` / `;` 之间
+    #      既含 `INTO`、又含「求不出来」的标记 ⇒ 判不了（不管写的是哪张表）。
+    ("py 间隔与表名同时是插值", ".py",
+     'gap = " "\n'
+     'table = "training_sets"\n'
+     'Q = f"INSERT{gap}INTO {table} (stock_code, file_path) VALUES (1,2)"\n'),
+    # ⛔ **间隔很长**：兜底网原先有 400 字符的窗口，间隔一长就够不着 ⇒ 静默。
+    #    ⚠️ 「420 个字符的间隔很荒谬」**不是判据** —— 本仓成文教训：
+    #      我上一片第 15 轮就是判断「关键字之间放嵌套注释很荒谬」而漏掉了真缺陷。
+    #    ⇒ 窗口大小本身就是个「数不完」的参数，已去掉上限（实测零误报、耗时不变）。
+    ("py 关键字之间的间隔超长", ".py",
+     'Q = f"INSERT {g}' + "x" * 420 + ' INTO training_sets'
+     ' (stock_code, file_path) VALUES (1,2)"\n'),
     # ⛔ codex 第二轮实测的静默绕过：`fold` 对**含变量的 `Add`** 返回 None，
     #    于是碎片被各自当成单元 —— 而碎片 `INSERT INTO training_` 里**没有任何标记**，
     #    「表名不是字面量」那条判据也就认不出它。

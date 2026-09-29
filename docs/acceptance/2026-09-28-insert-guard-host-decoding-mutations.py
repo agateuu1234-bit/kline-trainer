@@ -122,6 +122,18 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "M22 兜底网去掉词边界": (
         '    r"(?![A-Za-z0-9_$])",          # ⛔ 词边界：否则 `training_sets_audit` 也被拖下水',
         '    r"",  # MUT'),
+    "M25 兜底网的间隔恢复字符上限（间隔一长就够不着）": (
+        'rf"insert{_LR_SPAN}+?into{_LR_SPAN}*?training{_LR_NAME}{{0,12}}?sets"',
+        'rf"insert{_LR_SPAN}{{1,400}}?into{_LR_SPAN}{{0,200}}?training'
+        '{_LR_NAME}{{0,12}}?sets"  # MUT'),
+    # ── 不要求表名的那条判据（地板之三） ──────────────────────────────────
+    "M26 「间隔或表名求不出来」判据摘掉": (
+        "            for st in _unresolved_insert_spans(utext):",
+        "            for st in []:  # MUT"),
+    "M27 该判据改成也要求表名字面量": (
+        '        if _INTO_KW.search(span) and any(mk in span for mk in _COLS_MARKERS):',
+        '        if (_INTO_KW.search(span) and "training_sets" in span.lower()\n'
+        '                and any(mk in span for mk in _COLS_MARKERS)):  # MUT'),
     "M23 兜底网的表名跨度用任意字符": (
         '_LR_NAME = r"[\\s_\\"\'+\\\\]"', "_LR_NAME = _LR_SPAN  # MUT"),
 }
@@ -136,6 +148,27 @@ def red_tests() -> list[str]:
         env={"PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"})
     return [ln.split("::")[-1].split()[0].replace("test_", "")
             for ln in r.stdout.splitlines() if ln.startswith(("FAILED", "ERROR"))]
+
+
+#: ⛔ **组合变异**：有几处修复是**纵深防御** —— 它们的场景被更强的那道判据
+#:    （`_unresolved_insert_spans`，不要求表名）也覆盖了，所以**单独**改回去时零红。
+#: ⚠️ 零红有两种完全不同的含义，必须分清：
+#:      ① 这处修复是**死代码**（真没用）；
+#:      ② 这处修复是**冗余的地板**（有更强的判据兜着）。
+#:    区分办法：把更强那道也一起摘掉 —— 若此时变红，就是 ②，是真正的纵深防御。
+#: ⭐ 这与本仓「M1+M2 两条一起才造出假绿」的做法是同一招。
+COMBOS: dict[str, list[str]] = {
+    "C1 区段判据只看第一个字符 + 不要求表名那条也摘掉": ["M15", "M26"],
+    "C2 兜底网只开一半 + 不要求表名那条也摘掉": ["M24", "M26"],
+    "C3 兜底网恢复窗口上限 + 不要求表名那条也摘掉": ["M25", "M26"],
+}
+
+
+def _by_prefix(code: str) -> tuple[str, tuple[str, str]]:
+    for label, pair in MUTATIONS.items():
+        if label.startswith(code + " "):
+            return label, pair
+    raise KeyError(code)
 
 
 def main() -> int:
@@ -161,8 +194,35 @@ def main() -> int:
             if red:
                 print(f"✅ {label}\n     变红：{red}")
             else:
-                print(f"⛔ {label}：**零红** —— 这处修复没有任何测试钉着")
-                bad.append(label)
+                combo = next((c for c, codes in COMBOS.items()
+                              if label.split()[0] in codes), None)
+                if combo:
+                    print(f"➖ {label}：单独零红 —— 由组合变异「{combo}」验证（纵深防御）")
+                else:
+                    print(f"⛔ {label}：**零红** —— 这处修复没有任何测试钉着")
+                    bad.append(label)
+
+        print()
+        for clabel, codes in COMBOS.items():
+            mutated, ok = original, True
+            for code in codes:
+                _lbl, (old, new) = _by_prefix(code)
+                if mutated.count(old) != 1:
+                    print(f"⛔ {clabel}：`{code}` 的锚点命中 {mutated.count(old)} 次 —— **未执行**")
+                    bad.append(clabel)
+                    ok = False
+                    break
+                mutated = mutated.replace(old, new, 1)
+            if not ok:
+                continue
+            GUARD.write_text(mutated, encoding="utf-8")
+            red = red_tests()
+            GUARD.write_text(original, encoding="utf-8")
+            if red:
+                print(f"✅ {clabel}\n     变红：{red}")
+            else:
+                print(f"⛔ {clabel}：**零红** —— 组合起来都没人红，说明这几处确实是死代码")
+                bad.append(clabel)
     finally:
         GUARD.write_text(original, encoding="utf-8")
 
@@ -176,7 +236,7 @@ def main() -> int:
         for b in bad:
             print(f"   · {b}")
         return 1
-    print(f"\n全部变红 ✅（共 {len(MUTATIONS)} 组）")
+    print(f"\n全部变红 ✅（单独 {len(MUTATIONS)} 组 + 组合 {len(COMBOS)} 组；其中单独零红的几处由组合变异验证为纵深防御）")
     return 0
 
 
