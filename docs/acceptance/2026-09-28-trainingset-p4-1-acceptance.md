@@ -36,11 +36,11 @@
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/ -q -rs
 ```
 
-**期望看到**：最后一行是 `1677 passed in <一个秒数>`；输出里**不能**出现 `skipped` 这个词（本仓后端 CI 是 Linux 且零容忍跳过）。
+**期望看到**：最后一行是 `1695 passed in <一个秒数>`；输出里**不能**出现 `skipped` 这个词（本仓后端 CI 是 Linux 且零容忍跳过）。
 
-⚠️ **这个 1677 是写这份清单当下的实测数字，不是钉死不变的**：它拆开是「合并前基线 1620 条（在 `origin/main` 一份干净副本上单独跑出来的，未采信任何文档里写的旧数字）+ 本片六个任务新增的 57 条」，而"新增的 57 条"这个子集本身会随后续评审/维护而增减（比如 A2 提到的批量检查清单加条目，或者某条用例被进一步拆分——就像 A6 第 5 行那条曾经拆成了两条）。⛔ 不要死抠「必须恰好是 1677」——那样的话，任何一次合理的后续改动（哪怕改动是对的）都会被这份清单误判成失败。
+⚠️ **这个 1695 是写这份清单当下的实测数字，不是钉死不变的**：它拆开是「合并前基线 1620 条 + 本片六个任务新增的 57 条 + 最终整支评审一次性修复波（A/B/C 十一条）新增的 18 条」，而后面这些子集本身会随后续评审/维护而增减（比如 A2 提到的批量检查清单加条目，或者某条用例被进一步拆分——就像 A6 第 5 行那条曾经拆成了两条）。⛔ 不要死抠「必须恰好是 1695」——那样的话，任何一次合理的后续改动（哪怕改动是对的）都会被这份清单误判成失败。
 
-**通过判定**：**0 skipped**，全文没有 `failed` / `error`，且末行的通过条数**不少于** `1677`（严格等于当然也算通过；如果比它更大，说明后续工作又新增了测试，同样应判定通过，而不是照抄这份文档写死的数字去挑错）。
+**通过判定**：**0 skipped**，全文没有 `failed` / `error`，且末行的通过条数**不少于** `1695`（严格等于当然也算通过；如果比它更大，说明后续工作又新增了测试，同样应判定通过，而不是照抄这份文档写死的数字去挑错）。
 
 ---
 
@@ -52,11 +52,11 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/back
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py -v
 ```
 
-**期望看到**：实测共 **56 条**，每一条前面都是 `PASSED`；末行 `56 passed`。
+**期望看到**：实测共 **74 条**，每一条前面都是 `PASSED`；末行 `74 passed`。
 
-⚠️ **这个 56 是实测数字，不是钉死不变的**：其中一组检查（`test_seven_tuple_shape_rejects_each_known_hole`）是「批量」写的——列了一份「已知的残缺样子」清单，以后谁往这份清单里再加一条新的残缺样子，这个数字就会往上涨。所以验收时不要死抠「必须正好是 56」，只要**这一条命令里没有任何一行不是 `PASSED`**、末行没有 `failed`，就算通过。
+⚠️ **这个 74 是实测数字，不是钉死不变的**：其中两组检查（`test_seven_tuple_shape_rejects_each_known_hole`、`test_write_detector_reports_nonzero_on_a_planted_write`）是「批量」写的——各自列了一份「已知的残缺样子 / 坏样本」清单，以后谁往这份清单里再加一条，这个数字就会往上涨。所以验收时不要死抠「必须正好是 74」，只要**这一条命令里没有任何一行不是 `PASSED`**、末行没有 `failed`，就算通过。
 
-**通过判定**：全文找不到 `FAILED`，末行形如 `N passed`（`N` ≥ 56）。
+**通过判定**：全文找不到 `FAILED`，末行形如 `N passed`（`N` ≥ 74）。
 
 ---
 
@@ -133,7 +133,7 @@ for row in rows:
 
 ---
 
-## A6 · 命令行入口对下面 9 种情况，每一种都要拒绝、退出码不是 0
+## A6 · 命令行入口对下面 10 种情况，每一种都要拒绝、退出码不是 0
 
 下面每一行是一条独立的自动检查，命名已经把「拒绝的是什么情况」写在测试名字里了。逐条执行（每行都是一条完整命令，可以整行复制）：
 
@@ -148,8 +148,9 @@ for row in rows:
 | 7 | 偷偷跑的两遍重建，字节结果不一致（此时清单文件必须**没有**被建出来） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_does_not_publish_when_the_two_rounds_differ -v` | 末行 `1 passed` |
 | 8 | `--scratch-dir`（临时工作根）指进了归档，而且全程一次都没有在归档里尝试建过文件 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_a_scratch_dir_inside_the_archive_without_writing_anything -v` | 末行 `1 passed` |
 | 9 | `--scratch-dir` 指向一个根本不存在的文件夹 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_a_missing_scratch_dir -v` | 末行 `1 passed` |
+| 10 | 本轮产出的【新清单】与钉死的三个目标对不上（最终整支评审 B1 新增——此前这条判据只是"天然吻合"，从没被真正断言过） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_when_new_manifest_does_not_match_pinned_targets -v` | 末行 `1 passed` |
 
-**通过判定**：9 行都跑一遍，每一行末尾都是 `1 passed`，没有一行是 `failed`。
+**通过判定**：10 行都跑一遍，每一行末尾都是 `1 passed`，没有一行是 `failed`。
 
 ⚠️ 第 8 条格外重要：它防的不是「归档里最后多了什么」（因为探针文件会被系统自己建了又删，事后看目录是空的，骗得过「跑完看目录」这种检查），而是「**全程有没有尝试过在归档里创建文件**」这个动作本身，判据是拦在**任何一次尝试创建之前**。
 
@@ -220,14 +221,14 @@ with tempfile.TemporaryDirectory() as d:
 
 ## 已知残留（本片交付时仍在，⛔ 不在本片修）
 
-以下四条是自查发现、经控制者裁定「本任务不修、交最终整支评审 triage」的已知问题，如实列在这里：
+以下四条是自查发现、经控制者裁定「本任务不修、交最终整支评审 triage」的已知问题。**最终整支评审的一次性修复波已经关掉其中三条**（1/2/4），逐条更新如下：
 
-1. **`test_read_legacy_rows_refuses_a_missing_file` 判别力偏弱**：这条检查只确认了"错误信息里带上了那个文件路径"，没有像同组另外两条那样也确认"错误信息里说清楚了失败的理由是什么"。
-2. **`read_legacy_rows` 的一处异常捕获范围偏窄**：它只接住了 `OSError`（文件读不出来一类的错误），没有像它的姊妹函数 `read_old_snapshot` 那样同时接住 `ValueError`。这意味着如果 p11 SQL 文件的**文字编码**坏掉（专业说法是 `UnicodeDecodeError`，它属于 `ValueError` 的一种），这个漏洞会让一个没被好好包装过的原始错误直接冒出来，而不是本工具统一使用的、说明清楚的错误提示。
-3. **`test_pinned_targets_match_the_authority_row_for_row` 里有两句检查是"摆设"**：这条测试内部先调用了另一个函数，那个函数自己会先抛错——所以这条测试里紧跟着写的那两句判断，在"数据不对"的路径上永远执行不到。这是"重复检查了同一件事"，不是"漏检查了什么"，不影响结果的正确性。
-4. **`test_write_detector_reports_nonzero_on_a_planted_write` 用的是循环而不是逐条列出**：这条测试拿一份「坏样本清单」做循环，一旦某一条坏样本提前触发失败，循环会当场停下，清单里排在它后面的样本就不会被跑到——所以理论上后面几个样本有没有问题，这条测试目前**看不出来**。
+1. ~~`test_read_legacy_rows_refuses_a_missing_file` 判别力偏弱~~ **已闭合**：改成同时断言路径**和**理由词「读不出来」；三条同组用例（文件不存在 / 解析不了 / 整数位非数字）统一带上理由词断言。
+2. ~~`read_legacy_rows` 的一处异常捕获范围偏窄~~ **已闭合**：`except OSError` 已改成 `except (OSError, ValueError)`，与姊妹函数 `read_old_snapshot` 同款；新增 `test_read_legacy_rows_refuses_an_undecodable_file` 喂一份编码坏掉的 p11 副本验证。
+3. **`test_pinned_targets_match_the_authority_row_for_row` 里有两句检查是"摆设"**：这条测试内部先调用了另一个函数，那个函数自己会先抛错——所以这条测试里紧跟着写的那两句判断，在"数据不对"的路径上永远执行不到。这是"重复检查了同一件事"，不是"漏检查了什么"，不影响结果的正确性。⛔ **仍未修**——不在本轮修复波的 A/B/C 条目范围内，继续如实留存。
+4. ~~`test_write_detector_reports_nonzero_on_a_planted_write` 用的是循环而不是逐条列出~~ **已闭合**：改成 `pytest.mark.parametrize`，每条坏样本各自独立跑、独立可见；同时补了两条此前测不到的坏样本（`SELECT … INTO`、`SELECT … FOR UPDATE`，均属白名单本身看不见的顶层仍是 `SelectStmt` 的形状，见最终整支评审 A3）。
 
-⛔ 上面四条本任务**没有修**，只是如实记录、原样交给整支的最终评审去定性和排期。
+⛔ 第 3 条仍未修，如实记录，继续原样交给后续排期。
 
 ---
 

@@ -198,3 +198,141 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖�
     - **T6-2**：拆成两条子结论——`test_cli_refuses_to_overwrite_an_existing_manifest` 对这条变异**没有判别力**（`publish_manifest` 的原子发布独立兜底，这是文档已写明的设计性冗余，未改动该用例）；`test_cli_refuses_manifest_inside_the_v1_archive` 原来的写法（指向归档里**已存在**的文件）同样没有判别力，实测证实换成指向**不存在**的路径后才有干净的判别力，已按方案 (a) 改写该用例。
     - **T6-6**：已按 Ruling ⑬ 拆成两条独立测试（`test_cli_refuses_when_neither_old_value_source_is_given` / `test_cli_refuses_when_both_old_value_sources_are_given`），两个子场景表现不同——子场景 A（两者都不给）是一次真实的、但形态是裸异常的红（命中已被控制者列为不改的已知残留）；子场景 B（两者都给）是一条干净的红（`assert 0 != 0`），拆开之后**在这条测试自己的、每一次正常 pytest 运行里都直接可见**，不再需要靠独立复现脚本才能确认。
   详见 T6-2 / T6-4 / T6-6 各自小节的完整记录。
+
+---
+
+## 最终整支评审 · 一次性修复波（A/B/C 共 11 条）
+
+背景：整支评审跑了 6 次实测探针后给出 3 条 Important（I1/I2-A/I2-B）+ 1 条延后项 triage（#7/#8 必须修）；控制者据此拆成 A（阻塞合并，4 条）/ B（强烈建议，3 条）/ C（清理，4 条）一次性派单。以下逐条记录改了什么、配了什么判据、变异证据。⚠️ C1/C2/C3 是纯文档 / 变量改名 / 注释扩写，不改变行为，没有可供变异的判据——落地证据用 `grep` 读回，不强行为它们造一个恒会通过的"变异"。
+
+### A1 —— `read_legacy_rows` 漏 `UnicodeDecodeError`
+
+**改了什么**：`except OSError as exc:` → `except (OSError, ValueError) as exc:`（`rebuild_training_sets.py:409`）。同时给 `read_legacy_rows` 那组三条既有用例加上"理由词"断言（`missing_file` 补断言含「读不出来」；`non_integer_column` 补断言含「不是整数」；`unparsable_sql` 原本就有「判不了」，未改），并新增 `test_read_legacy_rows_refuses_an_undecodable_file`（喂一份非法 UTF-8 字节的 p11 副本）。
+
+**变异**：把 `except (OSError, ValueError) as exc:` 临时改回 `except OSError as exc:  # MUTATION-A1`。
+- **落地证据**：`grep -n "MUTATION-A1" rebuild_training_sets.py` 命中改动那一行。
+- **红的是哪条**：`test_read_legacy_rows_refuses_an_undecodable_file` —— 裸 `UnicodeDecodeError` 直接从 `read_legacy_rows` 逃出去，`pytest.raises(RebuildMismatch)` 接不住，测试变成一条未捕获异常的 `FAILED`。
+- **复原后是否回绿**：是。`grep -n "MUTATION-A1"` 零命中，`pytest tests/test_rebuild_training_sets.py -q -rs` → `74 passed`。
+
+### A2 —— `GenerateSkipException` 从 `rebuild_one` 漏出去
+
+**改了什么**：`rebuild_one` 里 `load_gating_inputs(...)`（:113）与 `assemble_from_windows(...)`（:137）两处各包一层 `try/except GenerateSkipException`，转成 `RebuildMismatch`，与 `build_pinned_windows` 已有的同款转换对齐。⚠️ **`load_gating_inputs` 那一支需要额外处理**：它的"无覆盖 artifact"那条原始消息里**字面带着「跳过」**（`stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过`），若直接把 `{exc}` 原样嵌进 `RebuildMismatch` 的消息，"跳过"两个字会原样带出来，违反"消息里不含跳过"这条要求——加了一行 `reason = str(exc).replace("，跳过", "").replace("跳过", "")` 剥离这个词再嵌入。`assemble_from_windows` 那一支的原始消息本就不含"跳过"，未做同样处理（无此必要，见下方"不同意的判断"一节）。新增两条用例：`test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch`（喂无 `stock_coverage` 行的替身连接）、`test_rebuild_one_wraps_assembly_skip_into_rebuild_mismatch`（monkeypatch `assemble_from_windows` 抛 `GenerateSkipException`）。
+
+**变异（分两组，各自 deselect 邻居单独证明）**：
+
+1. **gating 那一支**：把 `try/except` 整段去掉，退回裸 `gi = await load_gating_inputs(...)  # MUTATION-A2-gating`。
+   - **落地证据**：`grep -n "MUTATION-A2-gating"` 命中。
+   - **单独跑两条一起**：`test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch` **红**（裸 `GenerateSkipException` 逃出去）；同跑的 `test_rebuild_one_wraps_assembly_skip_into_rebuild_mismatch` **仍然绿**——证明两条测试各自只盯自己那一支，不是互相顶替。
+   - **复原后回绿**：是（`74 passed`）。
+2. **assembly 那一支**：同样去掉 `try/except`，退回裸 `return assemble_from_windows(...)  # MUTATION-A2-assembly`。
+   - **落地证据**：`grep -n "MUTATION-A2-assembly"` 命中。
+   - **单独跑两条一起**：这次反过来——`test_rebuild_one_wraps_assembly_skip_into_rebuild_mismatch` **红**，`test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch` **仍然绿**。两组变异分别只让对应的那一条测试变红，互不牵连，判别力精确对应各自的 try/except。
+   - **复原后回绿**：是（`74 passed`）。
+
+### A3 —— 写检测器白名单看不见 `SELECT … INTO` / `SELECT … FOR UPDATE`
+
+**改了什么**：`assert_no_write_statements` 里 `top != "SelectStmt"` 判断之后，新增 `parsed[0].stmt.intoClause is not None` 与 `parsed[0].stmt.lockingClause` 两道显式排除（`rebuild_training_sets.py:213-218`）；docstring 里"合法面枚举不会漏"那句被证伪的主张已订正为准确说法（白名单钉的是顶层节点类名，不等于纯读，这两类由第一道 `connect_read_only()` 兜底）。⭐ 实测核实 pglast 7.13：`SELECT 1` 的 `intoClause`/`lockingClause` 都是 `None`/falsy，正向对照不会误报（见下方"跑了什么"一节的独立探针）。同时把 `test_write_detector_reports_nonzero_on_a_planted_write` 从 `for` 循环改成 `pytest.mark.parametrize`（关掉延后项 4），并把这两条新样本加进坏样本表。
+
+**变异**：把两道新增判断整段删掉，换成 `# MUTATION-A3: intoClause/lockingClause 检查整段删掉`。
+- **落地证据**：`grep -n "MUTATION-A3"` 命中。
+- **红的是哪条**：`pytest tests/test_rebuild_training_sets.py::test_write_detector_reports_nonzero_on_a_planted_write tests/test_rebuild_training_sets.py::test_write_detector_passes_on_reads_only -v` → **精确 2 个 parametrize 用例红**：`[select_into]`、`[select_for_update]`；**其余 10 个坏样本用例与正向对照 `test_write_detector_passes_on_reads_only` 全部仍绿**。这正是 `parametrize` 相对于 `for` 循环的意义：`for` 循环下，只要第一个坏样本在列表里的位置排在 `select_into`/`select_for_update` 之前，`pytest.raises` 提前失败会让后面的样本永远跑不到，看不出"恰好是这两条不具判别力"；`parametrize` 让 12 条坏样本各自独立可见。
+- **复原后是否回绿**：是（`74 passed`）。
+
+### A4 —— `ReadOnlyConn` docstring 那句"钉住实际发出的语句集合"是假的
+
+**改了什么**：**只改测试，不改生产代码**（两种写法任选，选了更强的一种）。`test_rebuild_one_issues_no_write_statements` 新增 `assert set(conn.statements) == {...两条真实 SQL 的文本...}`（第二条用 `g._KLINE_SELECT_COLS` 引用真实列清单常量，不手抄，避免列清单变化时判据跟着假红）。
+
+**变异**：在 `rebuild_one` docstring 结尾插一行 `await conn.fetchval("SELECT pg_try_advisory_lock(1,2)")  # MUTATION-A4`。
+- **落地证据**：`grep -n "MUTATION-A4"` 命中。
+- **红的是哪条**：`test_rebuild_one_issues_no_write_statements` —— **精确复现评审实测**：`r.assert_no_write_statements(conn.statements)` 这一句**仍然通过**（`SELECT pg_try_advisory_lock(1,2)` 文本上就是一条干净的 SELECT，第二道判据看不出它在取锁）；紧接着的 `assert set(conn.statements) == {...}` 才**真的抓住**——错误信息里 `Extra items in the left set: 'SELECT pg_try_advisory_lock(1,2)'`。这就是「存在性检查表达不了穷尽性」的实物证据：旧判据（`assert_no_write_statements` 通过就算过）在这个变异下全程不报错。
+- **复原后是否回绿**：是（`74 passed`）。
+
+### B1 —— `main()` 从不对新清单跑 `assert_matches_pinned_targets`
+
+**改了什么**：`main()` 的 `_run()` 里，`man = await rebuild_all(...)` 之后加一行 `assert_matches_pinned_targets(man["new"], where="本轮产出的新清单")`（:657）。⚠️ **连带影响**：这道新闸会在四处既有的「替身 `rebuild_all`」CLI 测试里被触发——它们原来都写 `"new": []`，加了这道闸后会被**提前**拦下，短路掉它们各自原本要覆盖的下游代码路径（比如"两轮不一致"测试会在还没跑到字节比对之前就先被这道闸拦住，测试表面仍然通过，但验的已经不是原来那件事了）。⇒ 新增共享助手 `_fake_pinned_new_rows()`（返回满足 `assert_matches_pinned_targets` 的三行），四个替身（`test_cli_pins_tempfile_to_the_validated_scratch_root`、`test_cli_always_verifies_determinism_even_without_any_flag`、`test_cli_does_not_publish_when_the_two_rounds_differ`、`test_cli_does_not_clobber_a_manifest_created_after_preflight`）全部改用它，让这道新闸对它们透明放行，各自原本要验的东西继续被验到。`_stub_rebuild_all`（5 个纯 preflight-拒绝用例共用）未改——那 5 条用例的 `rebuild_all` 从未被真正调用到（拒绝发生在 `asyncio.run(_run())` 之前），改了也是死代码。新增 `test_cli_refuses_when_new_manifest_does_not_match_pinned_targets`（替身给 0 行新清单，应有 3 行）。
+
+**变异**：把新增那一行换成 `# MUTATION-B1: assert_matches_pinned_targets(...) 删掉`。
+- **落地证据**：`grep -n "MUTATION-B1"` 命中。
+- **红的是哪条**：`test_cli_refuses_when_new_manifest_does_not_match_pinned_targets` —— `assert 0 != 0` 失败，`main()` 老老实实把一份 0 行的"新清单"写进了 `m.json` 并返回 0。
+- **复原后是否回绿**：是（`74 passed`）。
+
+### B2 —— 交给片 2 的「清单 JSON 结构」既定事实过期
+
+**改了什么**：①实测重跑一遍完整流程（详见下方"跑了什么"），核实发布出去的清单键集是 `{new, old, source_counts_before, source_counts_after, determinism_verified_against, statements_issued, scratch_root}` 共 **7** 个键（计划 `:2045` 原写 5 个），已同步订正 `docs/superpowers/plans/2026-09-28-trainingset-p4-1-rebuild-tool.md` 交接段（顺带修了 `:2043`/`:2045` 重复编号 `2.` 的问题，交接段现在是 1–6 顺编）。②在 `test_cli_always_verifies_determinism_even_without_any_flag` 里对 `json.loads(man.read_text())` 的键集合做集合等式断言。
+
+**变异**：把 `man["scratch_root"] = str(scratch_root)` 这一行换成 `# MUTATION-B2: ... 删掉`。
+- **落地证据**：`grep -n "MUTATION-B2"` 命中。
+- **红的是哪条**：`test_cli_always_verifies_determinism_even_without_any_flag` —— `set(published) == {...7 键...}` 失败，`Extra items in the right set: 'scratch_root'`，精确点名少了哪个键。
+- **复原后是否回绿**：是（`74 passed`）。
+
+### B3 —— `publish_manifest` 对非 `FileExistsError` 的 `OSError` 裸崩
+
+**改了什么**：`os.link(tmp, manifest_path)` 的 `try` 块里，`except FileExistsError:` 分支保持不变，新增 `except OSError as exc:` 分支（必须排在 `FileExistsError` 之后——后者是前者的子类，顺序反了会让 `FileExistsError` 分支变成死代码），转成 `RebuildMismatch`。新增 `test_publish_manifest_wraps_a_non_exists_oserror_from_os_link`（monkeypatch `os.link` 抛 `OSError(errno.EXDEV, ...)`）。
+
+**变异**：把新增的 `except OSError as exc: raise RebuildMismatch(...)` 整段换成 `# MUTATION-B3: ... 整段删掉`。
+- **落地证据**：`grep -n "MUTATION-B3"` 命中。
+- **红的是哪条**：`test_publish_manifest_wraps_a_non_exists_oserror_from_os_link` —— 裸 `OSError: [Errno 18] Invalid cross-device link` 直接从 `publish_manifest` 逃出去，`pytest.raises(RebuildMismatch)` 接不住。
+- **复原后是否回绿**：是（`74 passed`）。**并核实**：`FileExistsError` 分支本身在整个变异过程中原样未动，`test_publish_manifest_refuses_an_existing_destination`（验的是 `FileExistsError` 那一支）全程保持绿色，没有被这组变异波及——证明"拒绝覆盖"这条既有语义没有被本次改动碰坏。
+
+### C1 —— 孤儿注释 `#` 与失落的 `repeatable_read` 理由
+
+**改了什么**：`generate_training_sets.py:668` 那行光秃秃的 `#` 直接删掉；`load_gating_inputs` 的 docstring（`generate_training_sets.py:588` 附近）补上"两次读看到同一提交时点，不被并发写者撕成两半"这条理由（原句全仓已零命中，见下方"跑了什么"一节的核实命令）。纯文档改动，无判别力可测，落地证据用 `grep` 读回。
+
+### C2 —— `_HOLES` 推导式变量 `r` 遮蔽模块 `import ... as r`
+
+**改了什么**：`test_rebuild_training_sets.py` 的 `_HOLES` 字典里 7 处 `for r in rows` 全部改成 `for row in rows`（连带 `r.pop(...)`/`r.__setitem__(...)` 改成 `row.pop(...)`/`row.__setitem__(...)`）。纯改名，不改行为——已用 `pytest tests/test_rebuild_training_sets.py -q -rs` 确认改名前后测试数字与结果完全一致（`74 passed`）。⚠️ **不同意评审对这条的机制描述，见下方"不同意的判断"一节**：独立探针证实，在当前代码形状（lambda 包着列表推导式）下，Python 3 的推导式有独立作用域，`r` 并不会真的遮蔽到外层——描述的 `AttributeError` 场景没有用一个模拟当前代码结构的探针复现出来。改名本身仍然是合理的防御性清理（防将来把推导式换成 `for` 语句），按指示原样做了。
+
+### C3 —— 验证目录路径闸在构造上恒通过
+
+**改了什么**：`assert_write_target_is_safe(second, kind="验证目录")` 上方加一段注释，说明这道闸在构造上恒通过（`second` 是已校验过的 `scratch_root` 的子目录），是纵深防御而非活闸。纯注释，无判别力可测，落地证据用 `grep -n "C3：这道闸在"` 读回。
+
+### C4 —— `out` 目录失败不回滚且需要重试提示 + 收尾提示验证目录残留
+
+**改了什么**：`main()` 两处 `except RebuildMismatch` 失败出口（`_run()` 失败 / `publish_manifest` 失败）各加一句 `_out_dir_hint`（产出目录已建出、必须换新路径才能重跑）；成功收尾的 `print` 里补上第二轮验证目录路径与"带着 3 个 zip 永久留在 scratch 里"的提示。新增两条用例：`test_cli_prints_a_retry_hint_when_failing_after_out_dir_is_already_built`（capsys 抓 stderr）、`test_cli_success_message_mentions_the_leftover_verify_dir`（capsys 抓 stdout）。
+
+**变异（两组，各自独立）**：
+
+1. `_out_dir_hint` 的文本换成 `"MUTATION-C4-stderr"`。
+   - **落地证据**：`grep -n "MUTATION-C4-stderr"` 命中。
+   - **红的是哪条**：`test_cli_prints_a_retry_hint_when_failing_after_out_dir_is_already_built` —— `assert "已经建出" in err` 失败，stderr 里只有 `MUTATION-C4-stderr`。
+   - **复原后回绿**：是（`74 passed`）。
+2. 成功收尾 `print` 里"验证目录…zip…"那句删掉。
+   - **落地证据**：`grep -n "MUTATION-C4-stdout"` 命中。
+   - **红的是哪条**：`test_cli_success_message_mentions_the_leftover_verify_dir` —— `assert "验证目录" in out` 失败。
+   - **复原后回绿**：是（`74 passed`）。
+
+### 跑了什么，结果如何
+
+```
+cd backend && find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py -q -rs
+→ 74 passed
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_insert_schema_version_guard.py -q -rs
+→ 3 passed
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/ -q -rs
+→ 1695 passed（0 skipped；1677 + 本轮新增 18 条：A1(+1)/A2(+2)/A3(+11，1→12 个 parametrize 用例)/B1(+1)/B3(+1)/C4(+2)；A4/B2 只加强了既有断言，未新增测试函数）
+```
+
+pglast 7.13 正向对照独立探针（A3 落地前先核实过，非事后补测）：
+
+```python
+>>> from pglast import parse_sql
+>>> parse_sql("SELECT 1")[0].stmt.intoClause
+None
+>>> parse_sql("SELECT 1")[0].stmt.lockingClause
+None
+>>> parse_sql("SELECT * INTO newtab FROM klines")[0].stmt.intoClause
+<IntoClause rel=<RangeVar relname='newtab' ...> ...>
+>>> parse_sql("SELECT stock_code FROM training_sets FOR UPDATE")[0].stmt.lockingClause
+(<LockingClause strength=<LockClauseStrength.LCS_FORUPDATE: 4> ...>,)
+```
+
+B2 清单键集核实（真跑 `rebuild_all()` 一次，非静态猜测）：`rebuild_all()` 真实返回键集合 `['new', 'old', 'source_counts_after', 'source_counts_before']`（4 个）；`main()` 的 `_run()` 另加 `determinism_verified_against`/`statements_issued`/`scratch_root`（3 个）；合计 7 个，与计划订正后的新表述一致。
+
+C1 核实：`grep -rn "撕成两半\|同一提交时点" --include="*.py" --include="*.md" .` 改之前全仓零命中，改之后命中新加的 docstring 那一行。
+
+### 不同意的判断（如实列出，供裁决）
+
+1. **A2 的措辞需要额外处理，不是原样照抄 `{exc}` 就够**：brief 给的示例代码 `f"...门控输入读不出来（{exc}）—— ..."` 若原样照抄，会把 `load_gating_inputs` 那一支"无覆盖 artifact"分支原始消息里的字面「跳过」也带出来，导致"消息里不含跳过"这条断言本身不成立（实测：第一次照抄后跑 `test_rebuild_one_wraps_gating_skip_into_rebuild_mismatch`，`assert "跳过" not in str(ei.value)` 失败）。⇒ 加了一行 `.replace()` 剥离该词。`assemble_from_windows` 那一支不需要这个处理（它的原始消息本就不含"跳过"）。这不是对 brief 判断的反对，是补一个 brief 没写但实测会撞到的细节，如实记录。
+2. **C2 的机制描述与实测不完全相符**：brief 说"谁往里加一句 `r.LEGACY_SCHEMA_VERSION` 都会拿到 dict、炸一个莫名其妙的 `AttributeError`"。用一个模拟当前代码结构（lambda 包列表推导式）的独立探针实测：Python 3 的列表推导式有自己的作用域，推导式里的 `r` **不会**泄漏到外层，探针里紧跟着执行的 `r.LEGACY_SCHEMA_VERSION` 依然正常返回模块属性，没有炸出 `AttributeError`。⇒ 这条改名仍然做了（指示明确、且是无风险的防御性清理——防将来有人把推导式换成 `for` 语句那种真的会泄漏作用域的写法），但机制描述本身以实测为准，不认可"目前就会炸"这个具体说法，供裁决。
+
