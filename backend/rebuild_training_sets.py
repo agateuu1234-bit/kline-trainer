@@ -366,11 +366,19 @@ def read_legacy_rows(p11_sql_path) -> list[dict]:
     from pglast import parse_sql
     from pglast.stream import RawStream
 
-    text = Path(p11_sql_path).read_text(encoding="utf-8")
+    try:
+        text = Path(p11_sql_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RebuildMismatch(f"{p11_sql_path} 读不出来：{exc}") from None
     # `\set` 等 psql 元命令不是 SQL，parse_sql 会拒；逐行剔除后再解析。
     sql = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("\\"))
+    try:
+        statements = parse_sql(sql)
+    except Exception as exc:
+        raise RebuildMismatch(
+            f"{p11_sql_path} 解析不了（{exc}）⇒ 判不了 ⇒ 拒绝") from None
     rows: list[dict] = []
-    for stmt in parse_sql(sql):
+    for stmt in statements:
         node = stmt.stmt
         if node.__class__.__name__ != "InsertStmt":
             continue
@@ -387,7 +395,11 @@ def read_legacy_rows(p11_sql_path) -> list[dict]:
                     f"而列清单有 {len(_P11_EXPECTED_COLUMNS)} 个 —— 结构变了，停下来查清楚")
             d = dict(zip(_P11_EXPECTED_COLUMNS, vals))
             for k in ("start_datetime", "end_datetime", "schema_version"):
-                d[k] = int(d[k])
+                try:
+                    d[k] = int(d[k])
+                except (ValueError, TypeError) as exc:
+                    raise RebuildMismatch(
+                        f"{p11_sql_path} 的 {k} 列不是整数：{d[k]!r}（{exc}）") from None
             rows.append(d)
     if not rows:
         raise RebuildMismatch(f"{p11_sql_path} 里没找到 p11_expected 的 INSERT")

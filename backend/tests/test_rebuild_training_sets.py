@@ -314,6 +314,44 @@ def test_read_legacy_rows_refuses_a_regenerated_p11(tmp_path):
     assert "已经被重新生成过" in str(ei.value)
 
 
+def test_read_legacy_rows_refuses_a_missing_file(tmp_path):
+    """评审 Important：文件读不出来（`FileNotFoundError` ⊂ `OSError`）⇒ 判不了 ⇒ 拒绝，
+    ⛔ 不能让裸 `OSError` 漏出去（命令行接不住）。消息里必须带上那个路径。"""
+    missing = tmp_path / "does-not-exist.sql"
+    assert not missing.exists()
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_legacy_rows(missing)
+    assert str(missing) in str(ei.value)
+
+
+def test_read_legacy_rows_refuses_unparsable_sql(tmp_path):
+    """评审 Important：SQL 解析不了（pglast 的原始解析异常）⇒ 判不了 ⇒ 拒绝，
+    ⛔ 不能让 pglast 的原始异常漏出去。"""
+    src = (_repo_root() / _P11).read_text(encoding="utf-8")
+    broken = src + "\nTHIS IS NOT VALID SQL ((( ;;;"
+    assert broken != src
+    q = tmp_path / "p11-broken.sql"
+    q.write_text(broken, encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_legacy_rows(q)
+    assert "判不了" in str(ei.value)
+
+
+def test_read_legacy_rows_refuses_a_non_integer_column(tmp_path):
+    """评审 Important：该是整数的列被塞了非数字字面量 ⇒ 拒绝，
+    ⛔ 不能让裸 `ValueError` 漏出去；消息必须点名是哪一列、实际值是什么。"""
+    src = (_repo_root() / _P11).read_text(encoding="utf-8")
+    anchor = "1777996799, 1,"
+    assert src.count(anchor) == 1, "替换锚点漂了（不是恰好 1 处），停下来查"
+    fake = src.replace(anchor, "1777996799, 'x',")
+    assert fake != src
+    q = tmp_path / "p11-bad-int.sql"
+    q.write_text(fake, encoding="utf-8")
+    with pytest.raises(r.RebuildMismatch) as ei:
+        r.read_legacy_rows(q)
+    assert "schema_version" in str(ei.value)
+
+
 #: 每一项 = (怎么改坏, **期望命中的那条规则的原话片段**)。
 #: ⭐ 钉住「红的理由」而不只是「红了」—— 本仓记过：一个被**别的**规则抢先拒掉的用例
 #: 看起来是绿的（测试通过），实际上它要验的那条规则**一次都没执行过**。
