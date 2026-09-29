@@ -682,19 +682,52 @@ def test_cli_refuses_out_dir_inside_the_v1_archive(tmp_path, scratch, monkeypatc
     assert r.main(_cli(tmp_path, scratch, out_dir=archive)) != 0
 
 
+def _stub_rebuild_all(monkeypatch):
+    """把 `rebuild_all` 也换成"总是成功、写出匹配字节"的替身。
+
+    ⭐ **这是任务评审 Important 发现 1 逼出来的**：下面四条用例本来指望路径闸在
+    `main()` 走到任何数据库调用**之前**就把命令拦下——但一旦某条闸被**变异**删掉，
+    `main()` 会真的往下走到 `snapshot_source_counts(conn)` 去问一个只有 `close()`
+    方法的连接替身，`AttributeError: '_StubConn' object has no attribute
+    'fetchval'` 会在这里把测试变红。那样"红了"的原因是**替身不完整**、
+    而不是**闸没挡住**——两者不是一回事（codex 实测复现过，见变异记录 T6-2/T6-4/T6-6）。
+    ⇒ 补上这个替身，变异之后 `main()` 才能干净走完、返回一个真实的退出码，
+    让"红的是哪一句、为什么"这件事经得起追问。
+    """
+    async def _fake(conn, targets, output_dir, *, old_rows):
+        (Path(output_dir) / "000001.SZ_1756656000.zip").write_bytes(b"SAME-BYTES")
+        return {"new": [], "old": old_rows}
+
+    monkeypatch.setattr(r, "rebuild_all", _fake)
+
+
 def test_cli_refuses_manifest_inside_the_v1_archive(tmp_path, scratch, monkeypatch):
-    """清单路径也要过同一道闸 —— 实测 `write_text()` 会把归档里的包**截断成 3 字节**。"""
+    """清单路径也要过同一道闸——判据要能分辨"闸在"与"闸不在"两种情况。
+
+    ⚠️ **任务评审 Important 发现 1 逼出来的改法**：上一版让 `--manifest` 指向归档里
+    一个**已经存在**的旧 zip，断言它的字节没被动过。实测证明这样选**分不出**
+    "归档闸在"和"归档闸被删掉"——因为 `publish_manifest` 的 `os.link`（目标已存在
+    即失败）本来就会独立拒绝覆盖一个已存在的文件，闸删不删这条用例都一样绿。
+    ⇒ 改成指向归档里一个**不存在**的路径，断言**归档目录的文件集合完全没变**——
+    这与 `--scratch-dir` 那条用例（`test_cli_refuses_a_scratch_dir_inside_the_archive_without_writing_anything`）
+    是同一个判据形状：闸在场时，`main()` 应该在任何写入尝试之前就拒绝，
+    归档里不会多出任何新条目；闸被删掉时，`publish_manifest` 会真的在归档里
+    建出一个新文件并成功返回 0（实测复现过），此时才是真正的、持久的违规。
+    """
     archive = _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
-    victim = archive / "000001.SZ_1756656000.zip"
+    _stub_rebuild_all(monkeypatch)
+    before = sorted(p.name for p in archive.iterdir())
+    victim = archive / "new-manifest-does-not-exist.json"
     assert r.main(_cli(tmp_path, scratch, manifest=victim)) != 0
-    assert victim.read_bytes() == b"V1-ORIGINAL-BYTES", "归档里的文件被动过了"
+    assert sorted(p.name for p in archive.iterdir()) == before, "归档目录多出了新文件"
 
 
 def test_cli_refuses_to_overwrite_an_existing_manifest(tmp_path, scratch, monkeypatch):
     """⛔ 首轮清单里的【旧身份快照】一旦被盖掉就再也取不回来（那时 P11 已是第 2 代）。"""
     _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
+    _stub_rebuild_all(monkeypatch)
     man = tmp_path / "m.json"
     man.write_text('{"old": "首轮快照"}', encoding="utf-8")
     assert r.main(_cli(tmp_path, scratch)) != 0
@@ -709,6 +742,7 @@ def test_cli_refuses_an_existing_out_dir(tmp_path, scratch, monkeypatch):
     """
     _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
+    _stub_rebuild_all(monkeypatch)
     out = tmp_path / "out"
     out.mkdir()                       # 已经存在，哪怕是空的也要拒
     assert r.main(_cli(tmp_path, scratch)) != 0
@@ -718,6 +752,7 @@ def test_cli_requires_exactly_one_old_value_source(tmp_path, scratch, monkeypatc
     """首轮给 --p11-sql、重跑给 --old-snapshot，⛔ 不得都给也不得都不给。"""
     _archive(tmp_path, monkeypatch)
     _stub_connection(monkeypatch)
+    _stub_rebuild_all(monkeypatch)
     assert r.main(_cli(tmp_path, scratch, p11_sql=None)) != 0
     assert r.main(_cli(tmp_path, scratch,
                        old_snapshot=tmp_path / "s.json")) != 0

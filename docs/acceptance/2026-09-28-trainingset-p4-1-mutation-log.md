@@ -21,7 +21,7 @@
 
 ## Task 6（本任务新增代码的变异）
 
-Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 6 条控制者点名的硬约束——每条约束配一组变异，逐组「改坏一处 → 证明落地 → 跑红 → 复原回绿」。
+Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖控制者点名的硬约束——每条约束配一组变异，逐组「改坏一处 → 证明落地 → 跑红 → 复原回绿」。
 
 ### T6-1 —— 确定性自证被砍成「只跑一遍」
 
@@ -56,11 +56,16 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 
 **怎么证明落地**：`grep -c 'kind="清单"' rebuild_training_sets.py`，改之前 **1**，改之后 **0**。
 
-**红的是哪条**：`test_cli_refuses_manifest_inside_the_v1_archive` 与 `test_cli_refuses_to_overwrite_an_existing_manifest` 两条都红。
+⚠️ **第 1 轮结论被评审打回，这里是重做后的真相（评审 Important 发现 1）**：第一次做这组变异时，用例里连数据库的替身（`_StubConn`）只有 `close()` 一个方法，闸删掉之后 `main()` 走到 `rebuild_all` → `snapshot_source_counts` 去问一句 `SELECT`，替身没实现 `fetchval`，直接 `AttributeError` 崩出测试之外——两条相关用例确实变成了 pytest 意义上的 `FAILED`，**但那个"红"证明的是"替身不完整"，不是"闸没挡住"**，`main()` 从没机会走到"闸删掉之后到底会不会真的往下写"这一步。
 
-⚠️ **如实记录一处与预想不完全一致的地方**：这两条红的表现不是"main 优雅地返回非 0"，而是**崩了**——`AttributeError: '_StubConn' object has no attribute 'fetchval'`。原因是这组测试用的替身连接只实现了 `close()`，删掉清单闸之后流程往前走，一路走到真正调用 `rebuild_all` 去读源库计数那一步，撞上替身没实现的方法。pytest 仍然把这算成 **FAILED**（两条测试都变红），所以变异仍然被抓住了，只是红的**形态**是崩溃而不是一条干净的断言失败，如实记下不粉饰。
+**修法**：补了一个共用替身 `_stub_rebuild_all(monkeypatch)`（写出匹配字节、正常返回），四条相关用例都装上了它，让 `main()` 在闸被删掉之后也能干净走完、返回一个真实的退出码。装好之后重新跑这组变异，**得到两条完全不同的真相**：
 
-**复原后是否回绿**：是。`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
+1. `test_cli_refuses_to_overwrite_an_existing_manifest`（清单 = `tmp_path/"m.json"`，跑之前已经写好旧内容）：**变异之后仍然是绿的**。追出原因：`main()` 一路走到 `publish_manifest`，它自己的 `os.link(tmp, manifest_path)` 在目标已存在时天然抛 `FileExistsError` → 转成 `RebuildMismatch` → `main()` 返回 1，旧内容全程没被碰。**这条闸删不删，这条用例的结果都一样**——真正兜底的是 `publish_manifest` 的原子发布，不是这里被删掉的预检。这与 `assert_write_target_is_safe` 自己 docstring 里写的"`must_not_exist` 这一支是早失败，不是保证；承重的那道在 `publish_manifest` 的 `os.link`"完全对得上——**属于文档里已经写明的设计性冗余，不是判别力缺陷**，本轮**没有改这条用例**。
+2. `test_cli_refuses_manifest_inside_the_v1_archive`（原版：清单指向归档里一个**已经存在**的旧 zip）：**变异之后也仍然是绿的**，原因和上面同一个——`victim` 早就存在，`os.link` 同样会失败，与"清单是否落在归档里"这件事**完全无关**。⇒ 这条用例原来的写法**分不出"归档闸在"与"归档闸不在"**，是一处真实的判别力缺口。**追加实测证实这个缺口是真的**：把 `--manifest` 指向归档里一个**不存在**的路径重新跑一遍原实现（闸删掉），`main()` 返回 **0**（成功！），归档目录里真的多出了一个新文件、**永久留下**（不是探针建了又删）。⇒ **选择方案 (a)：改用例**——`test_cli_refuses_manifest_inside_the_v1_archive` 现在指向归档里一个**不存在**的路径，断言改成"归档目录的文件名集合完全没变"，与 `--scratch-dir` 那条用例是同一个判据形状。重新跑这组变异：`pytest -v` 只针对这条用例，**红**，`assert 0 != 0`——一条干净的断言失败，不再有任何替身崩溃。
+
+**红的是哪条（重做后的最终结论）**：只有（改写后的）`test_cli_refuses_manifest_inside_the_v1_archive` 红，且是干净的 `assert 0 != 0`。`test_cli_refuses_to_overwrite_an_existing_manifest` **仍然是绿的**——如实记录：这条变异对它没有判别力，兜底的是 `publish_manifest` 的原子发布，接受这个事实，未改动该用例。
+
+**复原后是否回绿**：是。`grep -c 'kind="清单"'` 回到 1，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
 
 ### T6-3 —— 清单发布退回 `write_text`（丢掉原子性）
 
@@ -80,9 +85,11 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 
 **改了什么**：`os.mkdir(out)` 的 `except FileExistsError:` 分支从"抛 `RebuildMismatch`"改成 `pass`（悄悄放行）。
 
-**怎么证明落地**：新插入的 `# MUTATION-6-4` 标记行 `grep -n` 命中 1 行。
+**怎么证明落地**：新插入的标记注释 `grep -n` 命中 1 行。
 
-**红的是哪条**：`test_cli_refuses_an_existing_out_dir`。同 T6-2 的情况，表现是崩溃（`AttributeError: '_StubConn' object has no attribute 'fetchval'`）而不是干净的 `assert rc != 0`——原因相同：闸放行之后流程走到了替身连接没实现的方法。如实记录，仍然是 **1 failed**。
+⚠️ **同 T6-2，第 1 轮的"红"也是替身崩溃**（`AttributeError: '_StubConn' object has no attribute 'fetchval'`——同一个成因：`main()` 放行之后走到 `rebuild_all`，撞上不完整的连接替身），补上 `_stub_rebuild_all` 之后重做。
+
+**红的是哪条（重做后）**：`test_cli_refuses_an_existing_out_dir`，`assert 0 != 0`——一条干净的断言失败，`main()` 真的把已存在的目录当成新目录用了、返回 0。这一组**没有**被别的闸兜住：产出目录本身不存在其它保护层，闸一删，违规就直接可见。
 
 **复原后是否回绿**：是。改回抛 `RebuildMismatch` 那一段，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`。
 
@@ -104,11 +111,16 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 
 **改了什么**：把 `if bool(args.p11_sql) == bool(args.old_snapshot):` 换成 `if False:`（恒不触发）。
 
-**怎么证明落地**：`grep -n "bool(args.p11_sql) == bool(args.old_snapshot)"` 改前命中该行，改后命中 0（换成了 `if False:  # MUTATION-6-6` 那一行）。
+**怎么证明落地**：`grep -n "bool(args.p11_sql) == bool(args.old_snapshot)"` 改前命中该行，改后命中 0。
 
-**红的是哪条**：`test_cli_requires_exactly_one_old_value_source`。表现同样是崩溃而不是干净断言——第一个子场景（两者都不给）里 `args.old_snapshot` 也是 `None`，检查失效后代码往下走到 `Path(args.old_snapshot)`，`Path(None)` 直接抛 `TypeError: expected str, bytes or os.PathLike object, not NoneType`。pytest 仍判定该测试 **FAILED**，如实记录形态是崩溃。
+⚠️ **补上 `_stub_rebuild_all` 重做后，这一组的真相比 T6-2/T6-4 更细一层，分两个子场景**：
 
-**复原后是否回绿**：是。改回 `if bool(...) == bool(...):`，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`；随后跑了一次完整 `git diff --stat -- backend/rebuild_training_sets.py`，六组变异全部复原后与提交前只有本任务的新增内容、没有任何遗留标记（`grep -n "MUTATION"` 两个文件均为 0 命中）。
+1. **两者都不给**（`_cli(..., p11_sql=None)`，`old_snapshot` 也未设）：检查失效后代码走到 `else read_old_snapshot(Path(args.old_snapshot))`，`args.old_snapshot` 是 `None`，`Path(None)` 直接抛 `TypeError: expected str, bytes or os.PathLike object, not NoneType`——**这次崩溃不是替身不完整造成的**（根本没走到数据库那一步），而是移除检查之后代码真的会在这里崩，是这条变异**本身**的真实后果。但它的**形态**仍然是一次没被 `main()` 接住的裸异常，不是一条干净的 `assert rc != 0`——这与控制者已经裁定"`main()` 只捕 `RebuildMismatch`、其它异常裸抛是计划原文规定、本轮不改"的已知残留是**同一件事**在这里的具体表现。
+2. **两者都给**（`_cli(..., old_snapshot=tmp_path/"s.json")`）：检查失效后代码走 `if args.p11_sql:` 分支，`read_legacy_rows` 正常读出真实 p11 SQL、成功返回，`main()` 一路跑完、返回 **0**——**独立验证过**（脱离 pytest、单独跑一遍这个场景）：`main()` 返回 0，与"应该非 0"直接矛盾，是一条**干净**的、不涉及任何崩溃的红。
+
+**红的是哪条（重做后）**：`pytest -v` 只针对这条用例，整体仍是 **FAILED**——但红在**第一句**（子场景 1 的裸 `TypeError`），因为两句 `assert` 顺序执行、第一句一崩、第二句根本没轮到。⇒ 子场景 2 那条"干净的红"**没有在这次 pytest 运行里真正被看到**，是用独立脚本补验出来的，不是这条测试用例本身展示出来的。如实记下这个结构性限制：两句断言挤在一条测试函数里、用的又是会跳出 `assert` 语义的裸异常，导致子场景 2 的判别力**在这条测试的实际执行中不可见**，只在独立复现里确认过。本轮未拆分这条用例（拆分会改变 brief 给定的测试结构，且子场景 1 的裸异常问题已被控制者列为不改的已知残留），照实记录。
+
+**复原后是否回绿**：是。改回 `if bool(...) == bool(...):`，`pytest tests/test_rebuild_training_sets.py -q -rs` → `55 passed`；随后跑了一次完整 `git diff --stat -- backend/rebuild_training_sets.py`，本任务的各组变异全部复原后与提交前只有本任务的新增内容、没有任何遗留标记（`grep -n "MUTATION"` 两个文件均为 0 命中）。
 
 ---
 
@@ -172,7 +184,13 @@ Task 6 自己的代码是这一片最后接上的「命令行入口」，覆盖 
 
 ## 汇总结论
 
-- Task 1–6 六个任务的变异证据里，**唯二**"故意改坏之后、某条既有测试仍然是绿的"的情况，都已经逐条列出并给了理由：Task 4 的 5c（`test_write_detector_passes_on_reads_only` 在恒放行判据下仍绿——这是"正向对照单独看永远绿"的示范，必须配合反向用例一起看）与 Task 5 的 5c（见上方专项说明）。
+- Task 1–6 六个任务的变异证据里，"故意改坏之后、某条既有测试仍然是绿的"这类情况，逐条列出、不只记数量：Task 4 的 5c（`test_write_detector_passes_on_reads_only` 在恒放行判据下仍绿——"正向对照单独看永远绿"的示范，必须配合反向用例一起看）、Task 5 的 5c（见上方专项说明），以及 Task 6 T6-2 里的 `test_cli_refuses_to_overwrite_an_existing_manifest`（见下方，成因与前两条不同：不是判据本身恒真，而是**另一道独立机制**——`publish_manifest` 的原子发布——按设计兜了底）。⚠️ 前一版这里写的是"唯二"，本轮发现第三个实例后已订正，不再用"唯二"这种会随复核轮数增加而过期的计数措辞。
 - 出现"brief 预告的数字与实测不符"的两处（Task 3 的 5a「2→1」实为「3→2」；Task 4 的 5b「差 1」实为「差 2」）都已如实记录，均未回改 brief 原文，也未因此放宽任何断言。
 - Task 5 的 5b 属于"按上一轮评审订正换了打击对象"的情况，换的理由与前后对象已在上文写明。
-- Task 6 自己的 6 组变异里，有 3 组（T6-2 / T6-4 / T6-6）的红表现是**替身连接崩溃**而不是一条干净的断言失败——如实记录了这个形态上的差异，但每一组仍然确凿地把预期的那条/那些测试变成了 `FAILED`，判别力没有被削弱。
+- Task 6 自己各组变异的最终真相（**第 1 轮结论已被评审打回、按实测重写，不再用"判别力没有被削弱"这种一刀切的措辞**）：
+  - T6-1（含 T6-1b / T6-1c）、T6-3、T6-5：从第一次做起就是干净的断言失败，红的理由与预期一致。
+  - T6-2 / T6-4 / T6-6 三组，第 1 版的"红"混进了替身崩溃的假象（`_StubConn` 只有 `close()`，闸被删之后 `main()` 走到 `rebuild_all` 才炸），并不能证明"闸真的挡住了"。补上共用替身 `_stub_rebuild_all` 后重做，三组各自的真相并不相同：
+    - **T6-4**：重做后是干净的红（`assert 0 != 0`），没有其它闸兜底。
+    - **T6-2**：拆成两条子结论——`test_cli_refuses_to_overwrite_an_existing_manifest` 对这条变异**没有判别力**（`publish_manifest` 的原子发布独立兜底，这是文档已写明的设计性冗余，未改动该用例）；`test_cli_refuses_manifest_inside_the_v1_archive` 原来的写法（指向归档里**已存在**的文件）同样没有判别力，实测证实换成指向**不存在**的路径后才有干净的判别力，已按方案 (a) 改写该用例。
+    - **T6-6**：两个子场景表现不同——"两者都不给"是一次真实的、但形态是裸异常的红（命中已被控制者列为不改的已知残留）；"两者都给"独立验证是一条干净的红，但由于两句断言顺序执行、第一句先崩，这条干净的红**在这条测试的实际 pytest 运行里没有被看到**，只在独立复现脚本里确认过。
+  详见 T6-2 / T6-4 / T6-6 各自小节的完整记录。

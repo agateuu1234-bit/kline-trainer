@@ -138,7 +138,7 @@ for row in rows:
 | # | 要防的情况 | 动作（每行整行复制） | 期望看到 |
 |---|---|---|---|
 | 1 | 产出目录落在归档里 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_out_dir_inside_the_v1_archive -v` | 末行 `1 passed` |
-| 2 | 清单落在归档里，且归档里那个文件的字节数全程没变 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_manifest_inside_the_v1_archive -v` | 末行 `1 passed` |
+| 2 | 清单指向归档里一个还不存在的路径，且归档目录里一个新文件都不会多出来 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_manifest_inside_the_v1_archive -v` | 末行 `1 passed` |
 | 3 | 清单文件已经存在，且已有的旧内容没被覆盖 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_to_overwrite_an_existing_manifest -v` | 末行 `1 passed` |
 | 4 | 产出目录已经存在（哪怕是空文件夹） | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_refuses_an_existing_out_dir -v` | 末行 `1 passed` |
 | 5 | `--p11-sql` 与 `--old-snapshot` 都给了、或者都没给 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/backend" && PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest tests/test_rebuild_training_sets.py::test_cli_requires_exactly_one_old_value_source -v` | 末行 `1 passed` |
@@ -171,7 +171,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/trainingset-p4-1/back
 
 ## A8 · 亲手确认一次：把清单指向归档里的某个压缩包再跑一遍，那个压缩包的字节数完全没变
 
-这一条与 A6 第 2 行是同一件事，但这里换一种更直观的方式，让你能亲眼看到「前」和「后」两个数字：
+⚠️ **这一条与 A6 第 2 行不再是同一件事**（任务评审 Important 发现 1 逼出来的订正）：A6 第 2 行现在验的是「清单指向归档里**还不存在**的路径」——那才是归档边界闸本身在守的场景。这一条验的是**另一条、同样真实的安全保证**：清单指向归档里一个**已经存在**的旧压缩包时，那个包的字节全程不会被动——只是这份保证的**来源**实测证实是 `publish_manifest` 的原子发布（`os.link` 目标已存在即失败，一个字节都不碰），不是归档边界闸本身；归档边界闸删不删，这条包的字节都一样不会变。两条检查合在一起才覆盖了"清单落进归档"这件事的两种子情况（目标存在 / 目标不存在）。这里换一种更直观的方式，让你能亲眼看到「前」和「后」两个数字：
 
 **动作**：
 
