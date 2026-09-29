@@ -1255,6 +1255,58 @@ extension TrainingEngine {
         return true
     }
 
+    /// D136（P1c 第 3 片）：`drawings` 的**第 5 个**写入面 —— 改某条线的某个锚点。
+    /// 唯一生产调用点 = 节点拖动的收尾路径（`ChartContainerView.Coordinator`）。
+    ///
+    /// **门列表**（逐条对照既有写入面重新论证，⛔ 不照抄）：
+    ///   ⓪ 非复盘（D34 纵深，同 `updateDrawingStyle` / `deleteDrawing(id:)`）
+    ///   ① id 非空 + 全局**恰好**一条（D66）
+    ///   ② `!old.locked`（D60）——⚠️ 这是**第二层**，第一层在探针（D139）
+    ///   ②b 工具门（本构建不懂其样式语义的工具，同样不懂它的锚点语义）
+    ///   ③ raw-aware 两道（D61）：改锚点是「部分改写」，与删整条性质不同
+    ///   ④ `anchorIndex` 在范围内 —— Swift 数组越界是 **trap**，`do/catch` 接不住
+    ///   ⑤ `anchor.period == old.period`（D29 + N8）：混周期锚点 = 后续 candleIndex 被按错误周期解释
+    ///   ⑥ **内容未变 ⇒ 返 `true` 且零副作用**（D80）
+    ///
+    /// ⛔ **本接口不含、也不声称含几何门** —— 引擎没有 mapper（同 `deleteDrawing(id:)` 头注）。
+    /// 夹回边界发生在界面层（D137）。
+    @discardableResult
+    func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor) -> Bool {
+        guard flow.mode != .review else { return false }                       // ⓪
+        guard !id.isEmpty else { return false }                                // ①
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }  // ①
+        let old = drawings[i]
+        guard !old.locked else { return false }                                // ②
+        guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }  // ②b
+        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
+              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }   // ③
+        guard old.anchors.indices.contains(anchorIndex) else { return false }  // ④
+        guard anchor.period == old.period else { return false }                // ⑤
+        var anchors = old.anchors
+        anchors[anchorIndex] = anchor
+        // 逐字段拷贝，只换 anchors。⚠️ `isExtended` 由 lineSubType 派生、**不由锚点派生**
+        //（`Models.swift:260` / `:320-322`）⇒ 拷贝即可；`period` **显式传 old.period**
+        //（⛔ 不让 init 从 anchors.first 现取——那会让门 ⑤ 变成摆设）。
+        let updated = DrawingObject(
+            id: old.id, toolType: old.toolType, anchors: anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition,
+            revealTick: old.revealTick, period: old.period,
+            lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: old.thickness, colorToken: old.colorToken,
+            labelMode: old.labelMode, locked: old.locked,
+            text: old.text, fontSize: old.fontSize,
+            textColorToken: old.textColorToken, textForm: old.textForm,
+            tailAnchor: old.tailAnchor)
+        // ⑥ D80：**短路的条件是「相等」**（生产范式 `guard updated != old else { return true }`，`:1212`）。
+        // ⛔ 写反成「不相等就短路」会恰好覆盖所有真正改变锚点的拖动 ⇒ 松手报成功却没写、线当场弹回。
+        guard updated != old else { return true }
+        drawings[i] = updated
+        recordDrawingUndoDelta(.replaced(before: old, after: updated, at: i))
+        drawingsRevision += 1
+        return true
+    }
+
     /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
     /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑

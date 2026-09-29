@@ -1011,7 +1011,7 @@ struct TrainingEngineDrawingSessionTests {
     /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
     ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
     ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
-    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 10 处（穷尽性，多一处即红）")
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 11 处（穷尽性，多一处即红）")
     @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
         let code = try squeezedSource(trainingEnginePath)
         let n = engineDrawingsStructuralWrites(code)
@@ -1032,8 +1032,12 @@ struct TrainingEngineDrawingSessionTests {
         //   drawings = ds                         ×1  → injectDrawingsForTesting（测试专用换血口，
         //                                                会让栈里已存的下标必然错位，故它同时是 U-N3a 的靶子）
         //    **不是**「整体赋值不计入」——那句旧注释本身就是本次要修的缺陷，别再抄。
-        #expect(n == 10, """
-            drawings 结构性写入点应为 10，实际 \(n)。
+        // ⚠️ P1c 第 3 片（D136）：10 → 11 —— 新增 `updateDrawingAnchor` 里 `drawings[i] = updated` 那一处
+        //    结构性写入。本条与 `DrawingUndoSourceGuardTests.test_uG4_...` 的 `total` 断言是**同一个事实
+        //    的两份副本**（都调用 `engineDrawingsStructuralWrites`），Task 3 简报只点了前者、漏了这里——
+        //    两份必须同步改，否则本条会在 U-G4 转绿之后单独留红。
+        #expect(n == 11, """
+            drawings 结构性写入点应为 11，实际 \(n)。
             多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
             少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
             """)
