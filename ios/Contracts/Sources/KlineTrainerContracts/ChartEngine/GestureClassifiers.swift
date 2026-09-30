@@ -267,3 +267,26 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
         return TwoFingerStepResult(emission: nil, state: reset)
     }
 }
+
+// MARK: - 单指路由（P1c 第 3 片 D134）：节点拖动 vs 图表手势
+
+/// 本次单指手势整体走哪条路。**`.began` 决定，其余相位只转发**（D134）。
+enum SinglePanRoute: Equatable, Sendable { case chart, nodeDrag }
+
+/// D134：路由 latch 的纯决策。
+///
+/// **为什么必须在 `.began` 分叉**：`singlePanStep` 一旦把手势判成竖直就 latch 成 `.verticalRejected`
+/// （`:72`），后续即便累积满足水平分类也不再发平移，抬手按 `verticalSwitchThreshold` 发切周期。
+/// 而拖节点主要就是上下拖 ⇒ **等方向分类器判完，节点已经拖不动了**。
+///
+/// ⛔ **`.changed` 不重新询问**：候选可能在拖动中失效（选中被清 / 周期变），但那要的是
+/// 「作废并忽略后续回调」（D138），**不是**回落成图表平移 —— 后者会让「周期刚切完、手指还没抬」
+/// 变成一次用户没要的平移（D138 末段）。
+func singlePanRouteStep(phase: GesturePhase, candidateAccepted: Bool,
+                        current: SinglePanRoute) -> SinglePanRoute {
+    switch phase {
+    case .began:              return candidateAccepted ? .nodeDrag : .chart
+    case .changed:            return current
+    case .ended, .cancelled:  return .chart
+    }
+}

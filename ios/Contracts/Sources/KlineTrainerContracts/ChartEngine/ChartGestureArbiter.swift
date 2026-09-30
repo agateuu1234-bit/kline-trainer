@@ -41,6 +41,14 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     /// Coordinator 注入（读共享 crosshairOwner）。未注入（直接消费者）→ 视为 false → 退化旧 tap 行为（源/行为兼容）。
     public var onShouldExitRemoteCrosshair: (() -> Bool)?
 
+    /// P1c 第 3 片（D134）：`.began` 时问一句「此刻有没有一个已通过复核的可拖节点候选」。
+    /// ⛔ 本闭包**不认识**「画线模式」这个概念 —— 没有会话 / 没有选中时它必然回答 false，
+    ///    故既有守卫「`handleSinglePan` 体内不得出现 `drawingMode`」继续绿且**仍有判别力**。
+    public var onHasNodeDragCandidate: (() -> Bool)?
+    /// P1c 第 3 片：节点拖动的位移转发。(translation, phase)
+    /// ⛔ 传的是 **`translation`** 不是 `location` —— 位移换算全程不碰屏幕投影（D134c / D134d）。
+    public var onNodeDrag: ((CGPoint, GesturePhase) -> Void)?
+
     /// Drawing 模式开关。true 时单指点击 fire onTap（落锚）。**不影响**单指 Pan / 两指缩放（1a-iv D32）。
     public var drawingMode: Bool = false
     /// RFC-C 十字光标模式开关（Coordinator 长按进入时设 true、点击退出时设 false）。
@@ -63,6 +71,8 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     // 单指平移 per-gesture 状态（生命周期决策在纯函数 singlePanStep，本类仅存状态）。
     private var lastSinglePanTranslationX: CGFloat = 0
     private var singlePanLifecycle: SinglePanLifecycle = .idle
+    // 单指路由 latch（P1c 第 3 片 D134）。`.began` 决定，终止相位复位。
+    private var singlePanRouteState: SinglePanRoute = .chart
 
     // 两指 per-gesture 状态（生命周期决策在纯函数 twoFingerStep）。
     private var twoFingerState = TwoFingerState()
@@ -121,6 +131,15 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     /// **同步**关闭生命周期（R11 finding）：经纯函数 `singlePanSupersede` 直接发 `.cancelled` + 复位状态，
     /// **不依赖** `isEnabled` toggle 的回调投递；toggle 仅作防御性物理取消（其后续 .cancelled 命中 idle 被吞，不双发）。
     private func supersedeSinglePanForMultitouch(in view: UIView?) {
+        // D138：拖节点时第二根手指落下 ⇒ **就地定住**，走与抬手**同一条**收尾路径。
+        // ⛔ 不走 singlePanSupersede —— 那是图表平移的收尾，会给 onPan 发 .cancelled。
+        if singlePanRouteState == .nodeDrag {
+            let t = singlePanRecognizer?.translation(in: view) ?? .zero
+            onNodeDrag?(t, .ended)                   // .ended 而非 .cancelled：定住不是作废
+            singlePanRouteState = .chart
+            if let s = singlePanRecognizer, s.isEnabled { s.isEnabled = false; s.isEnabled = true }
+            return
+        }
         // 读单指识别器当前累积，结算时补末段残量（R13 finding-2 不丢接管前位移）。
         // 注意顺序：translation 必须在下方 isEnabled toggle 取消识别器之前读取（此处为 toggle 前，cumulative 为实时有效值）。
         let cumulative = singlePanRecognizer?.translation(in: view) ?? .zero
@@ -136,6 +155,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     private func resetGestureState() {
         lastSinglePanTranslationX = 0
         singlePanLifecycle = .idle
+        singlePanRouteState = .chart
         twoFingerState = TwoFingerState()
     }
 
@@ -160,6 +180,17 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         if crosshairMode {
             if ph == .began || ph == .changed { onCrosshairMove?(g.location(in: g.view)) }
             return
+        }
+        // P1c 第 3 片（D134）：节点拖动分支。⛔ 必须在 singlePanStep **之前** ——
+        // 方向分类器一旦 latch 成 .verticalRejected，上下拖就再也回不来了。
+        singlePanRouteState = singlePanRouteStep(
+            phase: ph,
+            candidateAccepted: ph == .began ? (onHasNodeDragCandidate?() ?? false) : false,
+            current: singlePanRouteState)
+        if singlePanRouteState == .nodeDrag {
+            onNodeDrag?(g.translation(in: g.view), ph)
+            if ph == .ended || ph == .cancelled { singlePanRouteState = .chart }
+            return                                   // ⛔ 整个手势不进 singlePanStep
         }
         // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer。
         // 1a-iv D32：画线模式**不再**截获单指 pan —— 水平走平移、竖直甩动走切周期，与非画线态同一条路径。
