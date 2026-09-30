@@ -183,13 +183,17 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         }
         // P1c 第 3 片（D134）：节点拖动分支。⛔ 必须在 singlePanStep **之前** ——
         // 方向分类器一旦 latch 成 .verticalRejected，上下拖就再也回不来了。
-        singlePanRouteState = singlePanRouteStep(
+        // ⛔ 第 1 轮 Critical 修复：仲裁器只管照着 singlePanRouteStep 的结果做——是否转发、
+        // 路由怎么更新全在纯函数里定死，这里不再自己拿 route 做二次判断（旧写法先覆盖
+        // singlePanRouteState 再用覆盖后的值判断，终止相位时早已被覆盖成 .chart，
+        // 导致 .ended/.cancelled 永远转发不出去）。
+        let routeStep = singlePanRouteStep(
             phase: ph,
             candidateAccepted: ph == .began ? (onHasNodeDragCandidate?() ?? false) : false,
             current: singlePanRouteState)
-        if singlePanRouteState == .nodeDrag {
+        singlePanRouteState = routeStep.route
+        if routeStep.forwardToNodeDrag {
             onNodeDrag?(g.translation(in: g.view), ph)
-            if ph == .ended || ph == .cancelled { singlePanRouteState = .chart }
             return                                   // ⛔ 整个手势不进 singlePanStep
         }
         // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer。
