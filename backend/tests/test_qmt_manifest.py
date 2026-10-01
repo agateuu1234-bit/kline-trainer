@@ -3867,6 +3867,10 @@ def test_recovery_removes_exactly_the_inflight_stock(tmp_path):
         rolled["pool_order"]["SH"] = [e for e in rolled["pool_order"]["SH"]
                                       if e["code"] != "600004.SH"]
         rolled["cursor"]["SH"] = 1
+        # R1（2026-10-01）：恢复必须**恰好退还**被移除记录的字节。
+        _removed = sum(f["bytes"] for f in full["files"]
+                       if f["stock_code"] == "600004.SH")
+        rolled["committed_bytes"] = full["committed_bytes"] - _removed
         _recompute_evidence(rolled)
         commit_stock(fd, rolled, ledger=ledger,
                      recovery=RecoveryScope(stock_code="600004.SH",
@@ -3875,6 +3879,8 @@ def test_recovery_removes_exactly_the_inflight_stock(tmp_path):
         assert {f["stock_code"] for f in on["files"]} == {"600000.SH", "000001.SZ",
                                                           "600006.SH"}
         assert on["cursor"]["SH"] == 1 and on["cursor"]["SZ"] == 1
+        assert on["committed_bytes"] == full["committed_bytes"] - _removed, \
+            "退还必须真的落盘，不能只是通过了守卫"
     finally:
         os.close(fd)
 
@@ -5041,10 +5047,16 @@ def test_recovery_removal_keeps_everyone_elses_order(tmp_path):
         ledger = _committed(fd, full)
         fixed = _drop_stock(full)             # 删中间那只 600004
         fixed["cursor"]["SH"] = 1             # ← min(cursor, universe_idx)
+        # R1（2026-10-01）：恢复必须恰好退还被移除记录的字节。
+        _removed = sum(f["bytes"] for f in full["files"]
+                       if f["stock_code"] == "600004.SH")
+        fixed["committed_bytes"] = full["committed_bytes"] - _removed
         _recompute_evidence(fixed)
         commit_stock(fd, fixed, ledger=ledger, recovery=_scope())
         assert [e["code"] for e in read_manifest(fd)["pool_order"]["SH"]] == \
             ["600000.SH", "600006.SH"]
+        assert read_manifest(fd)["committed_bytes"] == \
+            full["committed_bytes"] - _removed
     finally:
         os.close(fd)
 
