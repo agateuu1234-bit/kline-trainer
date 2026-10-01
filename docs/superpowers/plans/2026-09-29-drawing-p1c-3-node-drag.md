@@ -1540,6 +1540,75 @@ G1 两条既有守卫实跑确认仍绿：探针闭包不认识「画线模式�
 
 ---
 
+> ## ❗❗❗ Task 8 订正（2026-09-30，实施后评审发现 —— **本节上面的代码有一个 Critical，⛔ 不得再当依据**）
+>
+> **缺陷**：上面给出的仲裁器片段把赋值写在判断之前 ——
+> `singlePanRouteState = singlePanRouteStep(...)` 先执行，`if singlePanRouteState == .nodeDrag` 后执行。
+> 而原 `singlePanRouteStep` 对 `.ended` / `.cancelled` **无条件**返回 `.chart` ⇒ 到终止相位时
+> 「刚才是不是在拖节点」这个信息**已被前一行抹掉** ⇒ 那个 `if` **恒假** ⇒
+> **单指自然抬手时 `onNodeDrag` 永远收不到 `.ended`（`.cancelled` 同理）**
+> ⇒ **拖动的收尾信号被静默吞掉、线永远提交不了**（本片主交付物失效），且执行跌进 `singlePanStep`。
+> 片段里那句 `if ph == .ended || ph == .cancelled { singlePanRouteState = .chart }` 是**死代码**，
+> 恰是「本意想在此判断」的内部证据。
+>
+> **为什么四道检查都没抓到**：单测只喂纯函数（纯函数单独看是对的）＋ 仲裁器整类在
+> `#if canImport(UIKit)` 内、host 测试**根本不执行它** ＋ Catalyst 只做**类型检查**
+> （提前跑的那次 `** TEST BUILD SUCCEEDED **` **不能**证明它是对的）。
+>
+> **订正后的定稿形状**（判断整个搬进纯函数，仲裁器退化成零判断的傻转发）：
+>
+> ```swift
+> // GestureClassifiers.swift —— 返回「要做什么 + 新状态」，照该文件既有 SinglePanStep 的范式
+> struct SinglePanRouteStep: Equatable, Sendable {
+>     let forwardToNodeDrag: Bool
+>     let route: SinglePanRoute
+> }
+>
+> func singlePanRouteStep(phase: GesturePhase, candidateAccepted: Bool,
+>                         current: SinglePanRoute) -> SinglePanRouteStep {
+>     switch phase {
+>     case .began:
+>         return candidateAccepted
+>             ? SinglePanRouteStep(forwardToNodeDrag: true,  route: .nodeDrag)
+>             : SinglePanRouteStep(forwardToNodeDrag: false, route: .chart)
+>     case .changed:
+>         return SinglePanRouteStep(forwardToNodeDrag: current == .nodeDrag, route: current)
+>     case .ended, .cancelled:
+>         // 终止相位**必须**按 current 决定是否转发（否则收尾信号被吞），再无条件复位
+>         return SinglePanRouteStep(forwardToNodeDrag: current == .nodeDrag, route: .chart)
+>     }
+> }
+> ```
+>
+> ```swift
+> // ChartGestureArbiter.handleSinglePan —— ⛔ 这里不许再有任何判断
+> let routeStep = singlePanRouteStep(
+>     phase: ph,
+>     candidateAccepted: ph == .began ? (onHasNodeDragCandidate?() ?? false) : false,
+>     current: singlePanRouteState)
+> singlePanRouteState = routeStep.route
+> if routeStep.forwardToNodeDrag {
+>     onNodeDrag?(g.translation(in: g.view), ph)
+>     return
+> }
+> ```
+>
+> **为什么不采用「在仲裁器里记一个覆盖前的值」那种修法**：那会留下「两值舞蹈」——
+> 同一文件里两指分支读覆盖前、单指分支读覆盖后，正是这个 bug 的来源，修一处不等于修一族；
+> 且仲裁器在 host 上**不可测**，判别力留在那儿等于放在测不到的地方，而纯函数层可测。
+>
+> **⛔ 本节以下行号的内容已全部失效，读它们会得到错的结论**：
+> - 接口声明（`singlePanRouteStep` 返回 `SinglePanRoute`）—— 约 `:1364-1367`、`:1449-1456`
+> - Step 2 的四档测试（断言返回值是 `SinglePanRoute`）—— 约 `:1376-1420`
+> - Step 5③ 的仲裁器片段（**Critical 本体**）—— 约 `:1493-1500`
+>
+> **实际落地**：`86e559de`。`SinglePanRouteTests` 7 档（原 4 档改写 + 2 条 Critical 回归 + 1 条反向对照），
+> 变异反证「终止分支硬编码 `forward = false`」时**恰好且只有**那两条回归转红；全量 1907/1907 绿。
+>
+> **⭐ 教训（已写入记忆）**：纯函数单独正确，**不代表**调用它的那一层用对了。
+> 当判别力所在的那一层在本机不可执行时，把判断**搬进可执行的那一层**，让不可执行的那层零判断。
+>
+
 ## Task 9: `KLineView` 触摸钩子 + 候选捕获
 
 **Files:**
