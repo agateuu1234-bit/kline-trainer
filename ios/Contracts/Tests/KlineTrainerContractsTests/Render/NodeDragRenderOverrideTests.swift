@@ -247,6 +247,15 @@ struct NodeDragRenderOverrideTests {
         let engine = TrainingEngine.preview()
         let original = fullFieldFixture(id: "FIXTURE-A")
         engine.injectDrawingsForTesting([original])
+
+        // 修复环第1轮 Important：拖动「开始前」先取一次 base——此时 nodeDragOwner == nil，
+        // 覆盖不生效，这就是提交值的可见子集。查找只用来**定位下标** k，k 不参与后面的 id 断言，
+        // 这样 id 断言才不会沦为「用查找键断言查找键」的恒真断言（评审变异实证：之前的写法
+        // 删掉 applyNodeDragOverride 里的 `id: d.id,` 后，红的是 #require 查找行，从未执行到
+        // id == 那一条——即本仓记录过的「返回 self 的映射恒真」/「用查找键断言查找键」）。
+        let base = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: 999)
+        let k = try #require(base.firstIndex(where: { $0.id == "FIXTURE-A" }))
+
         engine.toggleDrawingMode()
         engine.drawingSession.setMode(.select)
         engine.drawingSession.setSelection(id: "FIXTURE-A", panel: .upper)
@@ -256,9 +265,12 @@ struct NodeDragRenderOverrideTests {
         engine.drawingSession.beginNodeDrag(owner, anchor: draggedAnchor)
 
         // revealTick(5) 非 0（订正 2 要求），故传一个远大于它的 tick，避免被渐显过滤挡在外面。
-        let overridden = try #require(
-            RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: 999)
-                .first(where: { $0.id == "FIXTURE-A" }))
+        let visible = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: 999)
+        // ⭐ 覆盖是 `.map`，必须保持长度与顺序；这一句不能省——否则「覆盖顺手改了长度」会让
+        // `visible[k]` 指向另一条线，下标对应关系就不成立了（用 #require：长度一旦不对，
+        // 后面按下标取值会越界崩溃，必须在那之前就红）。
+        try #require(visible.count == base.count, "覆盖必须是保长度保顺序的 .map，下标对应关系才成立")
+        let overridden = visible[k]
 
         // 先确认覆盖确实发生了（否则下面「换回锚点后相等」是空转——覆盖没生效也会相等）。
         #expect(overridden.anchors[1] == draggedAnchor)
@@ -270,8 +282,11 @@ struct NodeDragRenderOverrideTests {
         #expect(overriddenNormalized == originalNormalized,
                 "换回锚点后其余所有字段必须与原对象逐字段相等（== 本身就是全字段比较，唯独不比较 id）")
         // `DrawingObject.==` 故意不比较 `id`（Models.swift:362-375）⇒ 单独补一条 id 断言，
-        // 否则"手抄漏传 id、换成随机 UUID"这一档缺陷用 == 测不出来（详见报告「订正分歧」）。
-        #expect(overridden.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
+        // 否则"手抄漏传 id、换成随机 UUID"这一档缺陷用 == 测不出来。
+        // ⛔⛔ 两边必须都按下标 k 取（`overridden` 已是；这里再用 `base[k].id` 而不是字面量
+        // "FIXTURE-A" 或任何按 id 查找的结果）——⛔ 不许改回「按 id 查找」，那会让这条断言的
+        // 输入里重新含有它要断言的那个值，退回恒真（修复环第1轮 Important；Minor 一并处理）。
+        #expect(overridden.id == base[k].id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
     }
 
     // MARK: - 订正 1/2：手抄完整性②（Task 3 的 updateDrawingAnchor，回填）
@@ -283,12 +298,18 @@ struct NodeDragRenderOverrideTests {
         // 就被 `!old.locked` 门拒绝，写入永远不会发生，下面的断言会全部空转。
         let original = fullFieldFixture(id: "FIXTURE-B", locked: false)
         engine.injectDrawingsForTesting([original])
+        // 修复环第1轮 Important：写入**之前**先按 id 定位下标 k（此时数组内容是 original，
+        // 查找安全）；写入之后**改用下标** k 读 engine.drawings[k]，不再按 id 查找——
+        // `updateDrawingAnchor` 内部按 id 定位要替换的下标 `i` 这一步在手抄重建**之前**完成，
+        // 不受手抄漏传 id 的影响，`drawings[i] = updated` 是原地替换、不改长度/顺序，
+        // 故 k 在写入前后指向同一条线，下面的 id 断言才不会沦为「用查找键断言查找键」的恒真断言。
+        let k = try #require(engine.drawings.firstIndex(where: { $0.id == "FIXTURE-B" }))
 
         let newAnchor = DrawingAnchor(period: .m60, candleIndex: 4, price: 77)
         let ok = engine.updateDrawingAnchor(id: "FIXTURE-B", anchorIndex: 1, anchor: newAnchor)
         #expect(ok, "写入必须成功，否则下面的断言是空转")
 
-        let written = try #require(engine.drawings.first(where: { $0.id == "FIXTURE-B" }))
+        let written = engine.drawings[k]
         #expect(written.anchors[1] == newAnchor)
         #expect(written.anchors[1] != original.anchors[1])
 
@@ -296,6 +317,8 @@ struct NodeDragRenderOverrideTests {
         let originalNormalized = try zeroingAnchors(original)
         #expect(writtenNormalized == originalNormalized,
                 "换回锚点后其余所有字段必须与写入前逐字段相等")
+        // ⛔⛔ 不许改回「按 id 查找」取 written——那会让这条断言的输入里重新含有它要断言的
+        // 那个值，退回恒真（修复环第1轮 Important；Minor 一并处理）。
         #expect(written.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
     }
 }
