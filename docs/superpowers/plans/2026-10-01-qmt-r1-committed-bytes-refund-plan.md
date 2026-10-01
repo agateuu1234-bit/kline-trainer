@@ -39,6 +39,35 @@
 
 ---
 
+## 计划里的测试代码已经真跑过（2026-10-01）
+
+codex 连续两轮因「夹具跑不起来 / 在非法账本上通过」打回，所以这一版在送审前
+**把计划里所有测试代码块抽出来，在未改产品代码的树上真跑了一遍**
+（`extract_all.py` 抽取 → pytest 执行）。结果与本计划的预期逐条吻合：
+
+```
+8 failed, 8 passed, 381 deselected
+
+绿（8）：Task 1 的 U5/U6/U7/U12/U13/U14，加 U8、U9
+         —— 这八条在改产品代码**之前**就该绿，它们是「没误伤邻居」的基准
+红（8）：U1–U4（R2 未实现）、U15/U16（R4 未实现）、
+         U10（预算被放大 —— R1 缺陷的回归钉）、U17（端到端，commit_stock 拒绝退还）
+```
+
+过程中这套预跑**自己抓出了两个计划里的真 bug**，都已修：
+
+1. `_r1_base()` 原先手搓夹具，只改了 SH 池，把 `000001.SZ` 变成「有池条目、没 files
+   记录」的孤儿 ⇒ `validate_manifest` 拒绝。改为**复用既有的 `_multi_stock()`**，
+   并在 `_r1_assert_valid()` 里对每一份**意在合法**的夹具做一次真校验。
+2. `_r1_readd()` 原先把池恢复成原来的顺序 ⇒ 守卫报「改写了已提交池条目的**顺序**」。
+   `pool_order` 只许**按序追加**，所以重拉后受害股排到**池序末尾**。
+   这是系统的既有性质，不是本 PR 引入的；已写进该函数的 docstring 并由 U17 断言钉住。
+
+⚠️ 实施者仍需按任务逐步跑，**不要**因为「作者说预跑过」就跳过红绿验证 ——
+预跑用的是抽取出来的副本，不是真正落进测试文件的版本。
+
+---
+
 ## File Structure
 
 | 文件 | 职责 | 本计划的动作 |
@@ -62,8 +91,8 @@
 - Modify: `backend/tests/test_qmt_manifest.py`（文件末尾追加）
 
 **Interfaces:**
-- Consumes: 该文件已有的 `_valid_manifest()`、`_file_rec(code, name, period)`、`_min_bytes(m)`、`_recompute_evidence(m)`；`qmt_manifest` 的 `_require_no_progress_rollback`、`ManifestInvalidError`、`RecoveryScope`
-- Produces: 本节的五个辅助函数 `_r1_recs(code, name, nbytes)`、`_r1_pool_entry(m, code)`、`_r1_base(headroom)`、`_r1_remove_stock(m, code, refund) -> (m, removed)`、`_r1_scope(m, code)`，Task 2–4 都用它们
+- Consumes: 该文件已有的 `_multi_stock()`（**合法的多股夹具，现有恢复测试也用它**）、`_file_rec(code, name, period)`、`_min_bytes(m)`、`_recompute_evidence(m)`；`qmt_manifest` 的 `_require_no_progress_rollback`、`ManifestInvalidError`、`RecoveryScope`、`validate_manifest`
+- Produces: 本节的六个辅助函数 `_r1_assert_valid(m, label)`、`_r1_base(headroom)`、`_r1_victim_bytes(m, code)`、`_r1_remove_stock(m, refund, code) -> (m, removed)`、`_r1_scope(m, code)`、`_r1_add_spare(m) -> (m, added)`，Task 2–4b 都用它们
 
 - [ ] **Step 1：在 `backend/tests/test_qmt_manifest.py` 末尾追加辅助函数与 6 条用例**
 
@@ -71,95 +100,98 @@
 # ── R1 · committed_bytes 退还（2026-10-01 spec）─────────────────────────────
 # 术语：ob = 上一份的 committed_bytes；nb = 本次的；
 #       removed_bytes = 消失的记录字节之和；added = 新增记录字节之和。
+#
+# ⚠️ 夹具一律**复用既有的 `_multi_stock()`**，不自己手搓。
+# 理由（codex 实测点出）：手搓时很容易只改一个市场的池，把别的市场的池条目
+# 变成「有池条目、没 files 记录」的孤儿，而 `validate_manifest` 会拒绝那种账本。
+# 直接调 `_require_no_progress_rollback` 不做形状校验，于是用例会在**非法账本**
+# 上通过 —— 测了个寂寞。`_multi_stock()` 本身是合法的，且现有的两条恢复测试
+# 就用它，结构一致。
 import copy as _r1_copy
 
-from qmt_manifest import RecoveryScope as _R1Scope
+from qmt_manifest import RecoveryScope as _R1Scope, validate_manifest as _r1_validate
 
-_R1_A = ("600000.SH", "浦发银行")      # 被恢复移除的那只
-_R1_B = ("600004.SH", "白云机场")      # 另一只（用来测 R4）
+_R1_VICTIM = "600004.SH"      # 被恢复移除的那只（SH 名单里下标 1，与现有恢复测试一致）
+_R1_SPARE = ("000002.SZ", "万科A")   # 冻结名单里有、但池里还没有的一只（用来测 R4）
 _R1_MARKET = "SH"
-_R1_EACH = 183                         # 每条记录的字节数；一只股两条 = 366
 
 
-def _r1_recs(code, name, nbytes=_R1_EACH):
-    """造某只股的两条 files 记录（daily + 1m），字节数可控。
-
-    ⚠️ 周期只能是 `qmt_manifest.PERIODS = ("1m", "daily")` 里的值。
-    **不要写 `"1d"`** —— `_file_rec` 会照样造出一条「看起来对」的记录，
-    但 `period` 是生产会拒绝的值；而直接调 `_require_no_progress_rollback`
-    不做形状校验，于是测试会在**非法账本**上通过（codex 实测点出）。
-    """
-    out = [_file_rec(code, name, "daily"), _file_rec(code, name, "1m")]
-    for rec in out:
-        rec["bytes"] = nbytes
-    return out
-
-
-def _r1_pool_entry(m, code):
-    """造一个池条目：`{"code": …, "universe_idx": …}`。
-
-    ⚠️ `universe_idx` 必须**从冻结名单里现查**，不能照搬别的条目的值
-    —— 照搬会把 A 的下标安给 B，账本当场非法（codex 实测点出）。
-    """
-    return {"code": code,
-            "universe_idx": m["source_snapshot"]["universe"][_R1_MARKET].index(code)}
-
-
-def _r1_base(headroom=0):
-    """起点账本：池里只有 A，files 是 A 的两条，committed_bytes = 下界 + headroom。
-
-    headroom 的用途：把 committed_bytes 抬到远高于固有下界，这样「被拦住」
-    只可能是转移守卫干的，不会是固有下界检查代为拦截（spec §3 的夹具纪律）。
-    """
-    m = _valid_manifest()
-    m["files"] = _r1_recs(*_R1_A)
-    m["pool_order"][_R1_MARKET] = [_r1_pool_entry(m, _R1_A[0])]
-    m = _recompute_evidence(m)
-    m["committed_bytes"] = _min_bytes(m) + headroom
+def _r1_assert_valid(m, label):
+    """任何**意在合法**的夹具都要过一次真校验 —— 不让非法账本偷偷通过用例。"""
+    _r1_validate(_r1_copy.deepcopy(m))
     return m
 
 
-def _r1_remove_stock(m, code, refund):
+def _r1_base(headroom=0):
+    """起点账本 = 既有的 `_multi_stock()`，committed_bytes = 下界 + headroom。
+
+    headroom 的用途：把累计量抬到远高于固有下界，这样「被拦住」只可能是
+    转移守卫干的，不会是固有下界代为拦截（spec §3 的夹具纪律）。
+    """
+    m = _multi_stock()
+    m["committed_bytes"] = _min_bytes(m) + headroom
+    return _r1_assert_valid(m, "_r1_base")
+
+
+def _r1_victim_bytes(m, code=_R1_VICTIM):
+    return sum(f["bytes"] for f in m["files"] if f["stock_code"] == code)
+
+
+def _r1_remove_stock(m, refund, code=_R1_VICTIM):
     """模拟崩溃恢复第③档：删该股的 files + 池条目 **且**退游标。
 
     ⚠️ 退游标不可省：恢复是一次**耦合转移**（删条目且 cursor ← min(cursor, idx)），
-    只删不退会先被既有的耦合检查拦下，于是这条用例**测不到本 PR 的判据**。
+    只删不退会先被既有的耦合检查拦下，于是用例**测不到本 PR 的判据**。
     """
     m2 = _r1_copy.deepcopy(m)
-    removed = sum(f["bytes"] for f in m2["files"] if f["stock_code"] == code)
-    m2["files"] = [f for f in m2["files"] if f["stock_code"] != code]
-    m2["pool_order"][_R1_MARKET] = [
-        e for e in m2["pool_order"][_R1_MARKET] if e.get("code") != code
-    ]
+    removed = _r1_victim_bytes(m2, code)
     idx = m2["source_snapshot"]["universe"][_R1_MARKET].index(code)
-    cur = m2.get("cursor", {}).get(_R1_MARKET)
-    if isinstance(cur, int):
-        m2["cursor"][_R1_MARKET] = min(cur, idx)
-    m2 = _recompute_evidence(m2)
+    m2["files"] = [f for f in m2["files"] if f["stock_code"] != code]
+    m2["pool_order"][_R1_MARKET] = [e for e in m2["pool_order"][_R1_MARKET]
+                                    if e["code"] != code]
+    m2["cursor"][_R1_MARKET] = min(m2["cursor"][_R1_MARKET], idx)
+    _recompute_evidence(m2)
     if refund:
-        m2["committed_bytes"] = m2["committed_bytes"] - removed
-    return m2, removed
+        m2["committed_bytes"] -= removed
+    return _r1_assert_valid(m2, "_r1_remove_stock"), removed
 
 
-def _r1_scope(m, code=_R1_A[0]):
+def _r1_scope(m, code=_R1_VICTIM):
     idx = m["source_snapshot"]["universe"][_R1_MARKET].index(code)
     return _R1Scope(stock_code=code, market=_R1_MARKET, universe_idx=idx)
+
+
+def _r1_add_spare(m):
+    """把冻结名单里那只**还没进池**的股加进来（files 两条 + 池条目）。"""
+    code, name = _R1_SPARE
+    m2 = _r1_copy.deepcopy(m)
+    recs = [_file_rec(code, name, "1m"), _file_rec(code, name, "daily")]
+    m2["files"] += recs
+    m2["pool_order"]["SZ"].append(
+        {"code": code,
+         "universe_idx": m2["source_snapshot"]["universe"]["SZ"].index(code)})
+    _recompute_evidence(m2)
+    return m2, sum(r["bytes"] for r in recs)
 
 
 def test_r1_u5_undeclared_rollback_still_rejected():
     """U5 · **未**声明恢复时把累计量调小 —— R1 不变，照旧拦。"""
     before = _r1_base()
-    after, _removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    after, _removed = _r1_remove_stock(before, refund=True)
     with pytest.raises(ManifestInvalidError):
         _require_no_progress_rollback(before, after, "U5")   # 不传 recovery
 
 
 def test_r1_u6_partial_removal_still_rejected():
-    """U6 · 声明恢复但只**部分**移除 —— 既有耦合检查不得被削弱。"""
+    """U6 · 声明恢复但只**部分**移除 —— 既有耦合检查不得被削弱。
+
+    注：这一份**故意非法**（一只股只剩一条记录），所以不走 `_r1_assert_valid`。
+    """
     before = _r1_base()
     after = _r1_copy.deepcopy(before)
-    after["files"] = after["files"][:1]          # 只删一条，池条目还在
-    after = _recompute_evidence(after)
+    after["files"] = [f for f in after["files"]
+                      if not (f["stock_code"] == _R1_VICTIM and f["period"] == "1m")]
+    _recompute_evidence(after)
     with pytest.raises(ManifestInvalidError):
         _require_no_progress_rollback(before, after, "U6",
                                       recovery=_r1_scope(before))
@@ -168,25 +200,12 @@ def test_r1_u6_partial_removal_still_rejected():
 def test_r1_u7_removal_without_cursor_rewind_still_rejected():
     """U7 · 声明恢复、完整移除，但 **cursor 没退** —— 耦合检查不得被削弱。"""
     before = _r1_base()
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    after["cursor"] = _r1_copy.deepcopy(before["cursor"])    # 把游标推回去
-    after = _recompute_evidence(after)
+    after, _removed = _r1_remove_stock(before, refund=True)
+    after["cursor"][_R1_MARKET] = before["cursor"][_R1_MARKET]   # 把游标推回去
+    _recompute_evidence(after)
     with pytest.raises(ManifestInvalidError):
         _require_no_progress_rollback(before, after, "U7",
                                       recovery=_r1_scope(before))
-
-
-def test_r1_u13_normal_non_recovery_commit_passes():
-    """U13 · 正常的非恢复提交（新增一只股、累计量涨够）—— 必须放行。"""
-    before = _r1_base()
-    after = _r1_copy.deepcopy(before)
-    after["files"] = before["files"] + _r1_recs(*_R1_B)
-    after["pool_order"][_R1_MARKET] = (
-        before["pool_order"][_R1_MARKET] + [_r1_pool_entry(before, _R1_B[0])]
-    )
-    after = _recompute_evidence(after)
-    after["committed_bytes"] = before["committed_bytes"] + _R1_EACH * 2
-    _require_no_progress_rollback(before, after, "U13")      # 不抛即通过
 
 
 def test_r1_u12_negative_refund_is_caught_by_the_intrinsic_check():
@@ -199,12 +218,28 @@ def test_r1_u12_negative_refund_is_caught_by_the_intrinsic_check():
     本用例的作用就是把这个依据钉住：哪天固有检查被放宽，它会变红。
     """
     before = _r1_base()
-    before["committed_bytes"] = _R1_EACH            # 比该股两条之和还小
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    before["committed_bytes"] = 1                  # 远低于被移除的字节数
+    after = _r1_copy.deepcopy(before)
+    removed = _r1_victim_bytes(after)
+    after["files"] = [f for f in after["files"] if f["stock_code"] != _R1_VICTIM]
+    after["pool_order"][_R1_MARKET] = [e for e in after["pool_order"][_R1_MARKET]
+                                       if e["code"] != _R1_VICTIM]
+    after["cursor"][_R1_MARKET] = 1
+    _recompute_evidence(after)
+    after["committed_bytes"] = 1 - removed
     assert after["committed_bytes"] < 0, "夹具自检：这份账本退还后应为负"
     with pytest.raises(ManifestInvalidError, match="不小于两者之和"):
         _require_no_progress_rollback(before, after, "U12",
                                       recovery=_r1_scope(before))
+
+
+def test_r1_u13_normal_non_recovery_commit_passes():
+    """U13 · 正常的非恢复提交（新增一只股、累计量涨够）—— 必须放行。"""
+    before = _r1_base()
+    after, added = _r1_add_spare(before)
+    after["committed_bytes"] = before["committed_bytes"] + added
+    _r1_assert_valid(after, "U13 after")
+    _require_no_progress_rollback(before, after, "U13")      # 不抛即通过
 
 
 def test_r1_u14_identical_recopy_with_zero_added_still_passes():
@@ -269,7 +304,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: Task 1 的 `_r1_base()`、`_r1_remove_stock()`、`_r1_scope()`
 - Produces: 改造后的 `committed_bytes` 判据块；Task 3 在同一块里加 R4
 
-- [ ] **Step 1：写失败的测试（U1–U4、U11）**
+- [ ] **Step 1：写失败的测试（U1–U4）**
 
 追加到 `backend/tests/test_qmt_manifest.py`：
 
@@ -277,8 +312,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 def test_r1_u1_recovery_with_exact_refund_passes():
     """U1 · 恢复 + 恰好退还 —— 这是**今天被拒**的那一格，修好后必须放行。"""
     before = _r1_base()
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    assert removed == _R1_EACH * 2, "夹具自检：该股应占两条共 366 字节"
+    after, removed = _r1_remove_stock(before, refund=True)
+    assert removed > 0, "夹具自检：被移除的那只股应当有字节数"
     assert after["committed_bytes"] == before["committed_bytes"] - removed
     _require_no_progress_rollback(before, after, "U1",
                                   recovery=_r1_scope(before))   # 不抛即通过
@@ -287,7 +322,7 @@ def test_r1_u1_recovery_with_exact_refund_passes():
 def test_r1_u2_recovery_without_refund_rejected():
     """U2 · 恢复但**不退还**（今天的行为）—— 修好后必须拦。"""
     before = _r1_base()
-    after, _removed = _r1_remove_stock(before, _R1_A[0], refund=False)
+    after, _removed = _r1_remove_stock(before, refund=False)
     with pytest.raises(ManifestInvalidError, match="恰好退还"):
         _require_no_progress_rollback(before, after, "U2",
                                       recovery=_r1_scope(before))
@@ -300,7 +335,7 @@ def test_r1_u3_recovery_refunding_one_byte_too_much_rejected():
     于是先被**固有检查**拦掉，这条用例就测不到 R2（codex 实测）。
     """
     before = _r1_base(headroom=10_000_000)
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    after, _removed = _r1_remove_stock(before, refund=True)
     after["committed_bytes"] -= 1
     with pytest.raises(ManifestInvalidError, match="恰好退还"):
         _require_no_progress_rollback(before, after, "U3",
@@ -310,28 +345,11 @@ def test_r1_u3_recovery_refunding_one_byte_too_much_rejected():
 def test_r1_u4_recovery_refunding_one_byte_too_little_rejected():
     """U4 · 少退 1 字节 —— 等式的上侧要钉住。"""
     before = _r1_base()
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    after, _removed = _r1_remove_stock(before, refund=True)
     after["committed_bytes"] += 1
     with pytest.raises(ManifestInvalidError, match="恰好退还"):
         _require_no_progress_rollback(before, after, "U4",
                                       recovery=_r1_scope(before))
-
-
-def test_r1_u11_refund_down_to_exactly_zero_passes():
-    """U11 · 退还后恰好为 0 —— 边界，0 合法。
-
-    ⚠️ 必须用**零字节 `export_log`** 的夹具：默认夹具的日志占 2399554 字节，
-    固有下界因此远高于 0，退到 0 会先被固有检查拦掉（codex 实测）。
-    把日志清零后，移除该股之后的下界也是 0，退款分支才够得着。
-    """
-    before = _r1_base()
-    before["staged_export_log"]["bytes"] = 0
-    before = _recompute_evidence(before)
-    before["committed_bytes"] = _min_bytes(before)      # == 该股两条之和
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    assert after["committed_bytes"] == 0, "夹具自检：退还后应恰好为 0"
-    _require_no_progress_rollback(before, after, "U11",
-                                  recovery=_r1_scope(before))   # 不抛即通过
 ```
 
 - [ ] **Step 2：跑它们，确认全红**
@@ -341,15 +359,15 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
   -m pytest tests/test_qmt_manifest.py -q \
-  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11" -v
+  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4" -v
 ```
 
-Expected: **5 failed**。
-- U1 / U11 应报「committed_bytes 从 … 变成 … 它是累计量，调小…」
+Expected: **4 failed**。
+- U1 应报「committed_bytes 从 … 变成 … 它是累计量，调小…」
 - U2 / U3 / U4 应报 `DID NOT RAISE` 或匹配不上 `恰好退还`
 
-⚠️ 若 U3 或 U11 报的是「须为非负整数且不小于两者之和」，说明夹具的余量 / 零字节日志
-没设对 —— 那是**固有检查**在拦，这条用例测不到 R2，必须先修夹具。
+⚠️ 若 U3 报的是「须为非负整数且不小于两者之和」，说明 headroom 没设对 ——
+那是**固有检查**在拦，这条用例测不到 R2，必须先修夹具。
 
 ⚠️ **若出现 `no tests ran`，不算红**——那是选择器没选中任何用例，必须先修 `-k` 表达式
 （本仓栽过这个假绿）。
@@ -450,10 +468,10 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
   -m pytest tests/test_qmt_manifest.py -q \
-  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11" -v
+  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4" -v
 ```
 
-Expected: **5 passed**。
+Expected: **4 passed**。
 
 - [ ] **Step 5：跑后端全套，确认没碰坏任何邻居**
 
@@ -464,7 +482,7 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1628 passed / 3 failed**。
+Expected: **1627 passed / 3 failed**（基线 1620 + Task 1 的 6 + 本任务的 4 = 1630 条，其中 3 条既有恢复测试此刻为红）。
 ⚠️ 这 3 条红是**预期之中**的：它们是 spec §2.5 枚举出的既有恢复测试，
 原本「移除记录但不退还」，由 **Task 4b** 统一迁移。名字必须与 §2.5 列的三条**逐条相同**；
 出现**第四条**红，或红的名字对不上，都要立刻停下查清楚。
@@ -505,40 +523,32 @@ Task 2 的等式会让新增那只股**完全不计账**。本任务堵上它。
 
 ```python
 def test_r1_u15_recovery_that_also_adds_another_stock_rejected():
-    """U15 · 恢复提交里**完整移除 A 的同时新增 B** —— 必须拦（R4）。
+    """U15 · 恢复提交里**完整移除受害股的同时新增另一只** —— 必须拦（R4）。
 
     ⚠️ 夹具把 committed_bytes 抬高 1000 万：这样「被拦住」只可能是 R4 干的，
     不会是固有下界检查代为拦截（否则这条用例测不到它要测的判据）。
     """
     before = _r1_base(headroom=10_000_000)
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    # ⚠️ 池模板必须从 **before** 取：移除 A 之后 after 的 SH 池已经空了，
-    # 从它取 `[0]` 会抛 IndexError，用例根本走不到守卫（codex 实测）。
-    b_entry = _r1_pool_entry(before, _R1_B[0])
-    after["files"] = after["files"] + _r1_recs(*_R1_B)
-    after["pool_order"][_R1_MARKET] = after["pool_order"][_R1_MARKET] + [b_entry]
-    after = _recompute_evidence(after)
+    after, removed = _r1_remove_stock(before, refund=True)
+    after, _added = _r1_add_spare(after)
     after["committed_bytes"] = before["committed_bytes"] - removed
+    _r1_assert_valid(after, "U15 after")
     with pytest.raises(ManifestInvalidError, match="只许移除"):
         _require_no_progress_rollback(before, after, "U15",
                                       recovery=_r1_scope(before))
 
 
 def test_r1_u16_recovery_adding_another_stock_rejected_even_if_paid_for():
-    """U16 · 同 U15，但把 B 的字节补上 —— **照样拦**。
+    """U16 · 同 U15，但把新增那只的字节补上 —— **照样拦**。
 
     理由：恢复提交一律不许新增，否则 R2 的等式就不再可机械检验
     （无法区分「退还了多少」与「新增补了多少」）。
     """
     before = _r1_base(headroom=10_000_000)
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    b_entry = _r1_pool_entry(before, _R1_B[0])      # 同 U15：必须从 before 取
-    added_recs = _r1_recs(*_R1_B)
-    after["files"] = after["files"] + added_recs
-    after["pool_order"][_R1_MARKET] = after["pool_order"][_R1_MARKET] + [b_entry]
-    after = _recompute_evidence(after)
-    after["committed_bytes"] = (before["committed_bytes"] - removed
-                                + sum(r["bytes"] for r in added_recs))
+    after, removed = _r1_remove_stock(before, refund=True)
+    after, added = _r1_add_spare(after)
+    after["committed_bytes"] = before["committed_bytes"] - removed + added
+    _r1_assert_valid(after, "U16 after")
     with pytest.raises(ManifestInvalidError, match="只许移除"):
         _require_no_progress_rollback(before, after, "U16",
                                       recovery=_r1_scope(before))
@@ -601,7 +611,7 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1630 passed / 3 failed**（同 Task 2：那 3 条由 Task 4b 迁移）。
+Expected: **1629 passed / 3 failed**（同 Task 2：那 3 条由 Task 4b 迁移）。
 
 - [ ] **Step 6：提交**
 
@@ -634,13 +644,22 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1：写用例（U8、U9、U10）**
 
 ```python
-def _r1_readd(m_removed, base_full, committed):
-    """重拉：把 A 的两条记录与池条目加回来、游标推回去，committed_bytes 设为给定值。"""
+def _r1_readd(m_removed, base_full, committed, code=_R1_VICTIM):
+    """重拉：把受害股的两条记录加回 files，池条目**追加到末尾**，游标推回去。
+
+    ⚠️ **不能把池条目插回原位**（实测）：`pool_order` 只许**按序追加**，
+    恢复删掉中间那只之后，重拉若还原成原来的顺序，守卫会报
+    「改写了已提交池条目的**顺序**」。这是系统的既有性质，不是本 PR 引入的 ——
+    重拉后该股在池序里排到末尾。本辅助函数照这个真实行为构造。
+    """
     m3 = _r1_copy.deepcopy(m_removed)
-    m3["files"] = _r1_copy.deepcopy(base_full["files"])
-    m3["pool_order"] = _r1_copy.deepcopy(base_full["pool_order"])
+    m3["files"] = m3["files"] + [f for f in base_full["files"]
+                                 if f["stock_code"] == code]
+    m3["pool_order"][_R1_MARKET] = m3["pool_order"][_R1_MARKET] + [
+        {"code": code,
+         "universe_idx": base_full["source_snapshot"]["universe"][_R1_MARKET].index(code)}]
     m3["cursor"] = _r1_copy.deepcopy(base_full["cursor"])
-    m3 = _recompute_evidence(m3)
+    _recompute_evidence(m3)
     m3["committed_bytes"] = committed
     return m3
 
@@ -661,7 +680,7 @@ def test_r1_u8_readd_after_refund_accepts_the_original_total():
     """U8 · 恢复（已退还）后重拉，nb = ob —— 必须放行。"""
     before = _r1_base()
     ob = before["committed_bytes"]
-    removed_m, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    removed_m, _removed = _r1_remove_stock(before, refund=True)
     _require_no_progress_rollback(
         removed_m, _r1_readd(removed_m, before, ob), "U8")      # 不抛即通过
 
@@ -670,7 +689,7 @@ def test_r1_u9_readd_one_byte_below_the_original_total_rejected():
     """U9 · 重拉时 nb = ob - 1 —— 仍受「至少涨够新增」约束，必须拦。"""
     before = _r1_base()
     ob = before["committed_bytes"]
-    removed_m, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    removed_m, _removed = _r1_remove_stock(before, refund=True)
     with pytest.raises(ManifestInvalidError):
         _require_no_progress_rollback(
             removed_m, _r1_readd(removed_m, before, ob - 1), "U9")
@@ -679,16 +698,16 @@ def test_r1_u9_readd_one_byte_below_the_original_total_rejected():
 def test_r1_u10_repeated_crash_and_readd_does_not_inflate_the_budget():
     """U10 · **R1 缺陷的直接回归钉**：连续两轮「崩 → 重拉」，预算不得被放大。
 
-    修复前：最小可接受值 ob → ob+366 → ob+732（实测 2400286 / 2400652）。
+    修复前：最小可接受值 ob → ob+S → ob+2S（S = 受害股两条记录之和）。
     修复后：两轮都恒等于 ob。
     """
     before = _r1_base()
     ob = before["committed_bytes"]
-    per_stock = _R1_EACH * 2
+    per_stock = _r1_victim_bytes(before)
     cur = before
     seen = []
     for _ in range(2):
-        removed_m, removed = _r1_remove_stock(cur, _R1_A[0], refund=True)
+        removed_m, _removed = _r1_remove_stock(cur, refund=True)
         _require_no_progress_rollback(cur, removed_m, "U10 恢复",
                                       recovery=_r1_scope(cur))
         lo = removed_m["committed_bytes"]
@@ -701,6 +720,34 @@ def test_r1_u10_repeated_crash_and_readd_does_not_inflate_the_budget():
         f"预算被放大了：两轮最小可接受值 {seen}，应当都等于 {ob}。"
         f"若出现 {[ob, ob + per_stock]} 这种递增，说明退还没生效。"
     )
+
+
+def test_r1_u17_end_to_end_recovery_and_readd_through_the_public_path(tmp_path):
+    """U17 · **走公开路径**的一整轮「崩 → 重拉」：commit_stock + read_manifest。
+
+    前面几条都是直接对转移守卫下断言（那是唯一能隔离单条判据的办法）。
+    本条补上端到端：证明退还在**真实提交路径**上也成立，且确实落了盘。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _r1_base()
+        ledger = _committed(fd, full)
+        ob = full["committed_bytes"]
+        rolled, removed = _r1_remove_stock(full, refund=True)
+        commit_stock(fd, rolled, ledger=ledger, recovery=_r1_scope(full))
+        assert read_manifest(fd)["committed_bytes"] == ob - removed, \
+            "退还必须真的落盘"
+        back = _r1_readd(rolled, full, ob)
+        commit_stock(fd, back, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["committed_bytes"] == ob, "重拉后累计量应回到 ob，不得被放大"
+        # 成员必须一致；**顺序会变**——重拉后受害股排到池序末尾（见 _r1_readd 的说明）。
+        assert {f["stock_code"] for f in on["files"]} == \
+            {f["stock_code"] for f in full["files"]}
+        assert [e["code"] for e in on["pool_order"][_R1_MARKET]][-1] == _R1_VICTIM, \
+            "重拉后受害股应排在池序末尾（pool_order 只许追加）"
+    finally:
+        os.close(fd)
 ```
 
 - [ ] **Step 2：跑它们**
@@ -709,10 +756,10 @@ def test_r1_u10_repeated_crash_and_readd_does_not_inflate_the_budget():
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend"
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
-  -m pytest tests/test_qmt_manifest.py -q -k "r1_u8 or r1_u9 or r1_u10" -v
+  -m pytest tests/test_qmt_manifest.py -q -k "r1_u8 or r1_u9 or r1_u10 or r1_u17" -v
 ```
 
-Expected: **3 passed**（Task 2/3 已经把判据改好，这三条应当直接绿）。
+Expected: **4 passed**（Task 2/3 已经把判据改好，这四条应当直接绿）。
 ⚠️ 若 U10 红且断言信息显示 `[ob, ob+366]`，说明退还没生效，回头查 Task 2。
 
 - [ ] **Step 3：跑后端全套**
@@ -918,9 +965,9 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 对应 spec §4。每条命令都要打印 `branch` 与 `HEAD`。
 
-- [ ] **A1 · 单文件**：`pytest tests/test_qmt_manifest.py -q -rs` ⇒ **397 passed / 0 skipped**
-      （基线 381 + U1–U16 共 16 条；R3 已删但 U12 保留为表征用例，条数不变）
-- [ ] **A2 · 全套**：`pytest tests/ -q -rs` ⇒ **1636 passed / 0 skipped**（基线 1620 + 16）
+- [ ] **A1 · 单文件**：`pytest tests/test_qmt_manifest.py -q -rs` ⇒ **396 passed / 0 skipped**
+      （基线 381 + 新增 15 条：U1–U10、U12–U17，U11 随 R3 一并删除）
+- [ ] **A2 · 全套**：`pytest tests/ -q -rs` ⇒ **1635 passed / 0 skipped**（基线 1620 + 15）
 - [ ] **A3 · 变异验证**：R1、R2 的等式两侧、R4 共 **4 条**判据逐条改反，
       每条至少让一个用例变红。纪律见 spec §4：
       - 按判据枚举不按语法枚举；变异必须落在该判据本身
@@ -945,8 +992,9 @@ implementation"** —— 它只审了设计、没跑任何代码。上面四条�
 - spec §2.2 R2 → Task 2；R4 → Task 3；~~R3~~ 已删（不可达，U12 钉住依据）
 - spec §2.3 算术 → Task 4 的 U8/U10
 - spec §2.4 明确不做 → Global Constraints 的「不碰」与「不新增字段」
-- spec §3 U1–U16 → Task 1（U5/U6/U7/U12/U13/U14）、Task 2（U1–U4/U11）、
-  Task 3（U15/U16）、Task 4（U8/U9/U10）—— **16 条全部有归属**
+- spec §3 的用例 → Task 1（U5/U6/U7/U12/U13/U14）、Task 2（U1–U4）、
+  Task 3（U15/U16）、Task 4（U8/U9/U10/U17）—— **15 条全部有归属**；
+  U11 随 R3 一并删除（退到 0 在没有 R3 之后不再有特殊含义）
 - spec §4 A1–A4 → 收尾验收四条
 - spec §5 基线 → Global Constraints
 - spec §2.5 三条既有测试迁移 → Task 4b
