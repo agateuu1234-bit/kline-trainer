@@ -6685,3 +6685,113 @@ def test_r1_u19_recovery_rejects_added_records_even_with_zero_bytes():
     with pytest.raises(ManifestInvalidError, match="只许移除"):
         _require_no_progress_rollback(before, after, "U19",
                                       recovery=_r1_scope(before))
+
+
+# ═════════════════════════════════════════════════════════════
+# Task 4：端到端回归 —— R1 缺陷本身的钉子
+# ═════════════════════════════════════════════════════════════
+
+def _r1_readd(m_removed, base_full, committed, code=_R1_VICTIM):
+    """重拉：把受害股的两条记录加回 files，池条目**追加到末尾**，游标推回去。
+
+    ⚠️ **不能把池条目插回原位**（实测）：`pool_order` 只许**按序追加**，
+    恢复删掉中间那只之后，重拉若还原成原来的顺序，守卫会报
+    「改写了已提交池条目的**顺序**」。这是系统的既有性质，不是本 PR 引入的 ——
+    重拉后该股在池序里排到末尾。本辅助函数照这个真实行为构造。
+    """
+    m3 = _r1_copy.deepcopy(m_removed)
+    m3["files"] = m3["files"] + [f for f in base_full["files"]
+                                 if f["stock_code"] == code]
+    m3["pool_order"][_R1_MARKET] = m3["pool_order"][_R1_MARKET] + [
+        {"code": code,
+         "universe_idx": base_full["source_snapshot"]["universe"][_R1_MARKET].index(code)}]
+    m3["cursor"] = _r1_copy.deepcopy(base_full["cursor"])
+    _recompute_evidence(m3)
+    m3["committed_bytes"] = committed
+    return m3
+
+
+def _r1_min_acceptable_on_readd(m_removed, base_full, lo, hi):
+    """扫描 [lo, hi]，返回重拉时最小可接受的 committed_bytes（没有则 None）。"""
+    for cand in range(lo, hi + 1):
+        try:
+            _require_no_progress_rollback(
+                m_removed, _r1_readd(m_removed, base_full, cand), "扫描")
+            return cand
+        except ManifestInvalidError:
+            continue
+    return None
+
+
+def test_r1_u8_readd_after_refund_accepts_the_original_total():
+    """U8 · 恢复（已退还）后重拉，nb = ob —— 必须放行。"""
+    before = _r1_base()
+    ob = before["committed_bytes"]
+    removed_m, _removed = _r1_remove_stock(before, refund=True)
+    _require_no_progress_rollback(
+        removed_m, _r1_readd(removed_m, before, ob), "U8")      # 不抛即通过
+
+
+def test_r1_u9_readd_one_byte_below_the_original_total_rejected():
+    """U9 · 重拉时 nb = ob - 1 —— 仍受「至少涨够新增」约束，必须拦。"""
+    before = _r1_base()
+    ob = before["committed_bytes"]
+    removed_m, _removed = _r1_remove_stock(before, refund=True)
+    with pytest.raises(ManifestInvalidError):
+        _require_no_progress_rollback(
+            removed_m, _r1_readd(removed_m, before, ob - 1), "U9")
+
+
+def test_r1_u10_repeated_crash_and_readd_does_not_inflate_the_budget():
+    """U10 · **R1 缺陷的直接回归钉**：连续两轮「崩 → 重拉」，预算不得被放大。
+
+    修复前：最小可接受值 ob → ob+S → ob+2S（S = 受害股两条记录之和）。
+    修复后：两轮都恒等于 ob。
+    """
+    before = _r1_base()
+    ob = before["committed_bytes"]
+    per_stock = _r1_victim_bytes(before)
+    cur = before
+    seen = []
+    for _ in range(2):
+        removed_m, _removed = _r1_remove_stock(cur, refund=True)
+        _require_no_progress_rollback(cur, removed_m, "U10 恢复",
+                                      recovery=_r1_scope(cur))
+        lo = removed_m["committed_bytes"]
+        got = _r1_min_acceptable_on_readd(removed_m, before,
+                                          lo, lo + per_stock + 3)
+        assert got is not None, "重拉找不到任何可接受的 committed_bytes"
+        seen.append(got)
+        cur = _r1_readd(removed_m, before, got)
+    assert seen == [ob, ob], (
+        f"预算被放大了：两轮最小可接受值 {seen}，应当都等于 {ob}。"
+        f"若出现 {[ob, ob + per_stock]} 这种递增，说明退还没生效。"
+    )
+
+
+def test_r1_u17_end_to_end_recovery_and_readd_through_the_public_path(tmp_path):
+    """U17 · **走公开路径**的一整轮「崩 → 重拉」：commit_stock + read_manifest。
+
+    前面几条都是直接对转移守卫下断言（那是唯一能隔离单条判据的办法）。
+    本条补上端到端：证明退还在**真实提交路径**上也成立，且确实落了盘。
+    """
+    d, fd = _staging(tmp_path)
+    try:
+        full = _r1_base()
+        ledger = _committed(fd, full)
+        ob = full["committed_bytes"]
+        rolled, removed = _r1_remove_stock(full, refund=True)
+        commit_stock(fd, rolled, ledger=ledger, recovery=_r1_scope(full))
+        assert read_manifest(fd)["committed_bytes"] == ob - removed, \
+            "退还必须真的落盘"
+        back = _r1_readd(rolled, full, ob)
+        commit_stock(fd, back, ledger=ledger)
+        on = read_manifest(fd)
+        assert on["committed_bytes"] == ob, "重拉后累计量应回到 ob，不得被放大"
+        # 成员必须一致；**顺序会变**——重拉后受害股排到池序末尾（见 _r1_readd 的说明）。
+        assert {f["stock_code"] for f in on["files"]} == \
+            {f["stock_code"] for f in full["files"]}
+        assert [e["code"] for e in on["pool_order"][_R1_MARKET]][-1] == _R1_VICTIM, \
+            "重拉后受害股应排在池序末尾（pool_order 只许追加）"
+    finally:
+        os.close(fd)
