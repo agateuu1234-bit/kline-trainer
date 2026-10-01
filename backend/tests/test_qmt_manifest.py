@@ -6505,10 +6505,22 @@ def _r1_add_spare(m):
 
 
 def test_r1_u5_undeclared_rollback_still_rejected():
-    """U5 · **未**声明恢复时把累计量调小 —— R1 不变，照旧拦。"""
+    """U5 · **未**声明恢复时删 files 记录（连带把累计量调小）—— R1 不变，照旧拦。
+
+    ⚠️ **判别力订正**（控制者变异自测 2026-10-01 坐实）：原 docstring 说本用例
+    钉的是「累计量不许调小」那条（守卫⑤ else 分支），但停用那条判据后本用例
+    **照样全绿**——真正拦住它的是**排在更前面**的守卫②（已提交的 files 记录
+    不得回滚）：本夹具用 `_r1_remove_stock` 先摘掉受害股的两条 files 记录，
+    未声明 `recovery` 时守卫②没有豁免，先一步抛错，守卫⑤根本走不到。
+    「累计量不许调小」那条判据由**既有的**
+    `test_a_stale_snapshot_cannot_rewrite_committed_state` 参数化用例里
+    `[committed_bytes 被调小]` 那一档钉着（它只改 committed_bytes、不动
+    files，专门隔离出守卫⑤）。本用例仍有效：钉住「未声明恢复时，files
+    记录消失会被拦」。
+    """
     before = _r1_base()
     after, _removed = _r1_remove_stock(before, refund=True)
-    with pytest.raises(ManifestInvalidError):
+    with pytest.raises(ManifestInvalidError, match="已提交的 files 记录"):
         _require_no_progress_rollback(before, after, "U5")   # 不传 recovery
 
 
@@ -6522,7 +6534,8 @@ def test_r1_u6_partial_removal_still_rejected():
     after["files"] = [f for f in after["files"]
                       if not (f["stock_code"] == _R1_VICTIM and f["period"] == "1m")]
     _recompute_evidence(after)
-    with pytest.raises(ManifestInvalidError):
+    with pytest.raises(ManifestInvalidError,
+                       match="spec 要求那只股的两条 files 与池条目"):
         _require_no_progress_rollback(before, after, "U6",
                                       recovery=_r1_scope(before))
 
@@ -6533,7 +6546,7 @@ def test_r1_u7_removal_without_cursor_rewind_still_rejected():
     after, _removed = _r1_remove_stock(before, refund=True)
     after["cursor"][_R1_MARKET] = before["cursor"][_R1_MARKET]   # 把游标推回去
     _recompute_evidence(after)
-    with pytest.raises(ManifestInvalidError):
+    with pytest.raises(ManifestInvalidError, match="删条目与退游标是"):
         _require_no_progress_rollback(before, after, "U7",
                                       recovery=_r1_scope(before))
 
@@ -6561,6 +6574,44 @@ def test_r1_u12_negative_refund_is_caught_by_the_intrinsic_check():
     with pytest.raises(ManifestInvalidError, match="不小于两者之和"):
         _require_no_progress_rollback(before, after, "U12",
                                       recovery=_r1_scope(before))
+
+
+def _r1_u11_base():
+    """U11 专用夹具：**零字节 `staged_export_log`** + 受害股以外的 files 记录
+    字节也清零，使受害股自身的字节成为这份账本 committed_bytes 的**唯一**
+    来源：`ob = _min_bytes(m) = 受害股字节之和`。
+
+    ⚠️ 必须这样构造（spec §3 U11 实测）：不清零时固有下界
+    （`nb ≥ sum(files) + staged_export_log`）会在退还到 0 之前就先把 `ob`
+    本身的下限抬高，导致「退还后恰好为 0」这一格永远够不着——
+    退还后剩下的其它股 files 与 export_log 必须都是 0 字节，0 才可能
+    同时等于 `nb` 又不小于固有下界。
+    """
+    m = _multi_stock()
+    for f in m["files"]:
+        if f["stock_code"] != _R1_VICTIM:
+            f["bytes"] = 0
+    m["staged_export_log"]["bytes"] = 0
+    _recompute_evidence(m)
+    m["committed_bytes"] = _min_bytes(m)
+    return _r1_assert_valid(m, "_r1_u11_base")
+
+
+def test_r1_u11_refund_to_zero_does_not_trip_the_intrinsic_floor():
+    """U11 · 退款分支把累计量恰好退到 **0** —— 固有下界检查不得误伤（R2 边界）。
+
+    `_r1_u11_base()` 让受害股自身字节成为 `committed_bytes` 的唯一来源
+    （其余 files 与 `staged_export_log` 都清零），于是 `ob` 恰等于受害股
+    字节之和；完整移除受害股并恰好退还后，`nb = 0`——这正是「退款分支
+    与固有下界在 0 这个边界上不打架」要钉的那一格：**放行**，不抛异常。
+    """
+    before = _r1_u11_base()
+    after, removed = _r1_remove_stock(before, refund=True)
+    assert removed == before["committed_bytes"], \
+        "夹具自检：受害股字节应恰好吃光全部累计量"
+    assert after["committed_bytes"] == 0, "夹具自检：退还后累计量应恰为 0"
+    _require_no_progress_rollback(before, after, "U11",
+                                  recovery=_r1_scope(before))   # 不抛即通过
 
 
 def test_r1_u13_normal_non_recovery_commit_passes():
