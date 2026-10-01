@@ -4,7 +4,7 @@
 
 **Goal:** 让崩溃恢复删掉某只股的 `files` 记录时**同步退还**它们的字节，使同一只股反复重拉不再重复消耗 `--max-bytes` 预算。
 
-**Architecture:** 只改 `backend/qmt_manifest.py` 里 `_require_no_progress_rollback` 的 `committed_bytes` 那一段。把它分成两支：`scoped_removed` 为假时**原样保留**现状（`nb ≥ ob` 且 `nb ≥ ob + added`）；为真时换成三条更严的判据（不得新增、必须恰好退还、不得为负）。不新增任何持久化字段，不动 `manifest_version`。
+**Architecture:** 只改 `backend/qmt_manifest.py` 里 `_require_no_progress_rollback` 的 `committed_bytes` 那一段。把它分成两支：`scoped_removed` 为假时**原样保留**现状（`nb ≥ ob` 且 `nb ≥ ob + added`）；为真时换成两条更严的判据（不得新增、必须恰好退还）。不新增任何持久化字段，不动 `manifest_version`。
 
 **Tech Stack:** Python 3.11+（纯标准库）、pytest。解释器：`/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python`。
 
@@ -34,7 +34,7 @@
 **判据**（spec §2.2）：
 - **R1** `scoped_removed` 为假 ⇒ `nb ≥ ob` 且 `nb ≥ ob + added`（**现状，原样保留**）
 - **R2** `scoped_removed` 为真 ⇒ `nb` 必须**恰好等于** `ob - removed_bytes`
-- **R3** `nb ≥ 0`
+- ~~R3 `nb ≥ 0`~~ **已删**：固有检查 `_require_intrinsic_payload_ok` 先跑，要求 `nb ≥ sum(files) + staged_export_log ≥ 0` ⇒ 负数永远到不了退款分支（实测）。按 CLAUDE.md §2「不为不可能的场景写错误处理」不实现
 - **R4** `scoped_removed` 为真 ⇒ `added` 必须为 0
 
 ---
@@ -51,18 +51,20 @@
 
 ## Task 1：先把「现状必须不变」的那几格钉住
 
-这一步**不改产品代码**。先补上 5 条「今天就该这样」的用例，它们加进去**应当直接绿**。
-价值：后面三个任务改守卫时，这 5 条就是「没误伤邻居」的证据；若它们一开始就不绿，
+这一步**不改产品代码**。先补上 6 条「今天就该这样」的用例，它们加进去**应当直接绿**。
+价值：后面三个任务改守卫时，这 6 条就是「没误伤邻居」的证据；若它们一开始就不绿，
 说明我对现状的理解有误，必须先停下来查清楚。
+其中 U12 还承担一个特殊职责：它钉住「`nb` 不可能为负」这个事实，**而那正是退款分支里
+不写非负检查的依据**。哪天固有检查被放宽，U12 会变红，提醒下一个人把 R3 加回来。
 
 **Files:**
 - Modify: `backend/tests/test_qmt_manifest.py`（文件末尾追加）
 
 **Interfaces:**
 - Consumes: 该文件已有的 `_valid_manifest()`、`_file_rec(code, name, period)`、`_min_bytes(m)`、`_recompute_evidence(m)`；`qmt_manifest` 的 `_require_no_progress_rollback`、`ManifestInvalidError`、`RecoveryScope`
-- Produces: 本节的四个辅助函数 `_r1_base()`、`_r1_recs(code, name, nbytes)`、`_r1_pool_entry(m, code)`、`_r1_remove_stock(m, code, refund)`，Task 2–4 都用它们
+- Produces: 本节的五个辅助函数 `_r1_recs(code, name, nbytes)`、`_r1_pool_entry(m, code)`、`_r1_base(headroom)`、`_r1_remove_stock(m, code, refund) -> (m, removed)`、`_r1_scope(m, code)`，Task 2–4 都用它们
 
-- [ ] **Step 1：在 `backend/tests/test_qmt_manifest.py` 末尾追加辅助函数与 5 条用例**
+- [ ] **Step 1：在 `backend/tests/test_qmt_manifest.py` 末尾追加辅助函数与 6 条用例**
 
 ```python
 # ── R1 · committed_bytes 退还（2026-10-01 spec）─────────────────────────────
@@ -178,6 +180,24 @@ def test_r1_u13_normal_non_recovery_commit_passes():
     _require_no_progress_rollback(before, after, "U13")      # 不抛即通过
 
 
+def test_r1_u12_negative_refund_is_caught_by_the_intrinsic_check():
+    """U12 · 账本已损坏（ob < 被移除字节），退还会变成负数 —— 必须拦。
+
+    ⚠️ 这是一条**表征用例**：拦住它的是**固有检查**
+    （`nb ≥ sum(files) + staged_export_log`），不是退款分支。
+    正因为固有检查保证了 `nb ≥ 0`，退款分支里**不需要**再查一次非负
+    —— 那条判据永远执行不到，故本 PR 不实现它（CLAUDE.md §2）。
+    本用例的作用就是把这个依据钉住：哪天固有检查被放宽，它会变红。
+    """
+    before = _r1_base()
+    before["committed_bytes"] = _R1_EACH            # 比该股两条之和还小
+    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    assert after["committed_bytes"] < 0, "夹具自检：这份账本退还后应为负"
+    with pytest.raises(ManifestInvalidError, match="不小于两者之和"):
+        _require_no_progress_rollback(before, after, "U12",
+                                      recovery=_r1_scope(before))
+
+
 def test_r1_u14_identical_recopy_with_zero_added_still_passes():
     """U14 · 重拷成功那一格：记录逐字相同 ⇒ added = 0，而 nb > ob —— 必须放行。
 
@@ -196,10 +216,11 @@ def test_r1_u14_identical_recopy_with_zero_added_still_passes():
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend"
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
-  -m pytest tests/test_qmt_manifest.py -q -k "r1_u5 or r1_u6 or r1_u7 or r1_u13 or r1_u14" -v
+  -m pytest tests/test_qmt_manifest.py -q \
+  -k "r1_u5 or r1_u6 or r1_u7 or r1_u12 or r1_u13 or r1_u14" -v
 ```
 
-Expected: **5 passed**。
+Expected: **6 passed**。
 ⚠️ 若任何一条红，**停下来**——说明我对现状的理解有误，不要改产品代码去迁就它。
 
 - [ ] **Step 3：跑单文件全量，确认没碰坏邻居**
@@ -211,25 +232,25 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/test_qmt_manifest.py -q -rs
 ```
 
-Expected: **386 passed / 0 skipped**（基线 381 + 新增 5）。
+Expected: **387 passed / 0 skipped**（基线 381 + 新增 6）。
 
 - [ ] **Step 4：提交**
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes"
 git add backend/tests/test_qmt_manifest.py
-git commit -m "test(R1): 先钉住五格现状（未声明回退/部分移除/没退游标/正常提交/重拷成功）
+git commit -m "test(R1): 先钉住六格现状（含「负数由固有检查拦」这条表征用例）
 
-这五条在改动前就应当全绿，是后面三个任务「没误伤邻居」的基准。
-U14 尤其关键：它是 D7 的 S2-F38 悬案（≥ 不可收紧），本 PR 只收紧
-scoped_removed 那一格，不得误伤它。
+这六条在改动前就应当全绿，是后面三个任务「没误伤邻居」的基准。
+U14 是 D7 的 S2-F38 悬案（≥ 不可收紧），本 PR 只收紧 scoped_removed 那一格；
+U12 钉住「nb 不可能为负」这个事实 —— 它正是退款分支里不再写非负检查的依据。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 2：R2 + R3（恢复时必须恰好退还，且不得为负）
+## Task 2：R2（恢复时必须恰好退还）
 
 **Files:**
 - Modify: `backend/qmt_manifest.py:1546-1575`
@@ -239,7 +260,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: Task 1 的 `_r1_base()`、`_r1_remove_stock()`、`_r1_scope()`
 - Produces: 改造后的 `committed_bytes` 判据块；Task 3 在同一块里加 R4
 
-- [ ] **Step 1：写失败的测试（U1–U4、U11、U12）**
+- [ ] **Step 1：写失败的测试（U1–U4、U11）**
 
 追加到 `backend/tests/test_qmt_manifest.py`：
 
@@ -264,8 +285,12 @@ def test_r1_u2_recovery_without_refund_rejected():
 
 
 def test_r1_u3_recovery_refunding_one_byte_too_much_rejected():
-    """U3 · 多退 1 字节 —— 等式的下侧要钉住。"""
-    before = _r1_base()
+    """U3 · 多退 1 字节 —— 等式的下侧要钉住。
+
+    ⚠️ 必须带 headroom：无余量时 `ob - removed - 1` 会低于固有下界，
+    于是先被**固有检查**拦掉，这条用例就测不到 R2（codex 实测）。
+    """
+    before = _r1_base(headroom=10_000_000)
     after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
     after["committed_bytes"] -= 1
     with pytest.raises(ManifestInvalidError, match="恰好退还"):
@@ -284,26 +309,20 @@ def test_r1_u4_recovery_refunding_one_byte_too_little_rejected():
 
 
 def test_r1_u11_refund_down_to_exactly_zero_passes():
-    """U11 · 退还后恰好为 0 —— 边界，0 合法。"""
+    """U11 · 退还后恰好为 0 —— 边界，0 合法。
+
+    ⚠️ 必须用**零字节 `export_log`** 的夹具：默认夹具的日志占 2399554 字节，
+    固有下界因此远高于 0，退到 0 会先被固有检查拦掉（codex 实测）。
+    把日志清零后，移除该股之后的下界也是 0，退款分支才够得着。
+    """
     before = _r1_base()
-    before["committed_bytes"] = sum(f["bytes"] for f in before["files"])
-    # 这份账本的 committed_bytes 低于固有下界，固有检查会先拦；
-    # 故本例直接对转移守卫下断言，不走端到端。
+    before["staged_export_log"]["bytes"] = 0
+    before = _recompute_evidence(before)
+    before["committed_bytes"] = _min_bytes(before)      # == 该股两条之和
     after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    assert after["committed_bytes"] == 0
+    assert after["committed_bytes"] == 0, "夹具自检：退还后应恰好为 0"
     _require_no_progress_rollback(before, after, "U11",
                                   recovery=_r1_scope(before))   # 不抛即通过
-
-
-def test_r1_u12_refund_that_would_go_negative_rejected():
-    """U12 · 账本已损坏（ob < removed），退还会变负 —— 必须拦。"""
-    before = _r1_base()
-    before["committed_bytes"] = _R1_EACH            # 比该股两条之和还小
-    after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
-    assert after["committed_bytes"] < 0, "夹具自检：这份账本退还后应为负"
-    with pytest.raises(ManifestInvalidError, match="不得为负"):
-        _require_no_progress_rollback(before, after, "U12",
-                                      recovery=_r1_scope(before))
 ```
 
 - [ ] **Step 2：跑它们，确认全红**
@@ -313,12 +332,15 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
   -m pytest tests/test_qmt_manifest.py -q \
-  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11 or r1_u12" -v
+  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11" -v
 ```
 
-Expected: **6 failed**。
+Expected: **5 failed**。
 - U1 / U11 应报「committed_bytes 从 … 变成 … 它是累计量，调小…」
-- U2 / U3 / U4 / U12 应报 `DID NOT RAISE` 或匹配不上 `恰好退还` / `不得为负`
+- U2 / U3 / U4 应报 `DID NOT RAISE` 或匹配不上 `恰好退还`
+
+⚠️ 若 U3 或 U11 报的是「须为非负整数且不小于两者之和」，说明夹具的余量 / 零字节日志
+没设对 —— 那是**固有检查**在拦，这条用例测不到 R2，必须先修夹具。
 
 ⚠️ **若出现 `no tests ran`，不算红**——那是选择器没选中任何用例，必须先修 `-k` 表达式
 （本仓栽过这个假绿）。
@@ -365,12 +387,9 @@ Expected: **6 failed**。
                     f"{where} 崩溃恢复没有给出合法的 committed_bytes —— "
                     "恢复必须**恰好退还**被移除记录的字节数，缺了它无从比较。"
                 )
-            if nb < 0:
-                raise ManifestInvalidError(
-                    f"{where} 崩溃恢复把 committed_bytes 退成了 {nb}——"
-                    "累计量**不得为负**。出现这种值说明上一份账本已经损坏"
-                    f"（ob={ob}，被移除记录合计 {removed_bytes} 字节）。"
-                )
+            # 注：这里**不**再查 `nb < 0`。开头的 `_require_intrinsic_payload_ok`
+            # 已要求 `nb ≥ sum(files) + staged_export_log ≥ 0`，负数到不了这里
+            # （U12 是它的表征用例）。按 CLAUDE.md §2 不为不可能的场景写处理。
             if nb != ob - removed_bytes:
                 raise ManifestInvalidError(
                     f"{where} 崩溃恢复移除了合计 {removed_bytes} 字节的 files "
@@ -422,10 +441,10 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
 PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
   -m pytest tests/test_qmt_manifest.py -q \
-  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11 or r1_u12" -v
+  -k "r1_u1 or r1_u2 or r1_u3 or r1_u4 or r1_u11" -v
 ```
 
-Expected: **6 passed**。
+Expected: **5 passed**。
 
 - [ ] **Step 5：跑后端全套，确认没碰坏任何邻居**
 
@@ -436,7 +455,7 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1631 passed / 0 skipped**（基线 1620 + Task 1 的 5 + 本任务的 6）。
+Expected: **1631 passed / 0 skipped**（基线 1620 + Task 1 的 6 + 本任务的 5）。
 ⚠️ 出现任何 failed 或 skipped 都要停下查清楚，不许继续。
 
 - [ ] **Step 6：提交**
@@ -444,10 +463,11 @@ Expected: **1631 passed / 0 skipped**（基线 1620 + Task 1 的 5 + 本任务�
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes"
 git add backend/qmt_manifest.py backend/tests/test_qmt_manifest.py
-git commit -m "fix(R1): 崩溃恢复必须恰好退还被移除记录的字节（R2 + R3）
+git commit -m "fix(R1): 崩溃恢复必须恰好退还被移除记录的字节（R2）
 
 committed_bytes 判据分成两支：scoped_removed 为假时原样保留现状；
-为真时要求 nb 恰好等于 ob - removed_bytes，且不得为负。
+为真时要求 nb 恰好等于 ob - removed_bytes。
+不再写非负检查 —— 固有检查已保证 nb ≥ 0，那条判据不可达（U12 钉住这个依据）。
 口子挂在既有的 scoped_removed 上，不另造旁路；removed_bytes 由前后两份
 files 的差集算出，不依赖调用方自报，所以这个口子不是可滥用的旁路。
 
@@ -481,10 +501,11 @@ def test_r1_u15_recovery_that_also_adds_another_stock_rejected():
     """
     before = _r1_base(headroom=10_000_000)
     after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    # ⚠️ 池模板必须从 **before** 取：移除 A 之后 after 的 SH 池已经空了，
+    # 从它取 `[0]` 会抛 IndexError，用例根本走不到守卫（codex 实测）。
+    b_entry = _r1_pool_entry(before, _R1_B[0])
     after["files"] = after["files"] + _r1_recs(*_R1_B)
-    after["pool_order"][_R1_MARKET] = (
-        after["pool_order"][_R1_MARKET] + [_r1_pool_entry(after, _R1_B[0])]
-    )
+    after["pool_order"][_R1_MARKET] = after["pool_order"][_R1_MARKET] + [b_entry]
     after = _recompute_evidence(after)
     after["committed_bytes"] = before["committed_bytes"] - removed
     with pytest.raises(ManifestInvalidError, match="只许移除"):
@@ -500,11 +521,10 @@ def test_r1_u16_recovery_adding_another_stock_rejected_even_if_paid_for():
     """
     before = _r1_base(headroom=10_000_000)
     after, removed = _r1_remove_stock(before, _R1_A[0], refund=True)
+    b_entry = _r1_pool_entry(before, _R1_B[0])      # 同 U15：必须从 before 取
     added_recs = _r1_recs(*_R1_B)
     after["files"] = after["files"] + added_recs
-    after["pool_order"][_R1_MARKET] = (
-        after["pool_order"][_R1_MARKET] + [_r1_pool_entry(after, _R1_B[0])]
-    )
+    after["pool_order"][_R1_MARKET] = after["pool_order"][_R1_MARKET] + [b_entry]
     after = _recompute_evidence(after)
     after["committed_bytes"] = (before["committed_bytes"] - removed
                                 + sum(r["bytes"] for r in added_recs))
@@ -522,7 +542,8 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/test_qmt_manifest.py -q -k "r1_u15 or r1_u16" -v
 ```
 
-Expected: **2 failed**（U15 报 `DID NOT RAISE`；U16 可能匹配不上 `只许移除`）。
+Expected: **2 failed**（U15/U16 报 `DID NOT RAISE` 或匹配不上 `只许移除`）。
+⚠️ 若报的是 `IndexError`，说明池模板还是从 `after` 取的 —— 用例没走到守卫，必须先修夹具。
 ⚠️ `no tests ran` 不算红。
 
 - [ ] **Step 3：加 R4 判据**
@@ -758,13 +779,13 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 对应 spec §4。每条命令都要打印 `branch` 与 `HEAD`。
 
 - [ ] **A1 · 单文件**：`pytest tests/test_qmt_manifest.py -q -rs` ⇒ **397 passed / 0 skipped**
-      （基线 381 + U1–U16 共 16 条）
+      （基线 381 + U1–U16 共 16 条；R3 已删但 U12 保留为表征用例，条数不变）
 - [ ] **A2 · 全套**：`pytest tests/ -q -rs` ⇒ **1636 passed / 0 skipped**（基线 1620 + 16）
-- [ ] **A3 · 变异验证**：R1、R2 的等式两侧、R3、R4 共 **5 条**判据逐条改反，
+- [ ] **A3 · 变异验证**：R1、R2 的等式两侧、R4 共 **4 条**判据逐条改反，
       每条至少让一个用例变红。纪律见 spec §4：
       - 按判据枚举不按语法枚举；变异必须落在该判据本身
         （把 R2 的 `!=` 改成 `<`、改成 `>`；把 `removed_bytes` 的求和改成只数条数；
-        把 R4 的 `if added_in_recovery:` 改成 `if False:`；把 R3 的 `nb < 0` 改成 `nb < -1`）
+        把 R4 的 `if added_in_recovery:` 改成 `if False:`）
       - 每次变异前后清 `__pycache__`，带 `PYTHONDONTWRITEBYTECODE=1`
       - 把邻居用例 deselect 掉单独跑目标用例
       - 还原后用 `sha256` 与变异前逐字比对
@@ -781,10 +802,10 @@ implementation"** —— 它只审了设计、没跑任何代码。上面四条�
 **1. Spec 覆盖**：
 - spec §2.1 恢复时退还 → Task 2
 - spec §2.2 R1 → Task 2 Step 3 的 `else` 分支（原文一字不改）
-- spec §2.2 R2 → Task 2；R3 → Task 2；R4 → Task 3
+- spec §2.2 R2 → Task 2；R4 → Task 3；~~R3~~ 已删（不可达，U12 钉住依据）
 - spec §2.3 算术 → Task 4 的 U8/U10
 - spec §2.4 明确不做 → Global Constraints 的「不碰」与「不新增字段」
-- spec §3 U1–U16 → Task 1（U5/U6/U7/U13/U14）、Task 2（U1–U4/U11/U12）、
+- spec §3 U1–U16 → Task 1（U5/U6/U7/U12/U13/U14）、Task 2（U1–U4/U11）、
   Task 3（U15/U16）、Task 4（U8/U9/U10）—— **16 条全部有归属**
 - spec §4 A1–A4 → 收尾验收四条
 - spec §5 基线 → Global Constraints
