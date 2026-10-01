@@ -6413,3 +6413,160 @@ def test_a_max_bytes_annotation_does_not_pretend_the_run_published_a_fatal(tmp_p
         assert st.recheck == "passed", "已登记的复校结论不该被附注清掉"
     finally:
         os.close(fd)
+
+
+# ── R1 · committed_bytes 退还（2026-10-01 spec）─────────────────────────────
+# 术语：ob = 上一份的 committed_bytes；nb = 本次的；
+#       removed_bytes = 消失的记录字节之和；added = 新增记录字节之和。
+#
+# ⚠️ 夹具一律**复用既有的 `_multi_stock()`**，不自己手搓。
+# 理由（codex 实测点出）：手搓时很容易只改一个市场的池，把别的市场的池条目
+# 变成「有池条目、没 files 记录」的孤儿，而 `validate_manifest` 会拒绝那种账本。
+# 直接调 `_require_no_progress_rollback` 不做形状校验，于是用例会在**非法账本**
+# 上通过 —— 测了个寂寞。`_multi_stock()` 本身是合法的，且现有的两条恢复测试
+# 就用它，结构一致。
+import copy as _r1_copy
+
+from qmt_manifest import RecoveryScope as _R1Scope, validate_manifest as _r1_validate
+
+_R1_VICTIM = "600004.SH"      # 被恢复移除的那只（SH 名单里下标 1，与现有恢复测试一致）
+_R1_SPARE = ("000002.SZ", "万科A")   # 冻结名单里有、但池里还没有的一只（用来测 R4）
+_R1_MARKET = "SH"
+
+
+def _r1_assert_valid(m, label):
+    """任何**意在合法**的夹具都要过一次真校验 —— 不让非法账本偷偷通过用例。"""
+    _r1_validate(_r1_copy.deepcopy(m))
+    return m
+
+
+def _r1_base(headroom=0):
+    """起点账本 = 既有的 `_multi_stock()`，committed_bytes = 下界 + headroom。
+
+    headroom 的用途：把累计量抬到远高于固有下界，这样「被拦住」只可能是
+    转移守卫干的，不会是固有下界代为拦截（spec §3 的夹具纪律）。
+    """
+    m = _multi_stock()
+    m["committed_bytes"] = _min_bytes(m) + headroom
+    return _r1_assert_valid(m, "_r1_base")
+
+
+def _r1_victim_bytes(m, code=_R1_VICTIM):
+    return sum(f["bytes"] for f in m["files"] if f["stock_code"] == code)
+
+
+def _r1_remove_stock(m, refund, code=_R1_VICTIM):
+    """模拟崩溃恢复第③档：删该股的 files + 池条目 **且**退游标。
+
+    ⚠️ 退游标不可省：恢复是一次**耦合转移**（删条目且 cursor ← min(cursor, idx)），
+    只删不退会先被既有的耦合检查拦下，于是用例**测不到本 PR 的判据**。
+    """
+    m2 = _r1_copy.deepcopy(m)
+    removed = _r1_victim_bytes(m2, code)
+    idx = m2["source_snapshot"]["universe"][_R1_MARKET].index(code)
+    m2["files"] = [f for f in m2["files"] if f["stock_code"] != code]
+    m2["pool_order"][_R1_MARKET] = [e for e in m2["pool_order"][_R1_MARKET]
+                                    if e["code"] != code]
+    m2["cursor"][_R1_MARKET] = min(m2["cursor"][_R1_MARKET], idx)
+    _recompute_evidence(m2)
+    if refund:
+        m2["committed_bytes"] -= removed
+    return _r1_assert_valid(m2, "_r1_remove_stock"), removed
+
+
+def _r1_scope(m, code=_R1_VICTIM):
+    idx = m["source_snapshot"]["universe"][_R1_MARKET].index(code)
+    return _R1Scope(stock_code=code, market=_R1_MARKET, universe_idx=idx)
+
+
+def _r1_add_spare(m):
+    """把冻结名单里那只**还没进池**的股加进来（files 两条 + 池条目）。"""
+    code, name = _R1_SPARE
+    m2 = _r1_copy.deepcopy(m)
+    recs = [_file_rec(code, name, "1m"), _file_rec(code, name, "daily")]
+    m2["files"] += recs
+    m2["pool_order"]["SZ"].append(
+        {"code": code,
+         "universe_idx": m2["source_snapshot"]["universe"]["SZ"].index(code)})
+    _recompute_evidence(m2)
+    return m2, sum(r["bytes"] for r in recs)
+
+
+def test_r1_u5_undeclared_rollback_still_rejected():
+    """U5 · **未**声明恢复时把累计量调小 —— R1 不变，照旧拦。"""
+    before = _r1_base()
+    after, _removed = _r1_remove_stock(before, refund=True)
+    with pytest.raises(ManifestInvalidError):
+        _require_no_progress_rollback(before, after, "U5")   # 不传 recovery
+
+
+def test_r1_u6_partial_removal_still_rejected():
+    """U6 · 声明恢复但只**部分**移除 —— 既有耦合检查不得被削弱。
+
+    注：这一份**故意非法**（一只股只剩一条记录），所以不走 `_r1_assert_valid`。
+    """
+    before = _r1_base()
+    after = _r1_copy.deepcopy(before)
+    after["files"] = [f for f in after["files"]
+                      if not (f["stock_code"] == _R1_VICTIM and f["period"] == "1m")]
+    _recompute_evidence(after)
+    with pytest.raises(ManifestInvalidError):
+        _require_no_progress_rollback(before, after, "U6",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u7_removal_without_cursor_rewind_still_rejected():
+    """U7 · 声明恢复、完整移除，但 **cursor 没退** —— 耦合检查不得被削弱。"""
+    before = _r1_base()
+    after, _removed = _r1_remove_stock(before, refund=True)
+    after["cursor"][_R1_MARKET] = before["cursor"][_R1_MARKET]   # 把游标推回去
+    _recompute_evidence(after)
+    with pytest.raises(ManifestInvalidError):
+        _require_no_progress_rollback(before, after, "U7",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u12_negative_refund_is_caught_by_the_intrinsic_check():
+    """U12 · 账本已损坏（ob < 被移除字节），退还会变成负数 —— 必须拦。
+
+    ⚠️ 这是一条**表征用例**：拦住它的是**固有检查**
+    （`nb ≥ sum(files) + staged_export_log`），不是退款分支。
+    正因为固有检查保证了 `nb ≥ 0`，退款分支里**不需要**再查一次非负
+    —— 那条判据永远执行不到，故本 PR 不实现它（CLAUDE.md §2）。
+    本用例的作用就是把这个依据钉住：哪天固有检查被放宽，它会变红。
+    """
+    before = _r1_base()
+    before["committed_bytes"] = 1                  # 远低于被移除的字节数
+    after = _r1_copy.deepcopy(before)
+    removed = _r1_victim_bytes(after)
+    after["files"] = [f for f in after["files"] if f["stock_code"] != _R1_VICTIM]
+    after["pool_order"][_R1_MARKET] = [e for e in after["pool_order"][_R1_MARKET]
+                                       if e["code"] != _R1_VICTIM]
+    after["cursor"][_R1_MARKET] = 1
+    _recompute_evidence(after)
+    after["committed_bytes"] = 1 - removed
+    assert after["committed_bytes"] < 0, "夹具自检：这份账本退还后应为负"
+    with pytest.raises(ManifestInvalidError, match="不小于两者之和"):
+        _require_no_progress_rollback(before, after, "U12",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u13_normal_non_recovery_commit_passes():
+    """U13 · 正常的非恢复提交（新增一只股、累计量涨够）—— 必须放行。"""
+    before = _r1_base()
+    after, added = _r1_add_spare(before)
+    after["committed_bytes"] = before["committed_bytes"] + added
+    _r1_assert_valid(after, "U13 after")
+    _require_no_progress_rollback(before, after, "U13")      # 不抛即通过
+
+
+def test_r1_u14_identical_recopy_with_zero_added_still_passes():
+    """U14 · 重拷成功那一格：记录逐字相同 ⇒ added = 0，而 nb > ob —— 必须放行。
+
+    这是 D7 的 S2-F38 悬案（「能否收紧成严格相等」答否）。本 PR 只收紧
+    `scoped_removed` 那一格，**不得**误伤这一格。
+    """
+    before = _r1_base()
+    after = _r1_copy.deepcopy(before)                 # files 一字不改
+    after["committed_bytes"] = before["committed_bytes"] + 140
+    _require_no_progress_rollback(before, after, "U14")      # 不抛即通过
