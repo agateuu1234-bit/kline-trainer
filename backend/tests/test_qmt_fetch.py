@@ -1312,8 +1312,9 @@ def test_recovery_removing_a_stock_must_refund_its_bytes(roots):
                          if f["stock_code"] == "600000.SH")
     payload["committed_bytes"] = committed_bytes_after - removed_bytes
 
-    result = commit_stock(stg_fd, payload, ledger=ledger, recovery=recovery)
-    assert result["committed_bytes"] == committed_bytes_after - removed_bytes, \
+    commit_stock(stg_fd, payload, ledger=ledger, recovery=recovery)
+    disk = read_manifest(stg_fd)
+    assert disk["committed_bytes"] == committed_bytes_after - removed_bytes, \
         "落盘后的累计值必须等于退还后的数，不能只是通过了守卫"
 
 
