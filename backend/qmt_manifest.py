@@ -1560,14 +1560,33 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
                     b = _int_or_none(rec.get("bytes"))
                     if b is not None:
                         removed_bytes += b
+            # ⚠️ 这条检查按生产路径推理是「走不到」的（见下一条注释：`nb` 到这里
+            # 时已经被 `_require_intrinsic_payload_ok` 钉成合法非负整数），但
+            # **不能**像被删掉的 R3 那样直接拿掉 —— 两者后果不同：R3 删掉只是
+            # 少一次校验；这里删掉的话，`nb` 若真的是 `None`，会落进下面
+            # `nb != ob - removed_bytes` 那条等式判据（`None != int` 在 Python
+            # 里合法求值为 True，并不会抛裸异常），但报出来的话术会变成
+            # 「committed_bytes 从 {ob} 变成 None」——把「根本没给出合法值」
+            # 误读成「数值对不上」，诊断信息失真。保留这条显式检查，是为了在
+            # 这种情形下给出准确的归因。
             if nb is None:
                 raise ManifestInvalidError(
                     f"{where} 崩溃恢复没有给出合法的 committed_bytes —— "
-                    "恢复必须**恰好退还**被移除记录的字节数，缺了它无从比较。"
+                    "恢复必须**恰好退还**被移除记录的字节数"
+                    f"（应为 {ob - removed_bytes}），缺了它无从比较。"
                 )
             # 注：这里**不**再查 `nb < 0`。开头的 `_require_intrinsic_payload_ok`
-            # 已要求 `nb ≥ sum(files) + staged_export_log ≥ 0`，负数到不了这里
-            # （U12 是它的表征用例）。按 CLAUDE.md §2 不为不可能的场景写处理。
+            # 只在「`files` 非空或 `staged_export_log` 不为 None」成立时，才会
+            # 强制 `nb ≥ sum(files) + staged_export_log ≥ 0`；这条前置条件在这里
+            # 恒真，靠的不是 `files`（恢复后它完全可能是空的），而是
+            # `staged_export_log` ——它既是读侧**必需键**（永不缺席、永不为
+            # None），又是**冻结字段**（本函数前面的 ① 已经保证 payload 与
+            # previous 逐字段相同），所以 `sel is not None` 永远成立，
+            # `nb ≥ 0` 因此必然成立（U12 是它的表征用例）。按 CLAUDE.md §2
+            # 不为不可能的场景写处理。
+            # ⚠️ 这个依据不是永久的：哪天 `staged_export_log` 不再是必需键、
+            # 或者不再是冻结字段，这两处前提只要有一处被放宽，这里的「恒真」
+            # 就会落空，退款分支就会在负数场景下悄悄放行。
             if nb != ob - removed_bytes:
                 raise ManifestInvalidError(
                     f"{where} 崩溃恢复移除了合计 {removed_bytes} 字节的 files "

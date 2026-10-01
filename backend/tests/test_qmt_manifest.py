@@ -6613,3 +6613,17 @@ def test_r1_u4_recovery_refunding_one_byte_too_little_rejected():
     with pytest.raises(ManifestInvalidError, match="恰好退还"):
         _require_no_progress_rollback(before, after, "U4",
                                       recovery=_r1_scope(before))
+
+
+def test_r1_u18_declared_recovery_that_removed_nothing_takes_the_else_branch():
+    """U18 · 声明了恢复范围但**什么都没移除** ⇒ `scoped_removed` 为假 ⇒ 照旧走 else 分支。
+
+    钉住的是「口子挂在 `scoped_removed` 上」这条硬约束本身：
+    若有人把它改挂到 `recovery is not None`，这条会变红
+    （变异体会把这次合法提交当成「移除了 0 字节的恢复」而拦死）。
+    """
+    before = _r1_base()
+    after, added = _r1_add_spare(before)
+    after["committed_bytes"] = before["committed_bytes"] + added
+    _r1_assert_valid(after, "U18 after")
+    _require_no_progress_rollback(before, after, "U18", recovery=_r1_scope(before))
