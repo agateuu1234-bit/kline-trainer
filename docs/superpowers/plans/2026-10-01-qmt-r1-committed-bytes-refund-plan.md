@@ -44,7 +44,8 @@
 | 文件 | 职责 | 本计划的动作 |
 |---|---|---|
 | `backend/qmt_manifest.py` | 账本的形状校验与转移守卫 | 改 `_require_no_progress_rollback` 内 `committed_bytes` 一段（现 `:1546-1575`） |
-| `backend/tests/test_qmt_manifest.py` | 该模块的单元测试（现 381 条） | 追加一节 `R1 退还` 的用例 U1–U16 |
+| `backend/tests/test_qmt_manifest.py` | 该模块的单元测试（现 381 条） | 追加一节 `R1 退还` 的用例 U1–U16；迁移 2 条既有恢复测试 |
+| `backend/tests/test_qmt_fetch.py` | `qmt_fetch` 的测试 | 迁移 1 条既有恢复测试（含改名） |
 | `docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md` | S4a 契约，§3 登记着 R1 | 把 R1 标为已闭合并指向本 PR |
 
 ---
@@ -81,19 +82,27 @@ _R1_EACH = 183                         # 每条记录的字节数；一只股两
 
 
 def _r1_recs(code, name, nbytes=_R1_EACH):
-    """造某只股的两条 files 记录（1d + 1m），字节数可控。"""
-    out = [_file_rec(code, name, "1d"), _file_rec(code, name, "1m")]
+    """造某只股的两条 files 记录（daily + 1m），字节数可控。
+
+    ⚠️ 周期只能是 `qmt_manifest.PERIODS = ("1m", "daily")` 里的值。
+    **不要写 `"1d"`** —— `_file_rec` 会照样造出一条「看起来对」的记录，
+    但 `period` 是生产会拒绝的值；而直接调 `_require_no_progress_rollback`
+    不做形状校验，于是测试会在**非法账本**上通过（codex 实测点出）。
+    """
+    out = [_file_rec(code, name, "daily"), _file_rec(code, name, "1m")]
     for rec in out:
         rec["bytes"] = nbytes
     return out
 
 
 def _r1_pool_entry(m, code):
-    """照搬池里已有条目的形状，只换 code —— 不照想象造样本。"""
-    proto = m["pool_order"][_R1_MARKET][0]
-    entry = _r1_copy.deepcopy(proto)
-    entry["code"] = code
-    return entry
+    """造一个池条目：`{"code": …, "universe_idx": …}`。
+
+    ⚠️ `universe_idx` 必须**从冻结名单里现查**，不能照搬别的条目的值
+    —— 照搬会把 A 的下标安给 B，账本当场非法（codex 实测点出）。
+    """
+    return {"code": code,
+            "universe_idx": m["source_snapshot"]["universe"][_R1_MARKET].index(code)}
 
 
 def _r1_base(headroom=0):
@@ -455,8 +464,10 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1631 passed / 0 skipped**（基线 1620 + Task 1 的 6 + 本任务的 5）。
-⚠️ 出现任何 failed 或 skipped 都要停下查清楚，不许继续。
+Expected: **1628 passed / 3 failed**。
+⚠️ 这 3 条红是**预期之中**的：它们是 spec §2.5 枚举出的既有恢复测试，
+原本「移除记录但不退还」，由 **Task 4b** 统一迁移。名字必须与 §2.5 列的三条**逐条相同**；
+出现**第四条**红，或红的名字对不上，都要立刻停下查清楚。
 
 - [ ] **Step 6：提交**
 
@@ -590,7 +601,7 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1633 passed / 0 skipped**。
+Expected: **1630 passed / 3 failed**（同 Task 2：那 3 条由 Task 4b 迁移）。
 
 - [ ] **Step 6：提交**
 
@@ -713,7 +724,7 @@ PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/py
   -m pytest tests/ -q -rs
 ```
 
-Expected: **1636 passed / 0 skipped**。
+Expected: **1633 passed / 3 failed**（同上，Task 4b 收口）。
 
 - [ ] **Step 4：提交**
 
@@ -724,6 +735,135 @@ git commit -m "test(R1): 端到端回归 —— 连崩两次重拉，预算不�
 
 U10 是 R1 缺陷的直接回归钉：修复前最小可接受值 ob → ob+366 → ob+732，
 修复后两轮都恒等于 ob。断言信息里写明了「若出现递增说明退还没生效」。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 4b：迁移三条既有的恢复测试
+
+R2 一上，「移除记录但不退还」就成了违规，而现有测试里**有三条正是这么写的**。
+它们不是误报，是 R1 缺陷在测试里的既有表征。**不迁移，Task 2 的全套闸门就过不了。**
+
+枚举方法与结果见 spec §2.5（临时打补丁跑全套、让它自己报，跑完逐字还原）：
+
+```
+tests/test_qmt_fetch.py::test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accepted
+tests/test_qmt_manifest.py::test_recovery_removal_keeps_everyone_elses_order
+tests/test_qmt_manifest.py::test_recovery_removes_exactly_the_inflight_stock
+```
+
+**Files:**
+- Modify: `backend/tests/test_qmt_manifest.py`（两条）
+- Modify: `backend/tests/test_qmt_fetch.py`（一条，含改名）
+
+**Interfaces:**
+- Consumes: 各测试文件已有的 `_multi_stock()`、`_committed()`、`_drop_stock()`、
+  `_recompute_evidence()`、`_scope()`、`commit_stock`、`read_manifest`
+- Produces: 无
+
+- [ ] **Step 1：先单独跑这三条，确认它们此刻是红的**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend"
+echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
+PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
+  -m pytest -q -rf \
+  tests/test_qmt_fetch.py::test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accepted \
+  tests/test_qmt_manifest.py::test_recovery_removal_keeps_everyone_elses_order \
+  tests/test_qmt_manifest.py::test_recovery_removes_exactly_the_inflight_stock
+```
+
+Expected: **3 failed**，报的都是「恢复必须恰好退还 … 字节」。
+⚠️ 若报 `no tests ran` 或别的原因，先停下查清楚。
+
+- [ ] **Step 2：改 `test_recovery_removes_exactly_the_inflight_stock`**
+
+在 `rolled["cursor"]["SH"] = 1` 这一行**之后、`_recompute_evidence(rolled)` 之前**插入：
+
+```python
+        # R1（2026-10-01）：恢复必须**恰好退还**被移除记录的字节。
+        _removed = sum(f["bytes"] for f in full["files"]
+                       if f["stock_code"] == "600004.SH")
+        rolled["committed_bytes"] = full["committed_bytes"] - _removed
+```
+
+并在函数末尾的断言之后追加（原有断言一条不删）：
+
+```python
+        assert on["committed_bytes"] == full["committed_bytes"] - _removed, \
+            "退还必须真的落盘，不能只是通过了守卫"
+```
+
+- [ ] **Step 3：改 `test_recovery_removal_keeps_everyone_elses_order`**
+
+在 `fixed["cursor"]["SH"] = 1` 之后、`_recompute_evidence(fixed)` 之前插入：
+
+```python
+        # R1（2026-10-01）：恢复必须恰好退还被移除记录的字节。
+        _removed = sum(f["bytes"] for f in full["files"]
+                       if f["stock_code"] == "600004.SH")
+        fixed["committed_bytes"] = full["committed_bytes"] - _removed
+```
+
+并在末尾断言之后追加：
+
+```python
+        assert read_manifest(fd)["committed_bytes"] == \
+            full["committed_bytes"] - _removed
+```
+
+- [ ] **Step 4：改 `test_qmt_fetch.py` 里那条（含改名）**
+
+它的名字写着「committed_bytes 保持不变是被接受的」，而那正是本 PR 推翻的行为。
+
+1. 把函数名改为
+   `test_recovery_removing_a_stock_must_refund_its_bytes`；
+2. 把 docstring 改为说明**新**契约（恢复必须恰好退还），并点名这是 R1 的闭合；
+3. 构造「恢复后那一份」时把 `committed_bytes` 减去被移除记录的字节之和；
+4. 原有断言一条不删，末尾追加「落盘后的累计值 == 退还后的数」。
+
+⚠️ 实施者必须**先读那条测试的真实写法**再动手——它与上面两条的夹具不同名，
+照抄上面的代码会改错。
+
+- [ ] **Step 5：再跑这三条，确认全绿**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend"
+echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
+PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
+  -m pytest -q -rf \
+  tests/test_qmt_fetch.py::test_recovery_removing_a_stock_must_refund_its_bytes \
+  tests/test_qmt_manifest.py::test_recovery_removal_keeps_everyone_elses_order \
+  tests/test_qmt_manifest.py::test_recovery_removes_exactly_the_inflight_stock
+```
+
+Expected: **3 passed**。
+
+- [ ] **Step 6：跑后端全套**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend"
+echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
+PYTHONDONTWRITEBYTECODE=1 "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" \
+  -m pytest tests/ -q -rs
+```
+
+Expected: **1636 passed / 0 skipped**。
+
+- [ ] **Step 7：提交**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes"
+git add backend/tests/test_qmt_manifest.py backend/tests/test_qmt_fetch.py
+git commit -m "test(R1): 迁移三条既有恢复测试 —— 恢复必须退还字节
+
+这三条原本「移除记录但不退还」，是 R1 缺陷在测试里的既有表征。
+影响面是实测枚举出来的（临时给守卫打 R2 补丁跑全套，跑完逐字还原）：
+codex 只点到两条，第三条在 test_qmt_fetch.py 里，名字本身就写着
+「committed_bytes 保持不变是被接受的」，故连名字一起改。
+原有不变量断言一条不删，另加「退还必须真的落盘」的断言。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -809,7 +949,9 @@ implementation"** —— 它只审了设计、没跑任何代码。上面四条�
   Task 3（U15/U16）、Task 4（U8/U9/U10）—— **16 条全部有归属**
 - spec §4 A1–A4 → 收尾验收四条
 - spec §5 基线 → Global Constraints
-- spec §6 交付物三个文件 → Task 2/3（`qmt_manifest.py`）、Task 1–4（测试）、Task 5（契约）
+- spec §2.5 三条既有测试迁移 → Task 4b
+- spec §6 交付物 → Task 2/3（`qmt_manifest.py`）、Task 1–4（新测试）、
+  Task 4b（既有测试迁移，含 `test_qmt_fetch.py`）、Task 5（契约）
 
 **2. 占位符扫描**：无 TBD / TODO / 「类似 Task N」；每个代码步骤都给了可直接粘贴的真实代码。
 

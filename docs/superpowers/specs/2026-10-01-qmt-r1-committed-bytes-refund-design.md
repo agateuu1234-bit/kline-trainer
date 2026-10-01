@@ -176,6 +176,32 @@ U14 专门钉这一点。
 - **不动** `qmt_fetch.py`（它显式拒绝 `RecoveryScope`，与本 PR 无关）。
 - **不实现**恢复第③档本身（那是 S4b）。本 PR 只保证**契约正确**，使 S4b 能建在对的地基上。
 
+### 2.5 必须同时迁移的既有测试（**穷尽枚举，实测得出**）
+
+R2 一上，「移除记录但不退还」就成了违规，而**现有测试里有三条正是这么写的**。
+它们不是误报，是 R1 缺陷在测试里的既有表征。
+
+**枚举方法**（不靠读代码）：临时给守卫打上 R2 补丁、跑后端全套、让它自己报，
+跑完把源码逐字还原并用 `sha256` 核对（`enum_affected.py`）。结果：
+
+```
+3 failed, 1617 passed
+
+tests/test_qmt_fetch.py::test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accepted
+tests/test_qmt_manifest.py::test_recovery_removal_keeps_everyone_elses_order
+tests/test_qmt_manifest.py::test_recovery_removes_exactly_the_inflight_stock
+```
+
+⚠️ codex 只点到后两条；**第三条在另一个文件里**，是实测枚举补上的。
+它的**名字本身**就写着「committed_bytes 保持不变是被接受的」—— 那正是本 PR 要推翻的行为，
+故必须连名字一起改。
+
+**迁移方式**（三条共同）：
+
+- 在构造「恢复后的那一份」时，把 `committed_bytes` **减去被移除记录的字节之和**；
+- **原有的不变量断言一条不删**（它们测的是 files/pool/cursor 的形状，与本 PR 无关）；
+- 额外断言**落盘后的累计值**确实等于退还后的数（证明退还真的持久化了，不只是通过了守卫）。
+
 ---
 
 ## 3. 测试（每条都必须能红）
@@ -263,13 +289,17 @@ U10 是 R1 缺陷的**直接回归钉**：它在修复前必须红、修复后�
 | 文件 | 动作 |
 |---|---|
 | `backend/qmt_manifest.py` | 改（`_require_no_progress_rollback` 里 `committed_bytes` 那一段） |
-| `backend/tests/test_qmt_manifest.py` | 改（新增 U1–U14） |
+| `backend/tests/test_qmt_manifest.py` | 改（新增 U1–U16；**迁移 2 条既有恢复测试**） |
+| `backend/tests/test_qmt_fetch.py` | 改（**迁移 1 条既有恢复测试**，含改名，见 §2.5） |
 | `docs/superpowers/specs/2026-09-18-qmt-4b-s4a-contract.md` | 改（§3 的 R1 标为已闭合，指向本 PR） |
 | 本 spec | 已提交 |
 | `docs/superpowers/plans/2026-10-01-qmt-r1-committed-bytes-refund-plan.md` | 实施计划 |
 
-**不碰**：`qmt_fetch.py`、`qmt_pool.py`、`qmt_fsroot.py`、`.claude/` 下任何文件、
+**不碰**：`qmt_fetch.py`（**源码**）、`qmt_pool.py`、`qmt_fsroot.py`、`.claude/` 下任何文件、
 `backend/` 其余模块。
+
+⚠️ 但 `backend/tests/test_qmt_fetch.py` **要改**一条测试（见 §2.5）——
+「不碰 `qmt_fetch.py`」说的是源码，别把它误读成「那个文件的测试也不碰」。
 
 ---
 
@@ -315,6 +345,9 @@ U10 是 R1 缺陷的**直接回归钉**：它在修复前必须红、修复后�
 - 「反例的夹具要排除『被别的判据代为拦截』」→ U3/U11/U12/U15/U16 全部栽在这上面：
   codex 实测跑了我的夹具，发现 U3/U11/U12 都先被**固有下界**拦掉、根本到不了退款分支。
   ⇒ U3 加余量、U11 换零字节日志夹具、U12 改为表征用例。
+- 「穷尽性必须按字面量枚举后逐条定性」→ §2.5：codex 点了 2 条受影响的既有测试，
+  我没照着改，而是**临时给守卫打补丁跑全套让它自己报**，枚举出 **3 条**——
+  第三条在另一个文件里。**靠读代码找影响面必漏。**
 - 「不为不可能的场景写错误处理」→ R3 被删：固有检查保证 `nb ≥ 0`，那条判据永远
   执行不到。**是 codex 跑夹具跑出来的，不是读代码读出来的。**
 - 「先用探针把问题跑出答案」→ §1.2/§1.3 两组数字都是探针跑出来的，不是读代码推断的；
