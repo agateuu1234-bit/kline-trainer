@@ -6570,3 +6570,46 @@ def test_r1_u14_identical_recopy_with_zero_added_still_passes():
     after = _r1_copy.deepcopy(before)                 # files 一字不改
     after["committed_bytes"] = before["committed_bytes"] + 140
     _require_no_progress_rollback(before, after, "U14")      # 不抛即通过
+
+
+def test_r1_u1_recovery_with_exact_refund_passes():
+    """U1 · 恢复 + 恰好退还 —— 这是**今天被拒**的那一格，修好后必须放行。"""
+    before = _r1_base()
+    after, removed = _r1_remove_stock(before, refund=True)
+    assert removed > 0, "夹具自检：被移除的那只股应当有字节数"
+    assert after["committed_bytes"] == before["committed_bytes"] - removed
+    _require_no_progress_rollback(before, after, "U1",
+                                  recovery=_r1_scope(before))   # 不抛即通过
+
+
+def test_r1_u2_recovery_without_refund_rejected():
+    """U2 · 恢复但**不退还**（今天的行为）—— 修好后必须拦。"""
+    before = _r1_base()
+    after, _removed = _r1_remove_stock(before, refund=False)
+    with pytest.raises(ManifestInvalidError, match="恰好退还"):
+        _require_no_progress_rollback(before, after, "U2",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u3_recovery_refunding_one_byte_too_much_rejected():
+    """U3 · 多退 1 字节 —— 等式的下侧要钉住。
+
+    ⚠️ 必须带 headroom：无余量时 `ob - removed - 1` 会低于固有下界，
+    于是先被**固有检查**拦掉，这条用例就测不到 R2（codex 实测）。
+    """
+    before = _r1_base(headroom=10_000_000)
+    after, _removed = _r1_remove_stock(before, refund=True)
+    after["committed_bytes"] -= 1
+    with pytest.raises(ManifestInvalidError, match="恰好退还"):
+        _require_no_progress_rollback(before, after, "U3",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u4_recovery_refunding_one_byte_too_little_rejected():
+    """U4 · 少退 1 字节 —— 等式的上侧要钉住。"""
+    before = _r1_base()
+    after, _removed = _r1_remove_stock(before, refund=True)
+    after["committed_bytes"] += 1
+    with pytest.raises(ManifestInvalidError, match="恰好退还"):
+        _require_no_progress_rollback(before, after, "U4",
+                                      recovery=_r1_scope(before))

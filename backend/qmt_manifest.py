@@ -1546,33 +1546,64 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
     ob = _int_or_none(previous.get("committed_bytes"))
     if ob is not None:
         nb = _int_or_none(payload.get("committed_bytes"))
-        if nb is None or nb < ob:
-            raise ManifestInvalidError(
-                f"{where} 会让 committed_bytes 从 {ob} 变成 "
-                f"{payload.get('committed_bytes')!r}——它是累计量，"
-                "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
-            )
-        # ⚠️ **只拦「减少」不够**（codex R14 [high]）：**加了文件却原地不动**
-        # 照样通过 —— 下一次运行从一个被低估的累计值起步，突破 --max-bytes
-        # 这条硬上限，最坏把仅约 30 GiB 的可用空间写满（本机复现：新增 246 万
-        # 字节而累计值纹丝不动）。
-        # ⚠️ 判据取「**至少涨够新增文件的字节数**」而非严格相等：
-        # spec 未定 committed_bytes 计不计失败 `.part` 的字节（5o 只说
-        # `--max-bytes` 是逐块扣减的流式上限），严格相等会把那种合法记账判死。
-        added = 0
-        for key, rec in new_files.items():
-            if key not in prev_files:
-                b = _int_or_none(rec.get("bytes"))
-                if b is not None:
-                    added += b
-        _ = added                    # 下面用
-        if added and nb < ob + added:
-            raise ManifestInvalidError(
-                f"{where} 新增了合计 {added} 字节的 files 记录，而 "
-                f"committed_bytes 只从 {ob} 涨到 {nb}——累计量必须至少涨够"
-                "新增文件的字节数，否则下一次运行会从一个被低估的总数起步，"
-                "突破 --max-bytes 硬上限。"
-            )
+        # ⚠️ **崩溃恢复第③档必须退还被移除记录的字节**（R1，2026-10-01）：
+        # 不退还时，重拉同一只股会被下面那条 `added` 判据算成「新增」，
+        # 于是每崩一次就多烧一份预算（实测 366 → 706 → 1046，而盘上恒 366），
+        # 最终以**虚假的 --max-bytes 触顶**结束运行 —— 一次基础设施故障
+        # 被记成一次正常结束。
+        # 口子挂在既有的 `scoped_removed` 上（它已保证：声明了 RecoveryScope、
+        # 锚点与冻结名单对得上、该股 files 与池条目一起消失），**不另造旁路**。
+        if scoped_removed:
+            removed_bytes = 0
+            for key, rec in prev_files.items():
+                if key not in new_files:
+                    b = _int_or_none(rec.get("bytes"))
+                    if b is not None:
+                        removed_bytes += b
+            if nb is None:
+                raise ManifestInvalidError(
+                    f"{where} 崩溃恢复没有给出合法的 committed_bytes —— "
+                    "恢复必须**恰好退还**被移除记录的字节数，缺了它无从比较。"
+                )
+            # 注：这里**不**再查 `nb < 0`。开头的 `_require_intrinsic_payload_ok`
+            # 已要求 `nb ≥ sum(files) + staged_export_log ≥ 0`，负数到不了这里
+            # （U12 是它的表征用例）。按 CLAUDE.md §2 不为不可能的场景写处理。
+            if nb != ob - removed_bytes:
+                raise ManifestInvalidError(
+                    f"{where} 崩溃恢复移除了合计 {removed_bytes} 字节的 files "
+                    f"记录，而 committed_bytes 从 {ob} 变成 {nb}——恢复必须"
+                    f"**恰好退还**这些字节（应为 {ob - removed_bytes}）。"
+                    "多退会让 --max-bytes 失守，少退会让同一只股每崩一次"
+                    "就多烧一份预算。"
+                )
+        else:
+            if nb is None or nb < ob:
+                raise ManifestInvalidError(
+                    f"{where} 会让 committed_bytes 从 {ob} 变成 "
+                    f"{payload.get('committed_bytes')!r}——它是累计量，"
+                    "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
+                )
+            # ⚠️ **只拦「减少」不够**（codex R14 [high]）：**加了文件却原地不动**
+            # 照样通过 —— 下一次运行从一个被低估的累计值起步，突破 --max-bytes
+            # 这条硬上限，最坏把仅约 30 GiB 的可用空间写满（本机复现：新增 246 万
+            # 字节而累计值纹丝不动）。
+            # ⚠️ 判据取「**至少涨够新增文件的字节数**」而非严格相等：
+            # spec 未定 committed_bytes 计不计失败 `.part` 的字节（5o 只说
+            # `--max-bytes` 是逐块扣减的流式上限），严格相等会把那种合法记账判死。
+            added = 0
+            for key, rec in new_files.items():
+                if key not in prev_files:
+                    b = _int_or_none(rec.get("bytes"))
+                    if b is not None:
+                        added += b
+            _ = added                    # 下面用
+            if added and nb < ob + added:
+                raise ManifestInvalidError(
+                    f"{where} 新增了合计 {added} 字节的 files 记录，而 "
+                    f"committed_bytes 只从 {ob} 涨到 {nb}——累计量必须至少涨够"
+                    "新增文件的字节数，否则下一次运行会从一个被低估的总数起步，"
+                    "突破 --max-bytes 硬上限。"
+                )
 
     # ⚠️ **容器这一层此前漏了**（Opus 第 5 轮 [low]）：同一次提交里刚给
     # `committed_bytes` 与**内层取值**改成「拒绝」（注释自称「三处同族」），
