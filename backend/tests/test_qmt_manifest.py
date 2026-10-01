@@ -6724,8 +6724,14 @@ def _r1_min_acceptable_on_readd(m_removed, base_full, lo, hi):
 
 
 def test_r1_u8_readd_after_refund_accepts_the_original_total():
-    """U8 · 恢复（已退还）后重拉，nb = ob —— 必须放行。"""
-    before = _r1_base()
+    """U8 · 恢复（已退还）后重拉，nb = ob —— 必须放行。
+
+    ⚠️ **必须带 headroom**（U9 坑过一次，控制者变异自测 2026-10-01）：无余量时
+    `committed_bytes` 停在固有下界上，payload 自身的固有检查
+    （`_require_intrinsic_payload_ok`）会先于转移守卫判定，U8/U9 就测不到
+    它们点名的那条「至少涨够新增」判据了。
+    """
+    before = _r1_base(headroom=10_000_000)
     ob = before["committed_bytes"]
     removed_m, _removed = _r1_remove_stock(before, refund=True)
     _require_no_progress_rollback(
@@ -6733,11 +6739,20 @@ def test_r1_u8_readd_after_refund_accepts_the_original_total():
 
 
 def test_r1_u9_readd_one_byte_below_the_original_total_rejected():
-    """U9 · 重拉时 nb = ob - 1 —— 仍受「至少涨够新增」约束，必须拦。"""
-    before = _r1_base()
+    """U9 · 重拉时 nb = ob - 1 —— 仍受「至少涨够新增」约束，必须拦。
+
+    ⚠️ **必须带 headroom**：无余量时 `ob - 1` 低于 payload 自身的固有下界
+    （`_require_intrinsic_payload_ok` 要求 `nb ≥ sum(files) + staged_export_log`），
+    会被那条**固有**检查抢先拦住，而不是这条用例点名的转移守卫「至少涨够
+    新增」判据——变异测试实测坐实：停用转移守卫那条判据后，本用例原先
+    （无 headroom 时）照样抛错，钉的其实是另一条判据，判别力为零
+    （控制者变异自测 2026-10-01 坐实，非 codex 通道）。加 headroom 让
+    `ob - 1` 停在固有下界之上，才轮得到转移守卫接手。
+    """
+    before = _r1_base(headroom=10_000_000)
     ob = before["committed_bytes"]
     removed_m, _removed = _r1_remove_stock(before, refund=True)
-    with pytest.raises(ManifestInvalidError):
+    with pytest.raises(ManifestInvalidError, match="累计量必须至少涨够"):
         _require_no_progress_rollback(
             removed_m, _r1_readd(removed_m, before, ob - 1), "U9")
 
