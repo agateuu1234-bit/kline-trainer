@@ -174,6 +174,9 @@ public struct ChartContainerView: UIViewRepresentable {
             arbiter.onHasNodeDragCandidate = { [weak self] in
                 self?.acceptNodeDragCandidate() ?? false
             }
+            arbiter.onNodeDrag = { [weak self] translation, phase in
+                self?.handleNodeDrag(translation: translation, phase: phase)
+            }
             arbiter.attach(to: view)
         }
 
@@ -383,6 +386,15 @@ public struct ChartContainerView: UIViewRepresentable {
                 //    把 guard 提到 switch 之前 = 复盘画线功能回归 —— 与 PR-1 那道 `.segment` 门误管所有
                 //    工具是同一类错误：fail-closed 的门必须限定到它真适用的那一类。
                 guard engine.flow.mode != .review else { return }
+                // P1c 第 3 片 Task 11（订正 3，Task 6 传下来的裁定，spec D135c `:253`）：
+                // 「点击造成的选中变更」范围明写包含「tap 未命中时的清空」——但 `clearSelection()`
+                // 内部会连带 `endNodeDrag()`（D135c 的生命周期语义：没有选中 ⇒ 不可能有拖动）。
+                // ⇒ 拖动进行中，另一只手在空白处点一下，会把正在进行的拖动**悄悄作废**，而 D138
+                // 对「第二根手指」定的是**就地定住**，不是作废 —— 这条路径不经 `setSelection` /
+                // `setCommittedSelection`（那两个各自有 `tapSelectionAllowed` 守卫），必须单独挡。
+                // ⛔ 只挡 `.select` 这一支（落锚 `.draw` 分支不受影响，超出 D135c 范围）；
+                // ⛔ 复用 Task 5 的既有判据，不新写一份「拖动中」判断。
+                guard !DrawingEditRouter.nodeDragInFlight(engine: engine) else { return }
                 // D40：命中集合 ≡ 渲染集合 —— 同一个 `visibleDrawings`、同一张 `drawingTools` 注册表。
                 let ordered = RenderStateBuilder.visibleDrawings(
                     engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
@@ -446,6 +458,150 @@ public struct ChartContainerView: UIViewRepresentable {
         func captureNodeDragCandidateForTesting(at point: CGPoint) { captureNodeDragCandidate(at: point) }
         func acceptNodeDragCandidateForTesting() -> Bool { acceptNodeDragCandidate() }
         var nodeDragCandidateForTesting: DrawingSession.NodeDragOwner? { nodeDragCandidate }
+
+        // MARK: - Task 11：拖动三相位接线 + 收尾路径（D138 三分 / D135b 两支失败）
+
+        /// P1c 第 3 片：拖动几何基准的**唯一**取法 —— **提交值**（`engine.drawings`）。
+        ///
+        /// ⛔⛔ **订正 1（Critical）**：`translation` 是「自手指按下以来的累计位移」
+        /// （`DrawingNodeDrag.draggedAnchor` 内部 `old = drawing.anchors[anchorIndex]` 再加
+        /// `anchorDelta(translation:)`）。而 `RenderStateBuilder.visibleDrawings` 在拖动进行中会把
+        /// 被拖那条的锚点换成**拖动中间值**（Task 10 的 `applyNodeDragOverride`）——若拿它当 `old`，
+        /// 上一帧已经叠过的位移会在这一帧被**再加一次**，逐帧复利叠加、节点二次函数式飞走
+        /// （报告「订正 1」一节有逐帧实测数字）。
+        ///
+        /// `visibleDrawings` 仍然要用——但**只用于存在性/可见性判断**：它是渲染/命中的唯一真相
+        /// （D40），一条已经结构性不可见（迁到了另一面板 / `revealTick` 未到）的线不该再被拖。
+        /// ⛔ 两件事都要、缺一不可：几何基准用提交值，存在性判据用 `visibleDrawings`。
+        private func committedDraggableDrawing(drawingID: DrawingID)
+            -> (drawing: DrawingObject, tool: any DrawingTool)? {
+            guard let engine else { return nil }
+            guard RenderStateBuilder.visibleDrawings(
+                    engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+                    .contains(where: { $0.id == drawingID })
+            else { return nil }
+            guard let committed = engine.drawings.first(where: { $0.id == drawingID }),
+                  let tool = KLineView.drawingTools[committed.toolType]
+            else { return nil }
+            return (committed, tool)
+        }
+
+        /// `activeNodeDrag()` 的判别结果。**G11**：`.changed` / `.ended` / `.cancelled` 三条相位分支
+        /// 共用这一个身份判据，⛔ 分支体内不出现 `selectedDrawingID` / `selectedPanel` 的字面比较——
+        /// 把「来源不符」「归属不符」两种失败都折进这一个函数的返回值里，调用方只管 switch。
+        private enum NodeDragLookup {
+            /// ① 来源不符：槧为空，或本次回调不属于本面板（别人的槧 / 已经陈旧）。
+            case notOurs
+            /// ② 归属不符：`finalizeNodeDragInPlace` 已经在本函数内部**就地定住 + 清槧**，调用方忽略本次回调。
+            case finalized
+            /// 几何/工具都齐——正常相位可以继续算这一帧。
+            case ready(owner: DrawingSession.NodeDragOwner, drawing: DrawingObject,
+                       tool: any DrawingTool, mapper: CoordinateMapper)
+            /// ⚠️ 订正 2：归属**对得上**，但 viewport/线/工具任一取不到——**仍然是本面板正在进行的拖动**，
+            /// 调用方（终止相位）必须无条件收尾，⛔ 不许当成「忽略」处理。
+            case ownedButGeometryUnavailable(owner: DrawingSession.NodeDragOwner)
+        }
+
+        /// D135b 的**每帧身份判据**，三条相位分支**调同一个**（G11）。
+        private func activeNodeDrag() -> NodeDragLookup {
+            guard let engine, let view else { return .notOurs }
+            let session = engine.drawingSession
+            // ① 先判来源：槧非空 且 本次回调来自 nodeDrag.panel。
+            guard let owner = session.nodeDragOwner, owner.panel == panel else { return .notOurs }
+            // ② 再判归属：(owner.panel, owner.drawingID) == (selectedPanel, selectedDrawingID)。
+            guard owner.drawingID == session.selectedDrawingID,
+                  owner.panel == session.selectedPanel else {
+                finalizeNodeDragInPlace(owner)
+                return .finalized
+            }
+            let viewport = view.renderState.viewport
+            guard viewport.geometry.candleStep > 0,
+                  let (drawing, tool) = committedDraggableDrawing(drawingID: owner.drawingID)
+            else { return .ownedButGeometryUnavailable(owner: owner) }
+            return .ready(owner: owner, drawing: drawing, tool: tool,
+                          mapper: CoordinateMapper(viewport: viewport,
+                                                   displayScale: view.traitCollection.displayScale))
+        }
+
+        /// 收尾的共用写法：**先清槧、再写**（避免覆盖影响写入读到的 `old`）；取不到锚点就只清槧不写
+        /// （fail-closed，D138 既有纪律）。`finalizeNodeDragInPlace`（D135b ②）与 `.ended`/`.cancelled`
+        /// 的收尾分支**共用**本函数，⛔ 不三处各写一遍。
+        private func finalizeAndCommit(owner: DrawingSession.NodeDragOwner, anchor: DrawingAnchor?) {
+            guard let engine else { return }
+            engine.drawingSession.endNodeDrag()
+            if let anchor {
+                _ = engine.updateDrawingAnchor(id: owner.drawingID, anchorIndex: owner.anchorIndex, anchor: anchor)
+            }
+        }
+
+        /// 就地定住：写一次、记一条撤销，与抬手**同一条**收尾语义（D138）。用的是**已有的**
+        /// `nodeDragCurrent`（上一帧已夹取好的值），⛔ 不重新算几何——这是「归属已经不对得上」的分支，
+        /// 没有可信的「本帧 translation」可用。
+        private func finalizeNodeDragInPlace(_ owner: DrawingSession.NodeDragOwner) {
+            finalizeAndCommit(owner: owner, anchor: engine?.drawingSession.nodeDragCurrent)
+        }
+
+        /// P1c 第 3 片：节点拖动的三个相位。**唯一**调用 `updateDrawingAnchor` 的生产路径。
+        private func handleNodeDrag(translation: CGPoint, phase: GesturePhase) {
+            guard let engine, let view else { return }
+            let session = engine.drawingSession
+            switch phase {
+            case .began:
+                // D140：路由到拖动之后才刹车，顺序与落锚逐字相同（G3 的 ② 分支钉死）。
+                engine.settleDeceleration(initiatedBy: panel)
+                rebuildRenderState(bounds: view.bounds)
+                let viewport = view.renderState.viewport
+                guard viewport.geometry.candleStep > 0 else { return }
+                let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
+                // 订正 1 的精确化：此刻 `beginNodeDrag` 还没被调用、`nodeDragOwner` 仍为 nil ⇒
+                // Task 10 的覆盖不生效，`committedDraggableDrawing` 在这一相位本就等价于
+                // 「从 visibleDrawings 取」——改用它只是让「几何基准只有一处写法」，非功能性改动。
+                guard let c = nodeDragCandidate,
+                      let (drawing, tool) = committedDraggableDrawing(drawingID: c.drawingID),
+                      let anchor = DrawingNodeDrag.draggedAnchor(
+                          drawing: drawing, anchorIndex: c.anchorIndex, translation: translation,
+                          mapper: mapper, tool: tool)
+                else { nodeDragCandidate = nil; return }
+                session.beginNodeDrag(c, anchor: anchor)
+                nodeDragCandidate = nil                 // 候选已被消费（D140b 第三行）
+                rebuildRenderState(bounds: view.bounds)
+
+            case .changed:
+                guard case .ready(let owner, let drawing, let tool, let mapper) = activeNodeDrag()
+                else { return }
+                guard let anchor = DrawingNodeDrag.draggedAnchor(
+                        drawing: drawing, anchorIndex: owner.anchorIndex, translation: translation,
+                        mapper: mapper, tool: tool) else { return }
+                session.updateNodeDragCurrent(anchor)
+                rebuildRenderState(bounds: view.bounds)   // ⛔ 直连重绘：nodeDragCurrent 不参与 observation
+
+            case .ended, .cancelled:
+                switch activeNodeDrag() {
+                case .notOurs:
+                    return                                // ① 陈旧回调/别人的槧 —— 不碰任何状态
+                case .finalized:
+                    return                                // ② 归属不符 —— activeNodeDrag 内部已就地定住 + 清槧
+                case .ready(let owner, let drawing, let tool, let mapper):
+                    // ⭐ 订正 2：无条件终止——先尽力按本帧真实位移算一个锚点，算不出就退回已有的
+                    //   nodeDragCurrent，再清槧、再写（顺序理由同 finalizeAndCommit 头注）。
+                    let anchor = DrawingNodeDrag.draggedAnchor(
+                        drawing: drawing, anchorIndex: owner.anchorIndex, translation: translation,
+                        mapper: mapper, tool: tool) ?? session.nodeDragCurrent
+                    finalizeAndCommit(owner: owner, anchor: anchor)
+                case .ownedButGeometryUnavailable(let owner):
+                    // ⭐⭐ 订正 2（Critical）本体：归属对得上，但 viewport/线/工具这一帧取不到——
+                    //   仍必须无条件收尾，⛔ 不许 `return` 丢在这里不管，否则 nodeDragOwner 残留，
+                    //   Task 7 的十道写入门把底栏永久锁灰（界面卡死，不是"这次拖动失败"）。
+                    finalizeAndCommit(owner: owner, anchor: session.nodeDragCurrent)
+                }
+                rebuildRenderState(bounds: view.bounds)
+            }
+        }
+
+        /// 测试入口（照 `handleDrawingTapForTesting`（`:323`）的先例）。
+        func handleNodeDragForTesting(translation: CGPoint, phase: GesturePhase) {
+            handleNodeDrag(translation: translation, phase: phase)
+        }
     }
 }
 #endif

@@ -424,5 +424,293 @@ struct NodeDragCandidateTests {
 
         #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)   // ⭐ 仍必须进拖动
     }
+
+    // MARK: - Task 11：拖动三相位接线 + 收尾路径（D138 三分 / D135b 两支失败 / 订正 1-4）
+
+    /// 通用「捕获候选 + 走完一次 `.began`」的前置动作，供下面多档共用。
+    @discardableResult
+    private func beginDrag(_ rig: Rig, id: String = "A") throws -> CGPoint {
+        let p = try nodePoint(rig, id: id)
+        rig.coordinator.captureNodeDragCandidateForTesting(at: p)
+        rig.coordinator.handleNodeDragForTesting(translation: .zero, phase: .began)
+        return p
+    }
+
+    // MARK: N4：一次完整拖动只产生一条撤销记录
+
+    @Test("N4：一次完整拖动（began→changed→ended）⇒ 撤销栈深度恰好1 / ↩一次整个回到拖前 / 拖动后≠拖前 / drawingsRevision 恰好+1")
+    func fullDragProducesExactlyOneUndoRecord() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实已经开始")
+        let anchorBefore = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        let revisionBefore = rig.engine.drawingsRevision
+
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -5), phase: .changed)
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -10), phase: .ended)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil, "收尾后必须清槧")
+        #expect(rig.engine.drawingSession.nodeDragCurrent == nil)
+        let anchorAfter = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        // ③ 拖动后锚点确实 ≠ 拖前（否则下面「撤销后等于拖前」因为压根没改而恒真）。
+        #expect(anchorAfter != anchorBefore, "拖动必须真的改动了锚点，否则下面的撤销断言是空转")
+        // ④ drawingsRevision 相对基线恰好 +1（不是每帧写一次）。
+        #expect(rig.engine.drawingsRevision == revisionBefore + 1,
+                "一次拖动必须恰好写盘一次——.changed 帧绝不许碰 drawings")
+        // ① 撤销栈深度恰好 1：此刻确实有恰好一条可撤销的记录。
+        #expect(rig.engine.canUndoDrawing == true, "必须恰好有一条可撤销记录")
+
+        // ② ↩ 一次锚点整个回到拖前。
+        #expect(rig.engine.undoDrawing() == true)
+        let anchorUndone = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        #expect(anchorUndone == anchorBefore, "撤销一次必须整个回到拖动之前的锚点")
+    }
+
+    // MARK: T4：第二根手指落下 ⇒ 就地定住（走与抬手同一条收尾路径）
+
+    @Test("T4：拖到一半被第二根手指打断（ChartGestureArbiter 对此发 .ended，与抬手同一条收尾路径）⇒ 就地定住：写一次、记一条撤销，定住的锚点 ≠ 起点")
+    func secondFingerInterruptionFinalizesInPlace() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        let anchorAtStart = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        let revisionBefore = rig.engine.drawingsRevision
+
+        // 拖到一半（.changed）……
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -6), phase: .changed)
+        // ……第二根手指落下：`ChartGestureArbiter.supersedeSinglePanForMultitouch`（`:134-141`）对
+        // 正在进行的节点拖动发的是 `.ended`（“定住不是作废”，⛔ 不是 `.cancelled`）——与真实抬手
+        // **同一条**生产回调，因此直接喂 `.ended` 即忠实复现这条打断源，不需要另造一套 UITouch。
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -6), phase: .ended)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil, "就地定住之后必须清槧")
+        let anchorFinal = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        #expect(anchorFinal != anchorAtStart, "定住的锚点必须 ≠ 拖动起点（D138：就地定住不是回弹到起点）")
+        #expect(rig.engine.drawingsRevision == revisionBefore + 1, "恰好写一次")
+        #expect(rig.engine.canUndoDrawing == true, "恰好记一条撤销")
+    }
+
+    // MARK: T14⑤：陈旧回调不得动别人的槧
+
+    /// 找某面板上某条线唯一锚点的真实屏幕点（同 `nodePoint(_:id:)`，但支持任意面板——
+    /// T14⑤ 需要同时操作 upper/lower 两个独立 Coordinator）。
+    private func nodePointOnPanel(engine: TrainingEngine, view: KLineView, panel: PanelId, id: String) throws -> CGPoint {
+        let mapper = CoordinateMapper(viewport: view.renderState.viewport, displayScale: view.traitCollection.displayScale)
+        let drawing = try #require(RenderStateBuilder.visibleDrawings(
+            engine: engine, panel: panel, tick: engine.tick.globalTickIndex
+        ).first(where: { $0.id == id }))
+        let tool = try #require(KLineView.drawingTools[drawing.toolType])
+        let marks = DrawingNodeGeometry.marks(for: drawing, mapper: mapper,
+                                              isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
+                                              maxAnchors: tool.requiredAnchors.upperBound)
+        var real: CGPoint?
+        if case let .real(_, p)? = marks.first { real = p }
+        return try #require(real, "夹具前置条件：选中线的锚点必须是 .real 节点")
+    }
+
+    @Test("T14⑤ 陈旧回调不得动别人的槧：A 已收尾清槧、B 已占槧 ⇒ 来自 A 面板的陈旧 .changed/.ended 不碰 B 的拖动态/drawingsRevision，且 B 之后仍能正常收尾")
+    func staleCallbackFromOtherPanelDoesNotTouchActiveDrag() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let engine = TrainingEngine.preview()
+        engine.injectDrawingsForTesting([
+            makeStyledHLine(id: "A", revealTick: 0, period: engine.upperPanel.period, candleIndex: 0, price: 10),
+            makeStyledHLine(id: "B", panelPosition: 1, revealTick: 0, period: engine.lowerPanel.period, candleIndex: 0, price: 10),
+        ])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+
+        let coordUpper = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let viewUpper = KLineView(frame: bounds)
+        coordUpper.attach(to: viewUpper)
+        coordUpper.rebuildRenderState(bounds: bounds)
+
+        let coordLower = ChartContainerView(panel: .lower, engine: engine).makeCoordinator()
+        let viewLower = KLineView(frame: bounds)
+        coordLower.attach(to: viewLower)
+        coordLower.rebuildRenderState(bounds: bounds)
+
+        // --- A（upper）走完一整轮拖动，正常收尾、清槧。
+        engine.drawingSession.setSelection(id: "A", panel: .upper)
+        let pA = try nodePointOnPanel(engine: engine, view: viewUpper, panel: .upper, id: "A")
+        coordUpper.captureNodeDragCandidateForTesting(at: pA)
+        coordUpper.handleNodeDragForTesting(translation: .zero, phase: .began)
+        #expect(engine.drawingSession.nodeDragOwner?.drawingID == "A", "前提：A 的拖动确实开始了")
+        coordUpper.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -5), phase: .ended)
+        #expect(engine.drawingSession.nodeDragOwner == nil, "前提：A 已经收尾清槧")
+
+        // --- 选中切到 B（lower），开始 B 的拖动，占槧。
+        engine.drawingSession.setSelection(id: "B", panel: .lower)
+        let pB = try nodePointOnPanel(engine: engine, view: viewLower, panel: .lower, id: "B")
+        coordLower.captureNodeDragCandidateForTesting(at: pB)
+        coordLower.handleNodeDragForTesting(translation: .zero, phase: .began)
+        #expect(engine.drawingSession.nodeDragOwner?.drawingID == "B", "前提：B 已经占槧")
+        let ownerBSnapshot = engine.drawingSession.nodeDragOwner
+        let currentBSnapshot = engine.drawingSession.nodeDragCurrent
+        let revisionBeforeStale = engine.drawingsRevision
+
+        // --- 陈旧回调：来自 A 的面板（upper）的 .changed / .ended 分别喂一次——这是 A 自己的
+        //     Coordinator 实例收到的、属于**早已结束**那次拖动的迟到回调（D135b 的①：来源不符）。
+        coordUpper.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -50), phase: .changed)
+        #expect(engine.drawingSession.nodeDragOwner == ownerBSnapshot, "B 的拖动态不得被 A 的陈旧回调碰")
+        #expect(engine.drawingSession.nodeDragCurrent == currentBSnapshot)
+        #expect(engine.drawingsRevision == revisionBeforeStale)
+
+        coordUpper.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -50), phase: .ended)
+        #expect(engine.drawingSession.nodeDragOwner == ownerBSnapshot, "B 的拖动态仍不得被碰（陈旧 .ended 同样要忽略）")
+        #expect(engine.drawingSession.nodeDragCurrent == currentBSnapshot)
+        #expect(engine.drawingsRevision == revisionBeforeStale)
+
+        // --- B 之后仍能正常继续更新、并自行收尾（证明 A 的陈旧回调没有把 B 的槧提前清掉/提前提交）。
+        coordLower.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -8), phase: .changed)
+        #expect(engine.drawingSession.nodeDragCurrent != currentBSnapshot, "B 必须仍能继续正常更新")
+        coordLower.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -8), phase: .ended)
+        #expect(engine.drawingSession.nodeDragOwner == nil, "B 必须仍能自行正常收尾")
+        #expect(engine.canUndoDrawing == true, "B 的收尾必须留下一条撤销记录")
+    }
+
+    // MARK: 订正 2（Critical）：终止相位必须无条件清槧
+
+    @Test("订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧")
+    func endedClearsSlotEvenWhenGeometryUnavailable() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实在进行")
+
+        // 强行破坏本帧视口（模拟转屏/resize 瞬间 bounds 失效那一类场景，订正 2 枚举的第一种成因）——
+        // ⛔ 不碰 engine/session，只破坏 `view.renderState`（Coordinator 读几何的那个唯一来源）。
+        rig.view.renderState = .empty
+
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -5), phase: .ended)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil,
+                "⭐⭐ 订正2 本体：几何取不到也必须清槧，否则 nodeDragOwner 残留 ⇒ 底栏永久锁灰")
+        #expect(rig.engine.drawingSession.nodeDragCurrent == nil)
+    }
+
+    @Test("订正2②：清槧之后，十道写入门必须真的重新放行（⛔ 只断言 nodeDragOwner==nil 是在测中间变量）")
+    func styleControlsReopenAfterGeometryUnavailableEndedClearsSlot() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        // 门此刻必须是关着的——拖动进行中，这是本档断言「重新放行」的对照基线。
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: rig.engine) == false,
+                "前提：拖动进行中，styleControlsEnabled 必须是关着的")
+
+        rig.view.renderState = .empty   // 同上一档：模拟本帧几何失效
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -5), phase: .ended)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil, "前提：槧确实被清了")
+        // ⭐ 真判据：门必须恢复为 true——此刻选中仍是 "A"、线仍存在、几何提示标志
+        // （`session.selectionGeometryVisible`）在这次事故里从未被碰过，唯一改变的变量
+        // 就是 `nodeDragOwner`，门的恢复因此只能归因于「拖动态清了」。
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: rig.engine) == true,
+                "清槧之后，styleControlsEnabled 必须恢复为 true——十道门里任选一道做真判据")
+    }
+
+    // MARK: 订正 3：拖动进行中，tap 未命中（.select）整支早退
+
+    @Test("订正3：拖动进行中，tap 未命中 ⇒ `.select` 整支早退：不换选中、不清空、不丢弃拖动态")
+    func tapMissWhileDraggingDoesNotDisturbDragState() throws {
+        let rig = makeRig()
+        let p = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实在进行")
+        let ownerBefore = rig.engine.drawingSession.nodeDragOwner
+        let currentBefore = rig.engine.drawingSession.nodeDragCurrent
+        let selectedBefore = rig.engine.drawingSession.selectedDrawingID
+        let revisionBefore = rig.engine.drawingsRevision
+
+        let missPoint = CGPoint(x: p.x + 10_000, y: p.y + 10_000)   // 安全远点，必定未命中任何线/节点
+        rig.coordinator.handleDrawingTapForTesting(at: missPoint)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == ownerBefore, "①拖动态（owner）必须原样保留")
+        #expect(rig.engine.drawingSession.nodeDragCurrent == currentBefore, "②拖动态（current）必须原样保留")
+        #expect(rig.engine.drawingSession.selectedDrawingID == selectedBefore, "③选中必须不变")
+        #expect(rig.engine.drawingsRevision == revisionBefore, "④drawingsRevision 必须不变")
+    }
+
+    @Test("订正3 反向对照：不在拖动中时，同一次未命中的 tap ⇒ 选中确实被清空（D37），证明上一档的「不变」不是巧合")
+    func tapMissWithoutDraggingClearsSelectionNormally() throws {
+        let rig = makeRig()
+        let p = try nodePoint(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil, "前提：此刻没有拖动")
+        #expect(rig.engine.drawingSession.selectedDrawingID == "A", "前提：此刻确实选中着 A")
+
+        let missPoint = CGPoint(x: p.x + 10_000, y: p.y + 10_000)
+        rig.coordinator.handleDrawingTapForTesting(at: missPoint)
+
+        #expect(rig.engine.drawingSession.selectedDrawingID == nil,
+                "不在拖动中时，tap 未命中必须清空选中——证明「整支早退」挡的是拖动，不是把 tap 清空焊死")
+    }
+
+    // MARK: 订正 4：`updateDrawingAnchor` 返回 false 时的静默丢弃，钉住这个行为
+
+    @Test("订正4：`updateDrawingAnchor` 返回 false（七道门之一拒绝）⇒ 拖动态清、锚点不变、不覆盖既有撤销记录、drawingsRevision 不再额外 +1")
+    func updateDrawingAnchorFailureIsSilentlyDiscardedWithoutClobberingExistingUndo() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实在进行")
+        let anchorBefore = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+
+        // 绕过路由直调引擎（`DrawingEditRouter.toggleLockSelected` 本身会被 `nodeDragInFlight`
+        // 拒绝，必须走 `engine.setDrawingLocked` 直调，同既有 cause③ 先例，`:151` 附近）——
+        // 制造「七道门」里的门②（`!old.locked`）在 `.ended` 写入那一刻失败。
+        #expect(rig.engine.setDrawingLocked(id: "A", locked: true) == true, "前提：锁定本身必须成功")
+        let revisionAfterLock = rig.engine.drawingsRevision
+        guard case .replaced(_, let afterLockSnapshot, _)? = rig.engine.drawingUndoEntryForTesting?.drawingsDelta else {
+            Issue.record("前提：锁定必须已经产生一条 .replaced 撤销记录")
+            return
+        }
+
+        rig.coordinator.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -10), phase: .ended)
+
+        #expect(rig.engine.drawingSession.nodeDragOwner == nil, "拖动态必须清——即便写入被拒")
+        #expect(rig.engine.drawingSession.nodeDragCurrent == nil)
+        let anchorAfter = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        #expect(anchorAfter == anchorBefore, "锚点必须原样不变——写入被 locked 门拒绝")
+        #expect(rig.engine.drawingsRevision == revisionAfterLock, "写入被拒必须零副作用，revision 不许再 +1")
+        guard case .replaced(_, let afterSnapshotNow, _)? = rig.engine.drawingUndoEntryForTesting?.drawingsDelta else {
+            Issue.record("撤销记录不见了，或类型变了——写入被拒不该动它")
+            return
+        }
+        #expect(afterSnapshotNow == afterLockSnapshot,
+                "被拒绝的拖动写入**绝不能**覆盖掉锁定那条已有的撤销记录（深度 1 的栈最容易被误覆盖）")
+    }
+
+    // MARK: 订正 1（Critical）：Catalyst 端到端验证 —— 真实 Coordinator 流水线不复利叠加
+
+    @Test("订正1 Catalyst 验证：真实 handleNodeDrag 流水线下，多帧累计位移与 `DrawingNodeDrag.draggedAnchor(基准=提交值)` 逐帧吻合（⛔ 不复利叠加）")
+    func realPipelineChangedPhaseStaysLinearAgainstCommittedBasis() throws {
+        let rig = makeRig()
+        let committedBefore = try #require(rig.engine.drawings.first(where: { $0.id == "A" }))
+        _ = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实已经开始")
+
+        // `.began` 之后视口不会再变（本档全程没有任何平移/惯性），全程复用这一个 mapper 算期望值。
+        let mapper = CoordinateMapper(viewport: rig.view.renderState.viewport,
+                                      displayScale: rig.view.traitCollection.displayScale)
+        let tool = try #require(KLineView.drawingTools[committedBefore.toolType])
+        let anchorIndex = 0
+
+        var actual: [DrawingAnchor] = []
+        var expected: [DrawingAnchor] = []
+        // 三帧累计位移（与 host 复现测试同款：-10/-20/-30）。
+        for ty in [CGFloat(-10), -20, -30] {
+            let t = CGPoint(x: 0, y: ty)
+            rig.coordinator.handleNodeDragForTesting(translation: t, phase: .changed)
+            let cur = try #require(rig.engine.drawingSession.nodeDragCurrent)
+            actual.append(cur)
+            // ⭐⭐ 订正1④ 的行为守卫：此刻 `nodeDragCurrent` 已经与提交值不同（上一帧已经移动过）——
+            //    每一帧都是「提交值 ≠ nodeDragCurrent」状态下喂的 `.changed`，期望值**恒用提交值**
+            //    现算，若 Coordinator 内部悄悄改回拿 `visibleDrawings`（拖动中的覆盖值）当基准，
+            //    这里算出的期望值就会与 `actual` 分叉（本测试会变红）。
+            let want = try #require(DrawingNodeDrag.draggedAnchor(
+                drawing: committedBefore, anchorIndex: anchorIndex, translation: t, mapper: mapper, tool: tool))
+            expected.append(want)
+        }
+
+        #expect(actual == expected, "每一帧的 nodeDragCurrent 都必须恰好等于「基准=提交值」算出来的结果，实测 actual=\(actual) expected=\(expected)")
+        // 帧间差相等（线性）+ 两两不等（确实在动）——与 host 复现档同款判据。
+        let diffs = zip(actual.dropFirst(), actual).map { $0.price - $1.price }
+        #expect(abs(diffs[0] - diffs[1]) < 1e-9, "帧间差必须相等（线性），实测 \(diffs)")
+        #expect(Set(actual.map(\.price)).count == actual.count, "三帧的值必须两两不等，否则「线性」断言可能是在比较三个相同的常数")
+    }
 }
 #endif

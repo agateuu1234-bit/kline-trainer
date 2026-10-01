@@ -100,6 +100,39 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)                                       // ⭐两面板重新回到 .drawing
     }
 
+    // P1c 第 3 片 Task 11（N8）：host-pure——只碰 `engine`/`drawingSession`，不需要 Coordinator/UIKit，
+    // 与上面 N8 周边既有的「D31 真变化」系列测试同夹具/同纪律（`engineMultiPeriod()` + `.toSmaller`，
+    // 原因同 `:76-80` 的既有警告：`preview()` 两个方向都会撞「目标周期无数据 → no-op」恒绿）。
+    @Test("N8：画线时切周期**真的变了** → 正在进行的节点拖动**作废**（D138 末行，与「第二根手指→就地定住」刻意不同）")
+    func realPeriodChangeInvalidatesNodeDrag() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.injectDrawingsForTesting([makeStyledHLine(id: "A", revealTick: 0,
+                                                     period: e.upperPanel.period, candleIndex: 0, price: 10)])
+        e.toggleDrawingMode()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "A", panel: .upper)
+
+        // 直接构造拖动态（@testable 直调 internal mutator，同 NodeDragRenderOverrideTests 先例）——
+        // 不需要真实 Coordinator：本测试只关心 `restoreDrawingSessionAfterPeriodChange` 对
+        // `nodeDragOwner`/`nodeDragCurrent`/`drawings`/`drawingsRevision` 的影响。
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 0, grabPoint: .zero)
+        e.drawingSession.beginNodeDrag(owner, anchor: DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 99))
+        #expect(e.drawingSession.nodeDragOwner != nil, "前提：拖动态确实在进行")
+        let drawingsBefore = e.drawings
+        let revisionBefore = e.drawingsRevision
+
+        e.switchPeriodCombo(direction: .toSmaller)   // (.m60,.daily) → (.m15,.m60) 真的能切成功
+
+        #expect(e.upperPanel.period == .m15, "防假绿：周期必须真的变了，不是撞了 no-op 守卫")
+        #expect(e.lowerPanel.period == .m60)
+        #expect(e.drawingSession.nodeDragOwner == nil, "拖动态必须被作废")
+        #expect(e.drawingSession.nodeDragCurrent == nil, "两半同生同死（G15）")
+        #expect(e.drawings == drawingsBefore, "作废不写：drawings 一个字节不改，不是「就地定住」")
+        #expect(e.drawingsRevision == revisionBefore, "作废不产生任何撤销记录")
+    }
+
     @Test("D31 no-op（目标周期无数据）：pending 锚**原样保留** —— 判据是「周期变没变」不是「做没做手势」")
     func noOpPeriodSwitchKeepsPendingAnchors() {
         let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()   // 只有 m3/m15/m60/daily，无 weekly

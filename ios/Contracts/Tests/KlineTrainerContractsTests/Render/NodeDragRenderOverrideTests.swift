@@ -321,4 +321,105 @@ struct NodeDragRenderOverrideTests {
         // 那个值，退回恒真（修复环第1轮 Important；Minor 一并处理）。
         #expect(written.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
     }
+
+    // MARK: - Task 11 订正 1（Critical）：几何基准必须是提交值，⛔ 不得是 `visibleDrawings` 的覆盖值
+
+    /// **host-pure 复现**（Task 11 控制者任务提示：若判别力只用 `DrawingNodeDrag` + session 构造
+    /// 就够，放 host；本档确实够——不需要 Coordinator/UIKit，只需要 `engine.drawings` /
+    /// `RenderStateBuilder.visibleDrawings` / `DrawingNodeDrag.draggedAnchor` 三者）。
+    ///
+    /// 直接用 `RenderStateBuilder.visibleDrawings` 的返回对象当 `DrawingNodeDrag.draggedAnchor` 的
+    /// `drawing` 参数（Task 11 brief 原文 Step 2 的写法）：拖动进行中它已经被 Task 10 的
+    /// `applyNodeDragOverride` 换成拖动中间值，而 `translation` 是「自按下以来的累计位移」——
+    /// 上一帧已经叠过的位移会在下一帧被再加一次，**逐帧复利叠加**。本档逐帧对照「基准=提交值」
+    /// （线性）与「基准=visibleDrawings 覆盖值」（复利）两条序列，并把实测数字写进断言消息里
+    /// （task-11-report.md 的「订正 1」一节原样引用这些数字）。
+    @Test("订正1 host 复现：拖动几何基准若取 `visibleDrawings` 的覆盖值 ⇒ 位移逐帧复利叠加，⛔ 不得与 translation 成正比")
+    func draggedAnchorCompoundsWhenBasisIsOverriddenValue() throws {
+        let engine = TrainingEngine.preview()
+        let upperPeriod = engine.upperPanel.period
+        let committed = makeTwoAnchorLine(id: "A", period: upperPeriod)
+        engine.injectDrawingsForTesting([committed])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setSelection(id: "A", panel: .upper)
+
+        let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let state = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: bounds)
+        let mapper = CoordinateMapper(viewport: state.viewport, displayScale: 2)
+        let tool = HorizontalLineTool()
+        // ⚠️ `.horizontal` 的 `requiredAnchors` 是 `1...1`（只认第 1 个锚点，`HorizontalLineTool.swift:12`）
+        //    ⇒ `DrawingNodeGeometry.marks` 的 `maxAnchors` 只覆盖下标 0，下标 1 恒产不出 `.real`
+        //    （`DrawingNodeDrag.draggedAnchor` 对它恒返回 nil，与本档要测的「线性性」无关）。
+        //    必须用下标 0——这与 T3/D135b/订正3 那几档刻意用下标 1（只测数组覆盖，不碰工具语义）
+        //    的理由不同：本档要调用真正的 `draggedAnchor`，必须落在工具认得的锚点上。
+        let anchorIndex = 0
+        // 四帧累计位移（与报告「订正 1」表格同款：-10/-20/-30/-40，纯纵向）。
+        let translations = [CGPoint(x: 0, y: -10), CGPoint(x: 0, y: -20),
+                            CGPoint(x: 0, y: -30), CGPoint(x: 0, y: -40)]
+
+        // ── 正确序列：几何基准**恒为提交值**（不受 nodeDragCurrent/覆盖影响）。
+        var correct: [DrawingAnchor] = []
+        for t in translations {
+            let a = try #require(DrawingNodeDrag.draggedAnchor(
+                drawing: committed, anchorIndex: anchorIndex, translation: t, mapper: mapper, tool: tool))
+            correct.append(a)
+        }
+        // 自检：正确序列必须真的在线性区（没有撞夹取边界），否则下面的「等差」断言测的是夹取而不是线性性。
+        let correctDiffs = zip(correct.dropFirst(), correct).map { $0.price - $1.price }
+        #expect(correctDiffs[0] != 0, "自检：正确序列的帧间差必须非零，否则本档测的是空气")
+        for i in 1..<correctDiffs.count {
+            #expect(abs(correctDiffs[i] - correctDiffs[0]) < 1e-9,
+                    "自检失败：正确序列不是等差（可能撞了夹取边界），需要调小本档的 translation 幅度。帧间差：\(correctDiffs)")
+        }
+
+        // ── 缺陷序列：几何基准取**上一帧写进 session 之后 `visibleDrawings` 的覆盖值**——
+        //    与 Task 11 brief 原文 Step 2「从 visibleDrawings 取 drawing」逐字同构。
+        var buggy: [DrawingAnchor] = []
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: anchorIndex, grabPoint: .zero)
+        for (i, t) in translations.enumerated() {
+            let basis: DrawingObject
+            if i == 0 {
+                // 第一帧等价 `.began`：此刻 `nodeDragOwner` 还是 nil，`visibleDrawings` 返回提交值
+                // （订正 1 的精确化：`.began` 本身没有缺陷，参见报告）。
+                basis = committed
+            } else {
+                basis = try #require(RenderStateBuilder.visibleDrawings(
+                    engine: engine, panel: .upper, tick: engine.tick.globalTickIndex
+                ).first(where: { $0.id == "A" }), "第 \(i + 1) 帧：visibleDrawings 必须能找到这条线")
+            }
+            let a = try #require(DrawingNodeDrag.draggedAnchor(
+                drawing: basis, anchorIndex: anchorIndex, translation: t, mapper: mapper, tool: tool))
+            buggy.append(a)
+            if i == 0 { engine.drawingSession.beginNodeDrag(owner, anchor: a) }
+            else { engine.drawingSession.updateNodeDragCurrent(a) }
+        }
+        let buggyDiffs = zip(buggy.dropFirst(), buggy).map { $0.price - $1.price }
+
+        // ⭐ 第一帧（.began 等价）两个序列必须相等——订正 1 的精确化：`.began` 本身没有缺陷。
+        #expect(buggy[0] == correct[0], "第一帧（.began 等价）正确/缺陷两个序列必须相等")
+
+        // ⭐⭐ 缺陷序列的帧间差必须是三角数倍数（2×/3×/4× unit，unit=正确序列的恒定帧间差）——
+        //    这正是「上一帧的覆盖值被当基准、位移被再加一次」的代数后果：第 n 帧相对提交值的
+        //    偏移量是三角数 T(n)=n(n+1)/2 乘 unit（本档实测 T(1..4)=1,3,6,10，即 1:3:6:10），
+        //    帧间差则是 T(n)-T(n-1)=n，即 2×/3×/4×unit（T(1)=1 已在第一帧里，不计入 diff）。
+        let unit = correctDiffs[0]
+        #expect(abs(buggyDiffs[0] - unit * 2) < 1e-9,
+                "缺陷序列第 1 个帧间差必须 ≈ 2×unit（三角数 T(2)-T(1)=2），实测 \(buggyDiffs[0])，unit=\(unit)")
+        #expect(abs(buggyDiffs[1] - unit * 3) < 1e-9,
+                "缺陷序列第 2 个帧间差必须 ≈ 3×unit（三角数 T(3)-T(2)=3），实测 \(buggyDiffs[1])")
+        #expect(abs(buggyDiffs[2] - unit * 4) < 1e-9,
+                "缺陷序列第 3 个帧间差必须 ≈ 4×unit（三角数 T(4)-T(3)=4），实测 \(buggyDiffs[2])")
+        // ⭐ 反向对照：两个序列必须真的分叉（不是碰巧全部相等）。
+        #expect(buggy[2] != correct[2],
+                "缺陷序列与正确序列必须在第 3 帧分叉，实测缺陷=\(buggy.map(\.price))，正确=\(correct.map(\.price))")
+
+        // 实测数字打进 stdout，task-11-report.md「订正 1」一节原样引用（本仓既有先例：
+        // `DrawingNodeDrag.swift` 头注同样把实测偏差数字写进注释，不只是断言）。
+        print("""
+            订正1 host 复现实测：committed.price=\(committed.anchors[anchorIndex].price)
+            正确序列=\(correct.map(\.price))（帧间差 \(correctDiffs)）
+            缺陷序列=\(buggy.map(\.price))（帧间差 \(buggyDiffs)）
+            """)
+    }
 }

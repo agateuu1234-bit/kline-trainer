@@ -56,7 +56,12 @@ enum DrawingEditRouter {
     /// —— 读错了 host 测**照样全绿**（两半的值一致），而真机上 SwiftUI 建不起依赖、控件不变灰。
     ///
     /// **⭐ 置灰必须是真的变灰**，不是「亮着、点了没反应」—— 后者在本仓是具名缺陷（1b-i PR-2 交接②）。
-    private static func nodeDragInFlight(engine: TrainingEngine) -> Bool {
+    ///
+    /// P1c 第 3 片 Task 11（订正 3）：由 `private` 放宽到 `internal`（module-wide）——
+    /// `ChartContainerView.Coordinator.handleDrawingTap` 的 `.select` 分支需要复用**这一个**判据
+    /// 挡「拖动进行中 tap 未命中 ⇒ 不得清空选中」（D135c / spec `:253` 的 tap 清空支）。
+    /// ⛔ **不新写一份**「拖动中」判断 —— 同一事实两份副本是本仓记过的缺陷来源。
+    static func nodeDragInFlight(engine: TrainingEngine) -> Bool {
         engine.drawingSession.nodeDragOwner != nil
     }
 

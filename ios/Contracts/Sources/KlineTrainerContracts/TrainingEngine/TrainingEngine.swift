@@ -447,6 +447,13 @@ public final class TrainingEngine {
     private func restoreDrawingSessionAfterPeriodChange() {
         guard drawingSession.drawingModeActive, let tool = drawingSession.activeDrawingTool else { return }
         if !drawingSession.pendingAnchors.isEmpty { drawingSession.discardPendingAnchors() }
+        // P1c 第 3 片 Task 11（N8）：周期组合真的变了 ⇒ 正在进行的节点拖动**作废**（D138 末行，
+        // 与「第二根手指落下→就地定住」刻意不同）——新周期下写进去的锚点与旧周期坐标系对不上，
+        // 正是 N8 禁止的混周期坏数据，作废不写。⚠️ 下面 `clearSelection()` 内部本就会连带调
+        // `endNodeDrag()`（D135c：没有选中 ⇒ 不可能有拖动），这里显式再调一次是为了让「周期变化
+        // 作废拖动」这件事不依赖「选中清空」这个旁系副作用来兑现——与 `discardPendingAnchors()`
+        // 并排、各自独立表达各自的善后语义，不许任何一者被悄悄删掉或挪位而让另一者失效。
+        drawingSession.endNodeDrag()
         // ③ D54 clause 3 / D57 表格末行（1b-i PR-3）：**结构性不可见 → 清空选中**。
         //    锚点绑在旧周期的 candleIndex 上，换了周期坐标系就错了；而且 D29 周期绑定下，这条线
         //    可能已经**迁到另一个面板**去渲染了 —— 它的 id 仍在 `drawings` 里（存在性谓词判"保留"），
