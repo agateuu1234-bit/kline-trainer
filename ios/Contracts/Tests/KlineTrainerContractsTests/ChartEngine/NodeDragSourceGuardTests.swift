@@ -69,13 +69,18 @@ struct NodeDragSourceGuardTests {
 
     /// 二级切片：在**已经切好**的函数体里，从某个 `case` 头切到下一个 `case` 头（或切到末尾）。
     /// 与 `body(of:)` 不同——case 分支不是自带配对括号的语法单位，只能按文本锚点切。
-    /// 找不到 `caseHeader` ⇒ nil，调用方必须 `Issue.record`。
+    /// 找不到 `caseHeader` ⇒ nil；**给了 `until:` 但找不到 `nextHeader`** 同样 ⇒ nil（⛔ 不许静默退化成
+    /// "切到末尾"——那会在 case 标签改名之后悄悄切出一个过宽的切片，诊断指错方向。只有**没给** `until:`
+    /// 时"切到末尾"才是正常语义，两条路径不共用同一句 `return`）。调用方必须 `Issue.record`。
     private func caseSlice(_ caseHeader: String, in code: String, until nextHeader: String? = nil) -> String? {
         guard let start = code.range(of: caseHeader) else { return nil }
-        if let nextHeader, let end = code.range(of: nextHeader, range: start.upperBound..<code.endIndex) {
-            return String(code[start.lowerBound..<end.lowerBound])
+        guard let nextHeader else {
+            return String(code[start.lowerBound..<code.endIndex])   // 没给 until：按原语义切到末尾
         }
-        return String(code[start.lowerBound..<code.endIndex])
+        guard let end = code.range(of: nextHeader, range: start.upperBound..<code.endIndex) else {
+            return nil   // 给了 until 但找不到 nextHeader ⇒ 锚点失效，不是"切到末尾"
+        }
+        return String(code[start.lowerBound..<end.lowerBound])
     }
 
     // MARK: - G2
@@ -149,6 +154,10 @@ struct NodeDragSourceGuardTests {
             Issue.record("handleNodeDrag 里找不到 case .began: —— 守卫失效，必须修"); return
         }
         #expect(probeBody.contains("hitTestNode("))   // 按下处理：必须有（防两侧切片都空导致两条都空洞成立）
+        // ⭐ 修复环第 1/5 轮 S4：上面那条对 probeBody 的正向断言防不了 beganOnly 自己切空——
+        //   若 beganOnly 真的切成了空串（如 caseHeader 紧跟 nextHeader），下面的负向断言会恒真。
+        //   补一条**同切片**的正向断言：.began 分支体内必然存在、且在分支偏后位置的调用。
+        #expect(beganOnly.contains("beginNodeDrag("))
         #expect(!beganOnly.contains("hitTestNode("))  // .began：不得重做
     }
 
@@ -359,18 +368,33 @@ struct NodeDragSourceGuardTests {
 
     @Test("G 系列的切片工具自身双向自检")
     func sliceHelperIsNotVacuous() {
+        // ⚠️ 下面这三组签名字面（"func f()" / "func h(" / "func zzzNoSuch()"）**全都不以 `{` 收尾**——
+        //   它们只覆盖 `body(of:)` 里"签名不带 `{`"那一支，从未执行过"签名自带 `{`"那一支
+        //   （修复环第 1/5 轮 Important：评审用变异证明过，把 `hasSuffix("{")` 那行改成 `if false`
+        //   这三组样本仍然全绿，而 12 条生产守卫当场红——真正兜住那次 bug 回归的是生产守卫自己，
+        //   不是这三组）。"签名自带 `{`" 那一支由下面新增的第 4 组样本 `guardFirstLine` 覆盖。
         let good = "func f() { a() }\nfunc g() { b() }"
         #expect(body(of: "func f()", in: good)?.contains("a(") == true)
         #expect(body(of: "func f()", in: good)?.contains("b(") == false, "切片吃到了下一个函数")
         #expect(body(of: "func zzzNoSuch()", in: good) == nil, "找不到时必须返回 nil 让调用方 Issue.record")
-        // 多行签名样本（照 applyNodeDragOverride 的真实写法：签名跨行，`{` 在第二行末）。
+        // 多行签名样本（照 applyNodeDragOverride 的真实写法：签名跨行，`{` 在第二行末；签名字面同样不带 `{`）。
         let multiline = "func h(_ x: Int,\n       y: Int) {\n    use(x, y)\n}\nfunc i() { other() }"
         #expect(body(of: "func h(", in: multiline)?.contains("use(") == true)
         #expect(body(of: "func h(", in: multiline)?.contains("other(") == false, "切片吃到了下一个函数")
-        // caseSlice 自检：找得到头 / 找不到头。
+        // 第 4 组（修复环第 1/5 轮新增）：签名**自带 `{`**，且函数体**第一行就是**
+        // `guard … else { return }`——这正是原 bug 的精确触发形状：若签名被误判成"不带 `{`"，
+        // 会去找签名之后**下一个** `{`，而那恰好是这条 guard 自己的 `{`，于是在它的 `}` 处就提前
+        // 收口，切不到函数末尾的 MARKER_END()。断言的是**同一个切片**里末尾附近的独有标记，
+        // 不是只断言"非空"（空字符串也能通过"非 nil"检查，但过不了这条 contains）。
+        let guardFirstLine = "func j() {\n    guard cond else { return }\n    MARKER_END()\n}\nfunc k() { other2() }"
+        #expect(body(of: "func j() {", in: guardFirstLine)?.contains("MARKER_END(") == true)
+        #expect(body(of: "func j() {", in: guardFirstLine)?.contains("other2(") == false, "切片吃到了下一个函数")
+        // caseSlice 自检：找得到头 / 找不到头 / 给了 until 但 nextHeader 找不到（⛔ 不许退化成切到末尾）。
         let withCases = "case .a:\n    foo()\ncase .b:\n    bar()"
         #expect(caseSlice("case .a:", in: withCases, until: "case .b:")?.contains("foo(") == true)
         #expect(caseSlice("case .a:", in: withCases, until: "case .b:")?.contains("bar(") == false)
         #expect(caseSlice("case .zzz:", in: withCases) == nil)
+        #expect(caseSlice("case .a:", in: withCases, until: "case .zzzNoSuch:") == nil,
+                "给了 until 但找不到 nextHeader 时必须返回 nil，不能静默切到末尾")
     }
 }
