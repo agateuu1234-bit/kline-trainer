@@ -31,6 +31,26 @@ public final class KLineView: UIView {
     public var onBoundsChange: ((CGRect) -> Void)?
     private var lastLaidOutBounds: CGRect = .zero
 
+    /// P1c 第 3 片（D140b）：**手指真正按下**那一刻的只读钩子，与 `onBoundsChange`（`:31`）同款范式。
+    /// ⛔⛔ 消费者**零 engine 写入**：不 settleDeceleration、不 rebuildRenderState、不改任何状态。
+    ///    理由：今天惯性要到 pan `.began` 才被 `beginPan` 截住；在这里刹车会让**每一次触摸**
+    ///    （含纯平移、纯点击）都提前截停惯性 —— 那是对 D32 既有行为的改动，直接违反 N1。
+    public var onTouchDown: ((CGPoint) -> Void)?
+    /// P1c 第 3 片（D140c）：按下时已有 ≥2 个触摸 —— 消费者据此清候选（fail-closed）。
+    public var onMultiTouchBegan: (() -> Void)?
+
+    public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        // G7：**只在单点触摸时**发按下钩子。判据用 event 的全量触摸数，⛔ 不是 touches.count
+        //（touches 只含**本次新增**的那些，第二指落下时它也是 1）。
+        let total = event?.allTouches?.count ?? touches.count
+        if total == 1, let t = touches.first {
+            onTouchDown?(t.location(in: self))       // 本面板局部坐标（D134e 的坐标空间契约）
+        } else {
+            onMultiTouchBegan?()
+        }
+    }
+
     /// 顺位9 夜间：图表 scheme 解析器。`displayMode` 保持 `.system`——override 由 SwiftUI
     /// `AppRootView.preferredColorScheme` 烤进 trait，本控制器只读生效 trait（RFC §4.3 item 3）。
     private let themeController = ThemeController()

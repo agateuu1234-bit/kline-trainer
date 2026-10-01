@@ -165,6 +165,15 @@ public struct ChartContainerView: UIViewRepresentable {
             arbiter.onTap = { [weak self] point in
                 self?.handleDrawingTap(at: point)
             }
+            self.view?.onTouchDown = { [weak self] point in
+                self?.captureNodeDragCandidate(at: point)
+            }
+            self.view?.onMultiTouchBegan = { [weak self] in
+                self?.nodeDragCandidate = nil            // D140c fail-closed
+            }
+            arbiter.onHasNodeDragCandidate = { [weak self] in
+                self?.acceptNodeDragCandidate() ?? false
+            }
             arbiter.attach(to: view)
         }
 
@@ -394,6 +403,49 @@ public struct ChartContainerView: UIViewRepresentable {
                 rebuildRenderState(bounds: view.bounds)
             }
         }
+
+        /// P1c 第 3 片（D140b）：按下那一刻捕获的候选，供 `.began` 复核（`acceptNodeDragCandidate`）。
+        /// ⛔ 瞬时态，绝不落盘、不进 `DrawingSession`——那边 `nodeDragOwner` 才是真正占槽的那份（D135）。
+        private var nodeDragCandidate: DrawingSession.NodeDragOwner?
+
+        /// D140b：**手指按下那一刻**捕获候选。⛔⛔ 本函数零 engine 写入 —— 用的是
+        /// `view.renderState.viewport`（= 屏幕上**正在显示**的那一帧，就是用户看着按下去的那一帧）。
+        /// ⚠️ 它是**上一帧**的结果，惯性快速滑动时与手指落下那一瞬最多差**一帧**；这是 UIKit
+        ///    触摸模型下的下界，⛔ 不得声称「精确」。它替代的是「一个 deadzone + 一次 overscroll
+        ///    夹取」的误差，数量级小一到两个档（spec D140b 末段，如实登记）。
+        private func captureNodeDragCandidate(at point: CGPoint) {
+            nodeDragCandidate = nil                       // 新按下**直接覆盖**旧候选（D140c）
+            guard let engine, let view else { return }
+            let vp = view.renderState.viewport
+            guard vp.geometry.candleStep > 0 else { return }
+            guard DrawingEditRouter.nodeDragPreconditions(engine: engine, panel: panel, point: point)
+            else { return }
+            guard let id = engine.drawingSession.selectedDrawingID,
+                  let drawing = RenderStateBuilder.visibleDrawings(
+                      engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+                      .last(where: { $0.id == id }),
+                  let tool = KLineView.drawingTools[drawing.toolType] else { return }
+            let mapper = CoordinateMapper(viewport: vp, displayScale: view.traitCollection.displayScale)
+            guard let idx = DrawingNodeGeometry.hitTestNode(
+                point: point, drawing: drawing, mapper: mapper,
+                isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
+                maxAnchors: tool.requiredAnchors.upperBound) else { return }
+            nodeDragCandidate = .init(panel: panel, drawingID: id, anchorIndex: idx, grabPoint: point)
+        }
+
+        /// pan `.began` 的 **fail-closed 复核**（D134e）。⛔ **不重做任何几何命中**（D140b）。
+        private func acceptNodeDragCandidate() -> Bool {
+            guard let engine, let c = nodeDragCandidate else { return false }
+            guard DrawingEditRouter.nodeDragPreconditions(
+                    engine: engine, panel: panel, point: c.grabPoint) else { return false }
+            guard engine.drawingSession.selectedDrawingID == c.drawingID else { return false }
+            return true
+        }
+
+        /// 测试入口（照 `handleDrawingTapForTesting`（`:323`）的先例）
+        func captureNodeDragCandidateForTesting(at point: CGPoint) { captureNodeDragCandidate(at: point) }
+        func acceptNodeDragCandidateForTesting() -> Bool { acceptNodeDragCandidate() }
+        var nodeDragCandidateForTesting: DrawingSession.NodeDragOwner? { nodeDragCandidate }
     }
 }
 #endif
