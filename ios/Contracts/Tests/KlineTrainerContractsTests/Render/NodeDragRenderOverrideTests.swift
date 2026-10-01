@@ -1,0 +1,301 @@
+// ios/Contracts/Tests/KlineTrainerContractsTests/Render/NodeDragRenderOverrideTests.swift
+// Spec: 2026-09-28-drawing-tools-P1c-3-node-drag-design.md（D135 / D135b，task-10-brief.md 控制者订正 1/2/3/5）
+//
+// 平台门：host-pure —— 只碰 TrainingEngine / DrawingSession / RenderStateBuilder.visibleDrawings，
+// 没有 Coordinator、没有 KLineView、没有 CGContext，不需要 UIKit（订正 5：不加 `#if canImport(UIKit)`，
+// 照 Q24 守卫 `VisibleDrawingsAnchorIdentityGuardTests.swift` 的先例写，在 macOS host swift test 直接跑）。
+//
+// 本套件钉住 Task 10 的两条契约：
+//   D135：拖动进行中，visibleDrawings 返回「替换了被拖锚点」的副本，且逐帧跟手指走（T3）、
+//         零写盘（T6，`drawingsRevision` 全程不变）。
+//   D135b：归属不变量（owner.drawingID == session.selectedDrawingID）不成立 ⇒ 不施加覆盖，
+//         且本函数是纯读——调用前后 `nodeDragOwner`/`nodeDragCurrent`/`drawingsRevision` 一个都不许变（G10）。
+// 订正 1/2 额外钉住「18 参数 init 里 14 个带默认值，手抄漏一个编译器不报错」这一族缺陷：
+// 两处手抄（Task 10 的 `applyNodeDragOverride` + Task 3 的 `updateDrawingAnchor`）各有一条
+// 「换回原锚点 ⇒ 与原对象整体相等」的往返恒等测试，夹具全部 14 个可配置字段都设成非默认值。
+import CoreGraphics
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+@MainActor
+@Suite("P1c-3 渲染覆盖（D135 / D135b）")
+struct NodeDragRenderOverrideTests {
+
+    // MARK: - 共用夹具
+
+    /// 简单两锚夹具（T3/T6/D135b 用；不需要「全字段非默认」，只需要锚点可区分）。
+    /// toolType 用 `.horizontal`——`DrawingToolType.implemented` 当前只收这一个（`Models.swift:50`），
+    /// `updateDrawingAnchor` 的 `isEditableToolType` 门只认它；锚点数（2）与工具语义不必自洽
+    /// （本测试不碰渲染/命中，只碰 `visibleDrawings`/`updateDrawingAnchor` 的字段级行为，同 Q24 守卫先例）。
+    private func makeTwoAnchorLine(id: String, period: Period) -> DrawingObject {
+        DrawingObject(
+            id: id, toolType: .horizontal,
+            anchors: [
+                DrawingAnchor(period: period, candleIndex: 0, price: 10),
+                DrawingAnchor(period: period, candleIndex: 0, price: 20),
+            ],
+            isExtended: false, panelPosition: 0, revealTick: 0, period: period)
+    }
+
+    /// 全字段非默认的夹具（订正 2 硬性要求）：`DrawingObject.init` 18 个参数里可配置的 14 个
+    /// 全部设成**非默认值**，否则「手抄漏掉某字段 → 静默回落默认值」这类缺陷在夹具恰好等于
+    /// 默认值的情况下测不出来（判别力为零）。
+    /// ⚠️ `period`（.m60）与 `anchors.first.period`（.daily）故意不一致——真实拖动状态里两者
+    /// 相等，这里刻意造一个不自洽的组合，**只是**为了让「手抄漏传 `period`、让 init 回落
+    /// `anchors.first?.period`」这一个缺陷可被侦测。⛔ 这是故意的，不要「修正」成两者相等，
+    /// 否则这条判据对 `period` 字段会永久失效（订正 2 原文明令）。
+    ///
+    /// ⚠️ `locked` 是**结构性例外**（订正 2 要求全部非默认，这一个字段做不到）：`locked` 同时
+    /// 是 `updateDrawingAnchor` 的写入门（`!old.locked`，`TrainingEngine.swift:1280`）——
+    /// `locked == true` 会在手抄那一行**之前**被拒，根本走不到手抄；`locked == false` 又恰好
+    /// 等于默认值，使"漏传 locked"在该入口下判别力恒为零。这是该字段在 `updateDrawingAnchor`
+    /// 这一个入口下的结构性限制（控制者订正未预见，详见报告「订正分歧」），不是测试偷懒。
+    /// `applyNodeDragOverride` 不读 `locked`，不受影响，默认传 `true`（非默认）。
+    private func fullFieldFixture(id: String, locked: Bool = true) -> DrawingObject {
+        DrawingObject(
+            id: id,
+            toolType: .horizontal,       // 同上：updateDrawingAnchor 的 isEditableToolType 门只认 .horizontal
+            anchors: [
+                DrawingAnchor(period: .daily, candleIndex: 0, price: 11),
+                DrawingAnchor(period: .daily, candleIndex: 0, price: 21),
+            ],
+            isExtended: true,              // 非默认（默认 false）
+            panelPosition: 1,               // 非默认（默认 0）
+            revealTick: 5,                  // 非默认（默认 0）——调用 visibleDrawings 时传大 tick 避免被渐显过滤
+            period: .m60,                   // 非默认（nil→回落 anchors.first.period）；故意与 anchors[0].period 不同，见上注
+            lineSubType: .segment,           // 非默认（默认 .straight）
+            lineStyle: .dash2,               // 非默认（默认 .solid）
+            thickness: 3,                    // 非默认（默认 1）
+            colorToken: .blue,               // 非默认（默认 .orange）
+            labelMode: .left,                // 非默认（默认 .hidden）
+            locked: locked,                  // 见上方头注：默认非默认值 true，test② 结构性必须传 false
+            text: "拖动夹具",                 // 非默认（默认 ""）
+            fontSize: 22,                     // 非默认（默认 14）
+            textColorToken: .purple,          // 非默认（默认 .orange）
+            textForm: .borderFilled,          // 非默认（默认 .plain）
+            tailAnchor: DrawingAnchor(period: .m60, candleIndex: 2, price: 99))  // 非默认（默认 nil）
+    }
+
+    /// 两条 `visibleDrawings` 结果之间「哪些 id 的内容变了」（`DrawingObject.==` 本身就是逐字段比较，
+    /// 唯独排除 `id`——同 id 匹配本身已保证 id 相同，这里只用它判内容是否被改写）。
+    private func diffIDs(_ visible: [DrawingObject], against committed: [DrawingObject]) -> [DrawingID] {
+        visible.compactMap { v in
+            guard let c = committed.first(where: { $0.id == v.id }) else { return nil }
+            return v == c ? nil : v.id
+        }
+    }
+
+    /// 把一个 `DrawingObject` 的 `anchors` 替换成固定值（这里置空），其余 17 个字段原样透传——
+    /// 经 Codable 往返改写 JSON 里的 "anchors" 键，**不手列其余字段**（订正 1 原文：「不要靠逐
+    /// 字段列清单去核，列清单本身也会漏」）。用来把两个对象「锚点归一化」后比 `==`，判别力与
+    /// 逐字段断言等价，但没有手抄风险。
+    private func zeroingAnchors(_ d: DrawingObject) throws -> DrawingObject {
+        let data = try JSONEncoder().encode(d)
+        guard var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw TestFixtureError.badJSON
+        }
+        obj["anchors"] = []
+        let newData = try JSONSerialization.data(withJSONObject: obj)
+        return try JSONDecoder().decode(DrawingObject.self, from: newData)
+    }
+
+    private enum TestFixtureError: Error { case badJSON }
+
+    // MARK: - T3 实时跟随
+
+    @Test("T3 实时跟随：visibleDrawings 里那条线的锚点 == 当前拖动锚点，且帧间几何确实变了")
+    func overrideAppliesToVisibleDrawings() throws {
+        let engine = TrainingEngine.preview()
+        let upperPeriod = engine.upperPanel.period
+        engine.injectDrawingsForTesting([makeTwoAnchorLine(id: "A", period: upperPeriod)])
+        engine.toggleDrawingMode()                  // drawingModeActive=true，setSelection 的门才放行
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setSelection(id: "A", panel: .upper)
+
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 1, grabPoint: .zero)
+        let frame1 = DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 50)
+        engine.drawingSession.beginNodeDrag(owner, anchor: frame1)
+
+        let visible1 = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: engine.tick.globalTickIndex)
+        let line1 = try #require(visible1.first(where: { $0.id == "A" }))
+        #expect(line1.anchors[1] == frame1, "拖动中那条线的锚点必须跟当前拖动锚点一致")
+
+        // 下一帧：手指移动，anchor 换一个不同的值。
+        let frame2 = DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 73)
+        engine.drawingSession.updateNodeDragCurrent(frame2)
+        let visible2 = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: engine.tick.globalTickIndex)
+        let line2 = try #require(visible2.first(where: { $0.id == "A" }))
+        #expect(line2.anchors[1] == frame2, "第二帧那条线的锚点必须跟新的拖动锚点一致")
+
+        // ⭐ 必须先断言帧与帧之间几何确实变了（差值非 0），否则「两边取同一个常数」恒真。
+        #expect(frame1 != frame2, "前提：两帧的拖动锚点本身必须不同")
+        #expect(line1.anchors[1] != line2.anchors[1], "两帧渲染出来的锚点必须跟着不同，不能是同一个常数")
+    }
+
+    // MARK: - T6 拖动中零写盘
+
+    @Test("T6 拖动中一次盘都不写：drawingsRevision 全程不变；收尾之后它才 +1（正向对照）")
+    func noPersistDuringDrag() throws {
+        let engine = TrainingEngine.preview()
+        let upperPeriod = engine.upperPanel.period
+        engine.injectDrawingsForTesting([makeTwoAnchorLine(id: "A", period: upperPeriod)])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setSelection(id: "A", panel: .upper)
+
+        let revisionBeforeDrag = engine.drawingsRevision
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 1, grabPoint: .zero)
+        engine.drawingSession.beginNodeDrag(owner, anchor: DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 30))
+        #expect(engine.drawingsRevision == revisionBeforeDrag, "占槽本身不写盘")
+
+        // 模拟多帧：反复调用 visibleDrawings（渲染读路径），revision 必须全程不变。
+        for price in [40.0, 50.0, 60.0, 70.0] {
+            engine.drawingSession.updateNodeDragCurrent(DrawingAnchor(period: upperPeriod, candleIndex: 0, price: price))
+            _ = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: engine.tick.globalTickIndex)
+            #expect(engine.drawingsRevision == revisionBeforeDrag, "渲染读路径在第 price=\(price) 帧零写入")
+        }
+
+        // 松手：真正的提交路径（Task 3 的 updateDrawingAnchor）才允许 +1 ——正向对照，
+        // 证明这份夹具下 revision 真的"能"变，上面「全程不变」不是因为它恒无法变化。
+        let finalAnchor = DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 70)
+        engine.drawingSession.endNodeDrag()
+        let committed = engine.updateDrawingAnchor(id: "A", anchorIndex: 1, anchor: finalAnchor)
+        #expect(committed, "正向对照的提交必须成功，否则下面的 +1 断言是空转")
+        #expect(engine.drawingsRevision == revisionBeforeDrag + 1, "收尾提交之后 revision 必须 +1")
+    }
+
+    // MARK: - D135b 不变量
+
+    @Test("D135b 不变量不成立（归属 ≠ 当前选中）⇒ 不施加覆盖，且渲染读路径零写入")
+    func overrideIsSkippedWhenOwnershipBroken() throws {
+        let engine = TrainingEngine.preview()
+        let upperPeriod = engine.upperPanel.period
+        let lineA = makeTwoAnchorLine(id: "A", period: upperPeriod)
+        let lineB = makeTwoAnchorLine(id: "B", period: upperPeriod)
+        engine.injectDrawingsForTesting([lineA, lineB])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+        // 当前选中是 B……
+        engine.drawingSession.setSelection(id: "B", panel: .upper)
+        // ……而 owner 直接造成 "A"（绕过正常入口——D135c 在正常入口下结构性禁止这种分叉，
+        // 这里用 @testable 直调 internal mutator 构造一个本应不可达的坏状态，专测防御分支）。
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 1, grabPoint: .zero)
+        let draggedAnchor = DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 999)
+        engine.drawingSession.beginNodeDrag(owner, anchor: draggedAnchor)
+        #expect(engine.drawingSession.selectedDrawingID == "B", "前提：选中仍是 B，不变量确实不成立")
+
+        let ownerBefore = engine.drawingSession.nodeDragOwner
+        let currentBefore = engine.drawingSession.nodeDragCurrent
+        let revisionBefore = engine.drawingsRevision
+
+        let visible = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: engine.tick.globalTickIndex)
+
+        // 不施加覆盖：A 的内容原样（订正 3 反向对照：差异元素个数恰好是 0）。
+        #expect(diffIDs(visible, against: engine.drawings).isEmpty,
+                "不变量不成立 ⇒ visibleDrawings 与 engine.drawings 之间不应有任何内容差异")
+        let returnedA = try #require(visible.first(where: { $0.id == "A" }))
+        #expect(returnedA == lineA, "A 的内容必须是提交值，不是被覆盖后的样子")
+        #expect(returnedA.anchors[1] != draggedAnchor, "A 的锚点不应被换成正在拖动的那个值")
+
+        // ⭐ G10：渲染读路径零写入——调用前后这三样一个都不许变。
+        #expect(engine.drawingSession.nodeDragOwner == ownerBefore, "读路径不许改写 nodeDragOwner")
+        #expect(engine.drawingSession.nodeDragCurrent == currentBefore, "读路径不许改写 nodeDragCurrent")
+        #expect(engine.drawingsRevision == revisionBefore, "读路径不许改写 drawingsRevision")
+    }
+
+    // MARK: - 订正 3：拖动进行中恰好差一处
+
+    @Test("订正3：不变量成立时，visibleDrawings 相对提交值恰好差一个元素，且那个元素恰好只差 owner.anchorIndex 一个下标")
+    func overrideDiffersFromCommittedByExactlyOneElementAtExactlyOneIndex() throws {
+        let engine = TrainingEngine.preview()
+        let upperPeriod = engine.upperPanel.period
+        let lineA = makeTwoAnchorLine(id: "A", period: upperPeriod)
+        let lineOther = makeTwoAnchorLine(id: "OTHER", period: upperPeriod)
+        engine.injectDrawingsForTesting([lineA, lineOther])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setSelection(id: "A", panel: .upper)
+
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 1, grabPoint: .zero)
+        let draggedAnchor = DrawingAnchor(period: upperPeriod, candleIndex: 0, price: 123)
+        engine.drawingSession.beginNodeDrag(owner, anchor: draggedAnchor)
+
+        let visible = RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: engine.tick.globalTickIndex)
+
+        // 断言差异元素的个数恰好是 1（⛔ 不是 ">= 1"）——否则"顺手改了别的线"抓不到。
+        let diffs = diffIDs(visible, against: engine.drawings)
+        #expect(diffs == ["A"], "差异元素必须恰好是 [\"A\"] 这一个，不多不少")
+
+        // 断言那一条的 anchors 与原值只有 owner.anchorIndex 这一个下标不同（逐下标比）。
+        let committedA = try #require(engine.drawings.first(where: { $0.id == "A" }))
+        let overriddenA = try #require(visible.first(where: { $0.id == "A" }))
+        for idx in committedA.anchors.indices {
+            if idx == owner.anchorIndex {
+                #expect(overriddenA.anchors[idx] == draggedAnchor, "owner.anchorIndex 这一下标必须等于当前拖动锚点")
+                #expect(overriddenA.anchors[idx] != committedA.anchors[idx], "owner.anchorIndex 这一下标必须与提交值不同")
+            } else {
+                #expect(overriddenA.anchors[idx] == committedA.anchors[idx], "下标 \(idx) 不是 owner.anchorIndex，必须原样不变")
+            }
+        }
+    }
+
+    // MARK: - 订正 1/2：手抄完整性①（Task 10 的 applyNodeDragOverride）
+
+    @Test("手抄完整性①（Task 10 的 applyNodeDragOverride）：换回原锚点 ⇒ 与原对象整体相等（含 id）")
+    func overrideCopyPreservesEveryField() throws {
+        let engine = TrainingEngine.preview()
+        let original = fullFieldFixture(id: "FIXTURE-A")
+        engine.injectDrawingsForTesting([original])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setSelection(id: "FIXTURE-A", panel: .upper)
+
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "FIXTURE-A", anchorIndex: 1, grabPoint: .zero)
+        let draggedAnchor = DrawingAnchor(period: .m60, candleIndex: 4, price: 77)
+        engine.drawingSession.beginNodeDrag(owner, anchor: draggedAnchor)
+
+        // revealTick(5) 非 0（订正 2 要求），故传一个远大于它的 tick，避免被渐显过滤挡在外面。
+        let overridden = try #require(
+            RenderStateBuilder.visibleDrawings(engine: engine, panel: .upper, tick: 999)
+                .first(where: { $0.id == "FIXTURE-A" }))
+
+        // 先确认覆盖确实发生了（否则下面「换回锚点后相等」是空转——覆盖没生效也会相等）。
+        #expect(overridden.anchors[1] == draggedAnchor)
+        #expect(overridden.anchors[1] != original.anchors[1])
+
+        // 往返恒等：锚点归一化后比较其余 17 个字段（订正 1 推荐写法，不手列字段）。
+        let overriddenNormalized = try zeroingAnchors(overridden)
+        let originalNormalized = try zeroingAnchors(original)
+        #expect(overriddenNormalized == originalNormalized,
+                "换回锚点后其余所有字段必须与原对象逐字段相等（== 本身就是全字段比较，唯独不比较 id）")
+        // `DrawingObject.==` 故意不比较 `id`（Models.swift:362-375）⇒ 单独补一条 id 断言，
+        // 否则"手抄漏传 id、换成随机 UUID"这一档缺陷用 == 测不出来（详见报告「订正分歧」）。
+        #expect(overridden.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
+    }
+
+    // MARK: - 订正 1/2：手抄完整性②（Task 3 的 updateDrawingAnchor，回填）
+
+    @Test("手抄完整性②（Task 3 的 updateDrawingAnchor）：写入后把锚点换回 ⇒ 与写入前整体相等（含 id）")
+    func updateDrawingAnchorPreservesEveryField() throws {
+        let engine = TrainingEngine.preview()
+        // locked: false 是结构性必须（见 fullFieldFixture 头注）——locked: true 会在手抄行之前
+        // 就被 `!old.locked` 门拒绝，写入永远不会发生，下面的断言会全部空转。
+        let original = fullFieldFixture(id: "FIXTURE-B", locked: false)
+        engine.injectDrawingsForTesting([original])
+
+        let newAnchor = DrawingAnchor(period: .m60, candleIndex: 4, price: 77)
+        let ok = engine.updateDrawingAnchor(id: "FIXTURE-B", anchorIndex: 1, anchor: newAnchor)
+        #expect(ok, "写入必须成功，否则下面的断言是空转")
+
+        let written = try #require(engine.drawings.first(where: { $0.id == "FIXTURE-B" }))
+        #expect(written.anchors[1] == newAnchor)
+        #expect(written.anchors[1] != original.anchors[1])
+
+        let writtenNormalized = try zeroingAnchors(written)
+        let originalNormalized = try zeroingAnchors(original)
+        #expect(writtenNormalized == originalNormalized,
+                "换回锚点后其余所有字段必须与写入前逐字段相等")
+        #expect(written.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
+    }
+}
