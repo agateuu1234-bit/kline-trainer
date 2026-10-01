@@ -42,7 +42,7 @@ struct NodeDragCandidateTests {
 
     /// 被选中那条线的真实屏幕点——与 `captureNodeDragCandidate` 内部用的同一条管线
     /// （mapper ← view.renderState.viewport；marks ← DrawingNodeGeometry + 工具表）。
-    private func nodePoint(_ rig: Rig, id: String = "A") -> CGPoint {
+    private func nodePoint(_ rig: Rig, id: String = "A") throws -> CGPoint {
         let mapper = CoordinateMapper(viewport: rig.view.renderState.viewport,
                                       displayScale: rig.view.traitCollection.displayScale)
         let drawing = RenderStateBuilder.visibleDrawings(
@@ -52,10 +52,11 @@ struct NodeDragCandidateTests {
         let marks = DrawingNodeGeometry.marks(for: drawing, mapper: mapper,
                                               isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
                                               maxAnchors: tool.requiredAnchors.upperBound)
-        guard case let .real(_, p)? = marks.first else {
-            fatalError("夹具前置条件：选中线的锚点必须是 .real 节点")
-        }
-        return p
+        // 修复环第1轮：fatalError 会崩掉整个测试进程，让「这一档夹具算错」在日志里长得像「全绿」
+        // （xcodebuild 重启后那一轮打印 0 tests passed）。改用 #require——失败只红这一档，其余照常跑完。
+        var real: CGPoint?
+        if case let .real(_, p)? = marks.first { real = p }
+        return try #require(real, "夹具前置条件：选中线的锚点必须是 .real 节点")
     }
 
     // MARK: - T12④ 候选在 touchesCancelled 之后仍在
@@ -63,7 +64,7 @@ struct NodeDragCandidateTests {
     @Test("T12④ 触摸被取消之后候选**仍在**（⛔「取消」不等于「手指抬起」）")
     func candidateSurvivesTouchesCancelled() throws {
         let rig = makeRig()
-        let p = nodePoint(rig)
+        let p = try nodePoint(rig)
         rig.coordinator.captureNodeDragCandidateForTesting(at: p)
         #expect(rig.coordinator.nodeDragCandidateForTesting != nil)   // 前提：候选真的建立了
 
@@ -81,7 +82,7 @@ struct NodeDragCandidateTests {
     @Test("T12⑤ 陈旧候选不泄漏：节点上按下后抬手不拖，再到远处按下 ⇒ 候选被**覆盖**")
     func newTouchDownOverwritesStaleCandidate() throws {
         let rig = makeRig()
-        let p = nodePoint(rig)
+        let p = try nodePoint(rig)
         rig.coordinator.captureNodeDragCandidateForTesting(at: p)
         #expect(rig.coordinator.nodeDragCandidateForTesting != nil)   // 前提：旧候选真的建立了
 
@@ -99,7 +100,7 @@ struct NodeDragCandidateTests {
     @Test("G7 行为面：两点触摸 ⇒ 不产生候选（⛔ 只做源码守卫不够，判据写成 >= 1 源码上照样出现）")
     func multiTouchProducesNoCandidate() throws {
         let rig = makeRig()
-        let p = nodePoint(rig)
+        let p = try nodePoint(rig)
         rig.coordinator.captureNodeDragCandidateForTesting(at: p)
         #expect(rig.coordinator.nodeDragCandidateForTesting != nil)   // 前提：候选真的建立了
 
@@ -121,7 +122,7 @@ struct NodeDragCandidateTests {
         // ① 线被删
         do {
             let rig = makeRig()
-            let p = nodePoint(rig)
+            let p = try nodePoint(rig)
             rig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)   // 前提：此刻仍放行
             #expect(rig.engine.deleteDrawing(id: "A") == true)
@@ -131,7 +132,7 @@ struct NodeDragCandidateTests {
         // ② 选中被清
         do {
             let rig = makeRig()
-            let p = nodePoint(rig)
+            let p = try nodePoint(rig)
             rig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)
             rig.engine.drawingSession.clearSelection()
@@ -144,7 +145,7 @@ struct NodeDragCandidateTests {
         // ③ 被锁
         do {
             let rig = makeRig()
-            let p = nodePoint(rig)
+            let p = try nodePoint(rig)
             rig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)
             #expect(rig.engine.setDrawingLocked(id: "A", locked: true) == true)
@@ -156,13 +157,13 @@ struct NodeDragCandidateTests {
         // ④ 进复盘（flow.mode 构造时定型，不可写——撤/加成因靠两个独立引擎，照 NodeDragPreconditionsTests 先例）
         do {
             let normalRig = makeRig(mode: .normal)
-            let p = nodePoint(normalRig)
+            let p = try nodePoint(normalRig)
             normalRig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(normalRig.coordinator.acceptNodeDragCandidateForTesting() == true)
 
             let reviewRig = makeRig(mode: .review)
             #expect(reviewRig.engine.flow.mode == .review)   // 前提成立
-            let pr = nodePoint(reviewRig)
+            let pr = try nodePoint(reviewRig)
             reviewRig.coordinator.captureNodeDragCandidateForTesting(at: pr)
             #expect(reviewRig.coordinator.acceptNodeDragCandidateForTesting() == false)
         }
@@ -170,7 +171,7 @@ struct NodeDragCandidateTests {
         // ⑤ 选中换成**同面板**另一条可编辑线——⭐ 必须断言 B 真的可编辑（否则退化成②的复制品）
         do {
             let rig = makeRig()
-            let p = nodePoint(rig)
+            let p = try nodePoint(rig)
             rig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)
 
@@ -185,9 +186,15 @@ struct NodeDragCandidateTests {
         }
 
         // ⑥ 选中换成**另一面板**的可编辑线——⭐ 同样必须断言 C 真的可编辑
+        // ⚠️ 修复环第1轮订正：本档**不隔离身份比对**——它是被 `acceptNodeDragCandidate`
+        // （ChartContainerView.swift:439）里 `nodeDragPreconditions` 自己的「`selectedPanel==panel`」
+        // 那一步先挡住的（`panel` 是 Coordinator 固定的 `self.panel`=.upper，候选换到 .lower 选中后
+        // `session.selectedPanel` 变成 .lower，两者不等，还没走到身份比对就已经 false）。
+        // **真正隔离身份比对的是 cause⑤**（同面板换选中）。⛔ 若将来有人见本档全绿就删掉
+        // `acceptNodeDragCandidate` 里的身份比对那一行，本档依然会正确拒绝——那不能当「身份比对没用」的证据。
         do {
             let rig = makeRig()
-            let p = nodePoint(rig)
+            let p = try nodePoint(rig)
             rig.coordinator.captureNodeDragCandidateForTesting(at: p)
             #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == true)
 
@@ -214,11 +221,17 @@ struct NodeDragCandidateTests {
         let bounds: CGRect
     }
 
-    // ⚠️ candleIndex 必须选在「offset=0 时的可见窗口」∩「offset 推到 maxOffset / 深度 overscroll 时的
-    //    可见窗口」的交集里——T11③ 会把 offset 推到 maxOffset+400（深度 overscroll），那时 `makeViewport`
-    //    把 startIndex 钳在 0（见 RenderStateBuilder.swift:237「min(max(...,0),upperBound)」），
-    //    可见窗口退化成 [0,80)；offset=0 时窗口约是 [71,150]。75 落在两者交集 [71,80) 内，
-    //    对任意中间的 offset 也成立（startIndex 单调地在 [0,71] 之间移动）。
+    // ⚠️ 修复环第1轮订正：candleIndex 选哪个值**不能手算**——手算漏掉了 `pixelShift`（overscroll 时
+    //    整段内容连同 startIndex==0 一起整体右移，把 indexToX 推出 mainChartFrame 右缘，index 落在数组
+    //    可见区间内也可能被判成 `.proxy` 而非 `.real`）。本仓已有纪律：期望值要交给真解析器/真几何去算，
+    //    不要手算——这正是那条纪律在本文件第一轮踩的坑。
+    //    已用 TEMP-DIAG 临时测试（Catalyst 真机跑出来，见 task-9-report.md 修复环第1轮）在**每个测试
+    //    实际会查询的 checkpoint** 上扫过 `DrawingNodeGeometry.marks`，结果：
+    //      T11①/T11②（kickInertia 惯性配方）：1 帧后 real∈[65,144]，7 帧后 real∈[41,120]，交集 [65,120]——
+    //        75 落在交集内，默认值不改。
+    //      T11③（overscroll+settle 配方）：越界那一帧 real∈[0,63]（pixelShift 把 >63 推出右缘），
+    //        夹回后 real∈[0,80]，交集 [0,63]——与 T11①/② 的交集**不相交**，⛔ 不能共用一个默认值，
+    //        T11③ 调用处显式传 `candleIndex: 50`（见下）。
     private func makeScrollRig(candleIndex: Int = 75, price: Double = 10, id: String = "A") -> ScrollRig {
         let bounds = TrainingEnginePanLinkageTests.bounds   // 800×600，makeEngine 已 recordRenderBounds
         let (engine, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
@@ -234,7 +247,7 @@ struct NodeDragCandidateTests {
         return ScrollRig(engine: engine, fakes: fakes, coordinator: coordinator, view: view, bounds: bounds)
     }
 
-    private func scrollNodePoint(_ rig: ScrollRig, id: String = "A") -> CGPoint {
+    private func scrollNodePoint(_ rig: ScrollRig, id: String = "A") throws -> CGPoint {
         let mapper = CoordinateMapper(viewport: rig.view.renderState.viewport,
                                       displayScale: rig.view.traitCollection.displayScale)
         let drawing = RenderStateBuilder.visibleDrawings(
@@ -244,10 +257,10 @@ struct NodeDragCandidateTests {
         let marks = DrawingNodeGeometry.marks(for: drawing, mapper: mapper,
                                               isVisible: tool.isVisible(drawing: drawing, mapper: mapper),
                                               maxAnchors: tool.requiredAnchors.upperBound)
-        guard case let .real(_, p)? = marks.first else {
-            fatalError("夹具前置条件：选中线的锚点必须是 .real 节点")
-        }
-        return p
+        // 修复环第1轮：同 nodePoint 的理由——fatalError 崩进程会把「夹具算错」伪装成「全绿」。
+        var real: CGPoint?
+        if case let .real(_, p)? = marks.first { real = p }
+        return try #require(real, "夹具前置条件：选中线的锚点必须是 .real 节点")
     }
 
     /// 起一次大速度甩动惯性（beginPan→endPan(velocity:)），不手动 applyPanOffset——
@@ -269,12 +282,12 @@ struct NodeDragCandidateTests {
         let rig = makeScrollRig()
         kickInertia(rig)
         _ = advanceFrames(rig, count: 1)          // 惯性已经在跑的那一刻
-        let p0 = scrollNodePoint(rig)
+        let p0 = try scrollNodePoint(rig)
         rig.coordinator.captureNodeDragCandidateForTesting(at: p0)
         #expect(rig.coordinator.nodeDragCandidateForTesting != nil)   // 前提：按下那一刻真的命中了节点
 
         _ = advanceFrames(rig, count: 6)          // 模拟按下到 `.began` 之间惯性继续跑
-        let p1 = scrollNodePoint(rig)
+        let p1 = try scrollNodePoint(rig)
         let moved = abs(p1.x - p0.x)
         #expect(moved > DrawingNodeGeometry.hitRadius,
                 "前提：视口必须真的移动了超过命中半径，否则本档与「没有移动」无法区分")
@@ -304,7 +317,7 @@ struct NodeDragCandidateTests {
         kickInertia(dryRun)
         _ = advanceFrames(dryRun, count: 1)
         _ = advanceFrames(dryRun, count: 6)
-        let q = scrollNodePoint(dryRun)             // 节点「惯性跑完之后」会落在的点
+        let q = try scrollNodePoint(dryRun)             // 节点「惯性跑完之后」会落在的点
 
         let rig = makeScrollRig()
         kickInertia(rig)
@@ -347,7 +360,9 @@ struct NodeDragCandidateTests {
 
     @Test("T11③ settleDeceleration 夹回 overscroll 致投影移动 → 同①，仍必须进拖动")
     func overscrollSettleClampStillEntersNodeDrag() throws {
-        let rig = makeScrollRig()
+        // candleIndex: 50——越界那一帧的 pixelShift 把 >63 的下标推出 mainChartFrame 右缘（见
+        // makeScrollRig 上方注释的 TEMP-DIAG 实测），默认值 75 在这一档会落空，必须显式传。
+        let rig = makeScrollRig(candleIndex: 50)
         let ob = RenderStateBuilder.offsetBounds(engine: rig.engine, panel: .upper, bounds: rig.bounds)
         #expect(ob.maxOffset > 0)   // 前提：真有滚动空间
 
@@ -361,7 +376,7 @@ struct NodeDragCandidateTests {
         #expect(rig.engine.upperPanel.offset > ob.maxOffset, "前提：确实还在越界区，否则测不到 clamp")
 
         // 按下那一刻：节点在指下（此刻视口仍是越界的那一帧）。
-        let p0 = scrollNodePoint(rig)
+        let p0 = try scrollNodePoint(rig)
         rig.coordinator.captureNodeDragCandidateForTesting(at: p0)
         #expect(rig.coordinator.nodeDragCandidateForTesting != nil)
 
@@ -371,7 +386,7 @@ struct NodeDragCandidateTests {
         #expect(rig.engine.upperPanel.offset <= ob.maxOffset, "自检：夹回界内")
 
         rig.coordinator.rebuildRenderState(bounds: rig.bounds)
-        let p1 = scrollNodePoint(rig)
+        let p1 = try scrollNodePoint(rig)
         #expect(abs(p1.x - p0.x) > DrawingNodeGeometry.hitRadius,
                 "前提：clamp 必须真的挪动了投影超过命中半径")
 
