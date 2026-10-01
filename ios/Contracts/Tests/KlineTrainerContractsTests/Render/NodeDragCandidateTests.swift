@@ -623,6 +623,10 @@ struct NodeDragCandidateTests {
         #expect(rig.engine.drawingSession.nodeDragOwner == ownerBefore, "①拖动态（owner）必须原样保留")
         #expect(rig.engine.drawingSession.nodeDragCurrent == currentBefore, "②拖动态（current）必须原样保留")
         #expect(rig.engine.drawingSession.selectedDrawingID == selectedBefore, "③选中必须不变")
+        // ⚠️ Task 12 评审实测：去掉 `handleDrawingTap` 的 `.select` 分支里那道 `nodeDragInFlight` 门之后，
+        // 只有 ①②③ 会转红——`clearSelection()`（DrawingSession.swift:142-147）本就不碰 `drawings` /
+        // `drawingsRevision`。⇒ 第④条对**这道门**判别力为零（隔离它的是 ①②③），不要删它——
+        // 它仍是有意义的附带确认「这次事故里没有任何写盘发生」，只是不能拿它当这道门的证据。
         #expect(rig.engine.drawingsRevision == revisionBefore, "④drawingsRevision 必须不变")
     }
 
