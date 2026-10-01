@@ -6659,3 +6659,29 @@ def test_r1_u16_recovery_adding_another_stock_rejected_even_if_paid_for():
     with pytest.raises(ManifestInvalidError, match="只许移除"):
         _require_no_progress_rollback(before, after, "U16",
                                       recovery=_r1_scope(before))
+
+
+def test_r1_u19_recovery_rejects_added_records_even_with_zero_bytes():
+    """U19 · 恢复提交里新增的记录即便 `bytes` 为 0 也必须拒。
+
+    spec §2.2 的 R4 约束的是「不得包含任何新增的**键**」，不是「新增字节数为
+    0」——两者在新增记录 `bytes` 恰为 0 时**分岔**：按字节和判的旧版会把
+    这份**合法**账本（先过 `_r1_assert_valid`）上新增的 2 条键判成「字节和
+    为 0」从而放行。本用例把新增那只的两条记录字节都设成 0，钉住这个分岔点。
+    """
+    before = _r1_base(headroom=10_000_000)
+    after, removed = _r1_remove_stock(before, refund=True)
+    code, name = _R1_SPARE
+    after = _r1_copy.deepcopy(after)
+    zero_byte_recs = [dict(_file_rec(code, name, "1m"), bytes=0),
+                      dict(_file_rec(code, name, "daily"), bytes=0)]
+    after["files"] += zero_byte_recs
+    after["pool_order"]["SZ"].append(
+        {"code": code,
+         "universe_idx": after["source_snapshot"]["universe"]["SZ"].index(code)})
+    _recompute_evidence(after)
+    after["committed_bytes"] = before["committed_bytes"] - removed  # 新增字节和为 0，无需再补
+    _r1_assert_valid(after, "U19 after")
+    with pytest.raises(ManifestInvalidError, match="只许移除"):
+        _require_no_progress_rollback(before, after, "U19",
+                                      recovery=_r1_scope(before))

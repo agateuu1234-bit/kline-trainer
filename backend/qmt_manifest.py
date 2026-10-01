@@ -1554,21 +1554,33 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         # 口子挂在既有的 `scoped_removed` 上（它已保证：声明了 RecoveryScope、
         # 锚点与冻结名单对得上、该股 files 与池条目一起消失），**不另造旁路**。
         if scoped_removed:
-            # ⚠️ **退款分支必须禁止同时新增**（R4，codex 2026-10-01 [medium]）：
-            # `scoped_removed` 只保证**目标股**完整消失，files 守卫并不禁止
-            # 新增别的键、pool_order 也允许追加。若不禁，下面那条等式会让新增
-            # 那些记录的字节**完全不计账**（本机复现：余量 1000 万时固有下界
-            # 也拦不住）—— 那就是一条记账旁路。
-            added_in_recovery = 0
+            # ⚠️ **退款分支必须禁止同时新增**（R4，codex 2026-10-01 [medium]；
+            # 2026-10-01 复评订正）：spec §2.2 的约束本体是「`new_files` 不得
+            # 包含任何 `prev_files` 里没有的**键**」——括号里「即 added 必须为
+            # 0」只是注解，§2.3「R4 保证这一步没有任何新增」与 U16 的说明
+            # 「恢复提交一律不许新增」都是按**键**说的。旧版判据误把注解当
+            # 本体，写成「新增字节和非零才拦」，在新增记录 `bytes` 恰为 0 时
+            # 与按键判**分岔**：一份先过 `validate_manifest` 的合法账本，
+            # 恢复时新增两条 bytes=0 的记录会被旧判据放行（U19 实测坐实）。
+            # ⚠️ 旧版「`b is None` 时不计入字节和」与「这条根本不是新增」
+            # 在求和语义下等价（都对总和贡献 0），把「新增但读不出字节」
+            # 与「没有新增」悄悄合流成同一个判据结果——按键判之后，这种
+            # 混淆自然消失：判据只问键在不在 `prev_files` 里，与它的
+            # `bytes` 是否良型无关。
+            added_keys = []
+            added_in_recovery = 0   # 仅诊断用：下面报错文案里的字节量参考，
+                                     # 判据本体是 `added_keys`，不是这个数字。
             for key, rec in new_files.items():
                 if key not in prev_files:
+                    added_keys.append(key)
                     b = _int_or_none(rec.get("bytes"))
                     if b is not None:
                         added_in_recovery += b
-            if added_in_recovery:
+            if added_keys:
                 raise ManifestInvalidError(
                     f"{where} 崩溃恢复提交里**只许移除**，不许同时新增 files "
-                    f"记录（本次新增了合计 {added_in_recovery} 字节）。"
+                    f"记录（本次新增了 {sorted(added_keys, key=repr)}，"
+                    f"合计 {added_in_recovery} 字节）。"
                     "请把新增放到另一次提交，好让它的字节被正常计账。"
                 )
 
