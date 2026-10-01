@@ -6627,3 +6627,35 @@ def test_r1_u18_declared_recovery_that_removed_nothing_takes_the_else_branch():
     after["committed_bytes"] = before["committed_bytes"] + added
     _r1_assert_valid(after, "U18 after")
     _require_no_progress_rollback(before, after, "U18", recovery=_r1_scope(before))
+
+
+def test_r1_u15_recovery_that_also_adds_another_stock_rejected():
+    """U15 · 恢复提交里**完整移除受害股的同时新增另一只** —— 必须拦（R4）。
+
+    ⚠️ 夹具把 committed_bytes 抬高 1000 万：这样「被拦住」只可能是 R4 干的，
+    不会是固有下界检查代为拦截（否则这条用例测不到它要测的判据）。
+    """
+    before = _r1_base(headroom=10_000_000)
+    after, removed = _r1_remove_stock(before, refund=True)
+    after, _added = _r1_add_spare(after)
+    after["committed_bytes"] = before["committed_bytes"] - removed
+    _r1_assert_valid(after, "U15 after")
+    with pytest.raises(ManifestInvalidError, match="只许移除"):
+        _require_no_progress_rollback(before, after, "U15",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u16_recovery_adding_another_stock_rejected_even_if_paid_for():
+    """U16 · 同 U15，但把新增那只的字节补上 —— **照样拦**。
+
+    理由：恢复提交一律不许新增，否则 R2 的等式就不再可机械检验
+    （无法区分「退还了多少」与「新增补了多少」）。
+    """
+    before = _r1_base(headroom=10_000_000)
+    after, removed = _r1_remove_stock(before, refund=True)
+    after, added = _r1_add_spare(after)
+    after["committed_bytes"] = before["committed_bytes"] - removed + added
+    _r1_assert_valid(after, "U16 after")
+    with pytest.raises(ManifestInvalidError, match="只许移除"):
+        _require_no_progress_rollback(before, after, "U16",
+                                      recovery=_r1_scope(before))

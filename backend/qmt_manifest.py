@@ -1554,6 +1554,24 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
         # 口子挂在既有的 `scoped_removed` 上（它已保证：声明了 RecoveryScope、
         # 锚点与冻结名单对得上、该股 files 与池条目一起消失），**不另造旁路**。
         if scoped_removed:
+            # ⚠️ **退款分支必须禁止同时新增**（R4，codex 2026-10-01 [medium]）：
+            # `scoped_removed` 只保证**目标股**完整消失，files 守卫并不禁止
+            # 新增别的键、pool_order 也允许追加。若不禁，下面那条等式会让新增
+            # 那些记录的字节**完全不计账**（本机复现：余量 1000 万时固有下界
+            # 也拦不住）—— 那就是一条记账旁路。
+            added_in_recovery = 0
+            for key, rec in new_files.items():
+                if key not in prev_files:
+                    b = _int_or_none(rec.get("bytes"))
+                    if b is not None:
+                        added_in_recovery += b
+            if added_in_recovery:
+                raise ManifestInvalidError(
+                    f"{where} 崩溃恢复提交里**只许移除**，不许同时新增 files "
+                    f"记录（本次新增了合计 {added_in_recovery} 字节）。"
+                    "请把新增放到另一次提交，好让它的字节被正常计账。"
+                )
+
             removed_bytes = 0
             for key, rec in prev_files.items():
                 if key not in new_files:
