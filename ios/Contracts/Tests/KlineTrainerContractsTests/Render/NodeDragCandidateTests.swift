@@ -210,6 +210,38 @@ struct NodeDragCandidateTests {
         }
     }
 
+    // MARK: - T11④ cause④ 的 mid-flight 场景（修复环第2轮订正）
+
+    /// 评审实测证明 `candidateRevalidationRejectsSixCauses` 的 cause④（进复盘）判别力为零：
+    /// `reviewRig` 是另造的引擎，`captureNodeDragCandidateForTesting` 在捕获阶段就被
+    /// `editableIgnoringGeometry` 的 `flow.mode != .review` 挡掉（候选从未建立），`acceptNodeDragCandidate`
+    /// 第一行 `guard let c = nodeDragCandidate else { return false }` 就返回——复核那一行有没有都无所谓。
+    /// cause④ 实际测的是「捕获前拒绝」，与 `NodeDragPreconditionsTests.swift:130-152` 近乎重复。
+    ///
+    /// 本档补 spec T11④ 真正要的场景：**候选在按下时已合法建立，`.began` 之前环境才变化**——
+    /// 由于活引擎的 `flow.mode` 是构造时定型的只读计算属性（`TrainingFlowController` 协议、
+    /// `NormalFlow`/`ReviewFlow`/`ReplayFlow` 三个实现各自写死返回值），「进复盘」在一个**活引擎**上
+    /// 结构性不可能发生——真实可达的等价场景是**换一整个引擎**，对应「手指还在屏幕上，视图层把
+    /// Coordinator 换绑到一个新引擎」。复用 Coordinator 既有的换引擎缝 `sync(panel:engine:view:)`
+    /// （`ChartContainerView.updateUIView` 每次调用的那条真实路径，`ChartContainerView.swift:79-108`），
+    /// ⛔ 不新增任何生产 API、不放宽可见性。
+    @Test("T11④ cause④' mid-flight：候选已合法建立，`.began` 前 Coordinator 的 engine 被换成复盘引擎 ⇒ 拒绝")
+    func candidateRevalidationRejectsMidFlightSwitchToReview() throws {
+        let rig = makeRig(mode: .normal)
+        let p = try nodePoint(rig)
+        rig.coordinator.captureNodeDragCandidateForTesting(at: p)
+        // ⭐ 不能省：证明候选真的被建立过，否则这一档又会退化成「压根没捕获」的复制品。
+        #expect(rig.coordinator.nodeDragCandidateForTesting != nil,
+                "前提：候选必须在切换引擎之前就合法建立")
+
+        // 换引擎（与 makeRig(mode:.review) 同款构造：画线会话已开、选择态、同一条线 "A" 已选中——
+        // 唯一差别是 flow.mode，这样复盘门才与「选择态/选中」等其它分量隔离开）。
+        let reviewRig = makeRig(mode: .review)
+        rig.coordinator.sync(panel: .upper, engine: reviewRig.engine, view: rig.view)
+
+        #expect(rig.coordinator.acceptNodeDragCandidateForTesting() == false)
+    }
+
     // MARK: - T11①②③：视口在「按下 → .began」之间移动（D140b）
 
     // 共用夹具②：真有滚动空间的 .m3/.m3 双面板引擎 + FakeFrameDriver，驱动真实惯性/overscroll。
