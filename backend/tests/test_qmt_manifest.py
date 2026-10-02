@@ -6873,3 +6873,35 @@ def test_r1_u17_end_to_end_recovery_and_readd_through_the_public_path(tmp_path):
             "重拉后受害股应排在池序末尾（pool_order 只许追加）"
     finally:
         os.close(fd)
+
+
+def test_r1_u20_non_recovery_commit_shrinking_committed_bytes_by_one_byte_rejected():
+    """U20 · **非恢复**提交里 committed_bytes 只比上一份**少 1 字节**（`files`
+    一字不改）—— 单调守卫⑤（else 分支 `nb < ob`）必须拦。
+
+    钉住的是哪一格：既有的
+    `test_a_stale_snapshot_cannot_rewrite_committed_state
+    [committed_bytes 被调小]` 用例用 `_rich()` 夹具把 committed_bytes 一口气
+    调小了 1662178 字节，挡得住「调小一大截」；但把判据本身放宽 1 字节
+    （`if nb is None or nb < ob:` 改成 `if nb is None or nb < ob - 1:`）后，
+    那条既有用例照样全绿，`test_qmt_manifest.py` 全套一条都不红（变异实测
+    坐实）——「恰好小 1 字节」这个边界此前没有任何用例钉着。本用例把调小的
+    量钉死在 1，专门堵这个 off-by-one 缺口。
+
+    ⚠️ 必须带 headroom：不带余量时 `ob - 1` 会低于固有下界
+    （`_require_intrinsic_payload_ok` 的 `nb ≥ sum(files) + staged_export_log`），
+    会被那条**固有检查**先一步拦下，这条用例就测不到单调守卫⑤——本片
+    U3/U9/U11/U12 都栽过同一个坑。
+
+    ⚠️ 只改 `committed_bytes`，绝不碰 `files`：一动 `files` 就会先撞上
+    守卫②（已提交的 files 记录不得回滚/改写，U5 即是如此被拦），守卫⑤
+    根本走不到。
+
+    ⚠️ 不传 `recovery`：传了且构成 `scoped_removed` 就会转去走退款分支
+    （「恰好退还」那条等式判据），测不到本条 else 分支。
+    """
+    before = _r1_base(headroom=10_000_000)
+    after = _r1_copy.deepcopy(before)
+    after["committed_bytes"] = before["committed_bytes"] - 1
+    with pytest.raises(ManifestInvalidError, match="它是累计量"):
+        _require_no_progress_rollback(before, after, "U20")   # 不传 recovery
