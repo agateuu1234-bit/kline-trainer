@@ -67,6 +67,26 @@ codex R2-medium 接线守卫：ChartPanelsContainer 挂了 .task(id: stylePanelP
 KLineView 可实例化（spec L1179 final class）
 renderState 可读写（compile-check：let 字段 + init 重建模式）
 L8c 契约: 生产渲染注册表里确实没有 .trend（L8 的另一半，必须在 Catalyst 上跑）
+T12④ 触摸被取消之后候选**仍在**（⛔「取消」不等于「手指抬起」）
+T12⑤ 陈旧候选不泄漏：节点上按下后抬手不拖，再到远处按下 ⇒ 候选被**覆盖**
+G7 行为面：两点触摸 ⇒ 不产生候选（⛔ 只做源码守卫不够，判据写成 >= 1 源码上照样出现）
+T11④ 候选中途失效的**六个**成因，各自 fail-closed 不进拖动
+T11④ cause④' mid-flight：候选已合法建立，`.began` 前 Coordinator 的 engine 被换成复盘引擎 ⇒ 拒绝
+T11① 按下时节点在指下、之后惯性把节点移出 11pt → 仍必须进拖动（`.began` 不重做几何）
+T11② 按下时指下没有节点、惯性把某节点移进指下 → 必须不进拖动
+T11③ settleDeceleration 夹回 overscroll 致投影移动 → 同①，仍必须进拖动
+N4：一次完整拖动（began→changed→ended）⇒ 撤销栈深度恰好1 / ↩一次整个回到拖前 / 拖动后≠拖前 / drawingsRevision 恰好+1
+T4：拖到一半被第二根手指打断（ChartGestureArbiter 对此发 .ended，与抬手同一条收尾路径）⇒ 就地定住：写一次、记一条撤销，定住的锚点 ≠ 起点
+T14⑤ 陈旧回调不得动别人的槧：A 已收尾清槧、B 已占槧 ⇒ 来自 A 面板的陈旧 .changed/.ended 不碰 B 的拖动态/drawingsRevision，且 B 之后仍能正常收尾
+订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧
+订正2②：清槧之后，十道写入门必须真的重新放行（⛔ 只断言 nodeDragOwner==nil 是在测中间变量）
+订正3：拖动进行中，tap 未命中 ⇒ `.select` 整支早退：不换选中、不清空、不丢弃拖动态
+订正3 反向对照：不在拖动中时，同一次未命中的 tap ⇒ 选中确实被清空（D37），证明上一档的「不变」不是巧合
+订正4：`updateDrawingAnchor` 返回 false（七道门之一拒绝）⇒ 拖动态清、锚点不变、不覆盖既有撤销记录、drawingsRevision 不再额外 +1
+订正1 Catalyst 验证：真实 handleNodeDrag 流水线下，多帧累计位移与 `DrawingNodeDrag.draggedAnchor(基准=提交值)` 逐帧吻合（⛔ 不复利叠加）
+T5 正序（真实顺序）：标记 + 节点同锚 ⇒ 节点中心仍是节点色（日间纯黑），不被标记整个盖住
+⭐正向对照：移走标记后同一点仍是节点色 —— 证明上面那条不是恒真
+⭐反向对照：测试内部把两次绘制换序（不改生产代码）⇒ 同一点变成标记色，证明 T5 有判别力
 forScheme(.dark) 13 字段桥 = AppPalette.dark
 forScheme(.light) 13 字段桥 = AppPalette.light
 light/dark UIColor 真不同（防退化为单集）

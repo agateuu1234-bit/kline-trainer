@@ -547,13 +547,28 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   ⇒ 这条惯例值得再强调一次：**改 catalyst-uikit-baseline.txt 必须同时重裁 fixture 并更新下面的
 #   回显数字**，三者是同一件事的三份副本，漏任何一份都会让这道自测失真。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 80 行 UIKit 结果行取自真日志原文）。
+#   【划线 P1c 第 3 片 · Task 1-12（节点拖动）+ Task 13（T5 像素证据，本轮）】total 1935→2030（+95），
+#   uikit 80→100（+20）：Task 1-12 落地期间（候选捕获/生命周期/拖动提交/撤销/陈旧回调清槧等）
+#   新增的 UIKit-gated 测试（`NodeDragCandidateTests.swift` 17 档）与四处基线文件**一直没同步**——
+#   本仓"漏一份=本地全绿、CI才红"的那类问题，直到 Task 13 才被发现并补上；Task 13 自身只新增
+#   3 条 UIKit-gated（`NodeDragPixelEvidenceTests.swift` 的 T5 正序 + 正向对照 + 反向对照）。
+#   17+3=20，与 uikit 80→100 精确对账。host 侧（swift test，Contracts target）净增 75 条
+#   （由等式反推：Catalyst total = host − 1〔`DecelerationAnimatorTests.swift:205` 的
+#   `#if !canImport(UIKit)` 专属 host 测试，Catalyst 不编译它〕+ uikit；75+20=95，与
+#   1935→2030 精确对账）。实测 `swift test` 当前 host 总数 1931（Contracts）+ 173（Persistence，
+#   Catalyst 门不跑这个 target）。
+#   同步理由：不同步的话下一轮读到的仍是旧基线 1935，窗口下限锁死在 1935−30=1905，而当前真实
+#   总数已是 2030 ⇒ 从 2030 掉到 1905 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽；
+#   且活基线里新增的 20 条 UIKit-gated 测试在旧 fixture 找不到结果行，「活基线覆盖」自测会当场 FAIL。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 100 行 UIKit 结果行取自真日志
+#   原文；另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1935" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 80 / total 1935）→ GATE PASS 且回显 1935 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2030" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 100 / total 2030）→ GATE PASS 且回显 2030 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1935，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2030，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
