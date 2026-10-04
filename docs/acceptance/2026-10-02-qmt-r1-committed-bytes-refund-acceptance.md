@@ -73,16 +73,18 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 **期望看到**：
 
 - 第一行是 `branch=fix/qmt-r1-committed-bytes-refund HEAD=690ce405`
-- 最后一行是 `1640 passed in <某个秒数>`
+- 最后一行是 `1643 passed in <某个秒数>`
 
 **通过判定**：
 
-- 通过 —— 分支与 `HEAD` 两个值都对得上；数字是 **1640**；这一行里**没有** `failed`（失败）、
+- 通过 —— 分支与 `HEAD` 两个值都对得上；数字是 **1643**；这一行里**没有** `failed`（失败）、
   `skipped`（跳过没跑）、`error`（出错）这三个词。
 - 不通过 —— 上面任意一项不满足。
 
 > 参考：这一片开工之前（`origin/main = 25ad1c2a`）这个数字是 **1620**。
-> 本片净增 20 项，全部是新写的自动检查，没有删掉任何既有项。
+> 本片净增 **23** 项，全部是新写的自动检查，没有删掉任何既有项。
+> （其中最后 3 项 U21/U22/U23 是 codex 对抗性评审第 1 轮挖出一条绕法后补的，
+> 见本文件末尾「过程中发现、并且已经修掉的问题」第四条。）
 
 ---
 
@@ -102,14 +104,14 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 
 **期望看到**：
 
-- 第一条命令：最后一行就是数字 `20`。
-- 第二条命令：最后一行是 `20 passed, 381 deselected in <某个秒数>`。
+- 第一条命令：最后一行就是数字 `23`。
+- 第二条命令：最后一行是 `23 passed, 381 deselected in <某个秒数>`。
 
 **通过判定**：
 
-- 通过 —— 第一条输出 **20**；第二条的 `passed` 前面是 **20**、`deselected`（本次没挑中的）
+- 通过 —— 第一条输出 **23**；第二条的 `passed` 前面是 **23**、`deselected`（本次没挑中的）
   前面是 **381**，且这一行里**没有** `failed`、`skipped`、`error`。
-- 不通过 —— 两个 `20` 对不上；或 `deselected` 前面是 `0`；或出现上述任一个词。
+- 不通过 —— 两个 `23` 对不上；或 `deselected` 前面是 `0`；或出现上述任一个词。
 
 > ⚠️ 为什么要看 `deselected` 那个数：如果筛选条件写错了、一项都没挑中，屏幕上**照样会显示
 > 绿色的「通过」**——因为「0 项全部通过」在技术上也算通过。`deselected` 不为 0，才说明
@@ -193,11 +195,11 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes/backend" && echo "branch=$(git -C .. rev-parse --abbrev-ref HEAD) HEAD=$(git -C .. rev-parse --short HEAD)" && "/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" -m pytest tests/test_qmt_manifest.py -q -k "r1_u10 or r1_u17 or r1_u20"
 ```
 
-**期望看到**：最后一行是 `3 passed, 398 deselected in <某个秒数>`。
+**期望看到**：最后一行是 `3 passed, 401 deselected in <某个秒数>`。
 
 **通过判定**：
 
-- 通过 —— `passed` 前面是 **3**，`deselected` 前面是 **398**，没有 `failed` / `skipped` / `error`。
+- 通过 —— `passed` 前面是 **3**，`deselected` 前面是 **401**，没有 `failed` / `skipped` / `error`。
 - 不通过 —— 以上任意一项不满足。
 
 **这三项分别在钉什么**：
@@ -210,7 +212,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 
 ---
 
-## 过程中发现、并且已经修掉的问题（挑三个说，都不是「写错字」那类）
+## 过程中发现、并且已经修掉的问题（挑四个说，都不是「写错字」那类）
 
 ### 一、规范和实现的理解差了一格，而差的那一格能被绕过
 
@@ -237,6 +239,34 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 
 意思是：如果有人把这条规矩写成「少 1 个字节也行」（编程里很常见的「差一错误」），
 整套检查全绿，没人会发现。已补上专门盯这个边界的 U20。
+
+### 四、一条规矩被挂在一个跟它无关的开关后面
+
+「恢复时一条新记录都不许夹带」这条规矩（上面第一条说的就是它），实现时被和另一条
+规矩**打包塞进了同一个开关**里：只有当上一份账本**带着总账数字**时，这两条才会被检查。
+
+而旧账本**允许没有总账数字**（这是故意留的兼容性，否则所有已经拉了几百只股的半成品
+目录会全部作废）。于是：上一份账本没有总账数字时，这两条规矩**一条都不执行**。
+
+实测（两份账本都先过了真正的格式校验，证明是**合法**账本、不是乱填的）：
+
+```
+上一份**带**总账数字 → ✅拦住（并列出夹带了哪两条）
+上一份**缺**总账数字 → ⛔放行 —— 夹带了 2 条新记录、共 2469134 字节，没有任何人拦
+```
+
+夹带进来的这 2469134 字节**完全不计账**——而「一条新记录都不许夹带」这条规矩，
+本来就是为了堵这种不计账。换句话说：**同一个漏洞换了个入口又回来了。**
+
+修法不是在旁边再加一条检查，而是**把那个开关去掉**：「不许夹带」这条规矩压根用不到
+总账数字（它只看记录条数），改成无条件执行；真正需要总账数字的那条（「必须恰好退还
+多少字节」）则改成「没有总账数字就拒绝做恢复」——没有基准，就没法核对退得对不对。
+
+**正常提交不受影响**：旧账本缺总账数字时，普通的提交**照旧放行**，兼容性一个字节
+都没动。专门补了一项检查（U22）盯着这件事，防止「收紧一条规矩时把旁边的正常路径
+一起堵死」。
+
+---
 
 ---
 

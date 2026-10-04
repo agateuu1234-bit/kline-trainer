@@ -6905,3 +6905,144 @@ def test_r1_u20_non_recovery_commit_shrinking_committed_bytes_by_one_byte_reject
     after["committed_bytes"] = before["committed_bytes"] - 1
     with pytest.raises(ManifestInvalidError, match="它是累计量"):
         _require_no_progress_rollback(before, after, "U20")   # 不传 recovery
+
+
+# ── codex 对抗性评审 第 1 轮（判决 needs-attention；修复 2026-10-04）───────
+# 唯一一条 finding：R2/R4 整段被嵌在 `if ob is not None:` 里，而**读侧允许旧账本
+# 没有 `committed_bytes` 这个字段**（spec §8 的 R-B2 明文保留这条兼容性：把它变成
+# 读侧必需键须 bump `manifest_version`、会让既有 staging 全部作废，故交接 S5）。
+# ⇒ `ob is None` 时 R2 与 R4 **双双不执行**，R4 这条 binding 契约被整条绕开。
+#
+# 实测（两份账本都先过真正的 `validate_manifest`，证明是合法账本不是畸形输入）：
+#   对照组：旧账本**带** committed_bytes → ✅拦住（R4 报「只许移除」并列出新增的键）
+#   实验组：旧账本**缺** committed_bytes → ⛔放行，夹带 2 条新记录（2469134 字节）
+#
+# 修法（塌层 + 去开关，不在旁边再补一条检查）：R4 上移为无条件执行，
+# R2 仍需基准、缺基准就 fail closed。下面三条分别钉住：
+#   U21 = 绕法本身（R4 被跳过）；U23 = 缺基准那条新判据；U22 = 邻居没被误伤。
+
+def _r1_drop_committed_bytes(m, label):
+    """复制一份并摘掉 `committed_bytes` —— 模拟 R-B2 允许的「旧账本」。
+
+    ⚠️ 必须过一次 `_r1_assert_valid`：这条绕法的全部分量就在于
+    **摘掉这个字段之后它仍然是一份合法账本**（读侧不要求它）。
+    若它其实非法，用例就只是在畸形输入上通过，什么都证明不了。
+
+    注：这里的 `_recompute_evidence` 对本字段其实是**空操作** —— 聚合指纹的成员
+    只有 `files` 与 `staged_export_log`，不含 `committed_bytes`。照样调一次是守
+    「动过 manifest 就重算存根」那条夹具纪律，免得将来有人在这里再动别的字段时
+    忘了（不调的后果是存根判据代为拦截，把变异验证带进假阴性）。
+    """
+    m2 = _r1_copy.deepcopy(m)
+    del m2["committed_bytes"]
+    _recompute_evidence(m2)
+    return _r1_assert_valid(m2, label)
+
+
+def test_r1_u21_recovery_on_a_ledger_without_committed_bytes_cannot_smuggle_new_files():
+    """U21 · **旧账本缺 `committed_bytes` 时，R4 仍必须拦住夹带新增** —— 绕法本身。
+
+    这是 codex 对抗性评审第 1 轮（判决 `needs-attention`）唯一一条 finding，
+    控制者本机实测复现、实施者动手之前又独立复现了一次（两次数字一致）：
+    场景与 U15 逐字相同（完整移除受害股 + 同时新增另一只股的两条记录、且不为
+    新增字节付账），唯一的差别是**上一份账本没有 `committed_bytes` 这个字段**。
+
+    绕的是哪条判据：**R4**（`new_files` 不得包含任何 `prev_files` 里没有的键）。
+    它此前与 R2 一起嵌在 `if ob is not None:` 里，于是 `ob is None` 时整段被跳过，
+    夹带进来的 2469134 字节**完全不计账** —— 正是本 PR 要堵的那类记账旁路，
+    只是换了个入口。R4 压根不需要 `ob`（它只看键的差集），这个开关与它无关。
+
+    ⚠️ **本条的 `match=` 串依赖判据次序**：守卫里 R4 排在「缺基准就拒」**前面**
+    （R4 更具体、文案能列出夹带了哪些键）。谁要是把这两段调换顺序，本条会变红
+    —— 红的原因是**次序被换了**，不是 R4 失效：本条收到的会是「缺基准」那条的
+    文案，命不中「只许移除」。这不是推断，是把「缺基准就拒」提到顶层那次变异
+    实测到的副作用（记在 `docs/acceptance/2026-10-02-...-mutation-log.md` 的 M11）。
+
+    为什么旧账本能缺这个字段：`committed_bytes` **不是读侧必需键**，
+    spec §8 的 **R-B2** 明文保留这条兼容性（进必需键要 bump `manifest_version`、
+    会让既有 staging 全部作废，本 PR 不做，交接 S5）。所以这不是畸形输入 ——
+    `before` 先过了真正的 `validate_manifest`。
+
+    ⚠️ 夹具沿用 U15 的 1000 万余量：这样「被拦住」只可能是 R4 干的，
+    不会是固有下界检查代为拦截。
+
+    ⚠️ `after` **必须**带合法的 `committed_bytes`：固有检查
+    （`_require_intrinsic_payload_ok`）对 payload 是强制的，payload 也缺的话
+    会先被它拦掉、根本走不到转移守卫 —— 控制者第一次写探针就栽在这一下，
+    错以为缺陷不存在。R-B2 的兼容性只在**读侧**（上一份）。
+
+    判别力（放宽方向变异）：把「缺基准就拒」改回原来的嵌套
+    （恢复 `if ob is not None:` 的包裹），本条必红。
+    """
+    full = _r1_base(headroom=10_000_000)
+    before = _r1_drop_committed_bytes(full, "U21 before")
+    after, removed = _r1_remove_stock(full, refund=True)
+    after, added = _r1_add_spare(after)
+    # 不为夹带的那两条付账 —— 这正是「完全不计账」的那一格。
+    after["committed_bytes"] = full["committed_bytes"] - removed
+    assert added > 0, "夹具自检：夹带的那只股应当有字节数"
+    _r1_assert_valid(after, "U21 after")
+    with pytest.raises(ManifestInvalidError, match="只许移除"):
+        _require_no_progress_rollback(before, after, "U21",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u23_recovery_on_a_ledger_without_committed_bytes_is_refused():
+    """U23 · 旧账本缺 `committed_bytes` 时，**恢复提交一律拒** —— R2 没基准可核对。
+
+    同一条 finding 的另一半：缺基准时连 R2 的「恰好退还」也**无从核对**
+    （`removed_bytes` 算得出来，但 `ob - removed_bytes` 里的 `ob` 不存在），
+    于是恢复提交可以把累计量写成任意只要过得了固有下界的数字。
+    故修法里 R2 之前加了一条 **fail closed**：`scoped_removed` 且 `ob is None`
+    ⇒ 拒绝。体例对齐**守卫函数里**上面「`committed_bytes` 坏型时直接拒」那条
+    —— 坏型与缺席，对恢复提交是同一种处境。
+
+    本条与 U21 的分工：U21 夹带新增，先撞排在前面的 R4、走不到这里；本条**不夹带**，
+    所以这三条新用例里只有它走得到这条新判据。
+    （夹具顺手让它「退得恰好对」，但那**不是**走到这里的条件 —— 新判据排在 R2
+    之前，退多退少都一样先被它拦下。）
+
+    判别力（两个方向都实测过）：
+    - 把这条新判据整段删掉 ⇒ 本条必红，而且红的形态是 `None - int` 抛**裸
+      `TypeError`**（不是 `ManifestInvalidError`）—— 这正是它非写不可的理由：
+      没有它，一个合法旧账本上的恢复提交会把守卫自己弄崩。
+    - 把它从「只拦恢复提交」改成「一律拦」⇒ U22 必红。
+    """
+    full = _r1_base(headroom=10_000_000)
+    before = _r1_drop_committed_bytes(full, "U23 before")
+    after, removed = _r1_remove_stock(full, refund=True)   # 退得恰好对，且不夹带
+    assert removed > 0, "夹具自检：被移除的那只股应当有字节数"
+    with pytest.raises(ManifestInvalidError, match="拒绝在它之上做恢复提交"):
+        _require_no_progress_rollback(before, after, "U23",
+                                      recovery=_r1_scope(before))
+
+
+def test_r1_u22_a_ledger_without_committed_bytes_still_passes_a_normal_commit():
+    """U22 · 旧账本缺 `committed_bytes` 时，**正常（非恢复）提交照旧放行**。
+
+    这是「没误伤邻居」那一格：本次收紧的只有**恢复提交**这一条路径，
+    spec §8 的 **R-B2** 这条兼容性是 binding 的 —— 没有把 `committed_bytes`
+    变成读侧必需键、没有 bump `manifest_version`、既有 staging 不作废。
+    本仓有过「收紧一条判据时把邻居的合法路径一起拦死」的教训，故单独钉一格。
+
+    场景与 U13 逐字相同（正常提交、新增一只股、累计量涨够），
+    唯一差别是上一份账本没有 `committed_bytes`。
+
+    ⚠️ 既有测试里**没有**任何一条钉住这一格 —— 实施者按判据穷尽 `grep` 过：
+    全后端测试里让 manifest 缺这个字段的地方只有 3 处（本文件 4745 / 5120 行，
+    加上面那个新夹具），**前两处摘的都是 payload**；而 `_valid_manifest()` 默认
+    带这个字段，所以任何从它派生的 `previous` 都带着它。
+    离得最近的 `test_omitting_a_persisted_extension_field_carries_it_forward
+    [committed_bytes]` **方向正好相反**：它摘 payload 里的字段，断言「落盘后仍
+    等于旧值」（carry-forward，「省略不等于擦除」）。整族坏值扫描那条也只变异
+    payload，`previous` 恒为 `_valid_manifest()`。两者都不是「**上一份**缺它」。
+
+    判别力（收紧方向变异）：把「缺基准就拒」从「只拦恢复提交」改成「一律拦」
+    （把那段判据移出 `if scoped_removed:`），本条必红。
+    """
+    full = _r1_base(headroom=10_000_000)
+    before = _r1_drop_committed_bytes(full, "U22 before")
+    after, added = _r1_add_spare(full)
+    after["committed_bytes"] = full["committed_bytes"] + added
+    _r1_assert_valid(after, "U22 after")
+    _require_no_progress_rollback(before, after, "U22")   # 不传 recovery；不抛即通过

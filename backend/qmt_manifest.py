@@ -1544,115 +1544,145 @@ def _require_no_progress_rollback(previous: dict | None, payload: dict,
             "--max-bytes 的累计基准，坏型时无从比较，拒绝在它之上继续提交。"
         )
     ob = _int_or_none(previous.get("committed_bytes"))
-    if ob is not None:
-        nb = _int_or_none(payload.get("committed_bytes"))
-        # ⚠️ **崩溃恢复第③档必须退还被移除记录的字节**（R1，2026-10-01）：
-        # 不退还时，重拉同一只股会被下面那条 `added` 判据算成「新增」，
-        # 于是每崩一次就多烧一份预算（实测 366 → 706 → 1046，而盘上恒 366），
-        # 最终以**虚假的 --max-bytes 触顶**结束运行 —— 一次基础设施故障
-        # 被记成一次正常结束。
-        # 口子挂在既有的 `scoped_removed` 上（它已保证：声明了 RecoveryScope、
-        # 锚点与冻结名单对得上、该股 files 与池条目一起消失），**不另造旁路**。
-        if scoped_removed:
-            # ⚠️ **退款分支必须禁止同时新增**（R4，codex 2026-10-01 [medium]；
-            # 2026-10-01 复评订正）：spec §2.2 的约束本体是「`new_files` 不得
-            # 包含任何 `prev_files` 里没有的**键**」——括号里「即 added 必须为
-            # 0」只是注解，§2.3「R4 保证这一步没有任何新增」与 U16 的说明
-            # 「恢复提交一律不许新增」都是按**键**说的。旧版判据误把注解当
-            # 本体，写成「新增字节和非零才拦」，在新增记录 `bytes` 恰为 0 时
-            # 与按键判**分岔**：一份先过 `validate_manifest` 的合法账本，
-            # 恢复时新增两条 bytes=0 的记录会被旧判据放行（U19 实测坐实）。
-            # ⚠️ 旧版「`b is None` 时不计入字节和」与「这条根本不是新增」
-            # 在求和语义下等价（都对总和贡献 0），把「新增但读不出字节」
-            # 与「没有新增」悄悄合流成同一个判据结果——按键判之后，这种
-            # 混淆自然消失：判据只问键在不在 `prev_files` 里，与它的
-            # `bytes` 是否良型无关。
-            added_keys = []
-            added_in_recovery = 0   # 仅诊断用：下面报错文案里的字节量参考，
-                                     # 判据本体是 `added_keys`，不是这个数字。
-            for key, rec in new_files.items():
-                if key not in prev_files:
-                    added_keys.append(key)
-                    b = _int_or_none(rec.get("bytes"))
-                    if b is not None:
-                        added_in_recovery += b
-            if added_keys:
-                raise ManifestInvalidError(
-                    f"{where} 崩溃恢复提交里**只许移除**，不许同时新增 files "
-                    f"记录（本次新增了 {sorted(added_keys, key=repr)}，"
-                    f"合计 {added_in_recovery} 字节）。"
-                    "请把新增放到另一次提交，好让它的字节被正常计账。"
-                )
+    nb = _int_or_none(payload.get("committed_bytes"))
+    # ⚠️ **崩溃恢复第③档必须退还被移除记录的字节**（R1，2026-10-01）：
+    # 不退还时，重拉同一只股会被下面那条 `added` 判据算成「新增」，
+    # 于是每崩一次就多烧一份预算（实测 366 → 706 → 1046，而盘上恒 366），
+    # 最终以**虚假的 --max-bytes 触顶**结束运行 —— 一次基础设施故障
+    # 被记成一次正常结束。
+    # 口子挂在既有的 `scoped_removed` 上（它已保证：声明了 RecoveryScope、
+    # 锚点与冻结名单对得上、该股 files 与池条目一起消失），**不另造旁路**。
+    if scoped_removed:
+        # ⚠️ **这两条判据此前整段嵌在 `if ob is not None:` 里**（codex 对抗性
+        # 评审第 1 轮 [needs-attention]，本机实测坐实）：`committed_bytes`
+        # **不是读侧必需键** —— spec §8 的 R-B2 明文保留这条兼容性（进必需键
+        # 要 bump `manifest_version`、会让既有 staging 全部作废，故交接 S5），
+        # 所以 `ob` 真的可能是 `None`，而那时 R2 与 R4 **双双不执行**：
+        # 实测一份先过 `validate_manifest` 的**合法**账本，恢复时完整移除受害股
+        # 的同时夹带另一只股的两条记录（2469134 字节）被原样放行 —— 正是本 PR
+        # 要堵的那类记账旁路换了个入口。
+        # ⇒ **塌掉那一层、去掉那个与 R4 无关的开关**（本仓守则：同一类缺陷反复
+        # 出现时，解法是塌层 + 去开关，不是在旁边再补一条检查）：R4 只看键的
+        # 差集、压根用不到 `ob`，故**无条件**执行；R2 确实要基准，缺基准就
+        # fail closed（见下面那条）。U21 钉住这条绕法本身。
+        # ⚠️ **退款分支必须禁止同时新增**（R4，codex 2026-10-01 [medium]；
+        # 2026-10-01 复评订正）：spec §2.2 的约束本体是「`new_files` 不得
+        # 包含任何 `prev_files` 里没有的**键**」——括号里「即 added 必须为
+        # 0」只是注解，§2.3「R4 保证这一步没有任何新增」与 U16 的说明
+        # 「恢复提交一律不许新增」都是按**键**说的。旧版判据误把注解当
+        # 本体，写成「新增字节和非零才拦」，在新增记录 `bytes` 恰为 0 时
+        # 与按键判**分岔**：一份先过 `validate_manifest` 的合法账本，
+        # 恢复时新增两条 bytes=0 的记录会被旧判据放行（U19 实测坐实）。
+        # ⚠️ 旧版「`b is None` 时不计入字节和」与「这条根本不是新增」
+        # 在求和语义下等价（都对总和贡献 0），把「新增但读不出字节」
+        # 与「没有新增」悄悄合流成同一个判据结果——按键判之后，这种
+        # 混淆自然消失：判据只问键在不在 `prev_files` 里，与它的
+        # `bytes` 是否良型无关。
+        added_keys = []
+        added_in_recovery = 0   # 仅诊断用：下面报错文案里的字节量参考，
+                                 # 判据本体是 `added_keys`，不是这个数字。
+        for key, rec in new_files.items():
+            if key not in prev_files:
+                added_keys.append(key)
+                b = _int_or_none(rec.get("bytes"))
+                if b is not None:
+                    added_in_recovery += b
+        if added_keys:
+            raise ManifestInvalidError(
+                f"{where} 崩溃恢复提交里**只许移除**，不许同时新增 files "
+                f"记录（本次新增了 {sorted(added_keys, key=repr)}，"
+                f"合计 {added_in_recovery} 字节）。"
+                "请把新增放到另一次提交，好让它的字节被正常计账。"
+            )
 
-            removed_bytes = 0
-            for key, rec in prev_files.items():
-                if key not in new_files:
-                    b = _int_or_none(rec.get("bytes"))
-                    if b is not None:
-                        removed_bytes += b
-            # ⚠️ 这条检查按生产路径推理是「走不到」的（见下一条注释：`nb` 到这里
-            # 时已经被 `_require_intrinsic_payload_ok` 钉成合法非负整数），但
-            # **不能**像被删掉的 R3 那样直接拿掉 —— 两者后果不同：R3 删掉只是
-            # 少一次校验；这里删掉的话，`nb` 若真的是 `None`，会落进下面
-            # `nb != ob - removed_bytes` 那条等式判据（`None != int` 在 Python
-            # 里合法求值为 True，并不会抛裸异常），但报出来的话术会变成
-            # 「committed_bytes 从 {ob} 变成 None」——把「根本没给出合法值」
-            # 误读成「数值对不上」，诊断信息失真。保留这条显式检查，是为了在
-            # 这种情形下给出准确的归因。
-            if nb is None:
-                raise ManifestInvalidError(
-                    f"{where} 崩溃恢复没有给出合法的 committed_bytes —— "
-                    "恢复必须**恰好退还**被移除记录的字节数"
-                    f"（应为 {ob - removed_bytes}），缺了它无从比较。"
-                )
-            # 注：这里**不**再查 `nb < 0`。开头的 `_require_intrinsic_payload_ok`
-            # 只在「`files` 非空或 `staged_export_log` 不为 None」成立时，才会
-            # 强制 `nb ≥ sum(files) + staged_export_log ≥ 0`；这条前置条件在这里
-            # 恒真，靠的不是 `files`（恢复后它完全可能是空的），而是
-            # `staged_export_log` ——它既是读侧**必需键**（永不缺席、永不为
-            # None），又是**冻结字段**（本函数前面的 ① 已经保证 payload 与
-            # previous 逐字段相同），所以 `sel is not None` 永远成立，
-            # `nb ≥ 0` 因此必然成立（U12 是它的表征用例）。按 CLAUDE.md §2
-            # 不为不可能的场景写处理。
-            # ⚠️ 这个依据不是永久的：哪天 `staged_export_log` 不再是必需键、
-            # 或者不再是冻结字段，这两处前提只要有一处被放宽，这里的「恒真」
-            # 就会落空，退款分支就会在负数场景下悄悄放行。
-            if nb != ob - removed_bytes:
-                raise ManifestInvalidError(
-                    f"{where} 崩溃恢复移除了合计 {removed_bytes} 字节的 files "
-                    f"记录，而 committed_bytes 从 {ob} 变成 {nb}——恢复必须"
-                    f"**恰好退还**这些字节（应为 {ob - removed_bytes}）。"
-                    "多退会让 --max-bytes 失守，少退会让同一只股每崩一次"
-                    "就多烧一份预算。"
-                )
-        else:
-            if nb is None or nb < ob:
-                raise ManifestInvalidError(
-                    f"{where} 会让 committed_bytes 从 {ob} 变成 "
-                    f"{payload.get('committed_bytes')!r}——它是累计量，"
-                    "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
-                )
-            # ⚠️ **只拦「减少」不够**（codex R14 [high]）：**加了文件却原地不动**
-            # 照样通过 —— 下一次运行从一个被低估的累计值起步，突破 --max-bytes
-            # 这条硬上限，最坏把仅约 30 GiB 的可用空间写满（本机复现：新增 246 万
-            # 字节而累计值纹丝不动）。
-            # ⚠️ 判据取「**至少涨够新增文件的字节数**」而非严格相等：
-            # spec 未定 committed_bytes 计不计失败 `.part` 的字节（5o 只说
-            # `--max-bytes` 是逐块扣减的流式上限），严格相等会把那种合法记账判死。
-            added = 0
-            for key, rec in new_files.items():
-                if key not in prev_files:
-                    b = _int_or_none(rec.get("bytes"))
-                    if b is not None:
-                        added += b
-            _ = added                    # 下面用
-            if added and nb < ob + added:
-                raise ManifestInvalidError(
-                    f"{where} 新增了合计 {added} 字节的 files 记录，而 "
-                    f"committed_bytes 只从 {ob} 涨到 {nb}——累计量必须至少涨够"
-                    "新增文件的字节数，否则下一次运行会从一个被低估的总数起步，"
-                    "突破 --max-bytes 硬上限。"
-                )
+        # ⚠️ R2 的「恰好等于」需要旧基准，缺席时无从核对 ⇒ **拒绝**（由来见
+        # 本分支开头那段注释）。这与本函数上面「`committed_bytes` 坏型时直接
+        # 拒」是**同一个体例**：坏型与缺席，对恢复提交是同一种处境。
+        # ⚠️ **本条自己由 U23 钉着**（U21 夹带新增、先撞上面的 R4，走不到这里）：
+        # 把本条整段删掉时 U23 红的形态是 `None - int` 抛**裸 `TypeError`** ——
+        # 没有它，一个合法旧账本上的恢复提交会把守卫自己弄崩。
+        # ⚠️ 收紧的只有**恢复提交**这一条路径 —— `scoped_removed` 为假时照旧走
+        # 下面的 `elif`，旧账本缺这个字段的**正常提交一个字节都没变**
+        # （R-B2 不受影响，U22 钉住这一格）。
+        if ob is None:
+            raise ManifestInvalidError(
+                f"{where} 这是一次崩溃恢复提交，而读到的上一份里**没有** "
+                "committed_bytes 这个字段——它是 --max-bytes 的累计基准，"
+                "缺了基准，「恰好退还被移除记录的字节」就无从核对，"
+                "拒绝在它之上做恢复提交。"
+                "（读侧仍允许旧账本缺这个字段，**非恢复提交照旧放行**；"
+                "本次收紧的只有恢复提交这一条路径。）"
+            )
+
+        removed_bytes = 0
+        for key, rec in prev_files.items():
+            if key not in new_files:
+                b = _int_or_none(rec.get("bytes"))
+                if b is not None:
+                    removed_bytes += b
+        # ⚠️ 这条检查按生产路径推理是「走不到」的（见下一条注释：`nb` 到这里
+        # 时已经被 `_require_intrinsic_payload_ok` 钉成合法非负整数），但
+        # **不能**像被删掉的 R3 那样直接拿掉 —— 两者后果不同：R3 删掉只是
+        # 少一次校验；这里删掉的话，`nb` 若真的是 `None`，会落进下面
+        # `nb != ob - removed_bytes` 那条等式判据（`None != int` 在 Python
+        # 里合法求值为 True，并不会抛裸异常），但报出来的话术会变成
+        # 「committed_bytes 从 {ob} 变成 None」——把「根本没给出合法值」
+        # 误读成「数值对不上」，诊断信息失真。保留这条显式检查，是为了在
+        # 这种情形下给出准确的归因。
+        if nb is None:
+            raise ManifestInvalidError(
+                f"{where} 崩溃恢复没有给出合法的 committed_bytes —— "
+                "恢复必须**恰好退还**被移除记录的字节数"
+                f"（应为 {ob - removed_bytes}），缺了它无从比较。"
+            )
+        # 注：这里**不**再查 `nb < 0`。开头的 `_require_intrinsic_payload_ok`
+        # 只在「`files` 非空或 `staged_export_log` 不为 None」成立时，才会
+        # 强制 `nb ≥ sum(files) + staged_export_log ≥ 0`；这条前置条件在这里
+        # 恒真，靠的不是 `files`（恢复后它完全可能是空的），而是
+        # `staged_export_log` ——它既是读侧**必需键**（永不缺席、永不为
+        # None），又是**冻结字段**（本函数前面的 ① 已经保证 payload 与
+        # previous 逐字段相同），所以 `sel is not None` 永远成立，
+        # `nb ≥ 0` 因此必然成立（U12 是它的表征用例）。按 CLAUDE.md §2
+        # 不为不可能的场景写处理。
+        # ⚠️ 这个依据不是永久的：哪天 `staged_export_log` 不再是必需键、
+        # 或者不再是冻结字段，这两处前提只要有一处被放宽，这里的「恒真」
+        # 就会落空，退款分支就会在负数场景下悄悄放行。
+        if nb != ob - removed_bytes:
+            raise ManifestInvalidError(
+                f"{where} 崩溃恢复移除了合计 {removed_bytes} 字节的 files "
+                f"记录，而 committed_bytes 从 {ob} 变成 {nb}——恢复必须"
+                f"**恰好退还**这些字节（应为 {ob - removed_bytes}）。"
+                "多退会让 --max-bytes 失守，少退会让同一只股每崩一次"
+                "就多烧一份预算。"
+            )
+    elif ob is not None:
+        if nb is None or nb < ob:
+            raise ManifestInvalidError(
+                f"{where} 会让 committed_bytes 从 {ob} 变成 "
+                f"{payload.get('committed_bytes')!r}——它是累计量，"
+                "调小、删掉或换成别的类型都等于绕开 --max-bytes 这条硬上限。"
+            )
+        # ⚠️ **只拦「减少」不够**（codex R14 [high]）：**加了文件却原地不动**
+        # 照样通过 —— 下一次运行从一个被低估的累计值起步，突破 --max-bytes
+        # 这条硬上限，最坏把仅约 30 GiB 的可用空间写满（本机复现：新增 246 万
+        # 字节而累计值纹丝不动）。
+        # ⚠️ 判据取「**至少涨够新增文件的字节数**」而非严格相等：
+        # spec 未定 committed_bytes 计不计失败 `.part` 的字节（5o 只说
+        # `--max-bytes` 是逐块扣减的流式上限），严格相等会把那种合法记账判死。
+        added = 0
+        for key, rec in new_files.items():
+            if key not in prev_files:
+                b = _int_or_none(rec.get("bytes"))
+                if b is not None:
+                    added += b
+        _ = added                    # 下面用
+        if added and nb < ob + added:
+            raise ManifestInvalidError(
+                f"{where} 新增了合计 {added} 字节的 files 记录，而 "
+                f"committed_bytes 只从 {ob} 涨到 {nb}——累计量必须至少涨够"
+                "新增文件的字节数，否则下一次运行会从一个被低估的总数起步，"
+                "突破 --max-bytes 硬上限。"
+            )
 
     # ⚠️ **容器这一层此前漏了**（Opus 第 5 轮 [low]）：同一次提交里刚给
     # `committed_bytes` 与**内层取值**改成「拒绝」（注释自称「三处同族」），
