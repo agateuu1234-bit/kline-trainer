@@ -1279,11 +1279,12 @@ def test_copy_stock_committed_bytes_is_old_value_plus_actual_bytes_written(roots
     assert budget.used == out["committed_bytes"]
 
 
-def test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accepted(roots):
-    # D7 崩溃恢复第③档（E10/E11/E12）：qmt_manifest 接受「删这只股的记录、
-    # committed_bytes 原值不动」，拒绝「调小」。崩溃恢复本身是 S4b 的职责；
+def test_recovery_removing_a_stock_must_refund_its_bytes(roots):
+    # D7 崩溃恢复第③档（E10/E11/E12），R1（2026-10-01）闭合：qmt_manifest
+    # 现在拒绝「删这只股的记录、committed_bytes 原值不动」—— 那正是 R1 缺陷
+    # 本身（崩一次、下次的预算下限就被抬高一截）。崩溃恢复本身是 S4b 的职责；
     # 本测试直接驱动已合并的 commit_stock + RecoveryScope，钉住 Task 3 选择的
-    # 累计写入量语义（不去碰 committed_bytes）与它兼容。
+    # 累计写入量语义必须与「恢复要恰好退还被移除记录的字节」兼容。
     src_fd, stg_fd, src_path, stg_path = roots
     slot = Slot(code="600000.SH", market="SH", universe_idx=0)
     rel_1m = "1m/600000.SH_x_1分钟K线_前复权.csv"
@@ -1306,10 +1307,15 @@ def test_recovery_removing_a_stock_leaves_committed_bytes_unchanged_and_is_accep
                               for mk, v in out["pool_order"].items()}
     payload["cursor"] = dict(out["cursor"])
     payload["cursor"]["SH"] = min(out["cursor"]["SH"], 0)
-    # committed_bytes 原值不动（不写调小的值）。
+    # R1（2026-10-01）：恢复必须**恰好退还**被移除记录的字节，不能原值不动。
+    removed_bytes = sum(f["bytes"] for f in out["files"]
+                         if f["stock_code"] == "600000.SH")
+    payload["committed_bytes"] = committed_bytes_after - removed_bytes
 
-    result = commit_stock(stg_fd, payload, ledger=ledger, recovery=recovery)
-    assert result["committed_bytes"] == committed_bytes_after
+    commit_stock(stg_fd, payload, ledger=ledger, recovery=recovery)
+    disk = read_manifest(stg_fd)
+    assert disk["committed_bytes"] == committed_bytes_after - removed_bytes, \
+        "落盘后的累计值必须等于退还后的数，不能只是通过了守卫"
 
 
 # ── fd 不泄漏：copy_stock 对多只股连续调用 ──────────────────────
