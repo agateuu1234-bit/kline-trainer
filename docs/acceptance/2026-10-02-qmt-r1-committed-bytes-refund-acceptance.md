@@ -1,7 +1,7 @@
 # QMT 残留 R1（崩溃恢复要退还字节）· 非程序员验收清单
 
 **分支** `fix/qmt-r1-committed-bytes-refund`
-**代码定版** `690ce405`
+**代码定版** `e623fb7c`（此后只有文档提交，`backend/` 未再变动 —— 自己核：`git log -1 --format=%h -- backend/` 应输出 `e623fb7c`）
 **起点** `origin/main = 25ad1c2a`
 **日期** 2026-10-02
 
@@ -52,8 +52,14 @@
 窗口）后它自动断成了几行，说明复制时被截断了，请重新复制整行。
 
 ⚠️ 下面每条命令的开头都会先打印 `branch=...` 和 `HEAD=...` 两个值。**请核对它们**：
-`branch` 必须是 `fix/qmt-r1-committed-bytes-refund`，`HEAD` 必须是 `690ce405`。
-这两个值是防「跑到了别的分支上、测的是另一份代码却一片全绿」——本仓栽过这个坑。
+`branch` **必须**是 `fix/qmt-r1-committed-bytes-refund`。
+这是防「跑到了别的分支上、测的是另一份代码却一片全绿」——本仓栽过这个坑。
+⚠️ `HEAD` 那个值**不作判据**：每提交一次文档它都会变，写死就会让你把正常情况判成失败。
+要核对**代码**版本，单独跑这一条，应输出 `e623fb7c`：
+
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-bytes" && git log -1 --format=%h -- backend/
+```
 
 ⭐ **这一片没有改动手机 App 的任何一行**，也没有改动任何对外接口。
 想省时间的话，跑 **A1 + A3** 就够（约 4 分钟）。全部跑完约 11 分钟（实测：A1 约 3 分 52 秒、A2 第二条约 3 分 29 秒、A5 约 3 分 11 秒，A3/A4 是瞬间）。
@@ -72,12 +78,12 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-r1-committed-byte
 
 **期望看到**：
 
-- 第一行是 `branch=fix/qmt-r1-committed-bytes-refund HEAD=690ce405`
+- 第一行的 `branch=` 是 `fix/qmt-r1-committed-bytes-refund`（`HEAD=` 的值不作判据，见上）
 - 最后一行是 `1643 passed in <某个秒数>`
 
 **通过判定**：
 
-- 通过 —— 分支与 `HEAD` 两个值都对得上；数字是 **1643**；这一行里**没有** `failed`（失败）、
+- 通过 —— `branch` 对得上；数字是 **1643**；这一行里**没有** `failed`（失败）、
   `skipped`（跳过没跑）、`error`（出错）这三个词。
 - 不通过 —— 上面任意一项不满足。
 

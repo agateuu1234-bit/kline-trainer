@@ -1,7 +1,7 @@
 # QMT 残留 R1（崩溃恢复要退还字节）· 变异验证逐条记录
 
 **分支** `fix/qmt-r1-committed-bytes-refund`
-**代码定版** `690ce405`
+**代码定版** `e623fb7c`（此后只有文档提交，`backend/` 未再变动 —— 自己核：`git log -1 --format=%h -- backend/` 应输出 `e623fb7c`）
 **起点** `origin/main = 25ad1c2a`
 **日期** 2026-10-02
 
