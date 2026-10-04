@@ -1,0 +1,51 @@
+# P1c 第 3 片 Task 14：spec §8.4 变异验证结果（45 条逐条实跑）
+
+> 本文档随跑随写：每测完一批变异就 append 一次并单独 commit，避免配额打断丢失进度。
+> 基线（订正 5）：host 1931（Contracts）+ 173（Persistence）；Catalyst（整个 target）2030。两者首次运行均实测确认（TEST SUCCEEDED / 0 issues）。
+> 判据：host 用 `swift test --filter <Suite>`；Catalyst 用 `xcodebuild test -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:...`，三条判据（`** TEST SUCCEEDED/FAILED **` / 是否有 `Failing tests:` 区块 / `Restarting after unexpected exit` 计数为 0）。
+
+## 结果表（45 条，跑完即填，进行中）
+
+| # | 变异 | spec 的期望 | 实测红的是哪条测试名 | host/Catalyst | 一致？ |
+|---|---|---|---|---|---|
+| 1 | 探针改成「先问线，线命中就返回没有」 | T1（Q19 分支顺序） | `NodeDragCandidateTests` 17 个测试里 16 个红（几乎全灭：`candidateSurvivesTouchesCancelled`、`fullDragProducesExactlyOneUndoRecord`、`newTouchDownOverwritesStaleCandidate` 等），仅 1 个（`candidateRevalidationRejectsMidFlightSwitchToReview`）未列入失败清单 | Catalyst | 是（远超预期：水平线节点必然同时落在线上，候选永远建立不起来） |
+| 2 | 位移改回「原锚点投影 + translation 再反算」 | T10 的①②③三档 | `zeroTranslationReturnsIdenticalAnchor`(①) / `pureHorizontalKeepsPriceBitExact`(②) / `boundaryPriceOutsideRangeButStillRealIsUntouched`(④) / `inBoundsCandidateIsNotModified`(N7 框内不夹) | host | 部分一致——①②④红；③「拖走再拖回」在当前测试矩阵里没有独立测试（门⑥的 host 测试在引擎层，锚点由调用方手算传入，不经过本次变异的几何层），见残留清单 #1 |
+| 3 | `priceDelta` 的负号写掉 | T9④；T10②预期不红 | `verticalDeltaSignAndMagnitude`(T9④) + `clampKeepsNodeReal`（N7 四个方向，方向反了）；`pureHorizontalKeepsPriceBitExact`（T10②）确认不红 | host | 是，与预期逐字相符 |
+| 4 | 只给 🔒 加拖动门，其余九处不加 | T15 的其余九档；🔒 那一档预期不红 | `T15 E1–E5：五个置灰谓词…`（5 处）+ `T15 W1–W5：五个写入入口…`（除 toggleLockSelected 外 4 处，共 8 个子断言）+ `Step 5 实测…`（2 处）；`toggleLockSelected`/`lockButtonEnabled` 对应断言未红 | host | 是 |
+| 5 | 只给 W1–W5 加门，E1–E5 不加 | T15 的 E1–E5 五档 | 仅 `T15 E1–E5：五个置灰谓词…`（5 处）；`T15 W1–W5` 测试整个未红 | host | 是 |
+| 6 | 五个 Enabled 谓词改读 `nodeDragCurrent` | G14 的反向断言；T15 预期不红 | `G14 拖动门的覆盖是集合等式…`（`gate.contains("nodeDragOwner")` 与 `!code.contains("nodeDragCurrent")` 两条断言）；`NodeDragEditRouterGateTests` 的 T15 两个测试确认全绿 | host | 是 |
+| 7 | 清槧时只清 `nodeDragOwner`、不清 `nodeDragCurrent` | G15 | `G15 nodeDragOwner 与 nodeDragCurrent 同生同死…`；连带 `占槽⇒两半同时非空；清槽⇒两半同时为空`、`T14b 生命周期清理连带丢弃拖动态…`（3 处）也红 | host（DrawingSession.swift，已 `rm -rf .build`） | 是（更广，G15 之外还连带命中两个相关行为测试，合理） |
+| 8 | 把 D135b 两支失败合并成一支（来源不匹配也去收尾清槧） | T14⑤ | `staleCallbackFromOtherPanelDoesNotTouchActiveDrag()`（T14⑤，4 处断言） | Catalyst | 是，精确命中 |
+| 9 | 把 D135b 两支顺序调换（先判归属、再判来源） | T14⑤ | **无**——全部 17 个测试通过，`** TEST SUCCEEDED **` | Catalyst | **不一致**，见残留清单 #2 |
+| 13 | 把「触摸取消 / 触摸结束」加回候选的清除时机 | T12 的①④档 | `T12④ 触摸被取消之后候选仍在…`（3 处断言）[Catalyst]；`G8 候选清除点的覆盖…`（host，连带：全文件新增一处清空，`total==4` 变 `5`） | Catalyst + host | 是（T12①按 Q28 既有结论无法构造，不计入本行） |
+| 14 | 去掉「新按下覆盖旧候选」（只在消费时清） | T12⑤ | `T12⑤ 陈旧候选不泄漏…`（2 处断言）[Catalyst]；`G8`（host，`clearCount(probeBody)` 变 0、`total` 变 3） | Catalyst + host | 是 |
+| 15 | 探针里的盾判据拿掉 | T13 探针路径的 `.pending` 与「区内」两档；「区外」预期不红 | `T13 探针路径三档…` 的 `.pending`（insidePoint/outsidePoint 两处）与 `.rect` 区内共 3 处断言；区外放行断言未红 | host | 是 |
+| 16 | 统一函数的 `point` 参数去掉，盾改成「整面板拒」 | T13 两条路径的「区外放行」档 | `T13 探针路径三档…` 仅「区外放行」那一处断言红；复核路径（Catalyst）当前测试矩阵无专门的盾行为测试覆盖该路径，见残留清单 #3 | host（探针路径已验证；复核路径无专用测试） | 部分一致 |
+| 17 | 统一函数的 `point` 参数去掉，盾改成「整面板放行」 | T13 两条路径的 `.pending` 与「区内」档 | `T13 探针路径三档…` 的 `.pending`（2 处）与「区内」共 3 处断言红；「区外放行」未红；复核路径同 #16 残留 | host | 部分一致（同 #16 的复核路径空缺） |
+| 19 | 探针改到 `.began` 才跑（用刹车后的视口现查） | T11 的①②③三档 | `inertiaMovingNodeAwayStillEntersNodeDrag`(T11①) + `overscrollSettleClampStillEntersNodeDrag`(T11③)；`inertiaMovingNodeInDoesNotRetroactivelyCreateCandidate`(T11②) 未红 | Catalyst | 部分一致，见残留清单 #4 |
+| 20 | 在触摸按下的钩子里加 `settleDeceleration` | G3①分支 + N1 的「惯性期间行为不变」档 | `touchDownHandlerIsReadOnly`(G3①)[host]；Catalyst 侧 T11①②③ 的**前提自检**（`moved > hitRadius` 等）连带失败，但没有一条专门命名为「N1 惯性期间行为不变」的测试覆盖这一精确场景 | host + Catalyst（间接） | 部分一致，见残留清单 #5 |
+| 21 | 候选的 fail-closed 复核拿掉 | T11④ 六个成因各自应红 | `T11④ 候选中途失效的六个成因…` 里仅 cause①（线被删）、cause③（被锁）两处 + 专档 `candidateRevalidationRejectsMidFlightSwitchToReview`（cause④'）；`G9`（host，`acceptBody.contains("nodeDragPreconditions(")` 断言红） | Catalyst + host | 部分一致，见残留清单 #6 |
+| 22 | 复核里去掉身份比对（只留 `nodeDragPreconditions`） | T11④ 后两档（⑤⑥）；前四档预期不红 | 仅 cause⑤（同面板换选中）一处；cause①②③④ 确认不红；cause⑥（跨面板换选中）**未红** | Catalyst | 部分一致，见残留清单 #7（测试文件自身注释已记录该已知结论） |
+| 28 | 夹取整个拿掉（锚点原样写出） | N7 四个方向档 | `clampKeepsNodeReal` + `rayRightEdgeIsFailClosed` + `straightNonPixelAlignedRightEdgeKeepsNodeGrabbable` + `straightLeftEdgeClampsToStartIndexExactly`（N7 全部 4 个测试） | host | 是（更广，符合预期且合理） |
+| 29 | 夹取改成「恒夹到边界」 | N7 的「框内不夹」档 | `inBoundsCandidateIsNotModified`；连带 `zeroTranslationReturnsIdenticalAnchor`(①)、`pureHorizontalKeepsPriceBitExact`(②)、`boundaryPriceOutsideRangeButStillRealIsUntouched`(④) | host | 是 |
+| 30 | 夹取改成朴素的「把 candleIndex 夹进可见窗口」（不看后置条件） | N7 的 `.ray` 右缘档 + 非整像素右缘档；`.straight` 普通档预期不红 | `rayRightEdgeIsFailClosed` + `straightNonPixelAlignedRightEdgeKeepsNodeGrabbable`；但 `clampKeepsNodeReal`（.straight 普通档）**也红了**（1 处，dx=5000 方向） | host | **不一致**，见残留清单 #8（已查明根因，非测试串了） |
+| 31 | 后置条件退回「只判线可见」（不判 `.real`） | N7 的「非整像素右缘」档；`.ray` 右缘档预期不红 | `straightNonPixelAlignedRightEdgeKeepsNodeGrabbable` + `straightLeftEdgeClampsToStartIndexExactly`（spec 本行未提及，但实测确实红）；`rayRightEdgeIsFailClosed` 确认不红；`clampKeepsNodeReal` 确认不红（但原因是空洞自洽，见残留） | host | 部分一致，见残留清单 #9 |
+| 32 | 夹取改成无条件夹（不判候选是否已满足后置条件） | T10④ | `boundaryPriceOutsideRangeButStillRealIsUntouched`(T10④)；连带 ①②与 N7 框内不夹 | host | 是，但发现实现细节见残留清单 #10 |
+| 33 | 夹取在未舍入的坐标空间里选边界下标 | N7 的「非整像素右缘」档；其余档预期不红 | 与 #30 用同一份代码改动验证：`rayRightEdgeIsFailClosed` + `straightNonPixelAlignedRightEdgeKeepsNodeGrabbable` 红，`clampKeepsNodeReal` 也红（同 #30 根因） | host | 不一致（同 #30 根因，见残留清单 #8） |
+| 38 | `drawSelectionNodes` 挪到 `drawMarkers` 之前 | T5（像素）+ 第 2 片 T13（源码顺序），各自确认 | `SelectionNodeDrawOrderGuardTests`（host，第 2 片 T13，2 处）+ `NodeDragPixelEvidenceTests.nodeIsNotCoveredByTradeMarker`（Catalyst，本片 T5） | host + Catalyst | 是，精确命中两处 |
+| 39 | 双轴改成只改价位 | T2 | `pureHorizontalDragDoesNotTouchPrice`（`d?.index != 0`/`d?.index == 10` 两处失败）+ `pureHorizontalKeepsPriceBitExact`（candleIndex 断言）+ `straightLeftEdgeClampsToStartIndexExactly`/`straightNonPixelAlignedRightEdgeKeepsNodeGrabbable` 连带 | host | 是 |
+
+**进度：45 条中已跑 26 条（1,2,3,4,5,6,7,8,9,13,14,15,16,17,19,20,21,22,28,29,30,31,32,33,38,39）。剩余 19 条（10,11,12,18,23,24,25,26,27,34,35,36,37,40,41,42,43,44,45）跑完后续补。**
+
+## 交给 Task 15 的残留清单（逐条列出，⛔ 不只记数量）
+
+1. **变异 #2「T10③拖走再拖回」无独立测试**：本片测试矩阵里 T10③（翻译：拖远再拖回 `.zero`）没有一条独立覆盖「几何层」的测试——门⑥的 host 测试（`UpdateDrawingAnchorTests.unchangedAnchorIsZeroSideEffect`）是在**引擎层**手造锚点传入，不经过 `DrawingNodeDrag.draggedAnchor` 这一层几何计算，所以变异 #2（破坏几何层的往返精度）不会让它变红。真正需要覆盖 T10③ 的测试应该是「先用非零 translation 拖，再用相反的 translation 拖回 `.zero`，经 `draggedAnchor` 两次调用」这样的几何层往返测试，当前缺失。
+2. **变异 #9「D135b 两支顺序调换」测试矩阵抓不住**：`staleCallbackFromOtherPanelDoesNotTouchActiveDrag`（T14⑤）唯一夹具是「来源不符但归属本身成立」（owner 是 B 自己的、未被改动），两个 guard 不同时失效，调换顺序不改变最终分支。需要补一档「owner 来源不符 **且** 归属也不符」的夹具（例如：A 面板收到陈旧回调，而此刻 B 已经被清空选中/换成 C）才能让顺序产生可观察差异。
+3. **变异 #16/#17「复核路径」的盾行为缺乏专门测试**：T13 的「两条路径」（探针 `nodeDragPreconditions` 直调 / `.began` 复核 `acceptNodeDragCandidate`）共享同一个底层函数，但当前 Catalyst 测试矩阵（`NodeDragCandidateTests.swift`）里没有任何一条测试在"候选已捕获、.began 复核时盾状态是 `.pending`/`.rect`"的场景下断言复核的拒绝/放行——复核路径对盾变异的覆盖目前**完全依赖"调用同一个函数"这一结构事实**，没有独立行为测试证据。
+4. **变异 #19「T11②」结构性不受影响**：T11②（`inertiaMovingNodeInDoesNotRetroactivelyCreateCandidate`）测的是"候选不会被追溯创建"，而变异 #19（`.began` 复核重新查几何）只在候选**已存在**时生效；候选从未建立时，不管复核重查不重查都一样返回 false。这不是测试失效，是该档验证的性质与这个变异正交。
+5. **变异 #20「N1 惯性期间行为不变」没有精确命名的测试**：目前只能靠 T11①②③ 的"前提自检"间接证明机制危害（inertia 被提前刹停导致前提断言失败），没有一条测试直接断言"画线模式下按下手指时，单指横滑/竖滑的行为与非画线模式逐字相同、且惯性没有被提前截停"。这正是 spec 该行注释自己预见到的情况（"plan 须先确认自己写得出这一档，写不出就如实登记只有 G3 接得住"）——如实登记：目前只有 G3① 接得住，N1 这个精确场景没有专门测试。
+6. **变异 #21「六个成因各自应红」只有一半成立**：cause②⑤⑥的拒绝完全由身份比对（`selectedDrawingID == c.drawingID`）独立保证，与是否调用 `nodeDragPreconditions` 无关；只有 cause①③④'（线被删/被锁/进复盘）真正依赖这道复核。这意味着"六个成因各自独立验证了复核"这个判别力声明是**夸大的**——实际上只验证了 3 个成因，另外 3 个成因的红只是因为它们本身也会让身份比对失败（双重冗余保护，但判别力归因不对）。
+7. **变异 #22「后两档⑤⑥应红」cause⑥ 由另一重判据保护**：测试文件自己的代码注释已经写明这一点（`candidateRevalidationRejectsSixCauses` 的 cause⑥ 那段注释），本次实跑只是确认了既有文档结论，不是新发现，但 spec §8.4 表格的描述（"⑤⑥两档"）与实测（只有⑤生效）不一致，应订正 spec 表述为"仅⑤档，⑥档由 `nodeDragPreconditions` 自身的 `selectedPanel==panel` 独立挡住"。
+8. **变异 #30/#33「`.straight` 普通档预期不红」在当前 fixture 下不成立**：`clampKeepsNodeReal` 与「非整像素右缘」系列测试共用同一个 `DrawingNodeDragDeltaTests.mapper()`，该 mapper 的 `candleStep=4.0025`/`pixelShift=4` 是专门为"非整像素右缘"缺陷设计的参数；`clampKeepsNodeReal` 的 dx=5000 方向恰好也把下标推到越界的第 79 根，与"非整像素右缘"是同一个根因。这不是"测试串了"，是两个测试恰好共享了同一个会触发该边缘缺陷的 fixture 参数。**订正**：spec 该行"⚠️.straight 的普通档预期不红"这个假设在当前 fixture 参数下不成立，应改为"`.straight` 普通档是否红取决于其随机选用的越界距离是否正好落在非整像素缺陷区间内；本片固定 fixture（dx=±5000）恰好落入该区间，因此预期应订正为'可能红，视 fixture 而定'"。
+9. **变异 #31 两条超出 spec 预期描述的旁证**：① `straightLeftEdgeClampsToStartIndexExactly`（左缘对称档）也红了，因为 `draggedAnchor` 步①的幂等检查同样调用被弱化的 `producesRealNode`，对 `.straight` 恒真，步①直接短路返回未夹取的候选（候选的 candleIndex 是远超范围的负数，与 `startIndex`(0) 不等）。② `clampKeepsNodeReal` 确认不红，但原因是该测试自身的断言调用的就是被弱化的 `producesRealNode` 作为判据——判据与被测代码变成同一个函数，变成空洞自洽（本仓已有具名记录的"空洞成立"模式的又一例）。这条"不红"**没有判别力**，不能当作该变异"无害"的证据。
+10. **变异 #29/#32 的实现细节**：若只去掉 `draggedAnchor` 步①的幂等 early-return，而不去掉 `clampPrice` 自身的 `guard !(...) else { return a }` 早退，T10④ 不会变红——`clampPrice` 的早退会在值已经合法时直接返回原值，"救回"了被测的异常值。必须**两处早退一起去掉**才能让"无条件夹"这个变异产生可观察效果。这是 spec 原文"不判候选是否已满足后置条件"字面上已经隐含、但本任务独立实测验证到的实现细节，供 Task 15 写变异脚本时参考，避免重复踩坑。
