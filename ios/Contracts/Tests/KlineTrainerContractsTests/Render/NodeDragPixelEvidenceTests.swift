@@ -9,11 +9,18 @@
 // `RenderStateBuilder.swift:34` 自陈 `slice.startIndex == viewport.startIndex`），与锚点的
 // `candleIndex` 同一个 x 坐标空间 ⇒ 下面构造的「标记与节点锚同一根 K 线、同一价位」场景成立。
 //
-// 本测试直调 `KLineView` 的两个真实 UIKit extension 方法（不重新实现绘制逻辑），
-// 按生产顺序喂同一个 CGContext —— 与 `ChartContainerViewDrawingSessionTests.pixelAt`/`litPixels`
-// 同款 `UIGraphicsPushContext`/`draw`/`UIGraphicsPopContext` 技巧（`:427`/`:446`）。
+// 评审修复环第 1/5 轮 Important：首版"正序"/"正向对照"两档手工按固定顺序分别调
+// `drawMarkers`/`drawSelectionNodes`，从不经过 `KLineView.draw(_:)` 真实派发 ⇒ 把生产代码里
+// `KLineView.swift:134`/`:140` 的真实调用顺序整段换掉，这两档照样 PASS（评审实测复现）。
+// 判别力只能靠 `SelectionNodeDrawOrderGuardTests`（源码文本顺序守卫）兜底，T5 自己对"生产
+// 真的按这个顺序调"这件事判别力为零。本轮改为：**正序 / 正向对照改走真实 `view.draw(view.bounds)`**
+// 派发链（与 `ChartContainerViewDrawingSessionTests.pixelAt`/`litPixels` 同款 push/draw/pop
+// 技巧，`:427`/`:446`），构造一份真实 `KLineRenderState` 喂给 `view.renderState`，这样生产顺序
+// 一旦被换掉，这两档会跟着 `SelectionNodeDrawOrderGuardTests` 一起真的变红（已实测验证，见下）。
+// **反向对照**仍然必须手工调用两个真实 extension 方法并在测试内部换序——这正是它的定义
+// （"不改生产代码，只在测试内部换序"），不能走 `draw(_:)`（那只会执行**今天**的生产顺序）。
 //
-// 平台门：UIKit-only（drawMarkers/drawSelectionNodes 是 KLineView 的 UIKit extension 方法），
+// 平台门：UIKit-only（drawMarkers/drawSelectionNodes/KLineView.draw 都是 UIKit-only API），
 // macOS host swift test 整份不编译，同既有先例 NodeDragCandidateTests.swift。
 #if canImport(UIKit)
 import CoreGraphics
@@ -69,6 +76,47 @@ struct NodeDragPixelEvidenceTests {
         [TradeMarker(globalTick: 15, price: 999, direction: .buy)]  // price 不影响几何（D10：锚到 candle.close）
     }
 
+    /// 真实 `KLineRenderState`（`KLineRenderState.swift:16-41` 的完整 public init）——喂给
+    /// `view.renderState` 后，`view.draw(view.bounds)` 走的是生产 `KLineView.swift:98-145`
+    /// **一字不改**的真实派发链（含 `drawGridLines`/`drawCandles`/.../`drawDrawings` 等本测试
+    /// 不关心的层）。`volumeChart`/`macdChart` 给 `.zero`：那两块面积为零，`drawVolume`/`drawMACD`
+    /// 画不出任何像素，不会污染主图区的采样点。`crosshairPoint: nil` —— `drawCrosshair` 是
+    /// `drawSelectionNodes` 之后**唯一**还会画的东西（`KLineView.swift:144`），必须关掉，否则它
+    /// 会在节点之上再画一层，让"谁画在最后"这件事多一个变量。
+    private static func makeRenderState(markers: [TradeMarker], drawing: DrawingObject) -> KLineRenderState {
+        let mapper = Self.makeMapper()
+        return KLineRenderState(
+            panel: PanelViewState(period: .daily, interactionMode: .autoTracking,
+                                  visibleCount: 4, offset: 0, revision: 0),
+            frames: ChartPanelFrames(mainChart: mapper.viewport.mainChartFrame,
+                                     volumeChart: .zero, macdChart: .zero),
+            viewport: mapper.viewport,
+            visibleCandles: Self.candles[0..<4],
+            volumeRange: NonDegenerateRange.make(values: []),
+            macdRange: NonDegenerateRange.make(values: []),
+            markers: markers,
+            drawings: [drawing],
+            crosshairPoint: nil,
+            selectedDrawingID: drawing.id)
+    }
+
+    /// 真实派发链：`view.renderState = state` 之后直调 `view.draw(view.bounds)`——
+    /// 生产 `KLineView.swift:98` 这个方法本身，不是本文件重新拼出来的调用序列。
+    /// 换句话说，这里**没有**任何地方写"先 drawMarkers 再 drawSelectionNodes"——顺序完全
+    /// 由生产代码自己决定，改坏生产顺序会让这条路径跟着变。
+    private static func renderReal(markers: [TradeMarker], drawing: DrawingObject) -> [UInt8] {
+        let view = makeView()
+        view.renderState = Self.makeRenderState(markers: markers, drawing: drawing)
+        var data = [UInt8](repeating: 0, count: W * H * 4)
+        let ctx = CGContext(data: &data, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        UIGraphicsPushContext(ctx)
+        view.draw(view.bounds)
+        UIGraphicsPopContext()
+        return data
+    }
+
     /// `W`×`H` bitmap，`CGContext(data:)` 直建、`UIGraphicsPushContext` 推成"当前 UIKit 上下文"——
     /// `drawMarkers` 内部用 `UIColor.setFill()`（只认"当前上下文"，不认传入的显式 `ctx` 参数），
     /// 不推的话标记会被填成 CGContext 默认填色（不透明黑），与节点色（日间纯黑）撞色，
@@ -96,36 +144,26 @@ struct NodeDragPixelEvidenceTests {
         return (CGFloat(data[i]) / 255 / a, CGFloat(data[i + 1]) / 255 / a, CGFloat(data[i + 2]) / 255 / a)
     }
 
-    @Test("T5 正序（真实顺序）：标记 + 节点同锚 ⇒ 节点中心仍是节点色（日间纯黑），不被标记整个盖住")
+    // ⭐ 判别力边界（评审修复环第 1/5 轮 Important）：下面这两档走 `view.draw(view.bounds)`
+    // 真实派发链 —— 证明的是"**生产代码此刻真的按这个顺序调用时**，节点中心是节点色"。
+    // 它们**不是**"生产代码永远不会把节点盖住"的独立证明；那一半由
+    // `SelectionNodeDrawOrderGuardTests`（源码文本顺序守卫）钉住生产顺序本身不会被静默改掉。
+    // 两者缺一不可：改坏生产顺序时，这两档会**跟着**顺序守卫一起变红（已实测验证，见 Step3 的
+    // "换生产顺序"核验，T5 正序/正向对照与顺序守卫同时报错；见 task-13-report.md）。
+    @Test("T5 正序（真实路径）：标记 + 节点同锚，走 KLineView.draw(_:) 真实派发 ⇒ 节点中心仍是节点色（日间纯黑）")
     func nodeIsNotCoveredByTradeMarker() throws {
-        let mapper = Self.makeMapper()
         let drawing = Self.line()
-        let data = Self.render { view, ctx in
-            // 真实顺序：KLineView.draw(_:) 先 drawMarkers（:134）再 drawSelectionNodes（:140）。
-            view.drawMarkers(ctx: ctx, viewport: mapper.viewport, mapper: mapper,
-                             markers: Self.buyMarker(), candles: Self.candles[0..<4])
-            view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [drawing],
-                                    scheme: .light, selectedDrawingID: drawing.id,
-                                    tools: KLineView.drawingTools)
-        }
+        let data = Self.renderReal(markers: Self.buyMarker(), drawing: drawing)
         let p = try #require(Self.pixel(data, at: Self.center),
                              "节点中心必须有像素 —— 否则下面的颜色断言恒真")
         #expect(p.r < 0.1 && p.g < 0.1 && p.b < 0.1,
-               "节点画在标记之后，中心必须是节点的纯黑色，实得 \(p)")
+               "按生产真实派发链画完，中心必须是节点的纯黑色，实得 \(p)")
     }
 
     @Test("⭐正向对照：移走标记后同一点仍是节点色 —— 证明上面那条不是恒真")
     func withoutMarkerStillNodeColor() throws {
-        let mapper = Self.makeMapper()
         let drawing = Self.line()
-        let data = Self.render { view, ctx in
-            // 仍调用 drawMarkers（走它真实的早返分支），但 markers 列表为空 —— 场景里"移走"了那枚标记。
-            view.drawMarkers(ctx: ctx, viewport: mapper.viewport, mapper: mapper,
-                             markers: [], candles: Self.candles[0..<4])
-            view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [drawing],
-                                    scheme: .light, selectedDrawingID: drawing.id,
-                                    tools: KLineView.drawingTools)
-        }
+        let data = Self.renderReal(markers: [], drawing: drawing)
         let p = try #require(Self.pixel(data, at: Self.center), "节点中心必须有像素")
         #expect(p.r < 0.1 && p.g < 0.1 && p.b < 0.1,
                "无标记时节点中心仍须是纯黑，实得 \(p)")
