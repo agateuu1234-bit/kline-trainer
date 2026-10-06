@@ -135,6 +135,27 @@ plan 的第一步必须先把它跑出来；若无法区分，退回方案见 §
 
 ---
 
+### 4.4 ⚠️ 第二个未验证假设：CI 的 Xcode 版本（codex spec-R1 指出）
+
+**我的 spike 跑在本机 Xcode 27 / xcresulttool 25115（schema 0.4.0）上。CI 不是这个环境。**
+
+| | 版本 |
+|---|---|
+| CI（`catalyst-build.yml:25`） | `runs-on: macos-15`，镜像预装 **Xcode 16**，workflow 只断言 `>= 16` |
+| 我的 spike | **Xcode 27** |
+
+未知项（⛔ 本机无法验证，因为本机只有 27）：
+
+1. `xcrun xcresulttool get test-results tests` 这个子命令在 Xcode 16 上**是否存在**；
+2. 它的 JSON **结构/字段名是否相同**（`nodeType` / `name` / `result` / `testNodes`）；
+3. §4.1 那个「能否区分 swift-testing 与 XCTest」的答案在 Xcode 16 上是否一致。
+
+⚠️ **这不是可以带着往下走的假设**：若子命令不存在，整个 §3 设计在 CI 上根本跑不起来
+（而本地测试会全绿 —— 正是本仓 `feedback_swift_local_ci_toolchain_strictness`
+与 `feedback_swift_local_toolchain_blindspot` 记的「本地绿 ≠ CI 绿」形状）。
+
+⇒ 处置见 §8（plan 的 Task 1 改为**在 CI 里**探测，不在本机）。
+
 ## 5. 改动面
 
 | 文件 | 改什么 |
@@ -210,9 +231,31 @@ bash .github/scripts/catalyst-gate.test.sh
 
 ---
 
-## 8. 一处自我约束
+## 8. 两处未验证假设的处置：Task 1 是一个**在 CI 里跑的探针**
 
-§4.1 的未决点是**本设计唯一没有实测结论的技术假设**。按本仓
-`feedback_cannot_verify_is_not_a_reason_to_defer`（「『无法核实』不是延后的理由，是去核实的理由」），
-plan 的 **Task 1 必须是把它跑出来**，而不是带着假设往下写代码。
-若结论是「无法区分」，按 §7 R1 的 (a) 收口并回头改本 spec，⛔ 不许硬凑。
+本设计有且只有两处没有实测结论：**§4.1**（包里能否区分 swift-testing 与 XCTest）
+与 **§4.4**（CI 的 Xcode 16 上子命令与 JSON 结构是否相同）。
+
+按本仓 `feedback_cannot_verify_is_not_a_reason_to_defer`（「『无法核实』不是延后的理由，
+是去核实的理由」）与 `feedback_verify_foundational_infra_assumption_real_not_fake`
+（「地基假设要真环境验」）：
+
+⇒ **plan 的 Task 1 不写任何判据代码，只做一件事：开一个丢弃型探针 PR，让 CI 自己回答这两问。**
+
+探针只往 `catalyst-build.yml` 加**一个纯打印步骤**（不改任何判据），输出：
+
+1. `xcodebuild -version` 与 `xcrun xcresulttool version`（CI 实际版本，⛔ 别再假设）；
+2. `xcrun xcresulttool get test-results tests --path … --format json` 的**退出码**
+   （子命令是否存在）；
+3. 取到的 JSON 里 `nodeType` 的取值分布与**一条含中文显示名的节点原文**
+   （验字段名与中文是否完好）；
+4. 能否把 swift-testing 与 XCTest 分开计数（§4.1）。
+
+**看完即关，不合。** 两问有了 CI 的实测答案之后再写判据代码。
+若 §4.4 的答案是「子命令不存在」⇒ 整个 §3 作废，回头改本 spec（退路：只治 G8，
+用「解转义后再匹配」并额外设计防伪造，即原先被否的方案 B）；
+若 §4.1 的答案是「无法区分」⇒ 按 §7 R1 的 (a) 收口。**⛔ 两种情况都不许硬凑。**
+
+> ⭐ 这一条是 codex spec-R1 的功劳：它指出「要用 **CI 支持的那个 Xcode 版本**去验抽取与
+> 名字匹配」。我原 spec 只把 §4.1 列为未决点，**漏了版本这一层** —— 而它比 §4.1 更致命
+> （§4.1 最坏是退回读文本，§4.4 最坏是整个设计在 CI 上跑不起来、而本地全绿）。
