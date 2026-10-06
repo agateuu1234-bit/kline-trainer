@@ -154,7 +154,50 @@ A 类 DDL 触发（依据 `0004/forward.sql:3` 的头注释与 m01 §Bump 策略
 | 3 | `docs/governance/m01-schema-versioning-contract.md` 矩阵顶层 cell |
 | 4 | 同文件矩阵 PG 迁移 id cell：`0004_qmt_price_double_and_coverage` → `0005_schema_version_fail_closed` |
 | 5 | 同文件新增一条 **bump 记录**（照 2026-07-18 那条的格式：触发条件、变更内容、是否联动 sub-version、iOS 侧有无改动）|
-| ~~6~~ | ~~`scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`~~ —— **已核实：不需要改**。该脚本（124 行）只 `grep` 治理文档里有没有那段政策文字，**不断言矩阵 cell 的值、也不断言迁移 id** |
+| 6 | `docs/governance/m01-schema-versioning-contract.md:50` 末句的**裸字面量** |
+| 7 | `kline_trainer_modules_v1.4.md:2239` 的**指针** |
+| ~~8~~ | ~~`scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`~~ —— **已核实：不需要改**。该脚本（124 行）只 `grep` 治理文档里有没有那段政策文字，**不断言矩阵 cell 的值、也不断言迁移 id** |
+
+#### ⛔ 第 6、7 项：`1.15` 这个号在仓内**已被赋予语义**，取它会把两处变成假话
+
+这是「**同一事实 N 份副本 ⇒ 改一处漏其余**」的又一例。全仓 `git grep '1\.15'`
+（排除 Python `3.11.15` 与 CSS `line-height`）命中 8 处，逐条定性后分三类：
+
+**(a) 必须改 —— 2 处**
+
+| 文件:行 | 现在写的 | 为什么是假话 |
+|---|---|---|
+| `docs/governance/m01-schema-versioning-contract.md:50` | 同一行前半句带了免责「⛔ 这个数**不是**无条件的」，**但末句是裸字面量**：「`1.14` = 「产物已升第 2 代、App 尚不支持」，**`1.15` = 「App 支持第 2 代」**」 | 前半句说这个数不保证、后半句又拿它当标识写死 —— **该行自己内部矛盾**。本片取 1.15 后末句直接为假 |
+| `kline_trainer_modules_v1.4.md:2239` | 「…；**过渡态的权威定义见 `CONTRACT_VERSION 1.14 / 1.15`**）」 | 这是个**指针**。取 1.15 后它指向错的一对 |
+
+**改法**：都改成**关系式**，照 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md:188`
+已经对了的那版（它是 2026-09 P3c 整支最终评审 I2 **订正过**的写法）：
+
+> `1.14` = 「产物已升第 2 代、App 尚不支持」；**切片二落地后的那个号** = 「App 支持第 2 代」
+
+⚠️ `kline_trainer_modules_v1.4.md` 是**冻结契约**，改它要确认闸门不被打破。
+**已核实**：`backend/tests/test_frozen_contract_texts.py:113` 的
+
+```python
+_TRANSITION_NOTE = "⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地"
+```
+
+**不含 `1.15`** ⇒ 只改后面那个指针、保留这段标注，
+`test_frozen_contract_version_refs_are_2_with_transition_note` 不会红。
+
+**(b) 已经对了、不用改 —— 1 处**
+
+`…timestamp-semantics-design.md:188` 本来就是关系式写法（见上）。
+
+**(c) ⛔ 明确不改 —— 其余 5 处**
+
+全在 `docs/acceptance/**` 与 `docs/superpowers/plans/**`：那些是**历史记述**
+（P3b / P3c 当时的验收清单与计划），记的是「当时推断多半是 1.15」这个事实本身。
+⛔ 改它们等于改写当时的事实，而且它们的措辞**本来就带免责**
+（如 `p3c-acceptance.md:288` 标题逐字是「多半是 1.15，**但不保证**」）。
+
+⚠️ 这两处副本是**同事会话（prj-kline-trainer-be）提醒后**我才查到的；
+本设计初稿的 §4⑤ 只列了「矩阵两个 cell + 一条 bump 记录」，**漏了这两处散文**。
 
 ⛔ `docs/governance/m01-*` 属**信任边界文件** ⇒ 除 codex 评审外还需 **CODEOWNERS approve**。
 
@@ -230,9 +273,28 @@ A 类 DDL 触发（依据 `0004/forward.sql:3` 的头注释与 m01 §Bump 策略
 
 ### ⚠️ 本片查出、但**明确不在范围内**的一条漏
 
-**m01 矩阵的 cell 值没有任何测试钉着。** 核实依据：
+**m01 矩阵里，只有【训练组那一行】被钉着；PG 迁移 id 与顶层 CONTRACT_VERSION 两个 cell 无人钉。**
+
+⚠️ **这是对本设计初稿的订正** —— 初稿写的是「矩阵的 cell 值**没有任何**测试钉着」，
+那句**过头了**。实际核实：
+
+| cell | 钉它的东西 |
+|---|---|
+| 训练组 SQLite `PRAGMA user_version` | ✅ `backend/tests/test_frozen_contract_texts.py:173` 的 `test_m01_matrix_training_set_row_matches_backend_ddl` —— 把矩阵那一行钉到 `training_set_schema_v1.sql` 的 `PRAGMA user_version` 上，**两个独立来源互钉，任一边单独动就红** |
+| PG 迁移 id | ⛔ 无人钉 |
+| 顶层 `CONTRACT_VERSION` | ⛔ 无人钉 |
+
 `scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`（124 行）只检查治理文档里
-**有没有那段政策文字**，不比对任何 cell 的值；`git grep` 也找不到别处在钉。
+**有没有那段政策文字**，不比对任何 cell 的值。
+
+⭐ 那条已有的守卫**写法值得照抄**：它的 docstring 记着判据的来由 ——
+「doc=1 / code=2 的漂移**真的发生过**：#183 把 `training_set_schema_v1.sql` 的
+`PRAGMA user_version` 改成 2，而 m01 那行没人动，且当时**没有任何测试在读它**
+⇒ 漂移安安静静地存在了两周」；并明写「判据**不是**『等于字面量 2』—— 那样下一次
+bump 时会跟 DDL 一起说谎（两边都改错也全绿）」。
+
+⚠️ **TS1-R1 不碰** `training_set_schema_v1.sql`（本片改的是 PostgreSQL 的 `schema.sql`）
+⇒ 那条守卫不受本片影响。
 
 后果已经发生过**三次** —— m01 文档自己记着：
 2026-06-22 那条写「cell 此前 stale 为 `1.5`」、
