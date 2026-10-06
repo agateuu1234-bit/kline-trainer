@@ -123,17 +123,44 @@ rollback 的三条警告是否属实**。0005 沿用这个形状，三个 Part�
 | 2 | **存量行不受影响**：forward + rollback 前后，已有行的 `schema_version` 逐行不变 | `DROP DEFAULT` 只改元数据 —— 这是断言，要证明 |
 | 3 | **rollback 真的无损**：README 会声称「本次 rollback 无数据风险」（与 0004 那两条**有**风险的警告相反）| ⛔ 声称无风险比声称有风险更需要证明 —— 不许写上去就算 |
 
-### ④两道闸门 + 一份指纹（本片最易出错处）
+### ④两道闸门 + 两份哈希 + 一份指纹（本片最易出错处）
 
-三样东西都记着「`schema_version` 的默认值是 1」：
+⚠️ **本节漏过一项，由 codex 第二轮挖出并已核实**：`backend/qmt_pilot_db.py:1279` 的
+`CANONICAL_SCHEMA_SHA256` 是 **`schema.sql` 的字节 sha256**。
+`create_pilot_database`（`:1617-1625`）在**任何副作用之前**硬比对它，不符就抛
+`schema_not_canonical` ⇒ **按初稿清单实施会直接打断 pilot 建库**，
+且 `test_canonical_schema_hashes_match_the_repo_files` 会变红。
+初稿只列了 md5 与活目录指纹，**把这个独立的字节哈希漏了** —— 活目录指纹替代不了它
+（一个钉「递进来的字节」、一个钉「库建成什么样」）。
+
+#### `CANONICAL_*_SHA256` 家族逐个定性（⛔ 评审只点了一个，这里按家族穷举）
+
+| 常量 | 覆盖的文件 | 本片是否影响 | 谁钉它 |
+|---|---|---|---|
+| `CANONICAL_SCHEMA_SHA256`（`:1279`）| `backend/sql/schema.sql` | ✅ **必须重算** | `test_canonical_schema_hashes_match_the_repo_files` + `create_pilot_database` 的 `schema_not_canonical` 闸 |
+| `CANONICAL_PILOT_SCHEMA_SHA256`（`:1280`）| `backend/sql/pilot_schema.sql` | ❌ 本片不碰 | 同上测试 |
+| `CANONICAL_CLUSTER_SCHEMA_SHA256`（`:1289`）| `backend/sql/pilot_cluster_schema.sql` | ❌ 本片不碰 | `test_qmt_pilot_db.py:5988` |
+| `CANONICAL_BUSINESS_CATALOG_SHA256`（`:1394`）| 活目录指纹（真 PG 生成）| ✅ 见下表 | `test_business_catalog_fixture_matches_the_constant` + 真 PG 验收脚本 ㉕ 档 |
+
+⇒ 四个里 **2 个受影响、2 个不受影响**（集合等式，已逐个读过定义处的注释确认覆盖范围）。
+
+⚠️ 注意 `schema.sql` 同时被**两种哈希**钉着，用途不同：
+P6b 闸门里的 **md5**（只活在注释里、本片新增测试钉它）与模块常量里的 **sha256**（有真闸门）。
+改一个忘另一个 ⇒ 要么 pilot 建库炸、要么闸门文件说谎。
+
+---
+
+四样东西都记着「`schema_version` 的默认值是 1」或 `schema.sql` 的字节：
 
 | 文件:行 | 改成什么 | 新值怎么得到 |
 |---|---|---|
 | `docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql:60` | `$p6b$1$p6b$` → `$p6b$$p6b$` | 照同表其它无默认值列的写法（已核对第 56–59 行） |
 | 同文件 `:21` 的 `schema.sql md5 = 2e4b074d…` | 新 md5 | 对**改完的** `schema.sql` 重算 |
 | `backend/tests/fixtures/business_catalog_fingerprint.txt:65`（`training_sets.schema_version=1`）+ `backend/qmt_pilot_db.py:1394` 的 `CANONICAL_BUSINESS_CATALOG_SHA256` | 新指纹原文 + 新 sha256 | **本地 docker 起 `postgres:15.12`**，用改完的 `schema.sql` 建库，取出活目录指纹 |
+| `backend/qmt_pilot_db.py:1279` 的 `CANONICAL_SCHEMA_SHA256` | 新 sha256 | 对**改完的** `schema.sql` 重算字节哈希（`sha256sum`）|
 
-⛔ **次序约束**：先改 `schema.sql` → 再重算 md5 与指纹。反过来会得到旧值。
+⛔ **次序约束**：`schema.sql` **必须先定稿**，然后才算这三样 ——
+P6b 的 md5、`CANONICAL_SCHEMA_SHA256` 的 sha256、活目录指纹。反过来全部拿到旧值。
 
 ⛔ **指纹是三方互钉**（`test_qmt_pilot_db.py:85-90` 的注释）：固件 ↔ 常量 ↔ 活库。
 前两方由 `test_business_catalog_fixture_matches_the_constant` 钉；
@@ -271,6 +298,7 @@ _TRANSITION_NOTE = "⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧
 | 3 | **造一条漏填的 INSERT**（在 rehearsal 的临时库上）| PostgreSQL **报错**，报文含 `violates not-null constraint` 且点名 `schema_version` |
 | 4 | **造一条表名来自变量的漏填写入** | **同样被 DB 拒**。⚠️ 这条是本片相对文本守卫的**增量价值**证明：守卫对这一类只能说「判不了」，而 DB **判对了且不需要人介入** |
 | 5 | 现有 12 处 `INSERT` 仍能正常写入 | 正向对照，防止改成恒拒 |
+| 5b | **pilot 建库仍能成功**（`create_pilot_database` 不抛 `schema_not_canonical`）| 这是 `CANONICAL_SCHEMA_SHA256` 那条漏的正面验收 —— ⛔ 只跑单测不够：那个闸在建库路径上，要走一次真建库 |
 | 6 | 改动面文件集 | 与 §4 列出的**恰好相等**（集合等式，多一个少一个都算不通过）|
 
 ⛔ 判据 4 的措辞按实测更新过：文本守卫对动态表名报「**判不了**」（不是「看不见」），
