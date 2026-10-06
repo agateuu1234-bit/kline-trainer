@@ -183,6 +183,49 @@ A 类 DDL 触发（依据 `0004/forward.sql:3` 的头注释与 m01 §Bump 策略
 | 5 | 同文件新增一条 **bump 记录**（照 2026-07-18 那条的格式：触发条件、变更内容、是否联动 sub-version、iOS 侧有无改动）|
 | 6 | `docs/governance/m01-schema-versioning-contract.md:50` 末句的**裸字面量** |
 | 7 | `kline_trainer_modules_v1.4.md:2239` 的**指针** |
+| 8 | **Swift** `ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift:8` —— `#expect(CONTRACT_VERSION == "1.14")` |
+| 9 | **Swift** `…/Render/RenderStateBuilderTests.swift:1260` —— 同形断言 |
+| 10 | **Swift** 同文件 `:1238` —— ⚠️ **测试名**里也写着「契约仍 1.14」（只改断言不改名字 ⇒ 留下一个**说谎的测试名**）|
+| 11 | **Swift** `…/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift:52` —— `XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.14\"`")` |
+
+#### ⚠️ 第 8–11 项是 codex 第三轮挖出的：我**只扫了 Python 侧**
+
+本仓是 **Python + Swift 双语言**，而 `CONTRACT_VERSION` 是**跨语言共享常量**
+（`qmt_pilot_db.py:827` 与 `Models.swift:7`，且 `test_qmt_pilot_db.py:835` 钉两边相等）
+⇒ **版本类断言必然两边都有**。初稿与第二稿我都只跑了 `git grep … -- backend`，
+于是 Swift 侧 4 处字面量（3 条断言 + 1 个测试名）全漏。
+
+⛔ **本片的所有「全仓有/没有 X」类断言，一律按 `-- backend ios scripts .github` 扫。**
+
+#### `ios/` 下 `1.14` 的全部命中逐条定性（8 处，集合等式）
+
+```
+git grep -nI '1\.14' -- ios        # ⛔ 不加引号限定，否则漏掉 `"`\"1.14\"`" 这种转义写法
+```
+
+**(a) 必须改 —— 5 处 / 4 个文件**
+
+| 文件:行 | 是什么 |
+|---|---|
+| `Sources/KlineTrainerContracts/Models/Models.swift:7` | `public let CONTRACT_VERSION = "1.14"` —— 常量本体（= 上表第 2 项）|
+| `Tests/KlineTrainerContractsTests/ModelsTests.swift:8` | `#expect(CONTRACT_VERSION == "1.14")` |
+| `Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift:1260` | 同形断言 |
+| 同文件 `:1238` | ⚠️ **测试名**：`@Test("N7：…、契约仍 1.14")` —— 只改断言不改名字 ⇒ **说谎的测试名** |
+| `Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift:52` | `XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.14\"`")` —— **就是它钉住 m01 顶层 cell**（见 §7）|
+
+**(b) ⛔ 明确不改 —— 3 处，全在同一个人造负样本里**
+
+`M01MatrixSyncGuardTests.swift:58-84` 的 `test_parser_is_immune_to_values_that_only_appear_in_bump_notes`：
+样本的**数据行放旧值 `1.13`**、**bump 记录块里放新值 `1.14`**，断言解析器**不会**把
+只出现在记录块里的值当成数据行（旧稿的自检只对局部字符串调 `contains`，测的是标准库、恒绿）。
+
+| 文件:行 | 是什么 | 为什么不改 |
+|---|---|---|
+| `:61` | docstring：「顶层那行用**本次 bump**（`1.13` → `1.14`）作素材」| 同一段 docstring 自己就写着「样本只需满足『数据行是旧值、引用块里出现新值』，**不必对应一次真实发生过的 bump**」⇒ 本片 bump 后这句只是措辞陈旧，**不影响判据**。⚠️ 在此明说，不假装没这回事 |
+| `:74` | 样本内的 bump 记录文本 `"1.13"` → `"1.14"` | 人造固件的素材 |
+| `:79` | `XCTAssertNotEqual(r[顶层], "`\"1.14\"`")` | **已核实本片后仍通过**：样本数据行是 `` `"1.13"` ``，≠ `` `"1.14"` `` 恒成立；该测试**自包含、不引用活常量** |
+
+⇒ **5 改 + 3 不改 = 8**，与 `git grep` 命中总数吻合。
 | ~~8~~ | ~~`scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`~~ —— **已核实：不需要改**。该脚本（124 行）只 `grep` 治理文档里有没有那段政策文字，**不断言矩阵 cell 的值、也不断言迁移 id** |
 
 #### ⛔ 第 6、7 项：`1.15` 这个号在仓内**已被赋予语义**，取它会把两处变成假话
@@ -294,6 +337,7 @@ _TRANSITION_NOTE = "⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧
 | # | 动作 | 期望 |
 |---|---|---|
 | 1 | 跑整套后端测试 | 只有 `passed`，退出码 0 |
+| 1b | **跑整套 Swift 测试**（`ios/Contracts`）| 全绿。⛔ **只跑后端不够** —— 本片改了 Swift 常量与 3 个 Swift 测试文件；而 `CONTRACT_VERSION` 是跨语言共享常量，Swift 侧有 4 处字面量断言（含一个测试名）|
 | 2 | 跑 `0005/rehearse.sh` | 三个 Part 全部 `[PASS]`，退出码 0。⚠️ **需要本机 Docker 可用**（脚本第一步就检测，不可用会打印 `[FAIL] 未检测到 docker` 并 `exit 1`）——与 0004 的 `rehearse.sh` 同形 |
 | 3 | **造一条漏填的 INSERT**（在 rehearsal 的临时库上）| PostgreSQL **报错**，报文含 `violates not-null constraint` 且点名 `schema_version` |
 | 4 | **造一条表名来自变量的漏填写入** | **同样被 DB 拒**。⚠️ 这条是本片相对文本守卫的**增量价值**证明：守卫对这一类只能说「判不了」，而 DB **判对了且不需要人介入** |
@@ -326,19 +370,35 @@ _TRANSITION_NOTE = "⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧
 
 ### ⚠️ 本片查出、但**明确不在范围内**的一条漏
 
-**m01 矩阵里，只有【训练组那一行】被钉着；PG 迁移 id 与顶层 CONTRACT_VERSION 两个 cell 无人钉。**
+**m01 矩阵五行里，只有【PostgreSQL 迁移 id】那一行无人钉 —— 而那恰好就是本片要改的那一行。**
 
-⚠️ **这是对本设计初稿的订正** —— 初稿写的是「矩阵的 cell 值**没有任何**测试钉着」，
-那句**过头了**。实际核实：
+⚠️⚠️ **这句话我改过三遍，前两遍都说过头了。根因写在这里，因为它比结论更有用：**
 
-| cell | 钉它的东西 |
+| 第几稿 | 我写的 | 实际 | 怎么被打回 |
+|---|---|---|---|
+| 初稿 | 「**没有任何**测试钉着」| 训练组行有 **Python** 守卫 | 同事会话指出 |
+| 第二稿 | 「只有训练组行被钉；顶层与 PG 迁移 id 无人钉」| 顶层行有 **Swift** 守卫 | **codex 第三轮**指出 |
+| 本稿 | 「只有 PG 迁移 id 无人钉」| ✅ 两种语言都扫过才敢写 | — |
+
+⛔ **根因：我只扫了 `backend/`（Python），从没扫 `ios/`（Swift）。** 本仓是双语言，
+而 `CONTRACT_VERSION` 是跨语言共享常量 ⇒ 版本/治理类断言**必然两边都有**。
+只扫一边，结论必然偏向「以为没人管」—— 最危险的那个方向。
+
+逐行对账（2026-10 实测，两种语言都扫过）：
+
+| 矩阵行 | 谁钉它 |
 |---|---|
-| 训练组 SQLite `PRAGMA user_version` | ✅ `backend/tests/test_frozen_contract_texts.py:173` 的 `test_m01_matrix_training_set_row_matches_backend_ddl` —— 把矩阵那一行钉到 `training_set_schema_v1.sql` 的 `PRAGMA user_version` 上，**两个独立来源互钉，任一边单独动就红** |
-| PG 迁移 id | ⛔ 无人钉 |
-| 顶层 `CONTRACT_VERSION` | ⛔ 无人钉 |
+| 顶层 `CONTRACT_VERSION` | ✅ **Swift** `M01MatrixSyncGuardTests.swift:52` |
+| **PostgreSQL schema（迁移 id）** | ⛔ **无人钉** ← 本片要改这一行 |
+| 训练组 SQLite `PRAGMA user_version` | ✅ **Python** `test_frozen_contract_texts.py:173`（钉到 `training_set_schema_v1.sql` 的 DDL，**两源互钉**）|
+| app.sqlite GRDB migration | ✅ Swift 同文件 `:53` |
+| Swift 模型版本 | ✅ Swift 同文件 `:55` |
 
 `scripts/acceptance/plan_1f_m0_1_schema_versioning.sh`（124 行）只检查治理文档里
 **有没有那段政策文字**，不比对任何 cell 的值。
+
+⇒ **本片改 PG 迁移 id 那个 cell 时没有守卫兜着** —— 只能靠人看 diff。
+这也让「给矩阵补一致性测试」这条 backlog 的范围精确到了**一行**。
 
 ⭐ 那条已有的守卫**写法值得照抄**：它的 docstring 记着判据的来由 ——
 「doc=1 / code=2 的漂移**真的发生过**：#183 把 `training_set_schema_v1.sql` 的
