@@ -45,7 +45,27 @@
 - 测试台把它指向一个「cat 对应 fixture JSON」的桩 ⇒ **不需要把二进制 `.xcresult` 包签进 git**。
 
 **fixture 配对规则**：日志 `<name>.log` 的结构化样本是 `<name>.tests.json`；
-**文件不存在时回退到一份公共的「全 Passed」样本** ⇒ 现有 23 个 fixture **一个都不用改**。
+文件不存在时回退到一份公共的「全 Passed」样本。
+
+⚠️ **但「现有 fixture 一个都不用改」是错的**（codex plan-R1 指出，实核属实）。
+公共「全 Passed」样本会把**本该缺失的节点补回来** ⇒ 依赖 G8 的既有**负向**档位
+会被正确实现判成通过，而它们期望 `exit 1` ⇒ **判别力归零**。
+
+实核 `catalyst-gate.test.sh` 的 20 个档位，**必须配专属 JSON 的只有 2 档**：
+
+| 档位 | 现断言 | 要配的 JSON |
+|---|---|---|
+| `missing-one-uikit-test.log:315` | exit 1 + 点名 `§5.3 #15 registered tool render called once with passed-through drawing` | **去掉**该测试的节点 |
+| `stdout-spoof.log:326` | exit 1 + 点名 `§5.3 #14 drawDrawings with empty list calls no render` | **去掉**该测试的节点（其余保留，与它「删真 ✔ 行 + 插伪造文本」的原意一致） |
+
+其余 18 档的断言都**不经过 G8**（`TEST SUCCEEDED` / 编译 error / 警告 / target 标记 /
+macabi / 汇总行 / 用例数上下限 …）⇒ 用公共「全 Passed」样本即可，**不用改**。
+
+⇒ 公共样本**只给与结构化判据无关的档位**；凡断言里出现「UIKit-gated 测试未执行」的，
+一律配专属 JSON。这条规则本身要在 Task 3 加一档测试钉住（见该 Task）。
+
+**G7 相关的 5 档不受影响** —— 因为 spec §4.1 已决定 **G7 不迁移**（它不是受害者，
+且迁移会连带搞坏这 5 档）。
 
 ---
 
@@ -73,10 +93,32 @@ def w(n):
         [w(v) for v in n.values()]
     elif isinstance(n,list): [w(v) for v in n]
 w(d); print("nodeType 分布:",dict(c)); print("含中文节点样例:",json.dumps(ns[0],ensure_ascii=False) if ns else "无")'
-echo "=== ④ 两种框架能否分开计数 ==="
+echo "=== ④ 结果包本身能否区分两种框架（⛔ 必须解析 JSON，不许只 grep 文本）==="
+python3 -c 'import json,collections;d=json.load(open("/tmp/t.json"))
+rows=[]
+def w(n,path=()):
+    if isinstance(n,dict):
+        if n.get("nodeType")=="Test Case": rows.append((path,sorted(n.keys()),n.get("name","")))
+        for k,v in n.items(): w(v,path+(k if k!="children" else n.get("name",k),))
+    elif isinstance(n,list):
+        for v in n: w(v,path)
+w(d)
+print("Test Case 节点总数:",len(rows))
+print("节点字段名全集:",sorted({k for _,ks,_ in rows for k in ks}))
+paths=collections.Counter(p[-3:] for p,_,_ in rows)
+print("前 6 种树路径尾段（看有没有框架维度）:")
+[print("   ",c,p) for p,c in paths.most_common(6)]'
+echo "--- 同次运行的文本计数，用于交叉核对 ---"
 grep -oE "✔ Test run with [0-9]+ tests" /tmp/catalyst-build.log | head -1
-grep -cE "Executed [0-9]+ tests?, with" /tmp/catalyst-build.log
+echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/catalyst-build.log)"
 ```
+
+⚠️ ④ 的判绿标准：**从 JSON 里指出「哪个字段或哪段树路径能区分框架」，并给出两类节点各自的计数，
+再与同次运行的文本计数交叉核对**。
+⛔ 只拿到两个「不一样的数」**不算回答** —— 那只证明口径不同，不证明包里分得开。
+（初版 ④ 就是只 grep 文本，被 codex plan-R1 判为「无法回答该假设」，属实。）
+ℹ️ 注：spec §4.1 修订后 **G7 已决定不迁移** ⇒ ④ 的答案**不再决定分叉**，
+但仍要跑：它是将来万一要迁 G7 的现成素材，且成本只是多打印几行。
 
 ⚠️ 同步加 `-resultBundlePath /tmp/catalyst.xcresult`（否则 ② 必然无包可读）。
 ⛔ **不动任何判据**，`catalyst-gate.sh` 这一步零改动。
@@ -88,10 +130,13 @@ grep -cE "Executed [0-9]+ tests?, with" /tmp/catalyst-build.log
 判绿：拿到 ①②③④ 四项**真实输出**。
 ⛔ 不是「CI 绿了」—— 探针是纯打印，它绿不代表答案是想要的那个。
 
-- [ ] **Step 5：按答案分叉**
-  - ② 退出码非 0（子命令不存在）⇒ **整个 §3 作废**，回 spec 改走「解转义 + 额外防伪造」，本 plan 重写；
-  - ④ 无法分开计数 ⇒ 按 spec §7 R1 的 (a) 收口：**G7 继续读文本**（它不是受害者），本片只治 G8；
-  - 都顺利 ⇒ 继续 Task 2。
+- [ ] **Step 5：按答案分叉（只剩一条真分叉）**
+  - **② 退出码非 0（子命令在 Xcode 16 上不存在）⇒ 整个 §3 作废**，回 spec 改走
+    「解转义 + 额外设计防伪造」，本 plan 重写。这是唯一的致命分叉。
+  - **③ 字段名与 Xcode 27 不同** ⇒ 不致命，但 Task 4 取字段的路径要按 CI 的实际结构写，
+    ⛔ 不许照搬本机 spike 的字段名。
+  - **④ 无论什么答案都不再分叉** —— spec §4.1 修订后 G7 已决定不迁移。④ 只作素材留档。
+  - 以上都顺利 ⇒ 继续 Task 2。
 - [ ] **Step 6：关掉探针 PR、删分支**（⛔ 不合）
 
 ---
@@ -122,8 +167,14 @@ grep -cE "Executed [0-9]+ tests?, with" /tmp/catalyst-build.log
 - [ ] **Step 2：跑，确认四档都红**，且红的理由是「闸门还没有这条判据」而非别的
 - [ ] **Step 3：建 `catalyst-result-tests.sh`**（只取数：跑 `xcresulttool`，stdout 吐 JSON，失败非 0 退出）
 - [ ] **Step 4：闸门加 fail-closed 前置**（取数失败/空/非法 JSON/零节点 → `fail`），不加任何名字匹配
-- [ ] **Step 5：跑，四档转绿**；再跑一次现有 23 档，确认**一个都没被弄红**
-- [ ] **Step 6：提交**
+- [ ] **Step 5：加一档元测试钉住 fixture 配对规则本身**
+
+公共「全 Passed」样本只许给**不经过 G8** 的档位 —— 这条规则靠人记得就会漂。
+⇒ 加一档**对测试台自身的静态检查**：断言「凡 `expect 1 … UIKit-gated 测试未执行` 的 fixture，
+都存在同名 `.tests.json`」。将来有人加 G8 负向档位却忘配 JSON，这一档会红。
+
+- [ ] **Step 6：跑，五档转绿**；再跑现有 **20** 档，确认**一个都没被弄红**
+- [ ] **Step 7：提交**
 
 判绿：`bash .github/scripts/catalyst-gate.test.sh` 全绿且档位数 = 原数 + 4。
 
@@ -144,18 +195,26 @@ grep -cE "Executed [0-9]+ tests?, with" /tmp/catalyst-build.log
 - [ ] **Step 3：改 G8** —— 从 JSON 取 `nodeType == "Test Case"` 的节点，按 `name` 对 baseline 80 条逐条找，
       要求存在且 `result == "Passed"`（白名单，Global Constraint 3）。失败信息**必须点名**那条测试。
 - [ ] **Step 4：删掉 G8 的文本匹配**（`match_str` / `grep -qF` 那一段）
-- [ ] **Step 5：跑，全绿**；现有 23 档仍全绿
+- [ ] **Step 5：跑，全绿**；现有 **20** 档仍全绿（⚠️ 20 = 档位数；`fixtures/` 下 23 是**文件**数，含非 `.log`）
 - [ ] **Step 6：提交**
 
 ---
 
-## Task 5 · G7（按 Task 1 Step 5 的分叉处理）
+## Task 5 · G7 **明确不迁移**（spec §4.1 已定，不再是分叉）
 
-- [ ] **Step 1**：若④顺利 —— 加 M4，改 G7 从包里**只取 swift-testing 那部分**计数，保持 1935 与 ±delta 语义
-- [ ] **Step 1′**：若④不顺 —— **G7 不动**，在闸门该处加注释写明「它读文本是刻意的：
-      汇总行是 ASCII + 数字，不受劈字影响；受害者只有 G8」，并在 spec §7 R1 标记为已采纳
-- [ ] **Step 2**：跑，全绿
-- [ ] **Step 3**：提交
+G7 继续读文本汇总行。本 Task 只做两件小事，⛔ 不改 G7 的判据逻辑。
+
+- [ ] **Step 1：在 G7 处加注释**写明这是**刻意**的，三条理由逐条抄 spec §4.1（不另创措辞）：
+      ① 汇总行除 `✔` 外全是 ASCII 与数字、**没有测试名** ⇒ 劈字伤不到它，受害者只有 G8；
+      ② 迁移它会连带搞坏 5 档既有负向回归（那些变异加在文本上）；
+      ③ 不迁移就不必处理 1935 vs 2054 的口径差。
+      ⚠️ 这条注释是**防回归**的：下一个读到「G8 读结构化、G7 读文本」的人会觉得不一致、想顺手统一。
+- [ ] **Step 2：加一档测试钉住「G7 仍读文本」** —— 取一份既有 G7 负向 fixture
+      （如 `missing-summary-line.log`），**同时**给它配一份「全 Passed、计数正常」的 `.tests.json`。
+      期望仍是 exit 1 + 「找不到 swift-testing 汇总行」。
+      ⇒ 有人把 G7 改成读 JSON，这一档会立刻变绿 = 红旗。**这是 Step 1 注释的机械化版本。**
+- [ ] **Step 3**：跑，全绿
+- [ ] **Step 4**：提交
 
 ---
 
@@ -197,7 +256,7 @@ grep -cE "Executed [0-9]+ tests?, with" /tmp/catalyst-build.log
 
 - spec 覆盖：§2 非目标 → Global Constraint 1；§3 → Task 4/5/6；§4.1 → Task 5 分叉；
   §4.2 → Global Constraint 3 + M2/M3；§4.3 → Global Constraint 4 + M7；§4.4 → Task 1；
-  §6 → Task 3/4/5/7；§6.1 → Task 4 Step 1 的 M5a/M5b；§7 R1 → Task 5 Step 1′；§8 → Task 1。
+  §6 → Task 3/4/5/7；§6.1 → Task 4 Step 1 的 M5a/M5b；§7 R1 → **已升为 §4.1 的默认决定** ⇒ Task 5；§8 → Task 1。
 - ⛔ 本计划**刻意不内嵌闸门最终代码**：本仓 `feedback_plan_code_blocks_cause_vacuous_tests`
   记过「计划代码块是恒真测试的根因」，且上一条治理线实证过「plan 复制交付代码 = 造第二份真相，
   后续必失同步」。⇒ 这里只写**行为与期望输出**，代码以交付态文件为准。
