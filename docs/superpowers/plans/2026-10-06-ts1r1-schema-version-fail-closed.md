@@ -44,6 +44,28 @@
 12. **⛔ push 与开 PR 由 user 在终端执行**，Claude 不做（仓内守卫会拦）。
 13. 全程简体中文；验收清单必须非程序员可执行（动作 / 期望 / 通过与否）。
 
+14. **⛔ Python 解释器必须显式指定 —— 本 worktree 里没有虚拟环境。** 已实测：本 worktree 下
+    `python` 这个命令**根本不存在**，`python3` 存在但**没装 `pglast`**（本片全部新测试都要它）。
+    `pglast` 与 `pytest` 装在**主检出**的 `.venv` 里。每开一个新终端，**先执行这两行**：
+
+    ```bash
+    export PY="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd)/.venv/bin/python"
+    "$PY" -c "import pglast, pytest; print('解释器 OK: pglast', pglast.__version__, '/ pytest', pytest.__version__)"
+    ```
+
+    期望第二行打印 `解释器 OK: pglast v7.13 / pytest 8.4.2`。
+    ⚠️ `git rev-parse --git-common-dir` 在 worktree 里返回**主检出**的 `.git` 路径，所以上面这行
+    在任何 worktree 里都算得对（已实测）。本计划此后所有 Python 命令一律写 `"$PY"`，
+    ⛔ 不许写裸 `python` / `python3`。
+    ⚠️ 例外：`rehearse.sh` 的 Part 4 里那两处 `python3` 是**故意**用裸解释器的 ——
+    它只 `import qmt_pilot_db`，而那个模块的模块级 import 只有 `hashlib` / `re` / `sys`
+    三个标准库（已实测裸 `python3` 能 import 成功）⇒ 让演练脚本不依赖虚拟环境。
+
+15. **实施前基线（已实测，2026-10-06 本 worktree）**：整套后端 **`1720 passed`**，
+    0 failed，耗时约 4 分钟。本片新增 **9 条**测试（Task 1 的 3 条 + Task 2 的 6 条；
+    Task 3 只改写已有的那条守卫，不增条数）⇒ **完工后应为 `1729 passed`**。
+    ⚠️ 若最终数不是 1729，**先搞清差额来自哪里**，⛔ 不许笼统地说「全绿」就过。
+
 ---
 
 ## File Structure
@@ -181,7 +203,7 @@ def test_training_sets_schema_version_is_still_not_null():
 - [ ] **Step 2: 跑这两条，确认第一条红、第二条绿**
 
 ```bash
-cd backend && python -m pytest tests/test_schema.py -k schema_version -v
+cd backend && "$PY" -m pytest tests/test_schema.py -k schema_version -v
 ```
 
 期望：
@@ -218,7 +240,7 @@ def test_p6b_snapshot_records_the_actual_schema_md5():
 - [ ] **Step 4: 跑它，确认现在是绿的**
 
 ```bash
-cd backend && python -m pytest tests/test_schema.py::test_p6b_snapshot_records_the_actual_schema_md5 -v
+cd backend && "$PY" -m pytest tests/test_schema.py::test_p6b_snapshot_records_the_actual_schema_md5 -v
 ```
 
 期望：**PASS**（当前两边 md5 都是 `2e4b074d5a4607d53a00c849855434d5`，对得上）。
@@ -251,7 +273,7 @@ COMMENT ON COLUMN training_sets.schema_version
 - [ ] **Step 6: 跑测试看三条的新状态，再算两个新哈希**
 
 ```bash
-cd backend && python -m pytest tests/test_schema.py -v
+cd backend && "$PY" -m pytest tests/test_schema.py -v
 ```
 
 期望：
@@ -262,7 +284,7 @@ cd backend && python -m pytest tests/test_schema.py -v
 再跑一次整套后端，确认此刻的红**恰好只有两处**（而不是一片）：
 
 ```bash
-cd backend && python -m pytest -q 2>&1 | tail -20
+cd backend && "$PY" -m pytest -q 2>&1 | tail -20
 ```
 
 期望：`test_p6b_snapshot_records_the_actual_schema_md5` 与 `test_canonical_schema_hashes_match_the_repo_files` 两条 FAIL，其余全 passed。⚠️ 若红的不止这两条，**停下来**先搞清第三条红是什么，再往下。
@@ -288,7 +310,7 @@ cd "$(git rev-parse --show-toplevel)" && echo "新 md5    = $(md5 -q backend/sql
 - [ ] **Step 8: 跑整套后端，确认全绿**
 
 ```bash
-cd backend && python -m pytest -q 2>&1 | tail -5
+cd backend && "$PY" -m pytest -q 2>&1 | tail -5
 ```
 
 期望：`passed`，无 `failed`、无 `error`。
@@ -302,17 +324,17 @@ cd "$(git rev-parse --show-toplevel)"
 
 # 变异 A：把 DEFAULT 1 加回去 → 期望 test_..._has_no_default 变红
 sed -i '' 's/    schema_version INTEGER NOT NULL,/    schema_version INTEGER NOT NULL DEFAULT 1,/' backend/sql/schema.sql
-(cd backend && python -m pytest tests/test_schema.py::test_training_sets_schema_version_has_no_default -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_schema.py::test_training_sets_schema_version_has_no_default -q 2>&1 | tail -3)
 git checkout -- backend/sql/schema.sql
 
 # 变异 B：把 NOT NULL 去掉 → 期望 test_..._is_still_not_null 变红
 sed -i '' 's/    schema_version INTEGER NOT NULL,/    schema_version INTEGER,/' backend/sql/schema.sql
-(cd backend && python -m pytest tests/test_schema.py::test_training_sets_schema_version_is_still_not_null -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_schema.py::test_training_sets_schema_version_is_still_not_null -q 2>&1 | tail -3)
 git checkout -- backend/sql/schema.sql
 
 # 变异 C：把 P6b 注释里的 md5 改成一个错值 → 期望 md5 那条变红
 sed -i '' 's/^--    schema.sql md5 = .*/--    schema.sql md5 = 00000000000000000000000000000000/' docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
-(cd backend && python -m pytest tests/test_schema.py::test_p6b_snapshot_records_the_actual_schema_md5 -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_schema.py::test_p6b_snapshot_records_the_actual_schema_md5 -q 2>&1 | tail -3)
 git checkout -- docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
 ```
 
@@ -435,7 +457,7 @@ def test_migration_0005_comment_text_is_byte_identical_to_schema_sql():
 - [ ] **Step 2: 跑它们，确认 6 条全红**
 
 ```bash
-cd backend && python -m pytest tests/test_migrations.py -k 0005 -v 2>&1 | tail -20
+cd backend && "$PY" -m pytest tests/test_migrations.py -k 0005 -v 2>&1 | tail -20
 ```
 
 期望：6 条全 **FAIL**（目录还不存在，第一条报「缺 forward.sql」，其余报 `FileNotFoundError`）。
@@ -578,7 +600,7 @@ psql -d <db> -v ON_ERROR_STOP=1 -f rollback.sql
 - [ ] **Step 6: 跑测试，确认 6 条全绿**
 
 ```bash
-cd backend && python -m pytest tests/test_migrations.py -k 0005 -v 2>&1 | tail -20
+cd backend && "$PY" -m pytest tests/test_migrations.py -k 0005 -v 2>&1 | tail -20
 ```
 
 期望：`6 passed`。
@@ -607,23 +629,23 @@ R=backend/sql/migrations/0005_schema_version_fail_closed/rollback.sql
 # 变异 A：把 DROP DEFAULT 的目标列换成别的列 → 期望 drops_the_default 变红
 #   （证明判据钉到了具体那一列，而不是「含 DROP DEFAULT 就算」）
 sed -i '' 's/ALTER COLUMN schema_version DROP DEFAULT/ALTER COLUMN status DROP DEFAULT/' "$F"
-(cd backend && python -m pytest tests/test_migrations.py::test_migration_0005_forward_drops_the_default -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_migration_0005_forward_drops_the_default -q 2>&1 | tail -3)
 git checkout -- "$F"
 
 # 变异 B：rollback 只装回默认值、不撤注释 → 期望 restores_the_default 变红
 sed -i '' '/COMMENT ON COLUMN training_sets.schema_version IS NULL;/d' "$R"
-(cd backend && python -m pytest tests/test_migrations.py::test_migration_0005_rollback_restores_the_default -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_migration_0005_rollback_restores_the_default -q 2>&1 | tail -3)
 git checkout -- "$R"
 
 # 变异 C：把 forward 的注释文字改一个字 → 期望 byte_identical 变红
 sed -i '' "s/漏填必须当场失败/漏填必须立刻失败/" "$F"
-(cd backend && python -m pytest tests/test_migrations.py::test_migration_0005_comment_text_is_byte_identical_to_schema_sql -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_migration_0005_comment_text_is_byte_identical_to_schema_sql -q 2>&1 | tail -3)
 git checkout -- "$F"
 
 # 变异 D：把 forward 改成语法不合法 → 期望 forward_is_valid_postgres 变红
 #   （证明 pglast 真的在解析，而不是只读了个文件）
 printf '\nALTER TABLE ( oops;\n' >> "$F"
-(cd backend && python -m pytest tests/test_migrations.py::test_migration_0005_forward_is_valid_postgres -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_migration_0005_forward_is_valid_postgres -q 2>&1 | tail -3)
 git checkout -- "$F"
 
 git status --short
@@ -681,7 +703,7 @@ def test_rehearse_script_braces_vars_before_cjk():
 - [ ] **Step 2: 跑它，确认红**
 
 ```bash
-cd backend && python -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -v 2>&1 | tail -6
+cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -v 2>&1 | tail -6
 ```
 
 期望：**FAIL**，报文含 `只找到 1 个 rehearse.sh`（0005 的还不存在）。
@@ -1092,7 +1114,7 @@ echo "退出码 = $?"
 - [ ] **Step 5: 跑 CJK 守卫，确认由红转绿**
 
 ```bash
-cd backend && python -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -v 2>&1 | tail -5
+cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -v 2>&1 | tail -5
 ```
 
 期望：**PASS**（现在 glob 找到 2 个脚本，且两个都没有 `$VAR` 紧跟全角字符）。
@@ -1100,7 +1122,7 @@ cd backend && python -m pytest tests/test_migrations.py::test_rehearse_script_br
 - [ ] **Step 6: 跑整套后端确认全绿，然后提交**
 
 ```bash
-cd backend && python -m pytest -q 2>&1 | tail -5
+cd backend && "$PY" -m pytest -q 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)"
 git add backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh backend/tests/test_migrations.py
 git commit -m "feat(ts1r1): 0005 rehearse.sh Part 1-3（Docker 真库演练）
@@ -1121,12 +1143,12 @@ S=backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh
 
 # 变异 A：删掉一个迁移目录的 rehearse.sh → 期望 CJK 守卫的防空转断言变红
 mv "$S" /tmp/rehearse-0005.bak
-(cd backend && python -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -q 2>&1 | tail -3)
 mv /tmp/rehearse-0005.bak "$S"
 
 # 变异 B：往脚本里塞一行 `$VAR` 紧跟全角字符 → 期望 CJK 守卫变红
 printf 'echo "$CONTAINER_NAME（演练容器）"\n' >> "$S"
-(cd backend && python -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -q 2>&1 | tail -3)
+(cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_braces_vars_before_cjk -q 2>&1 | tail -3)
 git checkout -- "$S" && chmod +x "$S"
 
 git status --short
@@ -1333,7 +1355,7 @@ echo "新常量值 = $NEW_SHA"
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-python3 - <<'PYEOF'
+"$PY" - <<'PYEOF'
 import pathlib
 p = pathlib.Path("backend/tests/fixtures/business_catalog_fingerprint.txt")
 text = p.read_text(encoding="utf-8")
@@ -1363,7 +1385,7 @@ echo "退出码 = ${PIPESTATUS[0]}"
 - [ ] **Step 6: 跑整套后端，确认全绿**
 
 ```bash
-cd backend && python -m pytest -q 2>&1 | tail -5
+cd backend && "$PY" -m pytest -q 2>&1 | tail -5
 ```
 
 期望：`passed`，无 `failed`。特别确认 `test_business_catalog_fixture_matches_the_constant` 绿（固件 ↔ 常量 这条腿）。
@@ -1408,13 +1430,29 @@ Part 4 把'常量 ↔ 活库'那条腿真跑了一次 —— 它平时只活在 
 
 - [ ] **Step 1: 动手前先把命中逐条列出来（⛔ 两种语言都扫）**
 
+⚠️ **这条命令的范围是判据的一部分，我第一版写错过**（实测打印 **118 行**而不是 13 行）。
+两个错因，都要知道：
+
+1. **扫了整个 `docs/`** ⇒ 把 `docs/superpowers/specs|plans/` 与 `docs/acceptance/` 下
+   **十几份历史文档**里的 `1.14` 全扫进来了。那些是**历史记录**（P3c 那一片的 spec、
+   plan、验收清单，记的是「当时把 1.13 升到了 1.14」），改它们等于**篡改历史** ——
+   与 `m01:48` 那条历史 bump 记录不改是同一个道理。
+2. **`grep -v 'modules_v1\.4'` 把 `kline_trainer_modules_v1.4.md` 整个滤掉了** ——
+   那个 `-v` 本意是滤掉**内容**里提到「modules v1.4」的行，但**文件名自己**就含
+   `modules_v1.4`，于是要改的那一处（`:2239`）被自己的过滤器吃掉了。
+
+⇒ 正确的枚举**分两条跑**，范围限定在「活的代码/断言」与「活的治理文档」：
+
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-git grep -n '1\.14' -- backend ios docs scripts .github kline_trainer_modules_v1.4.md \
-  | grep -v '3\.11\.14' | grep -v 'modules_v1\.4'
+echo "=== (a) 活常量与断言 ==="
+git grep -n '1\.14' -- backend/qmt_pilot_db.py ios
+echo "=== (b) 活治理文档 ==="
+git grep -n '1\.14' -- docs/governance kline_trainer_modules_v1.4.md
 ```
 
-期望打印 **13 行**，逐条定性如下（⛔ 把实际输出与本表逐行对账，多一行少一行都要搞清为什么）：
+期望：(a) 打印 **9 行**、(b) 打印 **4 行**，合计 **13 行**，逐条定性如下
+（⛔ 把实际输出与本表逐行对账，多一行少一行都要搞清为什么）：
 
 | 行 | 改不改 | 为什么 |
 |---|---|---|
@@ -1543,7 +1581,7 @@ git grep -n 'TS1-R1 用掉\|已被 TS1-R1' -- docs/governance kline_trainer_modu
 - [ ] **Step 7: 跑两种语言的测试**
 
 ```bash
-cd "$(git rev-parse --show-toplevel)/backend" && python -m pytest -q 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/backend" && "$PY" -m pytest -q 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test 2>&1 | tail -20
 ```
 
@@ -1704,7 +1742,7 @@ git commit -m "docs(ts1r1): NAS runbook 新增 P6a「应用数据库迁移」一
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-(cd backend && python -m pytest -q 2>&1 | tail -5) | tee /tmp/ts1r1-final-backend.log
+(cd backend && "$PY" -m pytest -q 2>&1 | tail -5) | tee /tmp/ts1r1-final-backend.log
 (cd ios/Contracts && swift test 2>&1 | tail -20) | tee /tmp/ts1r1-final-swift.log
 ./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tee /tmp/ts1r1-final-rehearse.log
 echo "rehearse 退出码 = ${PIPESTATUS[0]}"
@@ -1718,7 +1756,7 @@ echo "rehearse 退出码 = ${PIPESTATUS[0]}"
 
 ```bash
 cd "$(git rev-parse --show-toplevel)/backend"
-python -m pytest tests/test_qmt_pilot_db.py -q -k "canonical or catalog or contract_version" 2>&1 | tail -5
+"$PY" -m pytest tests/test_qmt_pilot_db.py -q -k "canonical or catalog or contract_version" 2>&1 | tail -5
 grep -rn "create_pilot_database" tests/test_qmt_pilot_db.py | head -5
 ```
 
@@ -1785,8 +1823,9 @@ Step 4 的期望就是「`git diff --name-status origin/main...HEAD | sort` 的�
 
 | # | 动作（照着敲） | 期望（屏幕上出现） | 通过与否 |
 |---|---|---|---|
-| 1 | 在项目根目录敲 `cd backend && python -m pytest -q`，等它跑完 | 最后一行形如 `NNNN passed`，**没有** `failed`、**没有** `error`。退出码 0（敲 `echo $?` 显示 `0`） | |
-| 1b | 在项目根目录敲 `cd ios/Contracts && swift test`，等它跑完 | 最后出现 `Test run with N tests passed`（或等价的全绿字样），**没有** `failed`。⚠️ **只做第 1 条不够** —— 这一片改了 4 个苹果端（Swift）文件，其中 3 个是测试 | |
+| 0 | 先敲这一行（每开一个新终端都要）：`export PY="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd)/.venv/bin/python"`，再敲 `"$PY" -c "import pglast, pytest; print('OK')"` | 打印 `OK`。⚠️ 这一步是必须的：这份代码所在的目录里**没有** Python 环境，直接敲 `python` 会说「找不到命令」 | |
+| 1 | 敲 `cd backend && "$PY" -m pytest -q`，等约 4 分钟 | 最后一行是 **`1729 passed`**，**没有** `failed`、**没有** `error`。（实施前的基线是 `1720 passed`，这一片新增 9 条测试）。⚠️ 数字不是 1729 时**不要**自己判断「差不多就行」，照实写下实际数字 | |
+| 1b | 回到项目根目录，敲 `cd ios/Contracts && swift test`，等它跑完（苹果端的测试不需要上面那个 `$PY`）| 最后出现 `Test run with N tests passed`（或等价的全绿字样），**没有** `failed`。⚠️ **只做第 1 条不够** —— 这一片改了 4 个苹果端（Swift）文件，其中 3 个是测试 | |
 | 2 | 在项目根目录敲 `./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh` | 每一行都是 `[PASS]`，**没有** `[FAIL]`；最后一行形如 `[PASS] 全部断言通过，共 N 条。`。⚠️ 没装/没启动 Docker 时第一行就是 `[FAIL] 未检测到 docker`，那不是本片的问题，先把 Docker 启动 | |
 | 3 | 在第 2 条的输出里找这一行 | `[PASS] 迁移后：漏填 schema_version 的写入**被拒**（确由 [violates not-null constraint] 拒绝）` —— 这就是本片的**核心目的**：漏填当场失败 | |
 | 3b | 在第 2 条的输出里找这一行 | `[PASS] 报错信息点名了 schema_version（运维不用猜是哪一列）` —— 报错必须说清是哪一列，否则出事时要靠人猜 | |
