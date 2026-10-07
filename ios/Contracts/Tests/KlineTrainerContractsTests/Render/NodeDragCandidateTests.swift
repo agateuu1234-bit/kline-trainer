@@ -771,5 +771,53 @@ struct NodeDragCandidateTests {
         #expect(abs(diffs[0] - diffs[1]) < 1e-9, "帧间差必须相等（线性），实测 \(diffs)")
         #expect(Set(actual.map(\.price)).count == actual.count, "三帧的值必须两两不等，否则「线性」断言可能是在比较三个相同的常数")
     }
+
+    // MARK: Q26（spec §10）：拖动中视口变化 ⇒ 夹取/几何必须用**当前**（新）mapper，不是 `.began` 时缓存的旧 mapper
+
+    /// `ChartContainerView.Coordinator.activeNodeDrag()`（`:506-524`）**每次调用都现取**
+    /// `view.renderState.viewport` 并新建 `CoordinateMapper`——本档用一次真实的 `rebuildRenderState`
+    /// （模拟转屏/resize 把 `mainChartFrame` 宽度、从而把 `candleStep` 真的改变）证明 `.changed`
+    /// 读到的确实是**这一帧**的新视口，不是 `.began` 时留下的旧值。
+    @Test("Q26：拖动中视口真的变了（转屏/resize）⇒ `.changed` 用的是当前新 mapper，不是 `.began` 时缓存的旧 mapper")
+    func viewportChangeMidDragUsesCurrentMapperNotCachedBeginMapper() throws {
+        let rig = makeRig()
+        _ = try beginDrag(rig)
+        #expect(rig.engine.drawingSession.nodeDragOwner != nil, "前提：拖动态确实已经开始")
+
+        // `.began` 时生效的视口/mapper（本档要证明 `.changed` 不会复用它）。
+        let mapperAtBegin = CoordinateMapper(viewport: rig.view.renderState.viewport,
+                                             displayScale: rig.view.traitCollection.displayScale)
+
+        // 真实重建一次渲染状态，把 bounds 宽度放大 3 倍——`RenderStateBuilder` 的 `candleStep = mainFrameWidth / target`
+        // （`RenderStateBuilder.swift:164`），宽度变了 candleStep 必然跟着变，这不是伪造的视口、是真实几何管线算出来的。
+        let widerBounds = CGRect(x: 0, y: 0, width: rig.bounds.width * 3, height: rig.bounds.height)
+        rig.coordinator.rebuildRenderState(bounds: widerBounds)
+        let mapperAfterResize = CoordinateMapper(viewport: rig.view.renderState.viewport,
+                                                  displayScale: rig.view.traitCollection.displayScale)
+        #expect(mapperAfterResize != mapperAtBegin,
+                "自检：视口必须真的变了，否则本档对「重取 vs 缓存」没有判别力")
+
+        let drawing = try #require(rig.engine.drawings.first(where: { $0.id == "A" }),
+                                    "几何基准是提交值（同订正1的既有结论），非 nodeDragCurrent")
+        let tool = try #require(KLineView.drawingTools[drawing.toolType])
+        // ⚠️ 必须带横向分量——`anchorDelta` 的 `index` 只由 `translation.x / candleStep` 决定
+        // （`DrawingNodeDrag.swift:35`），纯纵向位移对两个 candleStep 不同的 mapper 算出来的结果
+        // 恒等（价位换算只看 `mainChartFrame.height`，本档只改了宽度）——必须带 x 分量才有判别力。
+        let translation = CGPoint(x: 40, y: -5)
+
+        let expectedWithStaleMapper = DrawingNodeDrag.draggedAnchor(
+            drawing: drawing, anchorIndex: 0, translation: translation, mapper: mapperAtBegin, tool: tool)
+        let expectedWithFreshMapper = DrawingNodeDrag.draggedAnchor(
+            drawing: drawing, anchorIndex: 0, translation: translation, mapper: mapperAfterResize, tool: tool)
+        #expect(expectedWithStaleMapper != expectedWithFreshMapper,
+                "自检：两个 mapper 算出来的结果必须不同，否则本档测不出「用了哪一个」")
+
+        rig.coordinator.handleNodeDragForTesting(translation: translation, phase: .changed)
+
+        let actual = rig.engine.drawingSession.nodeDragCurrent
+        #expect(actual == expectedWithFreshMapper,
+                "⭐ `.changed` 必须用新视口现算的 mapper，而不是 `.began` 时缓存的旧 mapper")
+        #expect(actual != expectedWithStaleMapper, "反向确认：结果不是用旧 mapper 算出来的")
+    }
 }
 #endif

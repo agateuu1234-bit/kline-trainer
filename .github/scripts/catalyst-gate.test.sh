@@ -572,13 +572,22 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   确认）。两处改动（新增 1 条 + 改名 1 条）合计：uikit 清单净 +1（100→101），内容替换 1 处。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 101 行 UIKit 结果行取自真日志
 #   原文，含 1 处 XCTestOutputBarrier 断行插花未修剪，禁手打伪造行）。
+#   【划线 P1c 第 3 片 · Task 15（Q26 残留闭合）】total 2031→2032（+1），uikit 101→102（+1）：
+#   Task 15 为 spec §10 Q26（夹取用的 mapper 是不是「每帧重取当前 viewport」而不是缓存
+#   `.began` 时的旧值）补了 1 条永久回归测试
+#   `NodeDragCandidateTests.viewportChangeMidDragUsesCurrentMapperNotCachedBeginMapper`
+#   （真实 `rebuildRenderState` 把 bounds 宽度放大 3 倍，使 candleStep 真的改变，证明
+#   `.changed` 读到的是新视口算出的锚点，不是 `.began` 时留下的旧值；变异验证：临时让
+#   `activeNodeDrag()` 缓存 `.began` 视口复用 ⇒ 该测试精确变红、其余 18 条不受影响）。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 102 行 UIKit 结果行取自真日志
+#   原文，禁手打伪造行）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2031" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 101 / total 2031）→ GATE PASS 且回显 2031 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2032" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 102 / total 2032）→ GATE PASS 且回显 2032 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2031，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2032，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

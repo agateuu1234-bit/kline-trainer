@@ -85,6 +85,7 @@ Task14变异#9补测：owner 来源与归属同时失效 ⇒ 陈旧回调绝不�
 订正3 反向对照：不在拖动中时，同一次未命中的 tap ⇒ 选中确实被清空（D37），证明上一档的「不变」不是巧合
 订正4：`updateDrawingAnchor` 返回 false（七道门之一拒绝）⇒ 拖动态清、锚点不变、不覆盖既有撤销记录、drawingsRevision 不再额外 +1
 订正1 Catalyst 验证：真实 handleNodeDrag 流水线下，多帧累计位移与 `DrawingNodeDrag.draggedAnchor(基准=提交值)` 逐帧吻合（⛔ 不复利叠加）
+Q26：拖动中视口真的变了（转屏/resize）⇒ `.changed` 用的是当前新 mapper，不是 `.began` 时缓存的旧 mapper
 T5 正序（真实路径）：标记 + 节点同锚，走 KLineView.draw(_:) 真实派发 ⇒ 节点中心仍是节点色（日间纯黑）
 ⭐正向对照：移走标记后同一点仍是节点色 —— 证明上面那条不是恒真
 ⭐反向对照：测试内部把两次绘制换序（不改生产代码）⇒ 同一点变成标记色，证明 T5 有判别力
