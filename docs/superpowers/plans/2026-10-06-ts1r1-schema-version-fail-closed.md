@@ -1589,7 +1589,9 @@ echo "退出码 = $rc   （完整输出在 $LOG，PR 里要贴的是这个文件
 ```
     阶段1 · 有 DEFAULT 1：
       省略该列      → 退出码 0；1
+INSERT 0 1
       值写 DEFAULT  → 退出码 0；1
+INSERT 0 1
   [PASS] 阶段1 · 有 DEFAULT 1：两种写法的退出码与错误身份逐字相同
     阶段2 · DROP DEFAULT 之后：
       省略该列      → 退出码 1；ERROR:  null value in column "schema_version" of relation "ts_default_probe" violates not-null constraint
@@ -1598,6 +1600,9 @@ echo "退出码 = $rc   （完整输出在 $LOG，PR 里要贴的是这个文件
     阶段3 · SET DEFAULT 1 回滚之后：（同阶段 1，退出码 0、值 1）
   [PASS] 阶段3 · SET DEFAULT 1 回滚之后：两种写法的退出码与错误身份逐字相同
 ```
+
+⚠️ 成功那两臂会多打一行 `INSERT 0 1`（`psql -tA -c` 对 `INSERT … RETURNING` 会同时输出
+返回值与状态行）—— 上面的样例已按**实测输出**写。两臂都多这一行，所以逐字比对照样成立。
 
 ⚠️ **阶段 2 必须是退出码 1**。若三个阶段全是退出码 0，说明 `DROP DEFAULT` 没施加到探针表上，
 等价性就被「证」得毫无内容。脚本里那条「显式给值仍能写入」的防空转断言挡不住这一种，
@@ -1663,7 +1668,10 @@ R=./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh
 
 # 变异 C：把 forward.sql 的 DROP DEFAULT 删掉 → Part 1 必须在"迁移后漏填被拒"那一条失败
 sed -i '' '/ALTER TABLE training_sets ALTER COLUMN schema_version DROP DEFAULT;/d' "$F"
-echo "证据 · forward.sql 里还有 DROP DEFAULT 吗：$(grep -c 'DROP DEFAULT' "$F")  （应为 0）"
+# ⚠️ 证据模式必须是**整条语句**。只写 `DROP DEFAULT` 会把第 13 行**注释里**那句
+#    「存量行不受影响：DROP DEFAULT 只改列的元数据…」也数进来 ⇒ 变异后仍得 1、期望值全错。
+#    实测踩过这一步（本仓同类教训第三次：被文件名命中 / 被探针表那行命中 / 被注释命中）。
+echo "证据 · forward.sql 里 DROP DEFAULT **语句**的条数 = $(grep -c 'ALTER TABLE training_sets ALTER COLUMN schema_version DROP DEFAULT;' "$F" || true)  （应为 0）"
 LOG=/tmp/ts1r1-mut-c.log
 "$R" > "$LOG" 2>&1; rc=$?
 tail -8 "$LOG"
@@ -1672,7 +1680,9 @@ git checkout -- "$F"
 
 # 变异 D：把 forward.sql 的注释文字改一个字 → Part 1 的"列注释已写入"那条必须失败
 sed -i '' "s/漏填必须当场失败/漏填必须立刻失败/" "$F"
-echo "证据 · forward.sql 里出现「漏填必须立刻失败」的次数 = $(grep -c '漏填必须立刻失败' "$F")  （应为 1）"
+# ⚠️ 正反各问一次：只问「新文字在不在」时，一份两句都有的畸形文件也会通过。
+echo "证据 · 「立刻」版出现次数 = $(grep -c '漏填必须立刻失败' "$F" || true)  （应为 1）"
+echo "证据 · 「当场」版出现次数 = $(grep -c '漏填必须当场失败' "$F" || true)  （应为 0）"
 LOG=/tmp/ts1r1-mut-d.log
 "$R" > "$LOG" 2>&1; rc=$?
 tail -8 "$LOG"
