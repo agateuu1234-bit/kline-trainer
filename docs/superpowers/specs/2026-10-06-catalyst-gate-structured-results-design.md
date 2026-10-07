@@ -149,7 +149,7 @@ Test Plan: 1   Unit test bundle: 1   Test Suite: 234   Test Case: 2054
 
 ---
 
-### 4.4 ⚠️ 第二个未验证假设：CI 的 Xcode 版本（codex spec-R1 指出）
+### 4.4 ✅ CI 的 Xcode 版本（codex spec-R1 指出，**已由 CI 探针实测关闭**）
 
 **我的 spike 跑在本机 Xcode 27 / xcresulttool 25115（schema 0.4.0）上。CI 不是这个环境。**
 
@@ -158,17 +158,37 @@ Test Plan: 1   Unit test bundle: 1   Test Suite: 234   Test Case: 2054
 | CI（`catalyst-build.yml:25`） | `runs-on: macos-15`，镜像预装 **Xcode 16**，workflow 只断言 `>= 16` |
 | 我的 spike | **Xcode 27** |
 
-未知项（⛔ 本机无法验证，因为本机只有 27）：
+### ✅ 已由 CI 探针实测回答（2026-10-07，PR #204，看完即关）
 
-1. `xcrun xcresulttool get test-results tests` 这个子命令在 Xcode 16 上**是否存在**；
-2. 它的 JSON **结构/字段名是否相同**（`nodeType` / `name` / `result` / `testNodes`）；
-3. §4.1 那个「能否区分 swift-testing 与 XCTest」的答案在 Xcode 16 上是否一致。
+| 项 | CI（Xcode **16.4** / xcresulttool **23714, format version 3.53**） | 本机（Xcode **27** / **25115, schema version 0.4.0**） |
+|---|---|---|
+| 子命令是否存在 | **`xcresulttool exit=0`**，产出 1,260,441 字节 | 存在 |
+| 顶层键 | `['devices','testNodes','testPlanConfigurations']` | **逐字相同** |
+| `Test Case` 节点字段名全集 | `duration / durationInSeconds / name / nodeIdentifier / nodeIdentifierURL / nodeType / result`（7 个） | **逐字相同** |
+| `Test Case` 节点数 | 2054 | **相同** |
+| 含非 ASCII 的名字数 | 1472 / 2054 | **相同** |
+| 最长中文名（164 字） | **逐字完好、无截断** | **相同** |
+| baseline 80 条对账 | **找不到 0 条 / 非 Passed 0 条** | 相同 |
+| 文本汇总 vs 包内计数 | 1935 vs 2054（差 119） | **相同** |
 
-⚠️ **这不是可以带着往下走的假设**：若子命令不存在，整个 §3 设计在 CI 上根本跑不起来
-（而本地测试会全绿 —— 正是本仓 `feedback_swift_local_ci_toolchain_strictness`
-与 `feedback_swift_local_toolchain_blindspot` 记的「本地绿 ≠ CI 绿」形状）。
+⭐ **结论：工具跨了 11 个大版本、连版本号的写法都从 `schema version` 变成 `format version`，
+但 `get test-results tests` 的输出结构逐项相同。** §3 设计在 CI 上站得住。
 
-⇒ 处置见 §8（plan 的 Task 1 改为**在 CI 里**探测，不在本机）。
+⛔ **但判据实现不得依赖版本号字符串** —— 两边的版本号格式本就不同，
+任何形如「检查版本 ≥ X」的写法都会在某一侧失效。判据只许依赖**字段是否存在**。
+
+⚠️ **仍未验到的一项**（这不是遗漏，是样本限制）：`result` 只见过 `Passed`
+（这一跑全过）。`Failed` / `Skipped` / 其它取值的字面量**仍未实测** ⇒
+§4.2 的白名单要求**依然有效且必要**，⛔ 不得因为「CI 验过了」就放宽。
+
+<details><summary>原未决项记录（已关闭）</summary>
+
+原文曾列三项未知：子命令是否存在 / JSON 结构是否相同 / 能否区分两种框架。
+前两项已由上表回答；第三项**已不影响设计**（§4.1 已决定 G7 不迁移）。
+探针顺带确认：CI 上的树路径尾段同样只有 `bundle → suite` 两层、**看不到框架维度**
+（与本机一致）⇒ 从数据侧也支持「不迁移 G7」。
+
+</details>
 
 ## 5. 改动面
 
@@ -264,7 +284,12 @@ bash .github/scripts/catalyst-gate.test.sh
 
 ---
 
-## 8. 两处未验证假设的处置：Task 1 是一个**在 CI 里跑的探针**
+## 8. ✅ 两处未验证假设已由 CI 探针关闭（2026-10-07，PR #204）
+
+**结果见 §4.4 的实测表。两项都是好答案，未触发任何分叉。**
+⚠️ 唯一仍未实测的是 `result` 的非 `Passed` 取值（样本限制，非遗漏）⇒ §4.2 的白名单依然必要。
+
+<details><summary>当时的处置办法（留档）</summary>
 
 本设计有且只有两处没有实测结论：**§4.1**（包里能否区分 swift-testing 与 XCTest）
 与 **§4.4**（CI 的 Xcode 16 上子命令与 JSON 结构是否相同）。
@@ -288,6 +313,8 @@ bash .github/scripts/catalyst-gate.test.sh
 若 §4.4 的答案是「子命令不存在」⇒ 整个 §3 作废，回头改本 spec（退路：只治 G8，
 用「解转义后再匹配」并额外设计防伪造，即原先被否的方案 B）；
 若 §4.1 的答案是「无法区分」⇒ 按 §7 R1 的 (a) 收口。**⛔ 两种情况都不许硬凑。**
+
+</details>
 
 > ⭐ 这一条是 codex spec-R1 的功劳：它指出「要用 **CI 支持的那个 Xcode 版本**去验抽取与
 > 名字匹配」。我原 spec 只把 §4.1 列为未决点，**漏了版本这一层** —— 而它比 §4.1 更致命
