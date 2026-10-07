@@ -80,6 +80,21 @@
     （正是本片的论点：把判据从宿主文本搬到数据库）。
     ⛔ 给守卫补「值不许是 `DEFAULT`」属 guard-hardening 的范围，**记为 backlog，本片不做**。
 6. **次序约束（最易出错处）**：`schema.sql` **必须先定稿**，然后才能算这三样 —— P6b 的 md5、`CANONICAL_SCHEMA_SHA256`、活目录指纹。反过来全部拿到旧值。
+
+6b. **⛔ 任何往 `training_sets` 塞样本的地方都要满足 `ck_lease_state_invariant`**：
+
+    | `status` | `lease_id` / `lease_expires_at` / `reserved_at` |
+    |---|---|
+    | `'unsent'`（列默认值）| **三者全为 NULL** |
+    | `'reserved'` / `'sent'` | **三者全非 NULL** |
+
+    ⇒ 不写 `status` 的样本自动合规（取默认 `'unsent'`，三列保持 NULL）；
+    **一旦显式写 `'sent'` 或 `'reserved'`，就必须把三列一起给值**。
+    实测违反时报 `new row for relation "training_sets" violates check constraint
+    "ck_lease_state_invariant"`，psql 退出码 **3** ⇒ `ON_ERROR_STOP=1` + `set -e`
+    会让演练脚本当场中止。
+    另外 `ck_content_hash_crc32_lowercase` 要求 `content_hash` 匹配 `^[0-9a-f]{8}$`
+    （8 位小写十六进制），`ck_status_enum` 限定 `status IN ('unsent','reserved','sent')`。
 7. **指纹是三方互钉**：固件（`backend/tests/fixtures/business_catalog_fingerprint.txt`）↔ 常量（`CANONICAL_BUSINESS_CATALOG_SHA256`）↔ 活库。重新生成时**三方必须同时对齐**，只改两方会让「所有正常路径在错的期望上通过」。
 8. **顶层 `CONTRACT_VERSION` 1.14 → 1.15**，11 个同步点，一个不漏（Task 5 逐条列出）。
 9. **扫描范围**：本片任何「全仓有/没有 X」「共 N 处」类断言，一律按 `git grep … -- backend ios scripts .github docs` 扫。⛔ 只扫 `backend/`（Python）会漏 Swift 侧 —— spec §4⑤ 的第 8–11 项就是这么漏掉再被 codex 挖出来的。
@@ -378,9 +393,29 @@ cd backend && "$PY" -m pytest -q 2>&1 | tail -5
 
 期望：`passed`，无 `failed`、无 `error`。
 
-- [ ] **Step 9: 变异验证 —— 证明这三条测试真有判别力**
+- [ ] **Step 9: 提交**
 
-逐条把判据改坏，看它是不是真红。⛔ **每次只改一处，改完立刻改回来。**
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git add backend/sql/schema.sql backend/qmt_pilot_db.py \
+        docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql \
+        backend/tests/test_schema.py
+git commit -m "feat(ts1r1): schema_version 去掉 DEFAULT 1 + 同步两处字节级快照
+
+- schema.sql: 去 DEFAULT，保留 NOT NULL，加列注释说明「刻意不设默认值」
+- P6b 快照: 默认值格改空 + 头注释 md5 重算
+- CANONICAL_SCHEMA_SHA256 重算（否则 create_pilot_database 会抛 schema_not_canonical）
+- 新增 3 条测试: 无默认值 / 仍 NOT NULL / P6b 的 md5 锚（这条锚此前无人钉）"
+```
+
+⚠️ **提交必须排在变异验证之前**：下一步要用 `git checkout --` 把变异还原，
+而 `git checkout --` 只能还原到**最近一次提交**。若先变异后提交，还原会把
+Step 5/7 的真实改动一起丢掉（本仓记过「复原别用 `git checkout <file>`」那一类事故）。
+
+- [ ] **Step 10: 变异验证 —— 证明这三条测试真有判别力**
+
+逐条把判据改坏，看它是不是真红。⛔ **每次只改一处，改完立刻还原。**
+本步的三个文件**都已提交**（上一步），所以 `git checkout --` 在这里是安全且正确的。
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
@@ -403,32 +438,13 @@ git checkout -- docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
 
 期望：A、B、C 三次各打印 `1 failed`。
 
-⚠️ **`git checkout -- <file>` 在这里是安全的**，因为变异的是**刚刚提交过**的内容吗？不是 —— 本 Step 在 Step 10 提交**之前**跑，`git checkout --` 会把 Step 5/7 的改动一起丢掉。所以：**把 Step 10 的提交挪到 Step 9 之前**，即先提交、再变异、变异后用 `git checkout --` 恢复到提交点。按这个次序执行：
-
-1. 先执行下面的 Step 10（提交）
-2. 再回来执行本 Step 9 的三个变异
-3. 变异全部确认后，`git status` 必须是干净的（证明三次恢复都生效了）
+变异全部确认后，工作区必须回到干净：
 
 ```bash
 git status --short
 ```
 
-期望：**无输出**（工作区干净）。
-
-- [ ] **Step 10: 提交（⚠️ 按上一步的说明，本步要在 Step 9 之前执行）**
-
-```bash
-cd "$(git rev-parse --show-toplevel)"
-git add backend/sql/schema.sql backend/qmt_pilot_db.py \
-        docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql \
-        backend/tests/test_schema.py
-git commit -m "feat(ts1r1): schema_version 去掉 DEFAULT 1 + 同步两处字节级快照
-
-- schema.sql: 去 DEFAULT，保留 NOT NULL，加列注释说明「刻意不设默认值」
-- P6b 快照: 默认值格改空 + 头注释 md5 重算
-- CANONICAL_SCHEMA_SHA256 重算（否则 create_pilot_database 会抛 schema_not_canonical）
-- 新增 3 条测试: 无默认值 / 仍 NOT NULL / P6b 的 md5 锚（这条锚此前无人钉）"
-```
+期望：**无输出**（证明三次 `git checkout --` 都生效了）。
 
 ---
 
@@ -1121,9 +1137,14 @@ assert_rejects "迁移后：漏填 schema_version 的写入**被拒**" "$DB1" \
   "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, DEFAULT, '/tmp/after_missing.zip', 'bbccddee');"
 
 # ③b 报文必须点名是哪一列 —— 不点名的报文会让运维去猜（验收判据 3 的措辞依据）
+#    ⚠️ 这一条刻意用 3100（不是 ③ 的 3000）：`uq_stock_start UNIQUE (stock_code, start_datetime)`
+#       在同一个 (股票, start) 上只允许一行。实测两条都失败的 INSERT **零行落地、不占唯一键**
+#       （报的都是 `null value … violates not-null constraint`，不是唯一键冲突），
+#       所以共用 3000 今天也不会出错 —— 但那依赖「③b 永远注定失败」这个前提。
+#       哪天有人把 ③b 改成期望成功，就会撞上一个与本意无关的唯一键错误。错开更省事。
 MISSING_OUT=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
   psql -U postgres -h 127.0.0.1 -d "$DB1" -v ON_ERROR_STOP=1 -tA \
-  -c "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, DEFAULT, '/tmp/after_missing2.zip', 'ccddeeff');" 2>&1 || true)
+  -c "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001', '演练股', 3100, 4100, DEFAULT, '/tmp/after_missing2.zip', 'ccddeeff');" 2>&1 || true)
 if printf '%s' "$MISSING_OUT" | grep -q 'schema_version'; then
   pass_msg "报错信息点名了 schema_version（运维不用猜是哪一列）"
 else
@@ -1202,12 +1223,32 @@ pg_query postgres "CREATE DATABASE ${DB3};" >/dev/null
 git -C "$REPO_ROOT" show "${PRE_MIGRATION_SHA}:backend/sql/schema.sql" > "$TMP_LOG"
 pg_run_file "$DB3" "$TMP_LOG" >/dev/null
 
+# ⛔ **`sent` 行必须把三个租约列一起填上**（codex 对 plan 第 2 轮的 [high] finding，已实测坐实）。
+#    `ck_lease_state_invariant` 的判据是：
+#        status='unsent'              ⇒ lease_id / lease_expires_at / reserved_at 三者**全为 NULL**
+#        status IN ('reserved','sent') ⇒ 三者**全非 NULL**
+#    本计划初稿只给了 status='sent' 而把三列省掉（⇒ 全是 NULL）⇒ 两个分支都不满足。
+#    实测报错：`new row for relation "training_sets" violates check constraint
+#    "ck_lease_state_invariant"`，psql 退出码 3 ⇒ `ON_ERROR_STOP=1` + `set -e`
+#    会让脚本**在 Part 3 的第一条语句就中止** —— 无损验证一条没跑，Part 4 也到不了。
+#    写法照 0004 的 `rehearse.sh:213-219`（它给 sent 行填的就是这三个值）。
+#    ⚠️ Part 1 / Part 2 的样本**不受影响**：它们不写 status ⇒ 取默认值 'unsent' ⇒
+#       三个租约列保持 NULL ⇒ 满足第一个分支（已实测确认三行都是 `unsent/NULL`）。
 pg_exec "$DB3" >/dev/null <<'SQL'
 INSERT INTO stocks (code, name) VALUES ('000003', '无损股');
-INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash, status)
-VALUES ('000003', '无损股', 100, 200, 1, '/tmp/l1.zip', 'aaaa1111', 'unsent'),
-       ('000003', '无损股', 300, 400, 2, '/tmp/l2.zip', 'bbbb2222', 'sent');
+INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash,
+                           status, lease_id, lease_expires_at, reserved_at)
+VALUES ('000003', '无损股', 100, 200, 1, '/tmp/l1.zip', 'aaaa1111',
+        'unsent', NULL, NULL, NULL),
+       ('000003', '无损股', 300, 400, 2, '/tmp/l2.zip', 'bbbb2222',
+        'sent', gen_random_uuid(), NOW() + interval '1 hour', NOW());
 SQL
+
+# 防呆：两种 status 都要真的在样本里。若哪天有人把 sent 那行删掉"图省事"，
+# 整表指纹判据会退化成"只验了 unsent 行"，而它照样全绿。
+assert_eq "无损样本覆盖了两种 status（unsent + sent）" \
+  "$(pg_query "$DB3" "SELECT string_agg(DISTINCT status, ',' ORDER BY status) FROM training_sets;")" \
+  "sent,unsent"
 
 # 判据不是"schema_version 没变"（Part 2 已经证了），而是**整张表一个字节都没变**：
 # 回滚"无损"要防的不只是那一列 —— 任何一列被改写、任何一行消失都算有损。
@@ -1258,9 +1299,18 @@ cd "$(git rev-parse --show-toplevel)"
 `__pycache__` 过滤都可能把它静默移出视野，而守卫会照样报「全都合规」）。
 所以必须做**对照 A**：把一条语句临时改成「省略该列」，守卫**必须变红、且报文里出现这个文件的路径**。
 
+⛔ **恢复不能用 `git checkout --`**（codex 对 plan 第 2 轮的 [medium] finding，成立）：
+本 Step 排在 Task 3 Step 6 的首次提交**之前**，此时 `rehearse.sh` 还是**未跟踪文件**，
+`git checkout -- <未跟踪文件>` 会报 `pathspec … did not match any file(s) known to git`，
+于是**变异留在脚本里**，此后整套后端测试会一直红 —— 而变异本身是"故意漏填"，
+它留下的红会被误读成"守卫在正常工作"。⇒ 用 `cp` 备份/还原，并**从输出派生结论**。
+
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 F=backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh
+BAK="$(mktemp)"
+cp "$F" "$BAK"
+echo "已备份到 $BAK（$(shasum -a 256 "$BAK" | cut -d' ' -f1 | cut -c1-16)…）"
 
 "$PY" - <<'MUT'
 import pathlib
@@ -1279,8 +1329,14 @@ MUT
 #    （本仓栽过「变异没改上而测试打印通过 ⇒ 结论完全反过来」）
 echo "证据 · 不含 schema_version 的 training_sets 列清单条数 = $(grep -c 'end_datetime, file_path' "$F")  （应为 1）"
 (cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -10)
-git checkout -- "$F" && chmod +x "$F"
+
+# 还原，并**证明还原成功**（⛔ 不是"执行了还原命令"就算 —— 本仓记过"还原用相对路径会静默失败"）
+cp "$BAK" "$F" && chmod +x "$F" && rm -f "$BAK"
+echo "还原后 · 不含 schema_version 的条数 = $(grep -c 'end_datetime, file_path' "$F")  （应为 0）"
+(cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -4)
 ```
+
+期望最后那次重跑是 **`3 passed`** —— 这既确认还原生效，也确认绿不是侥幸。
 
 期望（本计划定稿前已在真路径上实测过一次，输出如下）：
 
