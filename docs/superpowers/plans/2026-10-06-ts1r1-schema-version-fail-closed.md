@@ -698,8 +698,9 @@ psql -d <db> -v ON_ERROR_STOP=1 -f rollback.sql
 ```
 
 ⚠️ **NAS 上的应用步骤**见 `docs/runbooks/2026-08-24-qmt-nas-deployment.md` 的
-「P6a · 应用数据库迁移」一节 —— 跳过那一步，P6b 硬门会报 `FAIL-default-drift`
-（那不是部署坏了，是迁移没跑）。
+「P6a · 给已经在跑的库应用迁移」一节 —— 跳过那一步，P6b 硬门会报 `FAIL-default-drift`
+（那不是部署坏了，是迁移没跑）。⚠️ 节名要与 runbook 里的标题**逐字一致**，
+否则这里指的是一个不存在的章节（Task 6 Step 3 的 (2) 就是核对这件事）。
 ````
 
 - [ ] **Step 6: 跑测试，确认 6 条全绿**
@@ -1939,8 +1940,28 @@ A 类 DDL 触发（migration 0005）。逐条：
 
 **为什么必须有这一节：** runbook 用 `schema.sql` 建库（`:434`），而 `schema.sql` 全是 `CREATE TABLE IF NOT EXISTS` ⇒ 对**已经存在**的库什么都不做；且 runbook 里**完全没有「应用 migration」这一步**（`grep -E "forward\.sql|migration"` 零命中）。⇒ 本片合并后，NAS 上那个在跑的库**仍带着 `DEFAULT 1`**，下次跑 P6b 硬门会报 `FAIL-default-drift`（库里有默认值、闸门文件说没有），而那个失败**长得像「部署坏了」**。
 
+⚠️⚠️ **光插一节是不够的 —— 现有分流会让操作者根本走不到这一节**（codex 对 plan 第 4 轮的 [high] finding，已逐行核实）。实测 runbook 现状：
+
+| 位置 | 原文 | 后果 |
+|---|---|---|
+| `:244` | `🛑 打印 VOLUME_EXISTS：转 P6-RESET` | 旧卷的**唯一出口**是销毁 |
+| `:412` | 「销毁后回到 P6 第二步」 | 销毁完回去重建 —— 数据已经没了 |
+| `:459` | P6b 失败 → 「走 **P6-RESET** 那一节…销毁后回 P6 第二步」 | 连「迁移没跑」这种失败也被导向销毁 |
+
+⇒ 按顺序操作：有旧卷 → 被要求批准销毁 → 同意则数据先没了、拒绝则流程卡住。
+**两条路都到不了 P6a。**
+
+⭐ 讽刺的是 runbook 自己在 `:251` 就写着「**卷存在不等于它可以丢 —— 上一轮可能已经装进了真数据**」，
+却只提供了「丢掉」这一条路。⇒ 本 Task 要做的**不是**新增一条政策，而是**把那句已有的警告补完**：
+给旧卷第二个出口，并把 RESET 保留为一个**显式的破坏性操作**。
+
+⇒ 本 Task 改 runbook 的**三处**，不是一处。
+
 **Files:**
-- Modify: `docs/runbooks/2026-08-24-qmt-nas-deployment.md`（在 `## P6b` 那一节**之前**插入 `## P6a`）
+- Modify: `docs/runbooks/2026-08-24-qmt-nas-deployment.md`，**三处**：
+  1. `:243-245` P6 第一步的分流 —— 给 `VOLUME_EXISTS` 补第二个出口（保留数据 → P6a）
+  2. `## P6b` 之前 —— 插入 `## P6a`（并写明它也是「维护既有部署」的**入口**，可不经 P6 直接进）
+  3. `:459` P6b 的失败指引 —— 把「形状不符」按标签分两类归因，`FAIL-default-drift` 不再导向销毁
 
 **Interfaces:**
 - Consumes: Task 2 的 `backend/sql/migrations/0005_schema_version_fail_closed/forward.sql`；Task 1 改过的 P6b 快照（新一节的失败提示要与 P6b 的失败标签对得上）
@@ -1950,24 +1971,70 @@ A 类 DDL 触发（migration 0005）。逐条：
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-grep -n -E 'forward\.sql|migration|迁移' docs/runbooks/2026-08-24-qmt-nas-deployment.md | head
+R=docs/runbooks/2026-08-24-qmt-nas-deployment.md
+echo "--- (a) 有没有「应用 migration」这一步 ---"
+grep -n -E 'forward\.sql|migration|迁移' "$R" | head
+echo "--- (b) 旧卷的出口有几个 ---"
+sed -n '243,245p' "$R"
+echo "--- (c) P6-RESET 之后去哪 ---"
+grep -n '销毁后回到 P6' "$R"
+echo "--- (d) P6b 失败之后去哪 ---"
+sed -n '459p' "$R"
+echo "--- (e) FAIL-default-drift 这个标签真的存在吗 ---"
+grep -c 'FAIL-default-drift' docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
 ```
 
-期望：**零命中**，或只命中与数据库迁移无关的词。这证明 spec §4⑥ 描述的缺口真实存在。
+期望（本计划定稿前已逐条实测）：
+- (a) **零命中**（或只命中与数据库迁移无关的词）⇒ spec §4⑥ 描述的缺口真实存在
+- (b) 只有 `🛑 打印 VOLUME_EXISTS：转 P6-RESET` **一个**出口
+- (c) 命中「销毁后回到 P6 第二步」
+- (d) 「走 **P6-RESET** 那一节…销毁后回 P6 第二步」
+- (e) **非 0**（实测该标签确实存在，runbook `:476` 也已有它的定义）⇒ 下面新节里引用这个标签名不是编的
 
-- [ ] **Step 2: 在 `## P6b` 之前插入新的一节**
+- [ ] **Step 2a: 先给 P6 第一步的旧卷补第二个出口**
+
+把 `:243-245` 那三行：
+
+```
+- ✅ 通过：打印 `VOLUME_ABSENT` **且**紧接着打印 `QUERY_OK` → 直接进第二步
+- 🛑 打印 `VOLUME_EXISTS`：转 P6-RESET
+- ❌ 没看到 `QUERY_OK`：这条命令自己没跑成，**别当成「卷不存在」**，先查 ssh
+```
+
+改成：
+
+```
+- ✅ 通过：打印 `VOLUME_ABSENT` **且**紧接着打印 `QUERY_OK` → 直接进第二步
+- 🟡 打印 `VOLUME_EXISTS`：**先回答一个问题 —— 这个卷里的数据你还要不要？**
+  - **要**（它是上一轮装进去的真数据）→ ⛔ **不要销毁**，转 **P6a · 给已经在跑的库应用迁移**。
+    那一节会把本仓的迁移脚本应用到这个库上，**不动任何既有数据**，然后进 P6b 验形状。
+  - **不要**（确认是废卷）→ 转 **P6-RESET**（破坏性，那一节自己有四道门）
+  - **不确定** → 按「要」处理。⛔ 销毁不可逆，而迁移是可逆的（同目录有 `rollback.sql`）。
+- ❌ 没看到 `QUERY_OK`：这条命令自己没跑成，**别当成「卷不存在」**，先查 ssh
+```
+
+⚠️ 这一步**不是**新增政策，而是把 `:251` 那句已有的警告（「卷存在不等于它可以丢 ——
+上一轮可能已经装进了真数据」）补完：原文认识到问题，却只给了「丢掉」一条路。
+
+- [ ] **Step 2b: 在 `## P6b` 之前插入新的一节**
 
 找到 `## P6b · 直接查数据库的**实际形状**（硬门）` 那一行（约第 450 行），在它**之前**插入：
 
 ````markdown
-## P6a · 应用数据库迁移（**旧库必做，全新空卷可跳过**）
+## P6a · 给已经在跑的库应用迁移（**不重建、不动数据**）
 
 **执行者：Claude**
 
-**什么时候需要这一步：** 上一步（P6）用 `backend/sql/schema.sql` 灌建表脚本，而那份脚本里每一条都是 `CREATE TABLE IF NOT EXISTS` —— 意思是「这张表已经有了就什么都不做」。所以对一个**已经存在的旧库**，P6 实际上**一个字都没改**。表结构的改动要靠「迁移脚本」单独应用。
+> 🚪 **本节也是一个入口。** 如果你是在**维护一个已经在跑的部署**（库在跑、数据在里面，
+> 你只是要把表结构升到新版），**直接从本节开始**，⛔ **不要回头去跑 P6** ——
+> P6 是「从零建库」的流程，它第一步就会让你面对「这个卷要不要销毁」。
 
-- **全新空卷**（P6 第一步打印 `VOLUME_ABSENT`）：建库时就已经是新形状，**可以跳过本节**，直接进 P6b
-- **复用了旧卷**：**必须做本节**，否则下一步 P6b 会红
+**什么时候需要这一步：** P6 用 `backend/sql/schema.sql` 灌建表脚本，而那份脚本里每一条都是
+`CREATE TABLE IF NOT EXISTS` —— 意思是「这张表已经有了就什么都不做」。所以对一个**已经存在的库**，
+P6 实际上**一个字都没改**。表结构的改动要靠「迁移脚本」单独应用，那就是本节。
+
+- **全新空卷**（P6 第一步打印 `VOLUME_ABSENT`）：建库时就已经是新形状，**跳过本节**，直接进 P6b
+- **复用了旧卷 / 维护既有部署**：**必须做本节**，否则下一步 P6b 会红
 
 > ⛔ **跳过这一步会怎样**：P6b 硬门会报 **`FAIL-default-drift`**（库里 `training_sets.schema_version` 还带着默认值 `1`，而闸门文件说这一列没有默认值）。
 > **那不是部署坏了，是迁移没跑。** 看到这个标签先回本节，不要去走 P6-RESET 销毁数据卷。
@@ -2001,30 +2068,73 @@ ssh $NAS "docker exec -i kline-trainer-db-1 psql -U kline -d kline_trainer -tA -
 
 **第四步，进 P6b 硬门**，由它逐条核对完整形状。
 
-> ⚠️ **本节是人工步骤，没有自动化编排** —— 本仓目前没有迁移编排器（没有「记录哪些迁移已经跑过」的表），`0004_qmt_price_double_and_coverage` 也是同样形态。所以「这个库跑过哪些迁移」目前只能靠人记 + 靠 P6b 硬门事后发现形状不对。
+> ⚠️ **本节只应用 `0005` 这一个迁移。** 本仓目前没有迁移编排器（没有「记录哪些迁移已经跑过」的表），
+> `0004_qmt_price_double_and_coverage` 也是同样形态。所以「这个库跑过哪些迁移」只能靠人记。
+>
+> ⇒ **如果做完本节、P6b 仍然红，而且红的不是 `FAIL-default-drift`**，说明这个库**比 `0005` 落后更多**
+> （例如连 `0004` 都没跑过）。那时有两条路，**都要你明确点头**：
+> ① 按同样的方式把 `backend/sql/migrations/0004_qmt_price_double_and_coverage/forward.sql` 也应用上去
+>    （⚠️ 它改列类型、建新表，比 `0005` 重得多，先读它的 `README.md`）；
+> ② 确认这个库的数据不值得保留 → 转 P6-RESET 重建。
+> ⛔ **不要反复盲试** —— 每跑一个 `forward.sql` 都是在改一个有数据的库。
 >
 > ⚠️ **重复执行本节是安全的**：`ALTER COLUMN … DROP DEFAULT` 对一个已经没有默认值的列不报错、不改任何东西（PostgreSQL 的 `DROP DEFAULT` 是幂等的）。所以拿不准「跑过没跑过」时，再跑一次比不跑安全。
 
 > **要回滚怎么办**：同目录有 `rollback.sql`，照第一、二步的写法换个文件名执行即可。本次回滚**无数据风险**（只改列的元数据，不重写任何已有行，已由 `rehearse.sh` 的 Part 3 在真数据库上实证）。⚠️ 但回滚之后 P6b 会反过来报 `FAIL-default-drift` —— 因为闸门文件记的是**新形状**。回滚是「本片的 fail-closed 行为本身导致停机」时的应急手段，不是常规操作。
 ````
 
-- [ ] **Step 3: 核对三处交叉引用对得上**
+- [ ] **Step 2c: 改 P6b 的失败指引 —— 把「迁移没跑」从「部署坏了」里分出来**
+
+`:459` 现在写的是：
+
+```
+- ❌ 有任何一行被打出来：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止**，走 **P6-RESET** 那一节（⛔ 不要直接 `docker compose down -v` —— 理由见 P6），销毁后回 P6 第二步，**不得**往下插数据
+```
+
+改成：
+
+```
+- ❌ 有任何一行被打出来：命令会以**非零码**退出并打印 `P6b GATE FAIL`。**停止**，**不得**往下插数据。
+  接下来**按标签决定去哪**，⛔ 不要一律去销毁数据卷：
+  - 打出来的行是 **`FAIL-default-drift`**，且不合格的那一列是 **`training_sets.schema_version`**
+    → 这**不是部署坏了，是迁移没跑**。转 **P6a** 应用迁移，然后回本节重跑。
+  - 其它标签（`FAIL-missing` / `FAIL-type-mismatch` / `FAIL-nullability-drift` /
+    `FAIL-definition-drift` / `FAIL-unexpected`）→ 先看 P6a 末尾那段「比 0005 落后更多怎么办」；
+    确认数据不值得保留之后，才走 **P6-RESET**（⛔ 不要直接 `docker compose down -v` —— 理由见 P6），
+    销毁后回 P6 第二步。
+  - 在一个**全新空卷**上也红 → 见下面那条「全新空卷也红」的说明（那是快照过期，不是部署问题）
+```
+
+⚠️ **`FAIL-default-drift` 这个标签名不是编的**：Step 1 的 (e) 已经实测它存在于
+`docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql` 里，runbook `:476` 也有它的定义。
+⛔ 绝不能在 runbook 里写一个运维永远不会在屏幕上看到的字符串。
+
+- [ ] **Step 3: 核对交叉引用对得上**
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-echo "--- runbook 的新节标题 ---"
-grep -n '^## P6a' docs/runbooks/2026-08-24-qmt-nas-deployment.md
-echo "--- README 指向它的那句 ---"
+R=docs/runbooks/2026-08-24-qmt-nas-deployment.md
+echo "--- (1) 新节标题 ---"
+grep -n '^## P6a' "$R"
+echo "--- (2) README 指向它的那句 ---"
 grep -n 'P6a' backend/sql/migrations/0005_schema_version_fail_closed/README.md
-echo "--- P6b 的失败标签里有没有 default-drift ---"
-grep -n 'default-drift\|default_drift' docs/runbooks/2026-08-24-qmt-nas-deployment.md \
-  docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
+echo "--- (3) P6 第一步现在有几个出口指向 P6a ---"
+sed -n '243,255p' "$R" | grep -n 'P6a\|P6-RESET'
+echo "--- (4) P6b 的失败指引现在按标签分流了吗 ---"
+grep -n 'FAIL-default-drift' "$R"
+echo "--- (5) 标签名在闸门文件里真的存在吗 ---"
+grep -c 'FAIL-default-drift' docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql
+echo "--- (6) 全文有没有还把『旧卷』无条件导向销毁的地方 ---"
+grep -n 'VOLUME_EXISTS' "$R"
 ```
 
 期望：
-- runbook 有 `## P6a · 应用数据库迁移（**旧库必做，全新空卷可跳过**）`
-- README 里那句「见 …deployment.md 的『P6a · 应用数据库迁移』一节」与标题文字一致
-- `default-drift` 这个标签在 P6b 的闸门文件或 runbook 的失败标签表里**真的存在**
+- (1) 有 `## P6a · 给已经在跑的库应用迁移（**不重建、不动数据**）`
+- (2) README 里那句引用的节名与 (1) **逐字一致**（⛔ 两处标题不一致 = 指了个不存在的章节）
+- (3) `VOLUME_EXISTS` 之后**同时**出现 `P6a` 与 `P6-RESET` 两个出口
+- (4) P6b 的失败指引里出现 `FAIL-default-drift` 并指向 P6a
+- (5) **非 0**
+- (6) 每一处 `VOLUME_EXISTS` 的下文都给了「要数据 → P6a」这条路，⛔ 没有任何一处只给销毁
 
 ⚠️ 第三条若零命中 ⇒ 我在新节里写的失败标签是**编的**。那就得改成 P6b 真正会打印的标签名 —— ⛔ 不许在 runbook 里写一个运维永远不会在屏幕上看到的字符串。核实办法：
 
@@ -2208,8 +2318,13 @@ Step 4 的期望就是「`git diff --name-status origin/main...HEAD | sort` 的�
 ## 还需要人工做的一步（合并之后）
 
 NAS 上那台在跑的数据库**不会自动改过来**。合并之后要照
-`docs/runbooks/2026-08-24-qmt-nas-deployment.md` 的 **P6a** 一节手动应用迁移。
+`docs/runbooks/2026-08-24-qmt-nas-deployment.md` 的 **P6a · 给已经在跑的库应用迁移** 一节手动应用迁移。
 ⛔ 跳过那一步，下次跑 P6b 检查会报错，而那个报错**长得像「部署坏了」**，实际是「迁移没跑」。
+
+⚠️ **直接从 P6a 那一节进去，不要回头跑 P6** —— P6 是「从零建库」的流程，
+它第一步就会让你面对「这个数据卷要不要销毁」。本片同时把那个分流改了：
+看到卷已存在时，现在有「保留数据 → P6a」与「确认是废卷 → P6-RESET」两条路，
+而原来只有销毁一条。
 ```
 
 - [ ] **Step 6: 提交**
@@ -2240,7 +2355,7 @@ git commit -m "docs(ts1r1): 非程序员可执行的验收清单（CLAUDE.md 治
 | §4④ 两道闸门 + 两份哈希 + 一份指纹 | Task 1 Step 7（P6b 两处 + `CANONICAL_SCHEMA_SHA256`）+ Task 4（指纹固件 + `CANONICAL_BUSINESS_CATALOG_SHA256`） | 次序约束兑现：`schema.sql` 在 Task 1 Step 5 定稿，三样哈希全在其后 |
 | §4④ 三方互钉 | Task 4 Part 4 的三条腿断言 | 第三条腿（常量↔活库）此前只活在跑不起来的 ㉕ 档里 |
 | §4⑤ 11 个 bump 同步点 | Task 5 | Step 1 的 13 行命中表做了「9 改 + 4 不改」的集合等式 |
-| §4⑥ NAS runbook 新增一节 | Task 6 | 放在 P6b **之前**；含「那不是部署坏了，是迁移没跑」的归因提示 |
+| §4⑥ NAS runbook 新增一节 | Task 6（改 **3 处**，不是 1 处）| 放在 P6b **之前**；含「那不是部署坏了，是迁移没跑」的归因提示。⚠️ **spec 只要求「新增一节」，但只插一节到不了** —— 现有分流把旧卷**唯一**导向销毁（`:244`/`:412`/`:459` 三处实测）。codex 对 plan 第 4 轮的 [high] finding ⇒ 另改 P6 第一步的出口与 P6b 的失败归因，RESET 保留为显式破坏性操作 |
 | §4⑦ 三类测试 | Task 1（test_schema.py 3 条）+ Task 2（test_migrations.py 6 条）+ Task 3（CJK 守卫扩到两个目录） | md5 锚那条漏在 Task 1 Step 3 封上 |
 | §5 判据 1 / 1b | Task 7 Step 1 + 验收清单 1 / 1b | |
 | §5 判据 2 | Task 3 Step 4 + 验收清单 2 | |
