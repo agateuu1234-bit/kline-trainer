@@ -135,17 +135,26 @@ def test_rehearse_script_braces_vars_before_cjk():
 
     这是**真跑才会暴露**的一类 bug：`bash -n` 与 `shellcheck` 都查不出来（语法完全合法）。
     实测中它让脚本在加载迁移前 schema 那一步直接崩掉。修法是一律写成 `${VAR}`。
-    本测试把这个运行期陷阱变成静态可检，防止以后写中文提示时复发。"""
+    本测试把这个运行期陷阱变成静态可检，防止以后写中文提示时复发。
+
+    ⚠️ TS1-R1 起**遍历所有迁移目录**，不再只钉 0004：原来写死一个目录，
+    于是新加的 0005/rehearse.sh 犯同样的错不会有任何东西变红 ——
+    「守卫只钉它被写出来时存在的那一个对象」是本仓反复踩的一类假绿。
+    """
     import re
-    script = (MIG_0004 / "rehearse.sh").read_text(encoding="utf-8")
+    scripts = sorted(MIGRATIONS_DIR.glob("*/rehearse.sh"))
+    assert len(scripts) >= 2, (
+        f"只找到 {len(scripts)} 个 rehearse.sh —— 本仓至少有 0004 与 0005 两个，"
+        "glob 坏了（防空转）")
     bad = [
-        (i, line) for i, line in enumerate(script.splitlines(), 1)
+        (path.parent.name, i, line)
+        for path in scripts
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]", line)
     ]
     assert not bad, (
         "以下位置 `$VAR` 紧跟全角字符，bash 会把它当成变量名的一部分，请改用 ${VAR}：\n"
-        + "\n".join(f"  第 {i} 行: {line.strip()}" for i, line in bad)
-    )
+        + "\n".join(f"  {d}/rehearse.sh 第 {i} 行: {line.strip()}" for d, i, line in bad))
 
 
 def test_migration_0004_rollback_has_destructive_guard():
