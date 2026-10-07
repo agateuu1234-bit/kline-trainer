@@ -62,7 +62,6 @@ klines.id=nextval('klines_id_seq'::regclass)
 stock_coverage.dropped_1m_dates='[]'::jsonb
 training_sets.created_at=now()
 training_sets.id=nextval('training_sets_id_seq'::regclass)
-training_sets.schema_version=1
 training_sets.status='unsent'::character varying
 --sequences--
 klines_id_seq:bigint:1:1:9223372036854775807:1:false:1:p

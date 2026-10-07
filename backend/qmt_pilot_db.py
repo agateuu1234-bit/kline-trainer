@@ -1391,7 +1391,7 @@ SELECT
 """
 
 # 由 ㉕ 档在真 PG 上生成/校验；PG 大版本升级后需重新生成（见上）。
-CANONICAL_BUSINESS_CATALOG_SHA256 = "e5a87293f44a7f7193b8d2727bb76906a24ad3e94e9e8f67eeaca74cec9e53a8"
+CANONICAL_BUSINESS_CATALOG_SHA256 = "0e3f46f45d65040283c43596ee014a94eef43e445c89429e329cc930bbad502c"
 
 # ⚠️ **业务表也要证「没有行为对象」**（O4-R34-C1）：`_PILOT_TABLE_DEPENDENTS_SQL` 只管
 #    两张 pilot 表 —— 同一条判据在业务表上**没做**（本 PR 里「只修被点名的那一处」的又一次）。

@@ -472,6 +472,117 @@ else
   exit 1
 fi
 
+# ---------- Part 4：活目录指纹三方对齐 ----------
+
+echo ""
+echo "===== Part 4 · 活目录指纹三方对齐（固件 ↔ 常量 ↔ 活库）====="
+
+# 为什么在这里做：指纹是**三方互钉**（backend/tests/test_qmt_pilot_db.py:85-90 的注释）——
+#   · 固件 ↔ 常量：test_business_catalog_fixture_matches_the_constant（纯 Python，CI 里跑）
+#   · 常量 ↔ 活库：verify_pilot_two_phase_create.py 的 ㉕ 档（需要真 PG 的 DSN + asyncpg）
+# 第三条腿平时**跑不起来**，而改 schema.sql 恰恰改的就是"活库长什么样"。
+# 本 Part 用同一个演练容器把那条腿真跑一次，不需要 asyncpg、不需要外部 DSN。
+#
+# ⚠️ 它同时是**指纹的生成手段**：固件还是旧值时，本 Part 会红并打印活库实际值
+#    （与 ㉕ 档同样的设计）。那个红色输出里的值就是要写进固件的新值。
+
+DB4="rehearse_0005_catalog"
+pg_query postgres "CREATE DATABASE ${DB4} TEMPLATE template0;" >/dev/null
+
+# ⚠️ 用**仓库当前的** schema.sql 建库（不是迁移前快照）——
+#    指纹钉的是"用规范 schema.sql 新建出来的库长什么样"。
+pg_run_file "$DB4" "$SCHEMA_SQL" >/dev/null
+pass_msg "用当前 backend/sql/schema.sql 建了一个全新库 ${DB4}"
+
+# 指纹 SQL 的**唯一真源**是 backend/qmt_pilot_db.py 里的 _BUSINESS_CATALOG_FINGERPRINT_SQL。
+# ⛔ 刻意不在本脚本里抄一份：抄一份就是"同一事实两处副本"，模块那边一改、这里
+#    静默沿用旧版 ⇒ 本 Part 会在一个过时的判据上报绿。改为运行时从模块里取出来。
+FP_SQL=$(python3 - "$REPO_ROOT" <<'PYEOF'
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "backend"))
+from qmt_pilot_db import _BUSINESS_CATALOG_FINGERPRINT_SQL
+sys.stdout.write(_BUSINESS_CATALOG_FINGERPRINT_SQL)
+PYEOF
+)
+
+if [ -n "$FP_SQL" ]; then
+  pass_msg "已从 qmt_pilot_db 取出指纹 SQL（$(printf '%s' "$FP_SQL" | wc -c | tr -d ' ') 字节），未在本脚本里抄副本"
+else
+  fail_msg "从 qmt_pilot_db 取指纹 SQL 失败（空串）—— 常量改名或 import 坏了"
+  exit 1
+fi
+
+# 命令替换会吃掉尾部换行，正好对上固件"文件末尾无换行"的形态（实测固件最后一字节是 ')'）
+LIVE_FP=$(pg_query "$DB4" "$FP_SQL")
+
+if [ -n "$LIVE_FP" ]; then
+  pass_msg "活库指纹已取出（$(printf '%s' "$LIVE_FP" | wc -c | tr -d ' ') 字节，$(printf '%s' "$LIVE_FP" | wc -l | tr -d ' ') 个换行）"
+else
+  fail_msg "活库指纹是空串 —— 下面的比对会变成'空 == 空'的恒真，脚本自身有 bug"
+  exit 1
+fi
+
+LIVE_SHA=$(printf '%s' "$LIVE_FP" | shasum -a 256 | cut -d' ' -f1)
+FIXTURE_SHA=$(shasum -a 256 "$CATALOG_FIXTURE" | cut -d' ' -f1)
+CONST_SHA=$(python3 - "$REPO_ROOT" <<'PYEOF'
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "backend"))
+from qmt_pilot_db import CANONICAL_BUSINESS_CATALOG_SHA256
+print(CANONICAL_BUSINESS_CATALOG_SHA256)
+PYEOF
+)
+
+echo ""
+echo "  活库指纹 sha256 = ${LIVE_SHA}"
+echo "  固件   sha256 = ${FIXTURE_SHA}"
+echo "  常量   sha256 = ${CONST_SHA}"
+echo ""
+
+# 第一条腿：固件 ↔ 活库。不等时把**完整 diff** 打出来 —— 这就是"重新生成"的输入。
+if printf '%s' "$LIVE_FP" | diff -u "$CATALOG_FIXTURE" - > "$TMP_LOG" 2>&1; then
+  pass_msg "固件原文 ↔ 活库指纹 逐字节相等"
+else
+  fail_msg "固件原文与活库指纹不一致。完整 diff（左 = 仓库固件，右 = 活库实际）："
+  echo ""
+  cat "$TMP_LOG"
+  echo ""
+  echo "  ⚠️ 若你刚改过 backend/sql/schema.sql，这就是**预期的红**，右侧即新的真值。"
+  echo "     重新生成方法（在仓库根目录执行）："
+  echo ""
+  echo "     本脚本已把活库指纹写到： ${TMP_LOG}.live"
+  printf '%s' "$LIVE_FP" > "${TMP_LOG}.live"
+  echo "     1) cp ${TMP_LOG}.live backend/tests/fixtures/business_catalog_fingerprint.txt"
+  echo "     2) 把 CANONICAL_BUSINESS_CATALOG_SHA256 改成 ${LIVE_SHA}"
+  echo "     3) 重跑本脚本，本 Part 应当全 [PASS]"
+  echo ""
+  echo "     ⛔ 三方必须同时对齐：只改固件不改常量（或反之），会让"
+  echo "        所有'正常路径'在**错的期望**上通过 —— 最难发现的一类假绿。"
+  exit 1
+fi
+
+# 第二条腿：常量 ↔ 活库
+assert_eq "CANONICAL_BUSINESS_CATALOG_SHA256 ↔ 活库指纹 sha256 相等" "$CONST_SHA" "$LIVE_SHA"
+
+# 第三条腿：固件 ↔ 常量（纯 Python 侧也有一条测试钉它，这里一并确认，让三方闭环）
+assert_eq "固件 sha256 ↔ 常量 相等（与 test_business_catalog_fixture_matches_the_constant 同判据）" \
+  "$FIXTURE_SHA" "$CONST_SHA"
+
+# 本片的核心形状断言：指纹里**不得**再出现 schema_version 的默认值
+if printf '%s' "$LIVE_FP" | grep -q '^training_sets\.schema_version='; then
+  fail_msg "活库指纹的 --defaults-- 段里仍有 training_sets.schema_version —— schema.sql 的 DEFAULT 没真去掉"
+  exit 1
+else
+  pass_msg "活库指纹里已无 training_sets.schema_version 的默认值记录"
+fi
+
+# 反向防空转：别的列的默认值必须**还在**（证明上面那条 grep 不是因为整段 --defaults-- 空了而通过）
+if printf '%s' "$LIVE_FP" | grep -q "^training_sets\.status='unsent'::character varying$"; then
+  pass_msg "同表其它列的默认值仍在（防空转：上一条不是因为 --defaults-- 整段空了才通过）"
+else
+  fail_msg "指纹里连 training_sets.status 的默认值都没了 —— 上一条 grep 没有判别力"
+  exit 1
+fi
+
 # ---------- 收尾 ----------
 
 echo ""
