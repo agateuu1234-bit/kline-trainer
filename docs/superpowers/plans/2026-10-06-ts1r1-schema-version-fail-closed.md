@@ -120,8 +120,34 @@
     它只 `import qmt_pilot_db`，而那个模块的模块级 import 只有 `hashlib` / `re` / `sys`
     三个标准库（已实测裸 `python3` 能 import 成功）⇒ 让演练脚本不依赖虚拟环境。
 
-15. **实施前基线（已实测，2026-10-06 本 worktree）**：整套后端 **`1720 passed`**，
-    0 failed，耗时约 4 分钟。本片新增 **9 条**测试（Task 1 的 3 条 + Task 2 的 6 条；
+16. **⛔ 退出码绝不能在管道之后读。** 凡是要判「这个脚本是成功还是失败」的地方，
+    一律**先重定向到日志文件、立刻取 `$?`、再 `tail` 那个日志**：
+
+    ```bash
+    LOG=/tmp/<名字>.log
+    <命令> > "$LOG" 2>&1; rc=$?
+    tail -20 "$LOG"
+    echo "退出码 = $rc   （完整输出在 $LOG）"
+    ```
+
+    ⛔ **不许**写成 `<命令> 2>&1 | tail -8; echo "退出码 = $?"`，也**不许**用
+    `${PIPESTATUS[0]}`。两种写法的实测结果（codex 对 plan 第 3 轮的 finding，已复现）：
+
+    | 写法 | zsh（user 的终端） | bash |
+    |---|---|---|
+    | `false \| tail -1; echo $?` | **`0`**（拿到的是 `tail` 的） | **`0`** |
+    | `false \| tail -1; echo ${PIPESTATUS[0]}` | **空字符串**（zsh 用的是 `$pipestatus[1]`，而且下标从 1 开始）| `1` |
+    | 先重定向到日志再取 `$?` | 失败 `1` / 成功 `0` ✅ | 失败 `1` / 成功 `0` ✅ |
+
+    ⇒ 前两种会让「演练脚本以失败退出」被打印成 `退出码 = 0` 或 `退出码 = `，
+    而本计划有多处判据就是「退出码非 0」。这正是本仓的
+    「管道吞退出码」+「无条件 echo 是假绿发生器」两条成文教训。
+    ⚠️ 顺带好处：日志文件保留的是**完整输出**，而 PR 里要贴的恰恰是完整输出
+    （⛔ 不是 `tail` 之后的几行 —— 本计划初稿的 `(cmd | tail -5) | tee log` 写法
+    存进日志的只有 5 行）。
+
+17. **实施前基线（已实测，2026-10-06 本 worktree）**：整套后端 **`1720 passed`**,
+    0 failed、耗时约 4 分钟。本片新增 **9 条**测试（Task 1 的 3 条 + Task 2 的 6 条；
     Task 3 只改写已有的那条守卫，不增条数）⇒ **完工后应为 `1729 passed`**。
     ⚠️ 若最终数不是 1729，**先搞清差额来自哪里**，⛔ 不许笼统地说「全绿」就过。
 
@@ -1362,9 +1388,14 @@ FAILED tests/test_insert_schema_version_guard.py::test_every_executable_insert_c
 cd "$(git rev-parse --show-toplevel)/backend/sql/migrations/0005_schema_version_fail_closed"
 chmod +x rehearse.sh
 bash -n rehearse.sh && echo "语法 OK"
-./rehearse.sh 2>&1 | tee /tmp/ts1r1-rehearse-part123.log
-echo "退出码 = $?"
+LOG=/tmp/ts1r1-rehearse-part123.log
+./rehearse.sh > "$LOG" 2>&1; rc=$?
+tail -40 "$LOG"
+echo "退出码 = $rc   （完整输出在 $LOG，PR 里要贴的是这个文件的全文）"
 ```
+
+⛔ 注意这里**没有**写成 `./rehearse.sh 2>&1 | tail`：管道之后的 `$?` 是 `tail` 的，
+实测在 zsh 与 bash 下都恒为 `0` —— 见 Global Constraint 16。
 
 期望：所有行都是 `[PASS]`，最后一行 `[PASS] 全部断言通过，共 N 条。`，退出码 **0**。
 
@@ -1443,16 +1474,24 @@ git status --short
 cd "$(git rev-parse --show-toplevel)"
 F=backend/sql/migrations/0005_schema_version_fail_closed/forward.sql
 
+R=./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh
+
 # 变异 C：把 forward.sql 的 DROP DEFAULT 删掉 → Part 1 必须在"迁移后漏填被拒"那一条失败
 sed -i '' '/ALTER TABLE training_sets ALTER COLUMN schema_version DROP DEFAULT;/d' "$F"
-./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tail -8
-echo "退出码 = $?"
+echo "证据 · forward.sql 里还有 DROP DEFAULT 吗：$(grep -c 'DROP DEFAULT' "$F")  （应为 0）"
+LOG=/tmp/ts1r1-mut-c.log
+"$R" > "$LOG" 2>&1; rc=$?
+tail -8 "$LOG"
+echo "变异 C 的退出码 = $rc   （应当非 0）"
 git checkout -- "$F"
 
 # 变异 D：把 forward.sql 的注释文字改一个字 → Part 1 的"列注释已写入"那条必须失败
 sed -i '' "s/漏填必须当场失败/漏填必须立刻失败/" "$F"
-./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tail -8
-echo "退出码 = $?"
+echo "证据 · forward.sql 里出现「漏填必须立刻失败」的次数 = $(grep -c '漏填必须立刻失败' "$F")  （应为 1）"
+LOG=/tmp/ts1r1-mut-d.log
+"$R" > "$LOG" 2>&1; rc=$?
+tail -8 "$LOG"
+echo "变异 D 的退出码 = $rc   （应当非 0）"
 git checkout -- "$F"
 
 git status --short
@@ -1604,8 +1643,10 @@ fi
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tee /tmp/ts1r1-part4-red.log
-echo "退出码 = ${PIPESTATUS[0]}"
+LOG=/tmp/ts1r1-part4-red.log
+./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh > "$LOG" 2>&1; rc=$?
+tail -60 "$LOG"
+echo "退出码 = $rc   （应当非 0；完整输出在 $LOG）"
 ```
 
 期望：Part 1–3 全 `[PASS]`；Part 4 在「固件原文 ↔ 活库指纹」那一条 **`[FAIL]`**，打印完整 diff，退出码非 0。
@@ -1655,8 +1696,10 @@ echo "新常量值 = $NEW_SHA"
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tee /tmp/ts1r1-part4-green.log
-echo "退出码 = ${PIPESTATUS[0]}"
+LOG=/tmp/ts1r1-part4-green.log
+./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh > "$LOG" 2>&1; rc=$?
+tail -40 "$LOG"
+echo "退出码 = $rc   （应当是 0；完整输出在 $LOG）"
 ```
 
 期望：**全部 `[PASS]`**，退出码 **0**。
@@ -2023,11 +2066,29 @@ git commit -m "docs(ts1r1): NAS runbook 新增 P6a「应用数据库迁移」一
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-(cd backend && "$PY" -m pytest -q 2>&1 | tail -5) | tee /tmp/ts1r1-final-backend.log
-(cd ios/Contracts && swift test 2>&1 | tail -20) | tee /tmp/ts1r1-final-swift.log
-./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh 2>&1 | tee /tmp/ts1r1-final-rehearse.log
-echo "rehearse 退出码 = ${PIPESTATUS[0]}"
+# ⛔ 三处都是「先重定向到日志、立刻取 $?、再 tail」—— 见 Global Constraint 16。
+#    初稿写成 `(cmd | tail -5) | tee log`，那样**日志里只有 5 行**，
+#    而 PR 要贴的恰恰是完整输出。
+
+(cd backend && "$PY" -m pytest -q > /tmp/ts1r1-final-backend.log 2>&1); rc_be=$?
+tail -5 /tmp/ts1r1-final-backend.log
+echo "后端退出码 = $rc_be"
+
+(cd ios/Contracts && swift test > /tmp/ts1r1-final-swift.log 2>&1); rc_sw=$?
+tail -20 /tmp/ts1r1-final-swift.log
+echo "Swift 退出码 = $rc_sw"
+
+./backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh \
+  > /tmp/ts1r1-final-rehearse.log 2>&1; rc_re=$?
+tail -40 /tmp/ts1r1-final-rehearse.log
+echo "演练退出码 = $rc_re"
+
+echo
+echo "三项都必须是 0：后端=$rc_be  Swift=$rc_sw  演练=$rc_re"
 ```
+
+⛔ 三个退出码**必须都是 0**。任何一个非 0 就**停在这里**，⛔ 不许往下写验收清单
+——「测试全绿」这句话的全部依据就是这三个数。
 
 ⛔ 这三份日志里的**真实数字**要写进验收清单与 PR 描述，**不许**凭印象写。
 
