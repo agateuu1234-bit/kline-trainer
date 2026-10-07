@@ -567,6 +567,61 @@ struct NodeDragCandidateTests {
         #expect(engine.canUndoDrawing == true, "B 的收尾必须留下一条撤销记录")
     }
 
+    // MARK: Task 14 变异 #9 补测：D135b 两支失败的判定顺序，复合失效场景才有判别力
+    //
+    // 变异 #9（把"① 先判来源 ② 再判归属"调换成"① 先判归属 ② 再判来源"）在既有测试矩阵下全绿——
+    // `staleCallbackFromOtherPanelDoesNotTouchActiveDrag` 的夹具里"来源不符"与"归属不符"**不同时**
+    // 成立（owner=B 的归属本身是合法的，只是来源panel不对），两种顺序走到的都是同一个分支（.notOurs）。
+    // 只有 owner **同时**来源不符（来自另一面板的陈旧回调）**且**归属也不符（此刻选中已经换成了
+    // 第三条线）时，顺序才决定走 `.notOurs`（不写）还是 `.finalized`（就地定住 = 写）。
+
+    @Test("Task14变异#9补测：owner 来源与归属同时失效 ⇒ 陈旧回调绝不能把拖动态写进 owner 记的那条线")
+    func staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let engine = TrainingEngine.preview()
+        engine.injectDrawingsForTesting([
+            makeStyledHLine(id: "B", panelPosition: 1, revealTick: 0,
+                            period: engine.lowerPanel.period, candleIndex: 0, price: 10),
+            makeStyledHLine(id: "C", revealTick: 0,
+                            period: engine.upperPanel.period, candleIndex: 0, price: 20),
+        ])
+        engine.toggleDrawingMode()
+        engine.drawingSession.setMode(.select)
+
+        let coordUpper = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let viewUpper = KLineView(frame: bounds)
+        coordUpper.attach(to: viewUpper)
+        coordUpper.rebuildRenderState(bounds: bounds)
+
+        // 正常选中 C（上面板），此刻没有任何拖动态。
+        engine.drawingSession.setSelection(id: "C", panel: .upper)
+        #expect(engine.drawingSession.selectedDrawingID == "C")
+        #expect(engine.drawingSession.selectedPanel == .upper)
+
+        // 直接构造一个"B（下面板）的拖动槧"（@testable 直调内部 mutator，绕过正常入口——同
+        // `NodeDragRenderOverrideTests.overrideIsSkippedWhenOwnershipBroken` 的既有先例，专测防御分支）：
+        // 这代表"选中切到 C 之前，B 已经在拖"这个陈旧状态残留下来。
+        let ownerB = DrawingSession.NodeDragOwner(panel: .lower, drawingID: "B", anchorIndex: 0, grabPoint: .zero)
+        let staleAnchor = DrawingAnchor(period: engine.lowerPanel.period, candleIndex: 0, price: 999)
+        engine.drawingSession.beginNodeDrag(ownerB, anchor: staleAnchor)
+
+        // 自检：两个成因**同时**成立——① 来源不符：owner.panel(.lower) != 本次回调来源的 panel(.upper)；
+        // ② 归属不符：owner.drawingID("B") != 此刻的 selectedDrawingID("C")。
+        #expect(ownerB.panel != PanelId.upper, "自检：来源确实不符")
+        #expect(ownerB.drawingID != engine.drawingSession.selectedDrawingID, "自检：归属确实不符")
+
+        let revBefore = engine.drawingsRevision
+        let bPriceBefore = engine.drawings.first(where: { $0.id == "B" })!.anchors[0].price
+
+        // 来自上面板 Coordinator 的陈旧 `.ended` 回调。
+        coordUpper.handleNodeDragForTesting(translation: CGPoint(x: 0, y: -5), phase: .ended)
+
+        #expect(engine.drawingsRevision == revBefore,
+                "两个成因同时失效时，绝不能把 B 的拖动态当场写入（无论先判哪一个，最终分支都必须是「忽略」）")
+        #expect(engine.drawings.first(where: { $0.id == "B" })?.anchors[0].price == bPriceBefore,
+                "B 的锚点必须原样不变——写入等于把一条无关线的数据被陈旧回调污染")
+    }
+
     // MARK: 订正 2（Critical）：终止相位必须无条件清槧
 
     @Test("订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧")

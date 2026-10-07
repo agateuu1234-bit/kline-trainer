@@ -1,7 +1,7 @@
 # P1c 第 3 片 Task 14：spec §8.4 变异验证结果（45 条逐条实跑）
 
 > 本文档随跑随写：每测完一批变异就 append 一次并单独 commit，避免配额打断丢失进度。
-> 基线（订正 5）：host 1931（Contracts）+ 173（Persistence）；Catalyst（整个 target）2030。两者首次运行均实测确认（TEST SUCCEEDED / 0 issues）。
+> 基线（订正 5）：host 1931（Contracts）+ 173（Persistence）；Catalyst（整个 target）**原 2030，自变异 #9 补测试后变为 2031**（新增 `NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`，host 不受影响，仍 1931）。两者首次运行均实测确认（TEST SUCCEEDED / 0 issues）。⚠️ **交给 Task 15**：本片基线数字已变，若后续任务/验收文档里写死了 2030，需同步改成 2031（已知至少 4 处历史记录引用过旧数字，见下方残留清单）。
 > 判据：host 用 `swift test --filter <Suite>`；Catalyst 用 `xcodebuild test -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:...`，三条判据（`** TEST SUCCEEDED/FAILED **` / 是否有 `Failing tests:` 区块 / `Restarting after unexpected exit` 计数为 0）。
 
 ## 结果表（45 条，跑完即填，进行中）
@@ -16,7 +16,7 @@
 | 6 | 五个 Enabled 谓词改读 `nodeDragCurrent` | G14 的反向断言；T15 预期不红 | `G14 拖动门的覆盖是集合等式…`（`gate.contains("nodeDragOwner")` 与 `!code.contains("nodeDragCurrent")` 两条断言）；`NodeDragEditRouterGateTests` 的 T15 两个测试确认全绿 | host | 是 |
 | 7 | 清槧时只清 `nodeDragOwner`、不清 `nodeDragCurrent` | G15 | `G15 nodeDragOwner 与 nodeDragCurrent 同生同死…`；连带 `占槽⇒两半同时非空；清槽⇒两半同时为空`、`T14b 生命周期清理连带丢弃拖动态…`（3 处）也红 | host（DrawingSession.swift，已 `rm -rf .build`） | 是（更广，G15 之外还连带命中两个相关行为测试，合理） |
 | 8 | 把 D135b 两支失败合并成一支（来源不匹配也去收尾清槧） | T14⑤ | `staleCallbackFromOtherPanelDoesNotTouchActiveDrag()`（T14⑤，4 处断言） | Catalyst | 是，精确命中 |
-| 9 | 把 D135b 两支顺序调换（先判归属、再判来源） | T14⑤ | **无**——全部 17 个测试通过，`** TEST SUCCEEDED **` | Catalyst | **不一致**，见残留清单 #2 |
+| 9 | 把 D135b 两支顺序调换（先判归属、再判来源） | T14⑤ | 既有 17 个测试**全绿**（`staleCallbackFromOtherPanelDoesNotTouchActiveDrag` 测不出来，见下）；**已补新测试** `staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`（owner 来源与归属**同时**失效的复合场景）：原序确认绿、调换顺序后**实测红**（2 处断言：`drawingsRevision` 被改、B 的锚点被陈旧回调写入） | Catalyst | 处置①已落实并实跑验证（新测试已永久加入 `NodeDragCandidateTests.swift`，host 基线不变、Catalyst 基线 2030→**2031**） |
 | 10 | 去掉点击选中的那道门（D135c） | T14①②档 | `tapSelectionIsBlockedDuringDrag`(T14①，3 处断言)；`G12 点击选中两入口…`（host，连带红）；T14②（点在本面板另一条线上）在当前测试矩阵无独立夹具，见残留清单 #11 | host | 部分一致 |
 | 11 | `clearSelection` 不丢弃拖动态 | T14b 的①③档；⚠️②档（周期善后走另一条路）须实跑确认 | `lifecycleCleanupDiscardsDrag`（3 个 trigger：`deactivate`/`setMode`/`clearSelection` 全部 6 处断言红）；`G13`（host，连带红）；`realPeriodChangeInvalidatesNodeDrag`（N8，②档）**确认不红**——`restoreDrawingSessionAfterPeriodChange` 自己有独立的显式 `endNodeDrag()` 调用，不经过被改的 `clearSelection` | host | 是，且②档的"另一条路"猜测被实测坐实 |
 | 12 | 在 `visibleDrawings` 的覆盖逻辑里做收尾写入 | G10 | `G10 渲染读路径（applyNodeDragOverride）零写入`；连带 `订正3…`（2 处）与 `T6 拖动中一次盘都不写…`（5 处，因为新增的写入调用确实在渲染读路径里写了盘） | host | 是，且连带命中 T6（符合预期：渲染期写入正是 T6 要禁的那类缺陷） |
@@ -53,7 +53,7 @@
 ## 交给 Task 15 的残留清单（逐条列出，⛔ 不只记数量）
 
 1. **变异 #2「T10③拖走再拖回」无独立测试**：本片测试矩阵里 T10③（翻译：拖远再拖回 `.zero`）没有一条独立覆盖「几何层」的测试——门⑥的 host 测试（`UpdateDrawingAnchorTests.unchangedAnchorIsZeroSideEffect`）是在**引擎层**手造锚点传入，不经过 `DrawingNodeDrag.draggedAnchor` 这一层几何计算，所以变异 #2（破坏几何层的往返精度）不会让它变红。真正需要覆盖 T10③ 的测试应该是「先用非零 translation 拖，再用相反的 translation 拖回 `.zero`，经 `draggedAnchor` 两次调用」这样的几何层往返测试，当前缺失。
-2. **变异 #9「D135b 两支顺序调换」测试矩阵抓不住**：`staleCallbackFromOtherPanelDoesNotTouchActiveDrag`（T14⑤）唯一夹具是「来源不符但归属本身成立」（owner 是 B 自己的、未被改动），两个 guard 不同时失效，调换顺序不改变最终分支。需要补一档「owner 来源不符 **且** 归属也不符」的夹具（例如：A 面板收到陈旧回调，而此刻 B 已经被清空选中/换成 C）才能让顺序产生可观察差异。
+2. **变异 #9「D135b 两支顺序调换」——已闭合**：`staleCallbackFromOtherPanelDoesNotTouchActiveDrag`（T14⑤）唯一夹具是「来源不符但归属本身成立」，两个 guard 不同时失效，调换顺序不改变最终分支，故原有矩阵测不出来。**已补测试**（`NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`）构造「owner 来源不符 **且** 归属也不符」的复合夹具（陈旧回调来自上面板、而此刻选中已经换成第三条线 C），实测：原序绿、调换顺序后红（2 处断言）。走的是处置①（补测试让它红），不是订正 spec 期望——顺序确实承重，只是既有矩阵的夹具覆盖不到那个分支。Catalyst 基线因此从 2030 变为 2031（host 不变）。
 3. **变异 #16/#17「复核路径」的盾行为缺乏专门测试**：T13 的「两条路径」（探针 `nodeDragPreconditions` 直调 / `.began` 复核 `acceptNodeDragCandidate`）共享同一个底层函数，但当前 Catalyst 测试矩阵（`NodeDragCandidateTests.swift`）里没有任何一条测试在"候选已捕获、.began 复核时盾状态是 `.pending`/`.rect`"的场景下断言复核的拒绝/放行——复核路径对盾变异的覆盖目前**完全依赖"调用同一个函数"这一结构事实**，没有独立行为测试证据。
 4. **变异 #19「T11②」结构性不受影响**：T11②（`inertiaMovingNodeInDoesNotRetroactivelyCreateCandidate`）测的是"候选不会被追溯创建"，而变异 #19（`.began` 复核重新查几何）只在候选**已存在**时生效；候选从未建立时，不管复核重查不重查都一样返回 false。这不是测试失效，是该档验证的性质与这个变异正交。
 5. **变异 #20「N1 惯性期间行为不变」没有精确命名的测试**：目前只能靠 T11①②③ 的"前提自检"间接证明机制危害（inertia 被提前刹停导致前提断言失败），没有一条测试直接断言"画线模式下按下手指时，单指横滑/竖滑的行为与非画线模式逐字相同、且惯性没有被提前截停"。这正是 spec 该行注释自己预见到的情况（"plan 须先确认自己写得出这一档，写不出就如实登记只有 G3 接得住"）——如实登记：目前只有 G3① 接得住，N1 这个精确场景没有专门测试。
