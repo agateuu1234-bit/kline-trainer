@@ -2236,7 +2236,7 @@ struct HistoryActionSheet: View {
 - [ ] `backend/sql/schema.sql` 含 v1.2 `training_sets` 3 列 + `UNIQUE(stock_code, start_datetime)`
 - [ ] `backend/sql/training_set_schema_v1.sql` + 示例 zip（附 CRC32 验证脚本）
 - [ ] `ios/sql/app_schema_v1.sql` 含 `final_tick` 列
-- [ ] `TRAINING_SET_SCHEMA_VERSION = 2` 双方共享常量（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地；过渡态的权威定义见 `CONTRACT_VERSION 1.14 / 1.15`）
+- [ ] `TRAINING_SET_SCHEMA_VERSION = 2` 双方共享常量（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地；过渡态的权威定义见 `docs/governance/m01-schema-versioning-contract.md` 的 bump 记录。⛔ 此处原写「`CONTRACT_VERSION 1.14 / 1.15`」已失效：`1.15` 于 2026-10-07 被 TS1-R1 用掉，切片二的号以它落地时的实际顶层号为准）
 - [ ] 时区约定（Unix 秒 UTC，UI 转北京时间）
 - [ ] `settings` 表 key 列表**不含** `stamp_duty_enabled`
 
