@@ -562,13 +562,23 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   且活基线里新增的 20 条 UIKit-gated 测试在旧 fixture 找不到结果行，「活基线覆盖」自测会当场 FAIL。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 100 行 UIKit 结果行取自真日志
 #   原文；另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1）。
+#   【划线 P1c 第 3 片 · Task 14（变异验证，修复环第 1 轮）】total 2030→2031（+1），
+#   uikit 100→101（+1）：Task 14 为 spec §8.4 变异 #9（D135b 两支判定顺序）补了 1 条永久回归测试
+#   `NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`（owner
+#   来源与归属同时失效的复合场景；既有矩阵里两者不同时失效，顺序无判别力，这条补上）。
+#   ⚠️ 本轮同时发现并修复一处**跨轮未同步**的旧漂移：Task 13 把 T5 那条测试从「真实顺序」改名为
+#   「真实路径，走 KLineView.draw(_:) 真实派发」后，从未重生成 catalyst-uikit-baseline.txt——
+#   基线里一直留着旧名，直到本轮用 uikit-expected-tests.py 重新生成才被发现（diff 对账零差异后
+#   确认）。两处改动（新增 1 条 + 改名 1 条）合计：uikit 清单净 +1（100→101），内容替换 1 处。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 101 行 UIKit 结果行取自真日志
+#   原文，含 1 处 XCTestOutputBarrier 断行插花未修剪，禁手打伪造行）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2030" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 100 / total 2030）→ GATE PASS 且回显 2030 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2031" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 101 / total 2031）→ GATE PASS 且回显 2031 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2030，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2031，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
