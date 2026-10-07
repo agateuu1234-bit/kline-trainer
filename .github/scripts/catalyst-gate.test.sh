@@ -852,6 +852,12 @@ mx_case "$FIX/all-passed.tests.json" uikit-started-escaped.log 0 "" \
 mx_case "$FIX/superstring-name.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
     "M10：结果里只有该测试名的**超串**（'…no render AND MORE STUFF'）→ 必须 FAIL（判据要整行相等，⛔ 子串匹配会放行）"
 
+# G7 仍读文本汇总行（spec §4.1 的机械化版本）：结构化结果里只有 28 个节点，
+# 而文本汇总行说 1407（在冻结基线 1407±30 内）。G7 读文本 ⇒ GATE PASS。
+# 有人把 G7 改成数结构化节点 ⇒ 28 远低于下限 ⇒ 这一档立刻变红 = 红旗。
+mx_case "$FIX/only-frozen-28.tests.json" pass-ci-format.log 0 "" \
+    "G7 仍读文本汇总行：结构化只有 28 个节点、文本说 1407 → 必须 PASS（⛔ G7 刻意不迁移）"
+
 rm -rf "$MX_DIR"
 
 # 元测试：钉住 fixture 配对规则本身（从 Task 3 挪来）。

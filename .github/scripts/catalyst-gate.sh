@@ -233,6 +233,16 @@ if [ "$UIKIT_CHECKED_COUNT" -ne "$UIKIT_EXPECTED_COUNT" ]; then
 fi
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
+#
+# ⚠️ G7 **刻意不迁移**到结构化结果（2026-10-07，spec §4.1 已定，⛔ 不是遗漏、⛔ 不要
+#    "顺手统一"）。下一个读到「G8 读结构化、G7 读文本」的人一定会觉得不一致——三条理由：
+#    ① 汇总行除 `✔` 外全是 ASCII 与数字、**不含任何测试名** ⇒ 并发劈字伤不到它。
+#       本缺陷的受害者只有 G8（它要逐条比对含中文的测试名）。
+#    ② 迁移它会连带搞坏 5 档既有负向回归——那些档位的变异是加在**文本**上的
+#       （删汇总行 / 伪造汇总行 / 改数字），迁走之后它们全部失效。
+#    ③ 不迁移就不必处理 1935 vs 2054 的口径差（文本汇总行只数 swift-testing，
+#       结构化结果里 XCTest 与 swift-testing 混在一起）。
+#    机械化版本见 catalyst-gate.test.sh 里「G7 仍读文本汇总行」那一档。
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
 #     而 CI 的 macos-15 输出 'Test run with N tests passed'（没有 "in M suites"）。
 #     两种格式都要接受，否则 CI 上永远匹配不到（真实咬过一次，见 fixtures/pass-ci-format.log）。
