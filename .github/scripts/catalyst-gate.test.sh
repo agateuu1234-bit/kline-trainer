@@ -779,5 +779,104 @@ rt_case "$RT_NONODE"  "结构化结果里没有任何测试节点" "M9 fail-clos
 
 rm -rf "$RT_DIR"
 
+# ── M1/M2/M3/M5/M6/M7（2026-10-07）：G8 改读结构化结果后的判别力矩阵 ──
+# spec 2026-10-06 §6。每档都必须红在 **G8 专属** 的失败信息上（点名具体测试），
+# ⛔ 不许只看退出码——本文件开头的「教训 2」就是为此。
+G8_TARGET='§5.3 #14 drawDrawings with empty list calls no render'
+MX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/catalyst-gate-mx.XXXXXX")"
+
+# 按需从共享样本派生变体：删节点 / 改 result。变体由**真实样本**派生，⛔ 不手造节点。
+mx_variant() {  # mx_variant <out.json> <mode: drop|result> <目标名> [新 result]
+    python3 - "$FIX/all-passed.tests.json" "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, sys
+src, dst, mode, target, newres = sys.argv[1:6]
+d = json.load(open(src))
+kids = d["testNodes"][0]["children"][0]["children"]
+if mode == "drop":
+    d["testNodes"][0]["children"][0]["children"] = [k for k in kids if k.get("name") != target]
+    assert len(d["testNodes"][0]["children"][0]["children"]) == len(kids) - 1, "drop 没生效"
+else:
+    hit = [k for k in kids if k.get("name") == target]
+    assert len(hit) == 1, "result 目标不唯一"
+    hit[0]["result"] = newres
+json.dump(d, open(dst, "w"), ensure_ascii=False)
+PY
+}
+
+mx_stub() {  # mx_stub <out.sh> <json>
+    printf '#!/usr/bin/env bash\nexec cat %q\n' "$2" > "$1"
+    chmod +x "$1"
+}
+
+mx_case() {  # mx_case <json> <log> <期望退出码> <期望专属子串> <说明>
+    local json="$1" log="$2" want="$3" match="$4" desc="$5" stub out got
+    stub="$MX_DIR/stub-$RANDOM.sh"; mx_stub "$stub" "$json"
+    out=$(CATALYST_RESULT_TESTS_SCRIPT="$stub" bash "$GATE" "$FIX/$log" 2>&1)
+    got=$?
+    if [ "$got" -eq "$want" ] && { [ -z "$match" ] || grep -qF -- "$match" <<<"$out"; }; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=$want${match:+ 且含 \"$match\"}，实得 exit=$got)"
+        # 把闸门原话打出来：退出码对不上时，必须看得见红在**哪一条**判据，
+        # 否则「别的判据碰巧也拦下了它」会被当成本档通过/失败（归因必须单独核）。
+        echo "         闸门末行: $(tail -1 <<<"$out")"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+mx_variant "$MX_DIR/m1.json"  drop   "$G8_TARGET"
+mx_variant "$MX_DIR/m2.json"  result "$G8_TARGET" Failed
+mx_variant "$MX_DIR/m3.json"  result "$G8_TARGET" Flaky
+
+mx_case "$MX_DIR/m1.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M1：结构化结果里缺该 baseline 测试的节点 → G8 必须 FAIL 并点名"
+mx_case "$MX_DIR/m2.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M2：节点在但 result=Failed → G8 必须 FAIL 并点名"
+mx_case "$MX_DIR/m3.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M3：节点在但 result 是**未知取值** Flaky → 白名单必须 FAIL（⛔ 不许'不等于 Failed 就放行'）"
+
+# M5a/M5b：防伪造。stdout-spoof.log 里有一条没有 ✔ 前缀的**伪造**通过文本。
+# 两档方向相反，缺一不可（spec §6.1 / codex spec-R2）：
+mx_case "$MX_DIR/m1.json" stdout-spoof.log 1 "$G8_TARGET" \
+    "M5a：节点被删 + stdout 伪造该测试的通过行 → 必须 FAIL（stdout 冒充不了未执行的测试）"
+mx_case "$FIX/all-passed.tests.json" stdout-spoof.log 0 "" \
+    "M5b 对照：节点在且 Passed + 同一条伪造 stdout → 必须 PASS（游离 stdout 不造成假红）"
+
+# M6/M7：本片要治的那个病，以及"别治过头"。
+mx_case "$FIX/all-passed.tests.json" uikit-tick-escaped.log 0 "" \
+    "M6：baseline 某条的 ✔ 行被八进制转义（真日志定点改写）→ 必须 PASS（假红已治）"
+mx_case "$FIX/all-passed.tests.json" uikit-started-escaped.log 0 "" \
+    "M7：转义落在不参与匹配的 ◇ started 行 → 必须 PASS（⛔ 别把'有转义'本身当违规）"
+
+mx_case "$FIX/superstring-name.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M10：结果里只有该测试名的**超串**（'…no render AND MORE STUFF'）→ 必须 FAIL（判据要整行相等，⛔ 子串匹配会放行）"
+
+rm -rf "$MX_DIR"
+
+# 元测试：钉住 fixture 配对规则本身（从 Task 3 挪来）。
+# 共享样本会把本该缺失的节点补回来 ⇒ 凡断言「UIKit-gated 测试未执行」的档位
+# **必须**有专属 .tests.json，否则正确实现反而让它通过。靠人记得会漂，这里机械钉住。
+MISSING_PAIR=""
+while IFS= read -r f; do
+    [ -f "$FIX/${f%.log}.tests.json" ] || MISSING_PAIR="$MISSING_PAIR $f"
+done < <(grep -oE 'expect 1 [a-z0-9.-]+\.log[^"]*"UIKit-gated 测试未执行' "$0" | awk '{print $3}' | sort -u)
+if [ -z "$MISSING_PAIR" ]; then
+    echo "  ok   — 元测试：每个断言「UIKit-gated 测试未执行」的 fixture 都有专属 .tests.json"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 元测试：这些 fixture 缺专属 .tests.json（共享样本会把节点补回来 → 它们会假绿）：$MISSING_PAIR"
+    FAILED=$((FAILED + 1))
+fi
+
+# 结构性回归：G8 不得退回读 stdout 文本。
+if grep -qE 'match_str=.*✔ Test' "$GATE"; then
+    echo "  FAIL — 结构性回归：catalyst-gate.sh 的 G8 又出现了 '✔ Test … passed after' 文本匹配"
+    FAILED=$((FAILED + 1))
+else
+    echo "  ok   — 结构性回归：G8 不再用 '✔ Test … passed after' 文本匹配（改读结构化结果）"
+    PASSED=$((PASSED + 1))
+fi
+
 echo "结果：$PASSED 通过，$FAILED 失败"
 [ "$FAILED" -eq 0 ]

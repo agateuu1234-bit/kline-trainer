@@ -200,38 +200,30 @@ UIKIT_CHECKED_COUNT=0
 while IFS= read -r uikit_test; do
     [ -z "$uikit_test" ] && continue
     UIKIT_CHECKED_COUNT=$((UIKIT_CHECKED_COUNT + 1))
-    # F3（codex R5 finding）：swift-testing 对两种 @Test 写法打印格式不同——
-    # `@Test("显示名")` 收尾行带字面引号（`Test "显示名" passed`），而 `@Test func 名字()`
-    # （无显示名）直接印函数签名、不带引号（`Test 名字() passed`，已用真实 CI 日志核实）。
-    # uikit-expected-tests.py 用「名字末尾是不是 "()"」来标记是哪种形式，这里据此决定
-    # 要不要在匹配串两侧补引号。
+    # ⬇⬇ 2026-10-07：本判据**不再读 stdout 文本**，改查结构化结果（spec §3）。
+    # 为什么换（治的是真缺陷，不是重构）：两个并发进程写同一 fd 会把 ✔ 结果行里的
+    # 多字节 UTF-8 字符劈开，接收方把残字节转义成八进制（`\342\206\222`）⇒ 测试名
+    # 对不上 ⇒ 明明通过的测试被判「未执行」。偶发假红，重跑就好，所以极易被当成玄学。
+    # 文本匹配治不了它：转义点随机、改判据只会在「漏放」和「误伤」之间换边（spec §4.3
+    # 明令⛔不许写成「日志里不许有转义」——转义本身不是违规，M7 那档钉住这一点）。
     #
-    # F4（codex R9 finding，2026-07-15，实测可利用）：match_str 此前是裸子串
-    # `Test "<名>" passed`——grep -qF 不锚定行首、不看前缀，只要日志任何位置出现这串字符
-    # 就算数。实测复现：删掉某 UIKit 测试的真实 ✔ 结果行，改在日志别处插一条**普通缩进
-    # stdout**（如 `  some test stdout: Test "<名>" passed`，模拟另一个测试自己打印的调试
-    # 信息碰巧含有这串文字）——闸门照样 GATE PASS，该测试根本没跑却被判"跑过"。
-    # 根治：把 swift-testing 真实结果行的专属前缀 `✔ Test ` 和收尾 ` passed after ` 都纳入
-    # 匹配串——真结果行固定长这样（`✔ Test "显示名" passed after 1.714 seconds.`），
-    # 普通 stdout 不会同时带这两处标记。
-    # 不锚定行首（不要求 `^✔`）是刻意的：真实 CI 日志里 XCTest 自身的 XCTestOutputBarrier
-    # 诊断文本有时会跟 swift-testing 的 ✔ 结果行粘连在同一物理行（两个并发进程写同一 fd
-    # 时的输出交织，✔ 结果行本身没被截断，只是前面偶尔粘着上一条尚未换行的残留文本，
-    # 例如 `XCT✔ Test contractVersionIs1_11() passed after …`，已在 ci-catalyst-real.log
-    # 抓到 7 次真实样本）——若严格要求 ✔ 必须是该行第 1 个字符，会把这些真实通过的测试
-    # 误判成未执行（fail-open 换了个方向变成误伤真实通过）。只要求 `✔ Test ` 这段连续
-    # 子串存在，既挡住了本 finding 的伪造 stdout（没有 ✔ 字符），又不受这种真实交织
-    # 噪声影响。
-    case "$uikit_test" in
-        *'()')
-            match_str="✔ Test ${uikit_test} passed after "
-            ;;
-        *)
-            match_str="✔ Test \"${uikit_test}\" passed after "
-            ;;
-    esac
-    if ! grep -qF "$match_str" "$LOG"; then
-        fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到真实结果行 '✔ Test ... passed after ...'（不锚定行首但必须带 ✔ 前缀；伪造/普通 stdout 里出现同样文字不算数；UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
+    # 换成结构化结果后，原先两条文本层 finding 自动消失、但它们的**意图**仍被测试钉着：
+    #   F3（codex R5）：`@Test("显示名")` 日志行带字面引号、`@Test func 名字()` 不带 ⇒
+    #     过去要分两种拼法。结构化结果的 `name` 字段**就是裸名字、不带引号**（2026-10-07
+    #     实核：冻结清单 28 条逐字命中、活清单 80 条经 CI 探针逐条对账 0 缺失）⇒ 拼法
+    #     问题消失，逐字相等即可。⚠️ 残留 R5：当前全树**没有**函数形式（末尾 `()`）的
+    #     UIKit-gated 测试，所以「函数形式的结构化 name 是否也带 ()」**无样本可验**；
+    #     若将来新增此类测试而本判据报「未执行」，先查这里，别急着放宽判据。
+    #   F4（codex R9）：裸子串匹配可被普通 stdout 伪造（日志别处印出同样文字就算数）。
+    #     结构化结果取自 xcodebuild 自己写的结果包，测试没跑就没有节点，stdout 冒充不了
+    #     ⇒ M5a/M5b 两档（方向相反）钉住「伪造挡得住」且「游离 stdout 不造成假红」。
+    #
+    # 判据：该测试必须在结构化结果里有一个 result == "Passed" 的节点（整行相等）。
+    # RESULT_PASSED_NAMES 只收 `result == "Passed"`（白名单，spec §4.2）⇒ 「没有节点」
+    # 与「有节点但 result 不是 Passed（含未见过的取值）」都落到同一条失败，这是刻意的：
+    # 两种情形都不足以判「这条测试真的跑过并通过」，⛔不许「不等于 Failed 就放行」。
+    if ! grep -qxF -- "$uikit_test" <<<"$RESULT_PASSED_NAMES"; then
+        fail "UIKit-gated 测试未执行：${uikit_test} —— 结构化结果里没有它的 'Passed' 节点（要么这条测试没跑，要么它的 result 不是 Passed）。判据读的是 xcodebuild 结果包、不是 stdout 文本，所以日志里出现同名文字不算数；源码推导清单见 uikit-expected-tests.py"
     fi
 done <"$UIKIT_LIST_FILE"
 rm -f "$UIKIT_LIST_FILE"
