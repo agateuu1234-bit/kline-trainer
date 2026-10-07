@@ -406,10 +406,35 @@ cd backend && "$PY" -m pytest tests/test_schema.py -v
 再跑一次整套后端，确认此刻的红**恰好只有两处**（而不是一片）：
 
 ```bash
-cd backend && "$PY" -m pytest -q 2>&1 | tail -20
+cd backend && "$PY" -m pytest -q > /tmp/ts1r1-step6.log 2>&1; rc=$?
+grep "^FAILED" /tmp/ts1r1-step6.log | sed 's#::.*##' | sort | uniq -c
+tail -2 /tmp/ts1r1-step6.log
+echo "退出码 = $rc"
 ```
 
-期望：`test_p6b_snapshot_records_the_actual_schema_md5` 与 `test_canonical_schema_hashes_match_the_repo_files` 两条 FAIL，其余全 passed。⚠️ 若红的不止这两条，**停下来**先搞清第三条红是什么，再往下。
+期望：**`87 failed, 1636 passed`**（已实测，2026-10-07）。
+
+⚠️⚠️ **这里刻意不写「恰好两条红」—— 本计划初稿就是那么写的，实测错得很远。**
+改 `schema.sql` 之后会红的不是 2 条而是 **87 条**，其中 86 条在
+`backend/tests/test_qmt_pilot_db.py`：那些建库测试用的是**仓库里的真 `schema.sql`**
+（`TOY_SCHEMA_SQL = (_SQL_DIR / "schema.sql").read_text(...)`），而模块把它钉死到
+`CANONICAL_SCHEMA_SHA256` ⇒ 每条走 `create_pilot_database` 的测试都在**任何副作用之前**
+抛 `schema_not_canonical`。它们**不是新缺陷**，而是「常量还没跟着改」的下游 ——
+Step 7 更新常量后**全部转绿**（Step 8 实测 `1723 passed`）。
+
+⇒ 这一步的正确判据是**按文件归类**，不是数总数：
+
+```bash
+grep "^FAILED" /tmp/ts1r1-step6.log | sed 's#::.*##' | sort | uniq -c
+```
+
+期望**恰好两类**：
+- `tests/test_qmt_pilot_db.py` **86** 条 —— 全是 `schema_not_canonical` 的下游
+- `tests/test_schema.py` **1** 条 —— 就是 md5 锚那条（本步要的那个红）
+
+⚠️ 若出现**第三个文件**，那才是「停下来」的信号。
+⚠️ 若 `test_qmt_pilot_db.py` 那一类的报错**不是** `schema_not_canonical`，同样停下来 ——
+   顺手核一下：`grep -c schema_not_canonical /tmp/ts1r1-step6.log` 应当非 0。
 
 算新值：
 
