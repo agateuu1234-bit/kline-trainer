@@ -1851,18 +1851,26 @@ echo "退出码 = $rc   （应当非 0；完整输出在 $LOG）"
 - 若 diff 为空（Part 4 直接绿）⇒ 说明 `schema.sql` 的改动**没生效**，回 Task 1 查。
 
 ```bash
-grep -c '^[-+]' /tmp/ts1r1-part4-red.log
-grep '^[-+]' /tmp/ts1r1-part4-red.log
+grep -cE '^[-+][^-+ ]' /tmp/ts1r1-part4-red.log || true
+grep -E '^[-+][^-+ ]' /tmp/ts1r1-part4-red.log
 ```
 
-期望：只有 3 行以 `-`/`+` 开头 —— `--- 固件` 头、`+++ -` 头、以及 `-training_sets.schema_version=1`。
+期望：**恰好 1 行** —— `-training_sets.schema_version=1`。
+
+⚠️ 模式刻意写成 `^[-+][^-+ ]`（第二个字符既不是 `-`/`+` 也不是空格），为的是把三类
+**不是 diff 内容**的行排掉：`--- /路径…` 与 `+++ -` 两个 diff 文件头，以及脚本自己打的
+`----- Part 1 前置探针 …` 这类分隔线。初稿写 `^[-+]` 实测得 **5**（多出那两条分隔线），
+期望值全错 —— 同一类「证据模式太宽」在本片已发作三次。
 
 - [ ] **Step 4: 把活库真值写回固件 + 常量**
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-LIVE=$(ls -t /var/folders/*/T/tmp.*.live /tmp/tmp.*.live 2>/dev/null | head -1)
-echo "活库指纹文件 = $LIVE"
+# ⚠️ zsh 在通配符无匹配时会**报错中止**（nomatch），而不是像 bash 那样原样传过去。
+#    所以用 find 而不是 ls+通配符。实测本机这一步没找到文件（脚本的 trap 已清掉），
+#    于是走了下面那条兜底 —— 两条路算出的 sha256 完全相同，互为交叉校验。
+LIVE="$(find /var/folders /tmp -maxdepth 3 -name 'tmp.*.live' -newermt '-30 minutes' 2>/dev/null | head -1)"
+echo "活库指纹文件 = ${LIVE:-（没找到，走下面的兜底）}"
 cp "$LIVE" backend/tests/fixtures/business_catalog_fingerprint.txt
 NEW_SHA=$(shasum -a 256 backend/tests/fixtures/business_catalog_fingerprint.txt | cut -d' ' -f1)
 echo "新常量值 = $NEW_SHA"
