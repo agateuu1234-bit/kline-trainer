@@ -78,13 +78,14 @@ T11③ settleDeceleration 夹回 overscroll 致投影移动 → 同①，仍必�
 N4：一次完整拖动（began→changed→ended）⇒ 撤销栈深度恰好1 / ↩一次整个回到拖前 / 拖动后≠拖前 / drawingsRevision 恰好+1
 T4：拖到一半被第二根手指打断（ChartGestureArbiter 对此发 .ended，与抬手同一条收尾路径）⇒ 就地定住：写一次、记一条撤销，定住的锚点 ≠ 起点
 T14⑤ 陈旧回调不得动别人的槧：A 已收尾清槧、B 已占槧 ⇒ 来自 A 面板的陈旧 .changed/.ended 不碰 B 的拖动态/drawingsRevision，且 B 之后仍能正常收尾
+Task14变异#9补测：owner 来源与归属同时失效 ⇒ 陈旧回调绝不能把拖动态写进 owner 记的那条线
 订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧
 订正2②：清槧之后，十道写入门必须真的重新放行（⛔ 只断言 nodeDragOwner==nil 是在测中间变量）
 订正3：拖动进行中，tap 未命中 ⇒ `.select` 整支早退：不换选中、不清空、不丢弃拖动态
 订正3 反向对照：不在拖动中时，同一次未命中的 tap ⇒ 选中确实被清空（D37），证明上一档的「不变」不是巧合
 订正4：`updateDrawingAnchor` 返回 false（七道门之一拒绝）⇒ 拖动态清、锚点不变、不覆盖既有撤销记录、drawingsRevision 不再额外 +1
 订正1 Catalyst 验证：真实 handleNodeDrag 流水线下，多帧累计位移与 `DrawingNodeDrag.draggedAnchor(基准=提交值)` 逐帧吻合（⛔ 不复利叠加）
-T5 正序（真实顺序）：标记 + 节点同锚 ⇒ 节点中心仍是节点色（日间纯黑），不被标记整个盖住
+T5 正序（真实路径）：标记 + 节点同锚，走 KLineView.draw(_:) 真实派发 ⇒ 节点中心仍是节点色（日间纯黑）
 ⭐正向对照：移走标记后同一点仍是节点色 —— 证明上面那条不是恒真
 ⭐反向对照：测试内部把两次绘制换序（不改生产代码）⇒ 同一点变成标记色，证明 T5 有判别力
 forScheme(.dark) 13 字段桥 = AppPalette.dark
