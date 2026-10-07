@@ -137,6 +137,65 @@ UIKIT_EXPECTED_COUNT=$(printf '%s\n' "$UIKIT_EXPECTED_TESTS" | grep -c '.' || tr
 UIKIT_LIST_FILE="$(mktemp "${TMPDIR:-/tmp}/catalyst-gate-uikit-expected.XXXXXX" 2>&1)" || fail "无法创建临时文件写入 UIKit-gated 期望测试清单（TMPDIR 不可写/已满？):${UIKIT_LIST_FILE}"
 printf '%s\n' "$UIKIT_EXPECTED_TESTS" >"$UIKIT_LIST_FILE" || fail "写入 UIKit-gated 期望测试清单临时文件失败：$UIKIT_LIST_FILE"
 
+# ── 结构化结果取数（2026-10-06 spec §3；G8 的数据来源，替代读 stdout 文本）──
+# 为什么不再读 stdout：并发写同一 fd 会把一个多字节 UTF-8 字符劈开，接收方把残字节
+# 转义成八进制（实测 `✔ Test "…\342\206\222…" passed after`）。baseline 80 条**全部**
+# 含非 ASCII ⇒ 一旦劈字落在某条被匹配的名字上，闸门就误判「未执行」= 随机假红。
+# 结构化结果由测试运行器自己记账，不经过那条 racy 的文本流。
+#
+# 取数独立成脚本是为了可注入（测试喂 fixture JSON，真跑读 .xcresult 包）。
+# 契约见 catalyst-result-tests.sh 的头注释。
+RESULT_TESTS_SCRIPT="${CATALYST_RESULT_TESTS_SCRIPT:-$SCRIPT_DIR/catalyst-result-tests.sh}"
+set +e
+RESULT_TESTS_JSON=$(bash "$RESULT_TESTS_SCRIPT" "$LOG" 2>&1)
+RESULT_TESTS_STATUS=$?
+set -e
+# 四档 fail-closed：⛔「拿不到数据」绝不等于「没问题」——那正是本仓最常踩的 fail-open。
+if [ "$RESULT_TESTS_STATUS" -ne 0 ]; then
+    fail "结构化结果取数失败（${RESULT_TESTS_SCRIPT} exit=${RESULT_TESTS_STATUS}）：${RESULT_TESTS_JSON}"
+fi
+if [ -z "$RESULT_TESTS_JSON" ]; then
+    fail "结构化结果为空（取数脚本退出码 0 但没有任何输出）—— 无法据此判定测试是否执行"
+fi
+# 解析与节点计数交给 python3（闸门已依赖它跑 uikit-expected-tests.py，⛔ 不引入 jq）。
+# 只依赖「字段是否存在」，⛔ 不依赖 xcresulttool 的版本号字符串：
+# CI（Xcode 16.4）报 "format version 3.53"、本机（Xcode 27）报 "schema version 0.4.0"，
+# 而 2026-10-07 CI 探针实测两边**输出结构逐项相同**。
+set +e
+RESULT_PASSED_NAMES=$(printf '%s' "$RESULT_TESTS_JSON" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception as exc:
+    print(f"PARSE_ERROR {exc}", file=sys.stderr)
+    sys.exit(2)
+total = 0
+out = []
+def walk(node):
+    global total
+    if isinstance(node, dict):
+        if node.get("nodeType") == "Test Case":
+            total += 1
+            if node.get("result") == "Passed":
+                out.append(node.get("name", ""))
+        for val in node.values():
+            walk(val)
+    elif isinstance(node, list):
+        for val in node:
+            walk(val)
+walk(doc)
+if total == 0:
+    sys.exit(3)
+print("\n".join(out))
+' 2>&1)
+RESULT_PARSE_STATUS=$?
+set -e
+case "$RESULT_PARSE_STATUS" in
+    0) ;;
+    3) fail "结构化结果里没有任何测试节点（nodeType == \"Test Case\" 计数为 0）—— 门是空的" ;;
+    *) fail "结构化结果解析失败（python3 exit=${RESULT_PARSE_STATUS}）：${RESULT_PASSED_NAMES}" ;;
+esac
+
 UIKIT_CHECKED_COUNT=0
 while IFS= read -r uikit_test; do
     [ -z "$uikit_test" ] && continue

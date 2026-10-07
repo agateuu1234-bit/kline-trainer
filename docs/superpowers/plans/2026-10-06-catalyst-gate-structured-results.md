@@ -185,22 +185,25 @@ echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/cataly
 - [ ] **Step 2：跑，确认四档都红**，且红的理由是「闸门还没有这条判据」而非别的
 - [ ] **Step 3：建 `catalyst-result-tests.sh`**（只取数：跑 `xcresulttool`，stdout 吐 JSON，失败非 0 退出）
 - [ ] **Step 4：闸门加 fail-closed 前置**（取数失败/空/非法 JSON/零节点 → `fail`），不加任何名字匹配
-- [ ] **Step 5：加一档元测试钉住 fixture 配对规则本身**
+⚠️ **Step 5「元测试」已挪到 Task 4**（实施时发现的顺序错，2026-10-07）：
+那条元测试断言「凡断言 `UIKit-gated 测试未执行` 的 fixture 都有专属 `.tests.json`」，
+而那 2 份 JSON 是 **Task 4** 才造的 ⇒ 放在这里它必然红，等于跨提交带着一条红测试，
+违反「每个 Task 结束时全绿」。它与那 2 份 JSON 应当**同批出现**。
+（此刻 G8 仍读文本，所以那 2 个档位现在还是绿的 —— 问题只在 Task 4 改完 G8 后才成立。）
 
-公共「全 Passed」样本只许给**不经过 G8** 的档位 —— 这条规则靠人记得就会漂。
-⇒ 加一档**对测试台自身的静态检查**：断言「凡 `expect 1 … UIKit-gated 测试未执行` 的 fixture，
-都存在同名 `.tests.json`」。将来有人加 G8 负向档位却忘配 JSON，这一档会红。
+- [ ] **Step 5：跑测试台，读末行**。预期 `M=0` 且 `N = 38 + 4`（M8a/b/c + M9）
+- [ ] **Step 6：提交**
 
-- [ ] **Step 6：跑测试台，读末行**。预期 `M=0` 且 `N = 38 + 5`（M8a/b/c + M9 + 元测试）
-- [ ] **Step 7：提交**
-
-判绿：见上方「判绿口径」—— 跑测试台读末行，`M=0` 且 `N` 比开工基线 38 增加 5。
+判绿：见上方「判绿口径」—— 跑测试台读末行，`M=0` 且 `N` 比开工基线 38 增加 **4**。
 
 ---
 
 ## Task 4 · G8 改读结构化结果
 
 - [ ] **Step 1：写失败的测试** —— M1 / M2 / M3 / M5a / M5b / M6 / M7（见 spec §6）
+      **外加从 Task 3 挪来的那条元测试**：断言「凡断言 `UIKit-gated 测试未执行` 的 fixture
+      都存在同名 `.tests.json`」。它与本 Task 要造的那 2 份 JSON 同批出现，
+      ⇒ 配对规则从此由机械判据钉住，不靠人记得。
 
 ⚠️ **M6 的样本造法**（spec §6 已写明，不得含糊）：取 2026-10-06 那份**真日志**，
 把其中**某条 baseline 测试**的 ✔ 行里一个非 ASCII 字符按**真实形态**替换成 `\NNN`；
@@ -213,7 +216,7 @@ echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/cataly
 - [ ] **Step 3：改 G8** —— 从 JSON 取 `nodeType == "Test Case"` 的节点，按 `name` 对 baseline 80 条逐条找，
       要求存在且 `result == "Passed"`（白名单，Global Constraint 3）。失败信息**必须点名**那条测试。
 - [ ] **Step 4：删掉 G8 的文本匹配**（`match_str` / `grep -qF` 那一段）
-- [ ] **Step 5：跑测试台，读末行**。预期 `M=0` 且 `N` 比 Task 3 末态再增加 7（M1/M2/M3/M5a/M5b/M6/M7）
+- [ ] **Step 5：跑测试台，读末行**。预期 `M=0` 且 `N` 比 Task 3 末态（42）再增加 **8**（M1/M2/M3/M5a/M5b/M6/M7 + 元测试）
 - [ ] **Step 6：提交**
 
 ---

@@ -242,6 +242,14 @@ rm -rf "$R7_ROOT" 2>/dev/null || true
 # 默认值——对当前源码做实时推导，源码推导的保护完全没丢（见本文件末尾的独立验证）。
 export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
 
+# 结构化结果同理解耦（2026-10-07）：G8 改读 xcresult 结构化结果后，闸门每次都要取数，
+# 而 fixture 只有日志、没有二进制 .xcresult 包（它不能签进 git）。
+# ⇒ 经 CATALYST_RESULT_TESTS_SCRIPT 把取数换成桩：按 <name>.log → <name>.tests.json 配对，
+#   找不到就回退共享的 all-passed.tests.json。配对规则与陷阱见桩脚本头注释。
+# 真实 xcodebuild 日志（workflow 里的真跑）不设这个环境变量，仍走 catalyst-result-tests.sh
+# 的默认值去读真包——取数路径的保护完全没丢。
+export CATALYST_RESULT_TESTS_SCRIPT="$FIX/result-tests-stub.sh"
+
 # total 基线同理解耦（2026-07-18）：下面的 fixture 用例测的是「G7 total 判据逻辑」，
 # 不是「main 当前真实总数」。若让它们读活 catalyst-total-baseline.txt，任何大幅增减
 # 测试的 PR（如 #146 加 50 个）把活基线一挪，这些围绕 1407 构造的 fixture 就整片掉出
@@ -739,6 +747,37 @@ else
     echo "  FAIL — 正常路径本该 PASS，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
+
+# ── M8/M9（2026-10-07）：结构化结果取数的 fail-closed 四档 ──
+# 背景：G8 改读 xcresult 结构化结果（spec 2026-10-06 §3）。取数这一步有四种坏情况，
+# 每一种都必须 FAIL，⛔ 不许因为"拿不到数据"就放行——那正是本仓最常踩的 fail-open。
+# 注入缝沿用本文件上方 UIKIT_EXPECTED_TESTS_SCRIPT 的同款模式（环境变量 + 默认值）。
+RT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/catalyst-gate-rt.XXXXXX")"
+RT_CRASH="$RT_DIR/crash.sh";   printf '#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n'            > "$RT_CRASH"
+RT_EMPTY="$RT_DIR/empty.sh";   printf '#!/usr/bin/env bash\nexit 0\n'                             > "$RT_EMPTY"
+RT_BADJSON="$RT_DIR/bad.sh";   printf '#!/usr/bin/env bash\necho "not json at all {{{"\n'         > "$RT_BADJSON"
+RT_NONODE="$RT_DIR/nonode.sh"; printf '#!/usr/bin/env bash\necho %s\n' "'{\"testNodes\":[]}'"     > "$RT_NONODE"
+chmod +x "$RT_CRASH" "$RT_EMPTY" "$RT_BADJSON" "$RT_NONODE"
+
+rt_case() {  # rt_case <脚本> <期望专属子串> <说明>
+    local script="$1" match="$2" desc="$3" out got
+    out=$(CATALYST_RESULT_TESTS_SCRIPT="$script" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+    got=$?
+    if [ "$got" -eq 1 ] && grep -qF -- "$match" <<<"$out"; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=1 且输出含 \"$match\"，实得 exit=$got)"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+rt_case "$RT_CRASH"   "结构化结果取数失败"           "M8a fail-closed：取数脚本非零退出 → 必须 FAIL，不能当成'没有数据所以放行'"
+rt_case "$RT_EMPTY"   "结构化结果为空"               "M8b fail-closed：取数脚本输出为空 → 必须 FAIL"
+rt_case "$RT_BADJSON" "结构化结果解析失败"           "M8c fail-closed：输出不是合法 JSON → 必须 FAIL"
+rt_case "$RT_NONODE"  "结构化结果里没有任何测试节点" "M9 fail-closed：JSON 合法但零个 Test Case 节点 → 门是空的，必须 FAIL"
+
+rm -rf "$RT_DIR"
 
 echo "结果：$PASSED 通过，$FAILED 失败"
 [ "$FAILED" -eq 0 ]
