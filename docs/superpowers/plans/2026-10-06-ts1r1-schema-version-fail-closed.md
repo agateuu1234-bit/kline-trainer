@@ -34,7 +34,51 @@
 2. **⛔ 不加 CHECK 约束**（spec §6，方案 B 已否决）。本片让**漏填**失败，**不校验值对不对** —— 写 `schema_version = 99` 仍会被接受（spec §7 已知局限）。
 3. **⛔ 不动 App 侧** `TrainingSessionCoordinator.swift:1364` 的 `expectedSchemaVersion: 1` 与 `DownloadAcceptanceRunner.swift` 的 `TRAINING_SET_SCHEMA_VERSION = 1` —— 那是设计好的过渡态，属切片二。
 4. **⛔ 不给 m01 矩阵加一致性测试。** spec §7 明确判定这属治理/工具变更，要走自己的 `brainstorming → writing-plans → codex 评审`，记为 backlog。本片只保证自己这次 bump 的 11 个点都改对。
-5. **⛔ 不动 PR #201 那道文本守卫**（两片互不阻塞）。
+5. **⛔ 不动任何一道 `INSERT` 文本守卫** —— 但要分清是哪一道：
+   · **已合并**的 `backend/tests/test_insert_schema_version_guard.py`（#194，在 main 里、今天就在跑）
+     扫 `backend/` · `docs/runbooks/` · `.github/workflows/` 三个目录下的
+     `.py/.sql/.sh/.md/.yml/.yaml`（以及 `Dockerfile*`），**凡 `INSERT INTO training_sets`
+     的列清单里没有 `schema_version` 就报红**。它只豁免**自己一个文件**
+     （`_iter_files` 第 219 行 `if q.resolve() != _SELF`），**没有**通用豁免机制。
+     ⇒ 本片新建的 `0005/rehearse.sh` 落在 `backend/` 下、后缀 `.sh`，**在它视野里**。
+   · **未合并**的 PR #201 是给这道守卫加宿主语言解码层的加固片，本片同样不碰。
+
+5b. **⛔⛔ 「漏填」在演练脚本里必须写成「列清单含 `schema_version`、值写 `DEFAULT`」，
+    不许写成「把该列从列清单里省掉」。**
+
+    这是 **codex 第 1 轮对 plan 的 [high] finding**，已实测坐实。在真路径
+    `backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh` 上做的两个对照：
+
+    | 写法 | 已合并守卫的判定 |
+    |---|---|
+    | 省略列（本计划初稿的写法）| **红** —— 报 `…/0005_schema_version_fail_closed/rehearse.sh:3  列清单=stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash` |
+    | 列清单含 `schema_version`、值写 `DEFAULT` | **绿** —— 解析到 **4 条**语句，`missing=0 / positional=0 / unknown=0` |
+
+    ⇒ 初稿若照原样落盘，`test_every_executable_insert_carries_schema_version`
+    **必然失败**，Global Constraint 15 的 1729 全绿**达不到**。
+
+    **为什么 `DEFAULT` 是等价的**（PostgreSQL 15.12 本机实测，不是查文档）：
+    `VALUES (…, DEFAULT, …)` 的含义是「用该列的默认值；该列没有默认值时用 NULL」——
+    与**把该列从列清单里省掉**完全同义。三个阶段逐一对照过：
+
+    | 阶段 | 省略列 | 值写 `DEFAULT` |
+    |---|---|---|
+    | 有 `DEFAULT 1` | 写入成功，值 = 1 | 写入成功，值 = 1 |
+    | `DROP DEFAULT` 之后 | `ERROR: null value in column "schema_version" … violates not-null constraint` | **同一条报错** |
+    | `SET DEFAULT 1` 回滚后 | 写入成功，值 = 1 | 写入成功，值 = 1 |
+
+    ⛔ **不采纳**「把表名放进变量再拼出来」那条路（codex 的建议之一）：
+    那正是 PR #201 存在的理由 —— 文本守卫对动态表名只能报「判不了」。
+    拿自己标出来的盲点当解法，等于把一个**已知洞**写进仓库当常规做法。
+    `DEFAULT` 这条路相反：表名是字面量、列清单是字面量、不拆不拼不动态，
+    守卫**看得见全部内容并判它合规**。
+
+    ⚠️ **这条写法顺带暴露了那道守卫的一个真实缺口**，必须说出来而不是藏着：
+    守卫**只看列清单、不看值** ⇒ `schema_version` 配 `DEFAULT` 它判合规，
+    而语义上那是「让数据库决定」。本片之后该列**没有默认值** ⇒ 这么写会 fail closed，
+    所以对 `training_sets` 无害 —— 换句话说**是本片的 DDL 兜住了守卫的这个洞**
+    （正是本片的论点：把判据从宿主文本搬到数据库）。
+    ⛔ 给守卫补「值不许是 `DEFAULT`」属 guard-hardening 的范围，**记为 backlog，本片不做**。
 6. **次序约束（最易出错处）**：`schema.sql` **必须先定稿**，然后才能算这三样 —— P6b 的 md5、`CANONICAL_SCHEMA_SHA256`、活目录指纹。反过来全部拿到旧值。
 7. **指纹是三方互钉**：固件（`backend/tests/fixtures/business_catalog_fingerprint.txt`）↔ 常量（`CANONICAL_BUSINESS_CATALOG_SHA256`）↔ 活库。重新生成时**三方必须同时对齐**，只改两方会让「所有正常路径在错的期望上通过」。
 8. **顶层 `CONTRACT_VERSION` 1.14 → 1.15**，11 个同步点，一个不漏（Task 5 逐条列出）。
@@ -113,9 +157,13 @@
 
 ---
 
-## ⚠️ 对 spec 的一处声明性偏离（请评审者优先看这条）
+## ⚠️ 对 spec 的声明性偏离（两处，请评审者优先看）
 
-spec §4③ 写 `rehearse.sh` **三个 Part**。本计划实现**四个** —— 多出来的 **Part 4「活目录指纹三方对齐」**不是新需求，而是 spec §4④ 那条要求（「本地 docker 起 `postgres:15.12`，用改完的 `schema.sql` 建库，取出活目录指纹」+「三方必须同时对齐」）的**执行机制**。
+### 偏离一：`rehearse.sh` 做四个 Part + 一段前置探针（spec §4③ 写三个 Part）
+
+spec §4③ 写 `rehearse.sh` **三个 Part**。本计划实现**四个 + 一段前置探针**。两项多出来的都不是新需求：
+
+**Part 4「活目录指纹三方对齐」**是 spec §4④ 那条要求（「本地 docker 起 `postgres:15.12`，用改完的 `schema.sql` 建库，取出活目录指纹」+「三方必须同时对齐」）的**执行机制**。
 
 为什么放进 `rehearse.sh` 而不是另写一个脚本：
 
@@ -124,6 +172,21 @@ spec §4③ 写 `rehearse.sh` **三个 Part**。本计划实现**四个** ——
 3. ⛔ **不许用「一条命令贴输出」代替脚本** —— 本仓记过「命令超一行必被截断 ⇒ 落脚本」。
 
 ⚠️ 它同时是**指纹的生成手段**：Part 4 在固件还是旧值时会**红并打印活库实际值**（与 ㉕ 档同样的设计），Task 4 就是拿这个红色输出里的值去更新固件与常量，再重跑看它变绿。这个红→绿同时**证明了 Part 4 有判别力**（本仓记过「报 0 违反必须先证明它能报非 0」）。
+
+**Part 1 的前置探针**（克隆表上比对「省略该列」与「值写 `DEFAULT`」）是 Global Constraint **5b**
+那条设计决定的**自证**：整个 Part 1 的说服力都压在「`DEFAULT` ≡ 漏填」这一个命题上，
+而本仓的成文教训是「这类命题必须实测，不能读文档下结论」。探针把它变成每次演练都重新测一遍。
+
+### 偏离二：演练里的「漏填」写成 `DEFAULT`，而不是真的省掉该列
+
+见 Global Constraint **5b** 的完整论证与实测对照表。一句话：spec 没有预见到
+**已合并**的文本守卫（#194）会扫到 `backend/` 下新建的 `.sh`，而它要求每条
+`INSERT INTO training_sets` 的列清单都含 `schema_version`。
+这是 codex 对本计划第 1 轮的 [high] finding，已实测坐实（省略列 → 守卫红并点名该文件）。
+
+⛔ codex 给的建议是「用受控的表名变量构造」，本计划**不采纳** —— 那正是 PR #201
+要封的那个盲点（文本守卫对动态表名只能报「判不了」）。把一个**已知洞**写进仓库当常规做法，
+代价比收益大。`DEFAULT` 这条路的表名与列清单都是字面量，守卫看得见全部内容并判它合规。
 
 ---
 
@@ -655,9 +718,16 @@ git status --short
 
 ---
 
-## Task 3：`rehearse.sh` Part 1–3（Docker 真库演练升降级回环）
+## Task 3：`rehearse.sh` Part 1–3 + 等价性探针（Docker 真库演练升降级回环）
 
 **为什么单独一个 Task：** 它是本片**唯一跑真数据库**的东西，也是 README 里「无数据风险」那句断言的唯一证据来源。评审者完全可能认可迁移 SQL 却不认可演练的覆盖面。
+
+⚠️ **本 Task 必须同时满足两道方向相反的约束**（codex 对 plan 的第 1 轮 [high] finding）：
+· 演练要证明「漏填会失败」⇒ 需要一条**真的漏填**的可执行写入；
+· 已合并的文本守卫要求 `backend/` 下每条 `INSERT INTO training_sets` 的列清单**都含** `schema_version`。
+⇒ 解法是 Global Constraint **5b**：漏填写成「列清单含 `schema_version`、值写 `DEFAULT`」，
+   并在 Part 1 开头加一段**克隆表探针**，把「DEFAULT ≡ 省略该列」从断言变成测量。
+   ⛔ 不用「表名放进变量」那条路 —— 理由见 5b。
 
 **Files:**
 - Create: `backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh`（可执行位）
@@ -709,7 +779,7 @@ cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_bra
 期望：**FAIL**，报文含 `只找到 1 个 rehearse.sh`（0005 的还不存在）。
 ⚠️ 这个红**正是防空转断言在起作用** —— 如果没有那条 `>= 2`，glob 找到 1 个也会静默通过。
 
-- [ ] **Step 3: 建 `rehearse.sh`（Part 1–3）**
+- [ ] **Step 3: 建 `rehearse.sh`（Part 1 前置探针 + Part 1–3 正戏）**
 
 路径：`backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh`
 
@@ -945,10 +1015,85 @@ assert_eq "迁移前：schema_version 的默认值是 1" \
   "$(pg_query "$DB1" "SELECT column_default FROM information_schema.columns WHERE table_name='training_sets' AND column_name='schema_version';")" \
   "1"
 
-# ① 迁移前：漏填 schema_version 的 INSERT 应当成功，且被静默补成 1 —— 这就是本片要消灭的行为
+# ---------- Part 1 前置探针：证明「值写 DEFAULT」≡「省略该列」 ----------
+#
+# ⚠️ 为什么需要这一段：下面全部"漏填"场景都写成「列清单含 schema_version、值写 DEFAULT」
+#    （理由见计划 Global Constraint 5b：已合并的文本守卫会把"省掉该列"的字面量判红）。
+#    于是整个 Part 1 的说服力都压在"DEFAULT ≡ 省略"这一个**断言**上 ——
+#    ⛔ 断言必须变成**测量**。这段就在真库上把两种写法并排跑一遍。
+#
+# 用 training_sets 的**克隆表**做，不用玩具表：克隆表与真表列/类型/可空/默认值/CHECK 全同
+#   （`LIKE … INCLUDING ALL`），免掉"你是在玩具表上证的"这类质疑。
+#   ⚠️ `LIKE … INCLUDING ALL` **不复制外键** ⇒ 探针不需要 stocks 里有对应股票。
+#   ⚠️ `INCLUDING ALL` 会把 `id` 的默认值连同 `nextval('training_sets_id_seq')` 一起复制过来
+#      ⇒ 探针插入会消耗**真序列**的号。本容器是一次性的、Part 1 之后没有任何断言依赖
+#      training_sets.id 的具体取值（Part 3 的整表指纹跑在另一个库上），故无害。
+#   克隆表不是 training_sets ⇒ 它上面那条"省略列"的字面量**不在守卫的 needle 里**
+#   （守卫只找 `INSERT INTO training_sets`）——  这不是绕法，它确实是另一张表。
+
+echo ""
+echo "----- Part 1 前置探针：「值写 DEFAULT」是否真的等于「省略该列」 -----"
+
 pg_exec "$DB1" >/dev/null <<'SQL'
-INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)
-VALUES ('000001', '演练股', 1000, 2000, '/tmp/before.zip', 'aabbccdd');
+CREATE TABLE ts_default_probe (LIKE training_sets INCLUDING ALL);
+SQL
+
+assert_eq "克隆表继承了 schema_version 的默认值 1" \
+  "$(pg_query "$DB1" "SELECT coalesce(column_default,'<无>') FROM information_schema.columns WHERE table_name='ts_default_probe' AND column_name='schema_version';")" \
+  "1"
+assert_eq "克隆表继承了 schema_version 的 NOT NULL" \
+  "$(pg_query "$DB1" "SELECT is_nullable FROM information_schema.columns WHERE table_name='ts_default_probe' AND column_name='schema_version';")" \
+  "NO"
+
+probe_pair() {
+  # $1=阶段描述  $2=本轮用的时间戳前缀（两条探针必须用不同的行，否则撞唯一约束）
+  local phase="$1" n="$2" a b ra rb ka kb
+  a=$(pg_query "$DB1" "INSERT INTO ts_default_probe (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('000001','探针',${n}1,${n}2,'/tmp/a${n}.zip','aaaaaaa1') RETURNING schema_version;" 2>&1) && ra=0 || ra=$?
+  b=$(pg_query "$DB1" "INSERT INTO ts_default_probe (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001','探针',${n}3,${n}4,DEFAULT,'/tmp/b${n}.zip','bbbbbbb2') RETURNING schema_version;" 2>&1) && rb=0 || rb=$?
+  # ⚠️ 判据取**错误身份**（`ERROR:` 那一行），⛔ 不取整段输出：psql 的 `DETAIL:` 行会把
+  #    失败那一行的全部字段打出来（含 id / file_path / content_hash / 时间戳），
+  #    而两条探针插的本来就是**不同的行** ⇒ 整段比对**必然不等**。
+  #    那会得出"两种写法不等价"的**假结论** —— 实测踩过这一步。
+  ka=$(printf '%s' "$a" | grep '^ERROR:' || printf '%s' "$a")
+  kb=$(printf '%s' "$b" | grep '^ERROR:' || printf '%s' "$b")
+  echo "    ${phase}："
+  echo "      省略该列      → 退出码 ${ra}；${ka}"
+  echo "      值写 DEFAULT  → 退出码 ${rb}；${kb}"
+  if [ "$ka" = "$kb" ] && [ "$ra" = "$rb" ]; then
+    pass_msg "${phase}：两种写法的退出码与错误身份逐字相同"
+  else
+    fail_msg "${phase}：两种写法**不等价** —— 那么本脚本此后用 DEFAULT 代替漏填的做法整个失效，必须停下来重新设计"
+    exit 1
+  fi
+}
+
+probe_pair "阶段1 · 有 DEFAULT 1" 10
+pg_query "$DB1" "ALTER TABLE ts_default_probe ALTER COLUMN schema_version DROP DEFAULT;" >/dev/null
+probe_pair "阶段2 · DROP DEFAULT 之后" 20
+pg_query "$DB1" "ALTER TABLE ts_default_probe ALTER COLUMN schema_version SET DEFAULT 1;" >/dev/null
+probe_pair "阶段3 · SET DEFAULT 1 回滚之后" 30
+
+# 防空转：阶段 2 必须真的**失败过**，否则三个阶段全是"都成功"，等价性被证得毫无内容
+if pg_query "$DB1" "INSERT INTO ts_default_probe (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001','探针',901,902,2,'/tmp/c.zip','ccccccc3') RETURNING schema_version;" >/dev/null 2>&1; then
+  pass_msg "探针表在显式给值时仍能写入（防空转：证明上面的失败不是因为这张表根本写不进去）"
+else
+  fail_msg "探针表连显式给值都写不进去 —— 探针自身坏了，上面的等价性结论不可信"
+  exit 1
+fi
+
+pg_exec "$DB1" >/dev/null <<'SQL'
+DROP TABLE ts_default_probe;
+SQL
+pass_msg "探针表已清理（它只为证明等价性而存在，不参与后面的形状断言）"
+
+echo ""
+echo "----- Part 1 正戏 -----"
+
+# ① 迁移前：漏填 schema_version（写成 DEFAULT）的 INSERT 应当成功，且被静默补成 1
+#    —— 这就是本片要消灭的行为
+pg_exec "$DB1" >/dev/null <<'SQL'
+INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash)
+VALUES ('000001', '演练股', 1000, 2000, DEFAULT, '/tmp/before.zip', 'aabbccdd');
 SQL
 assert_eq "迁移前：漏填 schema_version 的写入**成功**，且被静默补成 1（= 本片要消灭的行为）" \
   "$(pg_query "$DB1" "SELECT schema_version FROM training_sets WHERE file_path='/tmp/before.zip';")" \
@@ -973,12 +1118,12 @@ assert_eq "迁移后：列注释已写入" \
 # ③ 迁移后：漏填必须失败，且是**因为 NOT NULL**，不是因为别的
 assert_rejects "迁移后：漏填 schema_version 的写入**被拒**" "$DB1" \
   "violates not-null constraint" \
-  "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, '/tmp/after_missing.zip', 'bbccddee');"
+  "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, DEFAULT, '/tmp/after_missing.zip', 'bbccddee');"
 
 # ③b 报文必须点名是哪一列 —— 不点名的报文会让运维去猜（验收判据 3 的措辞依据）
 MISSING_OUT=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
   psql -U postgres -h 127.0.0.1 -d "$DB1" -v ON_ERROR_STOP=1 -tA \
-  -c "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, '/tmp/after_missing2.zip', 'ccddeeff');" 2>&1 || true)
+  -c "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('000001', '演练股', 3000, 4000, DEFAULT, '/tmp/after_missing2.zip', 'ccddeeff');" 2>&1 || true)
 if printf '%s' "$MISSING_OUT" | grep -q 'schema_version'; then
   pass_msg "报错信息点名了 schema_version（运维不用猜是哪一列）"
 else
@@ -1008,8 +1153,8 @@ assert_eq "回滚后：列注释已撤掉（不留说谎的注释）" \
   "<无注释>"
 
 pg_exec "$DB1" >/dev/null <<'SQL'
-INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)
-VALUES ('000001', '演练股', 7000, 8000, '/tmp/after_rollback.zip', 'eeff0011');
+INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash)
+VALUES ('000001', '演练股', 7000, 8000, DEFAULT, '/tmp/after_rollback.zip', 'eeff0011');
 SQL
 assert_eq "回滚后：漏填又恢复为成功且补 1（证明回滚真的回到了迁移前行为）" \
   "$(pg_query "$DB1" "SELECT schema_version FROM training_sets WHERE file_path='/tmp/after_rollback.zip';")" \
@@ -1097,6 +1242,64 @@ echo "===== 结果 ====="
 echo "[PASS] 全部断言通过，共 ${PASS_COUNT} 条。"
 ```
 
+- [ ] **Step 3b: 先跑已合并的那道 `INSERT` 守卫 —— 并用对照证明它真在看这个文件**
+
+⛔ **这一步必须排在 Step 4（真跑 Docker）之前**：它是静态的、1 秒出结果；
+如果守卫会红，先花 3 分钟起容器毫无意义。
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+(cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -4)
+```
+
+期望：**`3 passed`**。
+
+⚠️ **「绿」本身不算证据** —— 守卫也可能根本没看见这个文件（后缀白名单、路径筛选、
+`__pycache__` 过滤都可能把它静默移出视野，而守卫会照样报「全都合规」）。
+所以必须做**对照 A**：把一条语句临时改成「省略该列」，守卫**必须变红、且报文里出现这个文件的路径**。
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+F=backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh
+
+"$PY" - <<'MUT'
+import pathlib
+f = pathlib.Path("backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh")
+t = f.read_text(encoding="utf-8")
+old = ("(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash)\n"
+       "VALUES ('000001', '演练股', 1000, 2000, DEFAULT, '/tmp/before.zip', 'aabbccdd');")
+new = ("(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash)\n"
+       "VALUES ('000001', '演练股', 1000, 2000, '/tmp/before.zip', 'aabbccdd');")
+assert t.count(old) == 1, f"锚点命中 {t.count(old)} 次 —— 变异没改上，⛔ 不要读下面的结果"
+f.write_text(t.replace(old, new), encoding="utf-8")
+print("变异已施加：第一条 INSERT 的列清单里已无 schema_version")
+MUT
+
+# ⛔ 先证明变异真的改上了，再读测试结果
+#    （本仓栽过「变异没改上而测试打印通过 ⇒ 结论完全反过来」）
+echo "证据 · 不含 schema_version 的 training_sets 列清单条数 = $(grep -c 'end_datetime, file_path' "$F")  （应为 1）"
+(cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -10)
+git checkout -- "$F" && chmod +x "$F"
+```
+
+期望（本计划定稿前已在真路径上实测过一次，输出如下）：
+
+```
+E       AssertionError: `INSERT INTO training_sets` 守卫发现 1 类问题：
+E         【列清单里没有 `schema_version`】…
+E           backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh:3  列清单=stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash
+FAILED tests/test_insert_schema_version_guard.py::test_every_executable_insert_carries_schema_version
+1 failed, 2 passed
+```
+
+⇒ 报文里**出现了这个文件的路径** = 守卫确实在看它；
+   恢复之后又 `3 passed` = `DEFAULT` 写法是被它**判为合规**，不是被它**漏掉**。
+   （定稿前另有一次直接调 `_scan` 的测量：该文件解析出 **4 条**语句、
+   `missing=0 / positional=0 / unknown=0`。）
+
+⚠️ 若对照 A **没有变红**，Step 3b 的「绿」就是假绿 —— **停下来**先搞清它为什么不在视野里，
+⛔ 不要往下走。
+
 - [ ] **Step 4: 赋可执行位，语法检查，再真跑**
 
 ```bash
@@ -1108,6 +1311,25 @@ echo "退出码 = $?"
 ```
 
 期望：所有行都是 `[PASS]`，最后一行 `[PASS] 全部断言通过，共 N 条。`，退出码 **0**。
+
+⚠️ 特别要在输出里找到**前置探针**那三组（它们是整个 Part 1 的地基）：
+
+```
+    阶段1 · 有 DEFAULT 1：
+      省略该列      → 退出码 0；1
+      值写 DEFAULT  → 退出码 0；1
+  [PASS] 阶段1 · 有 DEFAULT 1：两种写法的退出码与错误身份逐字相同
+    阶段2 · DROP DEFAULT 之后：
+      省略该列      → 退出码 1；ERROR:  null value in column "schema_version" of relation "ts_default_probe" violates not-null constraint
+      值写 DEFAULT  → 退出码 1；ERROR:  null value in column "schema_version" of relation "ts_default_probe" violates not-null constraint
+  [PASS] 阶段2 · DROP DEFAULT 之后：两种写法的退出码与错误身份逐字相同
+    阶段3 · SET DEFAULT 1 回滚之后：（同阶段 1，退出码 0、值 1）
+  [PASS] 阶段3 · SET DEFAULT 1 回滚之后：两种写法的退出码与错误身份逐字相同
+```
+
+⚠️ **阶段 2 必须是退出码 1**。若三个阶段全是退出码 0，说明 `DROP DEFAULT` 没施加到探针表上，
+等价性就被「证」得毫无内容。脚本里那条「显式给值仍能写入」的防空转断言挡不住这一种，
+所以这里要用眼睛确认一次。
 
 ⚠️ 若 Docker 不可用，脚本第一步就会打印 `[FAIL] 未检测到 docker` 并 `exit 1` —— 那时**不要**往下走，先把 Docker 起来。
 
@@ -1125,8 +1347,11 @@ cd backend && "$PY" -m pytest tests/test_migrations.py::test_rehearse_script_bra
 cd backend && "$PY" -m pytest -q 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)"
 git add backend/sql/migrations/0005_schema_version_fail_closed/rehearse.sh backend/tests/test_migrations.py
-git commit -m "feat(ts1r1): 0005 rehearse.sh Part 1-3（Docker 真库演练）
+git commit -m "feat(ts1r1): 0005 rehearse.sh 前置探针 + Part 1-3（Docker 真库演练）
 
+- Part 1 前置探针：在 training_sets 的克隆表上证明「值写 DEFAULT」≡「省略该列」
+  （三阶段比对退出码 + ERROR 行；⛔ 不比整段输出 —— DETAIL 行含行数据必然不等）
+  ⇒ 这是整个 Part 1 的地基：漏填必须写成 DEFAULT 形式才能过已合并的文本守卫（GC 5b）
 - Part 1 完整升降级回环：迁移前漏填成功补 1 → forward → 漏填被 NOT NULL 拒且报文点名该列
   → 显式给值仍成功（防恒拒）→ rollback → 漏填又恢复补 1
 - Part 2 存量行不变：样本刻意混 1/2/7 三个代号（单一值的样本看不出被改写）
@@ -1773,6 +1998,21 @@ git grep -n "INSERT INTO training_sets" -- backend docs scripts | cut -c1-160
 
 期望：每一处要么显式列出了 `schema_version`，要么是散文/测试输出/注释（不是真写入）。⛔ 逐条看过再下结论 —— 本仓记过「N 个调用点 ≠ 语义都一样」。
 
+⚠️ **本片新增的 4 处会出现在这个清单里，而且它们的「值」是 `DEFAULT`**
+（`0005/rehearse.sh` 的演练语句，理由见 Global Constraint 5b）。
+它们**列出了** `schema_version` ⇒ 文本守卫判合规；而**值是 `DEFAULT`** ⇒ 迁移后它们
+会 fail closed —— 这正是演练要证明的事。⛔ 别把它们当成「漏填的生产写入」报上来。
+真正写生产库的只有 `backend/generate_training_sets.py` 那一条（守卫的格子锚点 `("backend", ".py")`
+就是钉它的），它显式给的是真实代号，不是 `DEFAULT`。
+
+另外跑一次「值是不是 DEFAULT」的对账，把两类分开看：
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+echo "--- 列清单含 schema_version 且值写 DEFAULT 的（应当只有 0005/rehearse.sh 的 4 条）---"
+git grep -n "schema_version, file_path, content_hash)" -- backend | cut -c1-120
+```
+
 - [ ] **Step 4: 核验 spec §5 判据 6 —— 改动面集合等式**
 
 ```bash
@@ -1832,6 +2072,8 @@ Step 4 的期望就是「`git diff --name-status origin/main...HEAD | sort` 的�
 | 4 | 在第 2 条的输出里找这一行 | `[PASS] 迁移后：显式写 schema_version=2 仍成功（正向对照，证明不是恒拒）` —— 这证明我们没把写入**全部**挡掉，只挡了漏填 | |
 | 4b | 在第 2 条的输出里找这一行 | `[PASS] 升降级一圈之后**整张表的内容指纹**逐字节不变 ⇒ rollback 确实无数据损失` —— 说明「改回去」不会弄丢数据 | |
 | 4c | 在第 2 条的输出里找这一行 | `[PASS] 活库指纹里已无 training_sets.schema_version 的默认值记录` —— 说明数据库自己确认了默认值真的没了 | |
+| 4d | 在第 2 条的输出里找这三行 | `[PASS] 阶段1 …`、`[PASS] 阶段2 …`、`[PASS] 阶段3 …`（都以「两种写法的退出码与错误身份逐字相同」结尾）。⚠️ 并且**阶段 2 那一组的退出码必须是 1**（两行都是 `退出码 1`）—— 这一组是整个演练的地基：它证明演练里写的 `DEFAULT` 跟「真的漏填」是一回事 | |
+| 4e | 敲 `cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q` | `3 passed`。这是仓库里一道**已有**的检查：它要求所有会被执行的写入语句都必须写明「产物代号」这一列。本片新加的演练脚本必须让它继续是绿的 | |
 | 5 | 在项目根目录敲 `git diff --name-status origin/main...HEAD \| sort` | 输出的文件列表与本片实施计划 Task 7 Step 4 那张表**逐行相同**。多一个文件或少一个文件都算不通过 | |
 | 6 | 在项目根目录敲 `git grep -n '1\.14' -- backend ios \| grep -v '3\.11\.14'` | **只有 3 行**，都在 `M01MatrixSyncGuardTests.swift`（第 61、74、79 行）。那三行是故意留的「反面例子」，用来证明检查程序不会被骗。⛔ 若 `backend/qmt_pilot_db.py` 或 `Models.swift` 还出现 `1.14`，说明版本号漏改了 | |
 | 7 | 在项目根目录敲 `sed -n '28,31p' docs/governance/m01-schema-versioning-contract.md` | 「顶层标识」那一行的版本是 `` `"1.15"` ``；「PostgreSQL schema」那一行是 `` `0005_schema_version_fail_closed` ``。⚠️ **第二行没有任何自动检查盯着它**，只能靠眼睛看，所以这一条要特别仔细 | |
@@ -1876,7 +2118,8 @@ git commit -m "docs(ts1r1): 非程序员可执行的验收清单（CLAUDE.md 治
 |---|---|---|
 | §4① `schema.sql` 去默认值 + 列注释 | Task 1 Step 5 | 注释原文逐字抄自 spec |
 | §4② 迁移 0005 四件套 | Task 2（forward/rollback/README）+ Task 3（rehearse.sh） | 目录名 `0005_schema_version_fail_closed`；PG 系列此前只有 0004，0005 空号可用 |
-| §4③ rehearse.sh 三个 Part | Task 3 Part 1–3 | ⚠️ 另加 Part 4，已在「对 spec 的一处声明性偏离」一节明写理由 |
+| §4③ rehearse.sh 三个 Part | Task 3 Part 1–3 + 前置探针 | ⚠️ 另加 Part 4 与前置探针，两处都在「对 spec 的声明性偏离」一节明写理由 |
+| （spec 未覆盖）已合并文本守卫的兼容性 | Global Constraint 5 / 5b + Task 3 Step 3b | ⚠️ **spec 没预见到这一条**；codex 对 plan 第 1 轮的 [high] finding，已实测坐实 |
 | §4④ 两道闸门 + 两份哈希 + 一份指纹 | Task 1 Step 7（P6b 两处 + `CANONICAL_SCHEMA_SHA256`）+ Task 4（指纹固件 + `CANONICAL_BUSINESS_CATALOG_SHA256`） | 次序约束兑现：`schema.sql` 在 Task 1 Step 5 定稿，三样哈希全在其后 |
 | §4④ 三方互钉 | Task 4 Part 4 的三条腿断言 | 第三条腿（常量↔活库）此前只活在跑不起来的 ㉕ 档里 |
 | §4⑤ 11 个 bump 同步点 | Task 5 | Step 1 的 13 行命中表做了「9 改 + 4 不改」的集合等式 |
