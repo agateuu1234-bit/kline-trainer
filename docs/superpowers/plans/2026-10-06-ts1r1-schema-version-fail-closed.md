@@ -1535,12 +1535,15 @@ MUT
 
 # ⛔ 先证明变异真的改上了，再读测试结果
 #    （本仓栽过「变异没改上而测试打印通过 ⇒ 结论完全反过来」）
-echo "证据 · 不含 schema_version 的 training_sets 列清单条数 = $(grep -c 'end_datetime, file_path' "$F")  （应为 1）"
+# ⚠️ 证据模式**必须带表名**。只写 `end_datetime, file_path` 会把**探针表**那一行
+#    （`INSERT INTO ts_default_probe (… end_datetime, file_path, …)` —— 它合法地省略该列）
+#    一起数进来 ⇒ 未变异时就已经是 1、变异后是 2，期望值全错。实测踩过这一步。
+echo "证据 · training_sets 里不含 schema_version 的列清单条数 = $(grep -c 'INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path' "$F" || true)  （应为 1）"
 (cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -10)
 
 # 还原，并**证明还原成功**（⛔ 不是"执行了还原命令"就算 —— 本仓记过"还原用相对路径会静默失败"）
 cp "$BAK" "$F" && chmod +x "$F" && rm -f "$BAK"
-echo "还原后 · 不含 schema_version 的条数 = $(grep -c 'end_datetime, file_path' "$F")  （应为 0）"
+echo "还原后 · training_sets 里不含 schema_version 的条数 = $(grep -c 'INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, file_path' "$F" || true)  （应为 0）"
 (cd backend && "$PY" -m pytest tests/test_insert_schema_version_guard.py -q 2>&1 | tail -4)
 ```
 
