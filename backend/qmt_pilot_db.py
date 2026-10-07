@@ -1276,7 +1276,7 @@ REQUIRED_BUSINESS_TABLES = ("stocks", "klines", "stock_coverage", "training_sets
 #    字节相同 → 列、类型、NOT NULL、主键、索引、外键全对，**由构造保证**。
 #    模块不读文件（不耦合仓库布局）；防漂移交给
 #    `test_canonical_schema_hashes_match_the_repo_files` —— 改了 .sql 而没更新常量，它当场变红。
-CANONICAL_SCHEMA_SHA256 = "02c47d43b5bf64c8d61140f1d080c142f63e994679c69eff9142571568dbc28a"
+CANONICAL_SCHEMA_SHA256 = "b3ad42848b2e18dfe6a758ba7fda82b2a771b155c697fd1c7fe09096cfef8edc"
 CANONICAL_PILOT_SCHEMA_SHA256 = "8d018f98c5a29583e4eea8204680ea09f570ab9b3acf5479fb01ea0745527d7a"
 # ⚠️ **`pilot_cluster_schema.sql` 同样必须钉字节**：4a-1 给 schema.sql 与
 #    pilot_schema.sql 各钉了规范哈希，唯独这份漏了 —— 而它是 `--init-cluster-marker`

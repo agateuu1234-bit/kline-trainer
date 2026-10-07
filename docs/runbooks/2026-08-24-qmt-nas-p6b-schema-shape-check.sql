@@ -18,7 +18,7 @@
 --   ③ 索引：pg_indexes 的完整 indexdef（**含部分索引的 WHERE 谓词与有序列**）。
 --
 -- ⚠️ 本文件是 backend/sql/schema.sql 在 PostgreSQL 15.12 上产出形状的**快照**：
---    schema.sql md5 = 2e4b074d5a4607d53a00c849855434d5
+--    schema.sql md5 = b573b453e6fdaf8e28a00065f8309207
 --    若 schema.sql 变了，本文件必须重新生成（症状：在**全新空卷**上本门也会红 ——
 --    全新卷还红就说明是快照过期，不是部署有问题）。
 --
@@ -57,7 +57,7 @@ CREATE TEMP VIEW p6b_want_col(tbl, col, want_type, want_null, want_default) AS V
     ('training_sets', 'stock_name', $p6b$character varying(50)$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
     ('training_sets', 'start_datetime', $p6b$bigint$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
     ('training_sets', 'end_datetime', $p6b$bigint$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
-    ('training_sets', 'schema_version', $p6b$integer$p6b$, $p6b$NOT NULL$p6b$, $p6b$1$p6b$),
+    ('training_sets', 'schema_version', $p6b$integer$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
     ('training_sets', 'file_path', $p6b$text$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
     ('training_sets', 'content_hash', $p6b$character(8)$p6b$, $p6b$NOT NULL$p6b$, $p6b$$p6b$),
     ('training_sets', 'created_at', $p6b$timestamp without time zone$p6b$, $p6b$NULL$p6b$, $p6b$now()$p6b$),
