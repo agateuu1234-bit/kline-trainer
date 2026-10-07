@@ -335,7 +335,11 @@ def test_p6b_snapshot_records_the_actual_schema_md5():
     gate = (Path(__file__).parent.parent.parent / "docs" / "runbooks"
             / "2026-08-24-qmt-nas-p6b-schema-shape-check.sql")
     text = gate.read_text(encoding="utf-8")
-    assert f"schema.sql md5 = {actual}" in text, (
+    # ⚠️ 判据先算成一个布尔量再断言。直接写 `assert f"…" in text, …` 时，
+    #    pytest 的断言改写会把 `text` 整个打进失败信息 —— 实测那是**整份闸门文件**
+    #    （数百行 SQL），真正有用的那两行 md5 被埋在里面看不见。
+    recorded = f"schema.sql md5 = {actual}" in text
+    assert recorded, (
         f"P6b 快照文件头注释里记的 md5 与 schema.sql 实际 md5 不符。\n"
         f"  实际 md5：{actual}\n"
         f"  改了 schema.sql 就必须重新生成 {gate.name} 并同步这一行。")
@@ -384,6 +388,14 @@ cd backend && "$PY" -m pytest tests/test_schema.py -v
 - `test_training_sets_schema_version_has_no_default` **由红转绿**
 - `test_training_sets_schema_version_is_still_not_null` 仍绿
 - `test_p6b_snapshot_records_the_actual_schema_md5` **由绿转红**（md5 变了）← 这就是它的红
+
+⭐ **这三条的状态已在定稿前真跑过一次**（在本 worktree 上把 Task 1 Step 5 的改动落下去、
+跑完再还原）。实测结果与上面逐条吻合：`2 passed, 1 failed`，失败那条打印出的新 md5 是
+**`b573b453e6fdaf8e28a00065f8309207`**，对应的新 sha256 是
+**`b3ad42848b2e18dfe6a758ba7fda82b2a771b155c697fd1c7fe09096cfef8edc`**。
+⚠️ 这两个值**仅供对照**（确认你改出来的 `schema.sql` 与演练时那一份字节相同）——
+⛔ Step 7 仍必须填**你自己那次命令打印出来的值**，不要抄这里。
+还原之后整套后端回到 `1720 passed`、退出码 0（已实测）。
 
 再跑一次整套后端，确认此刻的红**恰好只有两处**（而不是一片）：
 
@@ -710,6 +722,11 @@ cd backend && "$PY" -m pytest tests/test_migrations.py -k 0005 -v 2>&1 | tail -2
 ```
 
 期望：`6 passed`。
+
+⭐ **这六条已在定稿前真跑过一次**（把 0005 四件套与这六条落到本 worktree、跑完再还原）：
+连同 Task 3 Step 1 扩宽后的 CJK 守卫一起 **`8 passed`**。
+其中 `test_migration_0005_comment_text_is_byte_identical_to_schema_sql` 确认可用 ——
+它要跨 `schema.sql` 里那条**两行式**的 `COMMENT ON`（`\s+` 能吃掉换行），这一点光读代码看不出来。
 
 - [ ] **Step 7: 提交**
 
