@@ -25,6 +25,24 @@
 6. **`.github/workflows/**` 对 Claude 硬 deny** ⇒ 走 ceremony：写 `/tmp` → user `cp`。⛔ 不许用 heredoc 绕过。
 7. 本仓 CI 是 **macos-15 / Xcode 16**；本机是 **Xcode 27**。⛔ 本机绿不能当 CI 绿（spec §4.4）。
 
+### ⚠️ 判绿口径（本片所有 Task 共用，⛔ 不许各写一套）
+
+**唯一权威 = 测试台自己打印的末行** `结果：N 通过，M 失败`。判绿条件两条：
+
+1. **`M = 0`**；
+2. **`N ≥ 开工基线`**。⚠️ 开工基线 = **2026-10-07 实跑所得 `38`**
+   （不是 20，也不是 23 —— 见下方「三个数的区别」）。
+
+⛔ **不许用 grep 推算档位数当判据。** 本片已为此连错三次：
+`fixtures/` 下有 **23 个文件**（含非 `.log`）、**20 份 `.log`**、`20` 个 `expect` 行，
+而测试台实报 **38** 条断言（另外 18 条是内联的 fail-closed / TMPDIR / 结构性回归等）。
+三个数都"对"，但只有 **38** 是「有多少条断言在跑」的答案。
+依据：`feedback_derived_counts_rot_faster_than_totals`（派生数比总数更会变错且更隐蔽
+⇒ **要么现场量，要么别写**）。
+
+⇒ 每个 Task 的判绿一律写成：**跑测试台 → 读末行 → `M=0` 且 `N` 比上一 Task 增加了预期条数**。
+⛔ 不写「XX 档全绿」。
+
 ---
 
 ## File Structure
@@ -173,10 +191,10 @@ echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/cataly
 ⇒ 加一档**对测试台自身的静态检查**：断言「凡 `expect 1 … UIKit-gated 测试未执行` 的 fixture，
 都存在同名 `.tests.json`」。将来有人加 G8 负向档位却忘配 JSON，这一档会红。
 
-- [ ] **Step 6：跑，五档转绿**；再跑现有 **20** 档，确认**一个都没被弄红**
+- [ ] **Step 6：跑测试台，读末行**。预期 `M=0` 且 `N = 38 + 5`（M8a/b/c + M9 + 元测试）
 - [ ] **Step 7：提交**
 
-判绿：`bash .github/scripts/catalyst-gate.test.sh` 全绿且档位数 = 原数 + 4。
+判绿：见上方「判绿口径」—— 跑测试台读末行，`M=0` 且 `N` 比开工基线 38 增加 5。
 
 ---
 
@@ -195,7 +213,7 @@ echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/cataly
 - [ ] **Step 3：改 G8** —— 从 JSON 取 `nodeType == "Test Case"` 的节点，按 `name` 对 baseline 80 条逐条找，
       要求存在且 `result == "Passed"`（白名单，Global Constraint 3）。失败信息**必须点名**那条测试。
 - [ ] **Step 4：删掉 G8 的文本匹配**（`match_str` / `grep -qF` 那一段）
-- [ ] **Step 5：跑，全绿**；现有 **20** 档仍全绿（⚠️ 20 = 档位数；`fixtures/` 下 23 是**文件**数，含非 `.log`）
+- [ ] **Step 5：跑测试台，读末行**。预期 `M=0` 且 `N` 比 Task 3 末态再增加 7（M1/M2/M3/M5a/M5b/M6/M7）
 - [ ] **Step 6：提交**
 
 ---
@@ -230,7 +248,7 @@ G7 继续读文本汇总行。本 Task 只做两件小事，⛔ 不改 G7 的判
 ## Task 7 · 全矩阵 + 三道闸门
 
 - [ ] **Step 1**：跑完整 M0–M9（含 M5a/M5b 两档对照），逐档记录「红/绿 + 红在哪条判据」
-- [ ] **Step 2**：跑 `bash .github/scripts/catalyst-gate.test.sh`（档位全绿）
+- [ ] **Step 2**：跑 `bash .github/scripts/catalyst-gate.test.sh`，读末行：`M=0`，并把 `N` 的终值记进验收清单
 - [ ] **Step 3**：本机真跑一次 Catalyst（带 `-resultBundlePath`），用真包跑闸门 ⇒ `GATE PASS`
 - [ ] **Step 4**：⚠️ **本机绿 ≠ CI 绿**（Global Constraint 7）⇒ 这一步只是必要条件，CI 由 PR 验
 - [ ] **Step 5**：提交

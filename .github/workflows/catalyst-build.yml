@@ -66,7 +66,32 @@ jobs:
             -scheme KlineTrainerContracts-Package \
             -destination 'platform=macOS,variant=Mac Catalyst' \
             -only-testing:KlineTrainerContractsTests \
-            -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log
+            -derivedDataPath /tmp/derived \
+            -resultBundlePath /tmp/catalyst.xcresult 2>&1 | tee /tmp/catalyst-build.log
+
+      # ⛔⛔ 一次性探针，随本 PR 一起关掉、**不进 main** ⛔⛔
+      # 目的：在 CI 的真实 Xcode 上回答两个本机无法回答的问题（plan Task 1 / spec §4.4）：
+      #   ① `xcrun xcresulttool get test-results tests` 在这里**存不存在**（看退出码）
+      #   ② 它的 JSON 字段名 / 中文显示名与本机 Xcode 27 是否一致
+      # ⚠️ 判绿标准是**人去读下面的输出**，不是「这一步绿了」—— 它只打印、从不失败。
+      - name: PROBE（勿合）— xcresult 在 CI 上到底长什么样
+        if: always()
+        run: |
+          echo "=== 1 CI 实际版本 ==="
+          xcodebuild -version
+          xcrun xcresulttool version
+          echo "=== 2 子命令是否存在：看退出码，别看有没有输出 ==="
+          set +e
+          xcrun xcresulttool get test-results tests \
+            --path /tmp/catalyst.xcresult --format json > /tmp/probe-tests.json
+          echo "xcresulttool exit=$?"
+          set -e
+          echo "   产出大小: $(wc -c < /tmp/probe-tests.json 2>/dev/null || echo 0) 字节"
+          echo "=== 3/4 字段名 / 中文完好性 / 框架维度 / baseline 逐条对账 ==="
+          python3 .github/scripts/probe-xcresult.py /tmp/probe-tests.json || echo "   解析失败（本身就是答案之一）"
+          echo "=== 交叉核对：同次运行的文本计数 ==="
+          grep -oE "Test run with [0-9]+ tests" /tmp/catalyst-build.log | head -1 || true
+          echo "XCTest 汇总行数: $(grep -cE 'Executed [0-9]+ tests?, with' /tmp/catalyst-build.log || true)"
 
       # 闸门判据实现在 .github/scripts/catalyst-gate.sh（含 fixture 单元测试，见上一步）。
       # 判据摘要：TEST SUCCEEDED 标记 / 编译器 error（锚定 .swift:行:列 格式，免疫 xctest 运行期
