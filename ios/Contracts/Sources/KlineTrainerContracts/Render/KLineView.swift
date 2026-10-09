@@ -74,6 +74,17 @@ public final class KLineView: UIView {
         // candle/线/标记，不填整 bounds。切换 scheme 重绘时残留旧 scheme 像素 → 明暗混杂伪影。isOpaque=false
         // 令 UIKit 每帧清空上下文 + 透出 SwiftUI 底色，消除伪影并符合透明画布设计意图。
         isOpaque = false
+        // 整支评审 Important 1：`isMultipleTouchEnabled` 默认 `false` ⇒ 第二指落在**同一个**
+        // KLineView 上时，UIKit **根本不会再调一次** `touchesBegan`（本视图只收多点序列里的第一个
+        // 触摸）⇒ `:40` 的 `else { onMultiTouchBegan?() }` 分支永远走不到，候选在「同面板第二指」
+        // 这条路径上**不会**被清——真机症状：按住黑点、候选已捕获、pan 还没 `.began`，这时落第二指
+        // 捏合缩放、再抬第二指、继续移动第一指 ⇒ pan 这才 `.began`，拿到的是**陈旧候选**（复核按
+        // D140b 刻意不重做几何），用户以为在继续平移，结果却开始拖节点。
+        // 打开本开关只影响**本视图自己**收不收多点触摸、不影响任何手势识别器（pan/pinch/长按都是
+        // 独立于视图 `isMultipleTouchEnabled` 的通道，两指缩放今天已经工作证明了这一点）；本文件
+        // 只覆写了 `touchesBegan` 一个方法，`:40` 的分支判据早已按 `total != 1` 写好、只是此前够
+        // 不到——打开开关即可让它真正接住。
+        isMultipleTouchEnabled = true
         // 顺位9：trait 的 userInterfaceStyle 变化（系统切暗/亮，或 preferredColorScheme 改 display_mode）→ 重绘。
         // 用「系统传入实例」重载 (view, previousTrait)，零 self 捕获，无 retain cycle（勿改成捕获 self）。
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: KLineView, _: UITraitCollection) in

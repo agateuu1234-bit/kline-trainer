@@ -622,6 +622,53 @@ struct NodeDragCandidateTests {
                 "B 的锚点必须原样不变——写入等于把一条无关线的数据被陈旧回调污染")
     }
 
+    // MARK: 整支评审阻断修复：`.began` 占槧时若槧非空，必须先把旧槧就地定住（spec `:236`/`:665-667` 的 fail-closed 兜底）
+    //
+    // spec 明写这一支在 D135c 之后**结构上不可达**（全局选中唯一，拖动要求"选择态+有选中"，
+    // 到不了另一条线的 `.began` 占槧路径），但要求**保留**为 fail-closed 兜底，否则槧一旦因任何
+    // 原因残留，Task 7 的十道写入门会把底栏永久锁灰、tap 又解不开，用户只能切模式/退出画线自救。
+    // ⛔ 不可达 ⇒ 不能靠正常入口（`setSelection` 的 `tapSelectionAllowed` 守卫）构造——必须像
+    // `staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`（`:604`）那样，直调
+    // `@testable` 可见的内部 mutator `beginNodeDrag` 绕过守卫，强行造出这个坏状态。
+
+    @Test("`.began` 占槧时若槧已非空（直调内部 mutator 构造的坏状态）⇒ 旧槧必须先被就地定住（写一次+记一条撤销），新槧随后占成功")
+    func beginNodeDragFinalizesStaleOwnerBeforeOccupyingNewSlot() throws {
+        let rig = makeRig(id: "A")
+        // 同面板追加第二条线 B 并选中、捕获它的候选——这是"即将合法占槧"的那个候选（同 cause⑤ 先例的
+        // "同面板换选中"构造，`:171-186`）。
+        rig.engine.injectDrawingsForTesting(
+            rig.engine.drawings + [makeStyledHLine(id: "B", revealTick: 0,
+                                                   period: rig.engine.upperPanel.period, candleIndex: 0, price: 10)])
+        rig.engine.drawingSession.setSelection(id: "B", panel: .upper)
+        let pB = try nodePoint(rig, id: "B")
+        rig.coordinator.captureNodeDragCandidateForTesting(at: pB)
+        #expect(rig.coordinator.nodeDragCandidateForTesting?.drawingID == "B", "前提：B 的候选真的建立了")
+
+        // 直接用内部 mutator 强行把槧占成 A——构造 spec 明写"结构上不可达"的坏状态：
+        // 槧记的是 A，此刻选中/候选却都是 B。
+        let staleOwner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 0, grabPoint: .zero)
+        let staleAnchor = DrawingAnchor(period: rig.engine.upperPanel.period, candleIndex: 0, price: 99)
+        rig.engine.drawingSession.beginNodeDrag(staleOwner, anchor: staleAnchor)
+        #expect(rig.engine.drawingSession.nodeDragOwner?.drawingID == "A", "前提：槧确实被强行占成了 A")
+
+        let aAnchorBefore = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        #expect(aAnchorBefore != staleAnchor, "自检：staleAnchor 与 A 现在的提交值不同，否则下面「写入了」断言会空洞自洽")
+        let revisionBefore = rig.engine.drawingsRevision
+
+        rig.coordinator.handleNodeDragForTesting(translation: .zero, phase: .began)
+
+        // ① 旧槧（A）必须被就地定住：写一次、记一条撤销，写入的锚点就是占槧时留下的 staleAnchor
+        //   （`finalizeNodeDragInPlace` 用的是 `nodeDragCurrent`，不是本帧 translation——同 D138 既有纪律）。
+        #expect(rig.engine.drawingsRevision == revisionBefore + 1, "A 必须被写入恰好一次（就地定住）")
+        let aAnchorAfter = try #require(rig.engine.drawings.first(where: { $0.id == "A" })).anchors[0]
+        #expect(aAnchorAfter == staleAnchor, "A 被写入的锚点必须是占槧时留下的 nodeDragCurrent（staleAnchor）")
+        #expect(rig.engine.canUndoDrawing == true, "必须留下一条可撤销记录")
+
+        // ② 新槧（B）必须占成功——不是继续卡在 A、也不是变成 nil。
+        #expect(rig.engine.drawingSession.nodeDragOwner?.drawingID == "B", "新槧必须是 B")
+        #expect(rig.engine.drawingSession.nodeDragCurrent != nil, "B 的 nodeDragCurrent 必须已经写入")
+    }
+
     // MARK: 订正 2（Critical）：终止相位必须无条件清槧
 
     @Test("订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧")

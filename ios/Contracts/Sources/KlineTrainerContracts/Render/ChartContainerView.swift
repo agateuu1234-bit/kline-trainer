@@ -553,15 +553,25 @@ public struct ChartContainerView: UIViewRepresentable {
                 let viewport = view.renderState.viewport
                 guard viewport.geometry.candleStep > 0 else { return }
                 let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
-                // 订正 1 的精确化：此刻 `beginNodeDrag` 还没被调用、`nodeDragOwner` 仍为 nil ⇒
-                // Task 10 的覆盖不生效，`committedDraggableDrawing` 在这一相位本就等价于
-                // 「从 visibleDrawings 取」——改用它只是让「几何基准只有一处写法」，非功能性改动。
+                // 几何基准用 `committedDraggableDrawing`（提交值 + 可见性判据），理由见该函数头注；
+                // 本相位是否受 Task 10 覆盖影响与此无关（下面那道 fail-closed 兜底才是唯一相关的事）。
                 guard let c = nodeDragCandidate,
                       let (drawing, tool) = committedDraggableDrawing(drawingID: c.drawingID),
                       let anchor = DrawingNodeDrag.draggedAnchor(
                           drawing: drawing, anchorIndex: c.anchorIndex, translation: translation,
                           mapper: mapper, tool: tool)
                 else { nodeDragCandidate = nil; return }
+                // spec `:236`/`:665-667`：D135c 之后这一支**实际不可达**——B 压根选不中（全局选中
+                // 唯一，拖动要求「选择态 + 有选中」，到不了别的面板/线的 `.began` 占槽路径）——
+                // 但 spec 明令**保留为 fail-closed 兜底**：① 将来放宽 D135c（允许拖动中换选中）时，
+                // 这是唯一能在下一次 `.began` 收掉残留槧的地方；② 槧一旦因任何原因残留（终止相位
+                // 丢失、面板视图在拖动中被 SwiftUI 重建导致 Coordinator 换人），Task 7 的十道写入门
+                // 会把底栏永久锁灰，而 `handleDrawingTap` 的 `.select` 分支又被**同一道门**挡住 ⇒
+                // 点图表也解不开，用户只能切模式/退出画线自救——这一支堵住的正是「静默丢掉上一次
+                // 调整、且界面卡死」这个后果。⛔ 不得因为测不了就删掉它，⛔ 也不得假装测到了。
+                if let staleOwner = session.nodeDragOwner {
+                    finalizeNodeDragInPlace(staleOwner)
+                }
                 session.beginNodeDrag(c, anchor: anchor)
                 nodeDragCandidate = nil                 // 候选已被消费（D140b 第三行）
                 rebuildRenderState(bounds: view.bounds)

@@ -292,16 +292,41 @@ struct NodeDragSourceGuardTests {
 
     // MARK: - G14
 
-    /// 从「@discardableResult」紧跟的下一行取 `static func <name>(` 的 `<name>`。
-    private func discardableResultFunctionNames(in code: String) -> Set<String> {
-        let lines = code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    /// 整支评审 Important 2：原来按「@discardableResult」紧跟的下一行取函数名——但那个标注只是
+    /// 「调用方可不可以忽略返回值」的语法事实，与「这个函数会不会真的写引擎状态」没有必然关系。
+    /// `applyPanelStyleMutation` / `routeAndSelect` 返回 `Void`、从未带这个标注，却确实在函数体里
+    /// 调了引擎写入 API ⇒ 对旧判据**完全不可见**。改成按**函数体内是否出现引擎写入 API 的字面
+    /// 调用**定义域——这是本文件实际在用的全部写入面（`engine.update*` / `delete*` /
+    /// `setDrawingLocked` / `undoDrawing` / `redoDrawing` / `routeDrawingCommit`（内部转发
+    /// `appendDrawing`/`appendReviewDrawing`）/ `session.setDefaultStyle`），任何将来新增的写入
+    /// 入口、或谁摘掉一个 @discardableResult，都逃不出这张清单。
+    private static let engineWriteAPILiterals = [
+        "engine.updateDrawingStyle(", "engine.deleteDrawing(", "engine.setDrawingLocked(",
+        "engine.undoDrawing(", "engine.redoDrawing(", "engine.routeDrawingCommit(",
+        "session.setDefaultStyle(",
+    ]
+
+    /// 全文件按字面扫 `static func <name>(` 形态的函数名（含 `private static func`——"static func "
+    /// 子串即算，不管前面有没有访问级别修饰符）。
+    private func allStaticFunctionNames(in code: String) -> Set<String> {
         var names: Set<String> = []
-        for (i, line) in lines.enumerated() where line.trimmingCharacters(in: .whitespaces) == "@discardableResult" {
-            var j = i + 1
-            while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).isEmpty { j += 1 }
-            guard j < lines.count, let r = lines[j].range(of: "func ") else { continue }
-            let rest = lines[j][r.upperBound...]
+        for line in code.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(line)
+            guard let r = line.range(of: "static func ") else { continue }
+            let rest = line[r.upperBound...]
             if let paren = rest.firstIndex(of: "(") { names.insert(String(rest[rest.startIndex..<paren])) }
+        }
+        return names
+    }
+
+    /// 新定义域：{全部 `static func`} 里函数体包含至少一个引擎写入 API 字面调用的那些。
+    private func engineWriteFunctionNames(in code: String) -> Set<String> {
+        var names: Set<String> = []
+        for name in allStaticFunctionNames(in: code) {
+            guard let b = body(of: "static func \(name)(", in: code) else { continue }
+            if Self.engineWriteAPILiterals.contains(where: { b.contains($0) }) {
+                names.insert(name)
+            }
         }
         return names
     }
@@ -320,13 +345,14 @@ struct NodeDragSourceGuardTests {
         return names
     }
 
-    @Test("G14 拖动门的覆盖是集合等式：{写入入口} ∪ {Enabled 谓词} 恰好 10 个，每个都调 nodeDragInFlight；且该判据读 nodeDragOwner 不读 nodeDragCurrent")
+    @Test("G14 拖动门的覆盖是集合等式：{引擎写入函数} ∪ {Enabled 谓词} 恰好 7+5 个，每个都调 nodeDragInFlight；且该判据读 nodeDragOwner 不读 nodeDragCurrent")
     func dragGateCoverageIsSetEquality() throws {
         let code = try source(editRouter)
-        let writes = discardableResultFunctionNames(in: code)
+        let writes = engineWriteFunctionNames(in: code)
         let enabled = enabledPredicateNames(in: code)
         // ⛔ 「这几个各自存在」抓不到“多出来的第十一个”——必须是集合等式，不是逐个 contains。
-        #expect(writes == ["applyStyle", "deleteSelected", "toggleLockSelected", "undo", "redo"])
+        #expect(writes == ["applyStyle", "deleteSelected", "toggleLockSelected", "undo", "redo",
+                           "applyPanelStyleMutation", "routeAndSelect"])
         #expect(enabled == ["styleControlsEnabled", "deleteButtonEnabled", "lockButtonEnabled",
                             "undoButtonEnabled", "redoButtonEnabled"])
         for name in writes.union(enabled) {

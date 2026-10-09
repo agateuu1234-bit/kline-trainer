@@ -298,6 +298,14 @@ enum DrawingEditRouter {
     ///    选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。
     static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
                                         engine: TrainingEngine) {
+        // 整支评审 Important 2：本函数返回 `Void`、没有 `@discardableResult`，G14 原来按那个标注
+        // 挑函数 ⇒ 对本函数**完全不可见**。今天无害——拖动只可能发生在"选择态+有选中"（D135b/c
+        // 构造性不变量），本函数三分支里只有那一支在拖动期间可达，而那一支只调 `applyStyle`（已有
+        // W1 门）、不碰 `session.defaultStyle`（Task 7 Step 5 的实测结论，`NodeDragEditRouterGateTests
+        // .applyPanelStyleMutationDuringDrag` 钉住，⛔ 本行不是因为那条结论错了才加的）。这里补的门
+        // 是**另一件事**：让 G14 的集合等式真正覆盖"函数体内有引擎写入 API 字面调用"这整个定义域，
+        // 不依赖"刚好只有一个可达分支、那个分支刚好已经被挡住"这种需要两步推理才看得出的性质。
+        guard !nodeDragInFlight(engine: engine) else { return }
         // D102（1b-ii 撤销 PR）：画线态的一次改样式是**两处写入**（本局默认 + 那条线）。
         // 包在作用域里，两处合并成**一条**撤销记录 —— undo / redo 一并回滚一并重做。
         // ⚠️ 必须包住**整个**函数体，不是只包 `.draw` 分支：将来任何人给别的分支补上
@@ -348,6 +356,9 @@ enum DrawingEditRouter {
     ///    文件里（host 上根本不编译），且「三处保持一致」没有任何机制保证。
     ///
     /// `commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点（源码守卫 G1 / G1b）。
+    /// ⚠️ 本函数自己不调任何引擎写入 API（`session.commitPending`/`clearSelection` 都不是），
+    ///    不在 G14 新定义域里；它经**唯一**调用点 `routeAndSelect` 转调写入 API，而那边已经
+    ///    补了门（见其头注）——拖动中真正的写入发生在那里，这里不需要再挡一次。
     static func commitPendingAndSelect(panel: PanelId, mapper: CoordinateMapper, engine: TrainingEngine) {
         let session = engine.drawingSession
 
@@ -385,6 +396,12 @@ enum DrawingEditRouter {
     /// ⚠️ 生产路径上**只有外层 `commitPendingAndSelect` 一个调用点**（源码守卫 G6）——
     ///    拆内外两层**不得**变成两个生产入口。
     static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine) {
+        // 整支评审 Important 2（同 `applyPanelStyleMutation` 头注）：本函数返回 `Void`，G14 按
+        // `@discardableResult` 挑函数时对它不可见，而它确实调了引擎写入 API（`routeDrawingCommit`）。
+        // 今天无害——生产路径上只能从 `.draw` 模式的提交流程到达，拖动要求 `.select`+有选中，
+        // 两者由 `setMode`/`clearSelection` 的构造性不变量互斥——但补这道门让 G14 的集合等式
+        // 真正覆盖整个写入面，不依赖"调用方永远先经过 `.draw` 模式检查"这条隐式前提。
+        guard !nodeDragInFlight(engine: engine) else { return }
         // ③ 提交**前**的存在性快照。**必须在 ④ 之前求值**：挪到 ④ 之后恒为 true
         //    → 第 ⑥ 步的合取项 ① 恒假 → 自动选中整体失效（变异 M5c）。
         let wasPresent = engine.drawings.contains { $0.id == committed.id }
