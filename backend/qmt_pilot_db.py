@@ -824,7 +824,7 @@ async def assert_cluster_allowed(maint_conn, *, connect, target_db: str | None) 
 
 # 与 ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift 的 CONTRACT_VERSION
 # 逐字相等。两边必须同时改（test_contract_version_matches_swift_source_of_truth 是这条的钉）。
-CONTRACT_VERSION = "1.14"
+CONTRACT_VERSION = "1.15"
 
 # pilot_meta 的九个键，顺序固定。
 # created_at **不参与放行判定，但参与令牌派生**（spec O1-F14）。
@@ -1276,7 +1276,7 @@ REQUIRED_BUSINESS_TABLES = ("stocks", "klines", "stock_coverage", "training_sets
 #    字节相同 → 列、类型、NOT NULL、主键、索引、外键全对，**由构造保证**。
 #    模块不读文件（不耦合仓库布局）；防漂移交给
 #    `test_canonical_schema_hashes_match_the_repo_files` —— 改了 .sql 而没更新常量，它当场变红。
-CANONICAL_SCHEMA_SHA256 = "02c47d43b5bf64c8d61140f1d080c142f63e994679c69eff9142571568dbc28a"
+CANONICAL_SCHEMA_SHA256 = "b3ad42848b2e18dfe6a758ba7fda82b2a771b155c697fd1c7fe09096cfef8edc"
 CANONICAL_PILOT_SCHEMA_SHA256 = "8d018f98c5a29583e4eea8204680ea09f570ab9b3acf5479fb01ea0745527d7a"
 # ⚠️ **`pilot_cluster_schema.sql` 同样必须钉字节**：4a-1 给 schema.sql 与
 #    pilot_schema.sql 各钉了规范哈希，唯独这份漏了 —— 而它是 `--init-cluster-marker`
@@ -1391,7 +1391,7 @@ SELECT
 """
 
 # 由 ㉕ 档在真 PG 上生成/校验；PG 大版本升级后需重新生成（见上）。
-CANONICAL_BUSINESS_CATALOG_SHA256 = "e5a87293f44a7f7193b8d2727bb76906a24ad3e94e9e8f67eeaca74cec9e53a8"
+CANONICAL_BUSINESS_CATALOG_SHA256 = "0e3f46f45d65040283c43596ee014a94eef43e445c89429e329cc930bbad502c"
 
 # ⚠️ **业务表也要证「没有行为对象」**（O4-R34-C1）：`_PILOT_TABLE_DEPENDENTS_SQL` 只管
 #    两张 pilot 表 —— 同一条判据在业务表上**没做**（本 PR 里「只修被点名的那一处」的又一次）。
