@@ -855,6 +855,34 @@ mx_case "$FIX/superstring-name.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
 # G7 仍读文本汇总行（spec §4.1 的机械化版本）：结构化结果里只有 28 个节点，
 # 而文本汇总行说 1407（在冻结基线 1407±30 内）。G7 读文本 ⇒ GATE PASS。
 # 有人把 G7 改成数结构化节点 ⇒ 28 远低于下限 ⇒ 这一档立刻变红 = 红旗。
+# R5 闭合（2026-10-11）：函数形式（末尾 "()"）的测试名，结构化 name 与期望清单逐字相同。
+# 交付时全树没有函数形式的 UIKit-gated 测试 ⇒ 原本只能记成残留。实测真包发现 2054 个节点里
+# 有 495 个是函数形式（源码 `@Test func 名字()`、文本日志印作 `✔ Test 名字() passed after`、
+# 结构化 name 就是 `名字()`），于是把那个节点**原样搬进** fixture，正反两档钉死。
+# ⇒ 将来真有人加一条函数形式的 UIKit-gated 测试，这两档已经覆盖了它。
+mx_case_with_list() {  # mx_case_with_list <清单脚本> <json> <log> <期望退出码> <期望子串> <说明>
+    local list="$1" json="$2" log="$3" want="$4" match="$5" desc="$6" stub out got
+    stub="$MX_DIR/stub-list-$RANDOM.sh"; mx_stub "$stub" "$json"
+    out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$list" CATALYST_RESULT_TESTS_SCRIPT="$stub" bash "$GATE" "$FIX/$log" 2>&1)
+    got=$?
+    if [ "$got" -eq "$want" ] && { [ -z "$match" ] || grep -qF -- "$match" <<<"$out"; }; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=$want${match:+ 且含 \"$match\"}，实得 exit=$got)"
+        echo "         闸门末行: $(tail -1 <<<"$out")"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+FUNCFORM='g3_replayBaseline_captures_all_include_defaultStyle()'
+mx_case_with_list "$FIX/uikit-expected-tests-frozen-plus-funcform.py" \
+    "$FIX/frozen-28-plus-funcform.tests.json" pass-ci-format.log 0 "" \
+    "R5 正向：期望清单含一条**函数形式**的测试，结构化结果里有同名 Passed 节点 → 必须 PASS（逐字相等对两种写法都成立）"
+mx_case_with_list "$FIX/uikit-expected-tests-frozen-plus-funcform.py" \
+    "$FIX/only-frozen-28.tests.json" pass-ci-format.log 1 "$FUNCFORM" \
+    "R5 反向：同一清单，但结构化结果里**没有**那条函数形式 → 必须 FAIL 并点名它（⛔ 别因为带括号就匹配不上还放行）"
+
 mx_case "$FIX/only-frozen-28.tests.json" pass-ci-format.log 0 "" \
     "G7 仍读文本汇总行：结构化只有 28 个节点、文本说 1407 → 必须 PASS（⛔ G7 刻意不迁移）"
 

@@ -29,7 +29,7 @@
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structured" && bash .github/scripts/catalyst-gate.test.sh | tail -1
 ```
 
-**预期**：最后一行是 `结果：53 通过，0 失败`
+**预期**：最后一行是 `结果：55 通过，0 失败`
 
 **通过 / 不通过**：□ 通过　□ 不通过
 
@@ -71,7 +71,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structured" && bash .github/scripts/catalyst-gate-judgment-check.sh
 ```
 
-**预期**：最后一行是 `✅ 有判别力：停掉 G8 判据后测试台变红，还原后回到『结果：53 通过，0 失败』`
+**预期**：最后一行是 `✅ 有判别力：停掉 G8 判据后测试台变红，还原后回到『结果：55 通过，0 失败』`
 （前面会依次打出三行数字：基线全绿 → 停掉判据后**有失败** → 还原后又全绿）
 
 **通过 / 不通过**：□ 通过　□ 不通过
@@ -129,7 +129,8 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 | 闸门跑真档案 + 真日志 | **GATE PASS** |
 | 正向对照：从真档案里删掉 1 条 | **GATE FAIL，并点名**被删的那一条 |
 | **端到端对照**：把真日志里某条测试的「通过」行做成劈字状态 | 改前的闸门 → **假红**（退出码 1）；改后的闸门 → **GATE PASS** |
-| 七条变异（故意改坏）+ 反向对照 | 每一个新测试档都至少被一条变异杀掉；还原后回到 53 通过 0 失败 |
+| 「函数写法的测试名在结果档案里长什么样」 | **原先我记成「没有样本可验」——这是错的**：真档案 2054 个节点里 495 个就是函数写法。已把其中一个原样搬进样本，加了正反两档钉住 |
+| 七条变异（故意改坏）+ 反向对照 | 13 个新测试档每一档都至少被一条变异杀掉（已逐档对账）；还原后回到 55 通过 0 失败 |
 
 明细见变异记录那份文件。
 
@@ -139,7 +140,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 
 1. **总用例数那条判据（G7）继续读文字，没有一起改。**
    三条理由：① 它的文字里不含测试名，劈字伤不到它；② 改它会连带废掉一批既有的检查
-   —— 这一条已用变异 G 实测：改了之后 14 档变红，其中确有既有检查；③ 文字说 1935、
+   —— 这一条已用变异 G 实测：改了之后 15 项检查变红，其中 10 项是本次改动之前就有的；③ 文字说 1935、
    结果档案说 2054，两个数本就不同口径，不改就不必处理这个差。
    并且加了一档测试钉住它「仍读文字」，谁改它就会立刻红。
 
@@ -155,7 +156,6 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 
 | 编号 | 内容 | 影响 |
 |---|---|---|
-| **R5**（实施期新发现，权威表述见设计文档 §7） | 现在全项目**没有任何一条**「函数写法」的待核测试（冻结清单 28 条、活清单 80 条都是 0 条），所以「函数写法的名字在结果档案里长什么样」**没有样本可验**。 | 将来有人新增这种写法的测试、而闸门报它「未执行」时，**先查 `catalyst-gate.sh` 里 G8 那段注释**，别急着放宽判据。注释里已写明此事。 |
 | R2（设计文档已记） | 劈字本身不会消失，日志给人看时仍会偶尔出现 | 不影响判定 |
 | R3（设计文档已记） | 总用例数的基准值仍靠人工同步 | 既有机制，本次不碰 |
 | R4（设计文档已记） | 没改 `app-build.yml` | 已核实它根本不跑测试，不受本缺陷影响 |
