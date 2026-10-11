@@ -1305,7 +1305,7 @@ extension TrainingEngine {
             text: old.text, fontSize: old.fontSize,
             textColorToken: old.textColorToken, textForm: old.textForm,
             tailAnchor: old.tailAnchor)
-        // ⑥ D80：**短路的条件是「相等」**（生产范式 `guard updated != old else { return true }`，`:1212`）。
+        // ⑥ D80：**短路的条件是「相等」**（生产范式 `guard updated != old else { return true }`，`:1219`）。
         // ⛔ 写反成「不相等就短路」会恰好覆盖所有真正改变锚点的拖动 ⇒ 松手报成功却没写、线当场弹回。
         guard updated != old else { return true }
         drawings[i] = updated

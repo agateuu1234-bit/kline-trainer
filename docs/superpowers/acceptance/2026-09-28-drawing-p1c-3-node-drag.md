@@ -116,7 +116,7 @@
 
 ### E. 范围外 backlog（本片不做，但要记）
 
-- `TrainingEngine.swift:1248-1257`（`setDrawingLocked` 内的 17 字段手抄）**没有往返恒等测试**——本片给另外两份同款手抄（`updateDrawingAnchor`、`RenderStateBuilder` 的 `applyNodeDragOverride`）都补了「改回原值 ⇒ 整个对象 `==` 相等」的往返测试，这第三份属于**既有代码**，按仓规"注意到就说、不顺手改"保留现状。补它的成本现在很低（写法已有两份先例可以照抄）。
+- `TrainingEngine.swift:1248-1257`（`setDrawingLocked` 内的 17 字段手抄）**没有往返恒等测试**——本片给另外三份同款手抄（`updateDrawingAnchor`、`RenderStateBuilder` 的 `applyNodeDragOverride`、`DrawingNodeDrag` 的 `candidateWithReplacedAnchor`，整支评审 M1 补齐第三份）都补了「改回原值 ⇒ 整个对象 `==` 相等」的往返测试，这第四份属于**既有代码**，按仓规"注意到就说、不顺手改"保留现状。补它的成本现在很低（写法已有三份先例可以照抄）。
 
 ### F. 诚实备案（⛔ 不改写历史提交，仅备案）
 

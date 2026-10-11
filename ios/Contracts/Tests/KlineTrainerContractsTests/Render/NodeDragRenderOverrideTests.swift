@@ -11,8 +11,9 @@
 //   D135b：归属不变量（owner.drawingID == session.selectedDrawingID）不成立 ⇒ 不施加覆盖，
 //         且本函数是纯读——调用前后 `nodeDragOwner`/`nodeDragCurrent`/`drawingsRevision` 一个都不许变（G10）。
 // 订正 1/2 额外钉住「18 参数 init 里 14 个带默认值，手抄漏一个编译器不报错」这一族缺陷：
-// 两处手抄（Task 10 的 `applyNodeDragOverride` + Task 3 的 `updateDrawingAnchor`）各有一条
-// 「换回原锚点 ⇒ 与原对象整体相等」的往返恒等测试，夹具全部 14 个可配置字段都设成非默认值。
+// 三处手抄（Task 10 的 `applyNodeDragOverride` + Task 3 的 `updateDrawingAnchor` + Task 2 的
+// `DrawingNodeDrag.candidateWithReplacedAnchor`，整支评审 M1 补）各有一条「换回原锚点 ⇒ 与原对象
+// 整体相等」的往返恒等测试，夹具全部 14 个可配置字段都设成非默认值。
 import CoreGraphics
 import Foundation
 import Testing
@@ -320,6 +321,32 @@ struct NodeDragRenderOverrideTests {
         // ⛔⛔ 不许改回「按 id 查找」取 written——那会让这条断言的输入里重新含有它要断言的
         // 那个值，退回恒真（修复环第1轮 Important；Minor 一并处理）。
         #expect(written.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
+    }
+
+    // MARK: - 整支评审 M1：手抄完整性③（DrawingNodeDrag.producesRealNode 的候选构造）
+
+    /// 第三份 17 字段手抄（`DrawingNodeDrag.swift` 的 `candidateWithReplacedAnchor`，`producesRealNode`
+    /// 内部调它）此前没有往返测试——它只通过 `producesRealNode` 的 `Bool` 返回值间接暴露，而
+    /// `thickness`/`colorToken`/`labelMode`/`text`/`fontSize`/`textColorToken`/`textForm`/
+    /// `tailAnchor`/`isExtended` 这 9 个字段都不影响几何/可见性判定 ⇒ 漏传它们时 `Bool` 不变，
+    /// 判别力恒为零。直接调测试入口拿到候选对象本身，不经 mapper/tool/几何——与 `producesRealNode`
+    /// 的 `Bool` 输出无关，专测字段拷贝完整性。
+    @Test("手抄完整性③（producesRealNode 的候选构造）：换回原锚点 ⇒ 与原对象整体相等（含 id）")
+    func producesRealNodeCandidatePreservesEveryField() throws {
+        let original = fullFieldFixture(id: "FIXTURE-C")
+        let newAnchor = DrawingAnchor(period: .m60, candleIndex: 4, price: 77)
+
+        let candidate = try #require(
+            DrawingNodeDrag.candidateWithReplacedAnchorForTesting(newAnchor, in: original, anchorIndex: 1))
+
+        #expect(candidate.anchors[1] == newAnchor)
+        #expect(candidate.anchors[1] != original.anchors[1])
+
+        let candidateNormalized = try zeroingAnchors(candidate)
+        let originalNormalized = try zeroingAnchors(original)
+        #expect(candidateNormalized == originalNormalized,
+                "换回锚点后其余所有字段必须与原对象逐字段相等")
+        #expect(candidate.id == original.id, "id 必须原样保留——DrawingObject.== 不覆盖这一项")
     }
 
     // MARK: - Task 11 订正 1（Critical）：几何基准必须是提交值，⛔ 不得是 `visibleDrawings` 的覆盖值

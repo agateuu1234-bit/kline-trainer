@@ -454,7 +454,7 @@ public struct ChartContainerView: UIViewRepresentable {
             return true
         }
 
-        /// 测试入口（照 `handleDrawingTapForTesting`（`:323`）的先例）
+        /// 测试入口（照 `handleDrawingTapForTesting`（`:335`）的先例）
         func captureNodeDragCandidateForTesting(at point: CGPoint) { captureNodeDragCandidate(at: point) }
         func acceptNodeDragCandidateForTesting() -> Bool { acceptNodeDragCandidate() }
         var nodeDragCandidateForTesting: DrawingSession.NodeDragOwner? { nodeDragCandidate }
@@ -490,9 +490,9 @@ public struct ChartContainerView: UIViewRepresentable {
         /// 共用这一个身份判据，⛔ 分支体内不出现 `selectedDrawingID` / `selectedPanel` 的字面比较——
         /// 把「来源不符」「归属不符」两种失败都折进这一个函数的返回值里，调用方只管 switch。
         private enum NodeDragLookup {
-            /// ① 来源不符：槧为空，或本次回调不属于本面板（别人的槧 / 已经陈旧）。
+            /// ① 来源不符：槽为空，或本次回调不属于本面板（别人的槽 / 已经陈旧）。
             case notOurs
-            /// ② 归属不符：`finalizeNodeDragInPlace` 已经在本函数内部**就地定住 + 清槧**，调用方忽略本次回调。
+            /// ② 归属不符：`finalizeNodeDragInPlace` 已经在本函数内部**就地定住 + 清槽**，调用方忽略本次回调。
             case finalized
             /// 几何/工具都齐——正常相位可以继续算这一帧。
             case ready(owner: DrawingSession.NodeDragOwner, drawing: DrawingObject,
@@ -506,7 +506,7 @@ public struct ChartContainerView: UIViewRepresentable {
         private func activeNodeDrag() -> NodeDragLookup {
             guard let engine, let view else { return .notOurs }
             let session = engine.drawingSession
-            // ① 先判来源：槧非空 且 本次回调来自 nodeDrag.panel。
+            // ① 先判来源：槽非空 且 本次回调来自 nodeDrag.panel。
             guard let owner = session.nodeDragOwner, owner.panel == panel else { return .notOurs }
             // ② 再判归属：(owner.panel, owner.drawingID) == (selectedPanel, selectedDrawingID)。
             guard owner.drawingID == session.selectedDrawingID,
@@ -523,7 +523,7 @@ public struct ChartContainerView: UIViewRepresentable {
                                                    displayScale: view.traitCollection.displayScale))
         }
 
-        /// 收尾的共用写法：**先清槧、再写**（避免覆盖影响写入读到的 `old`）；取不到锚点就只清槧不写
+        /// 收尾的共用写法：**先清槽、再写**（避免覆盖影响写入读到的 `old`）；取不到锚点就只清槽不写
         /// （fail-closed，D138 既有纪律）。`finalizeNodeDragInPlace`（D135b ②）与 `.ended`/`.cancelled`
         /// 的收尾分支**共用**本函数，⛔ 不三处各写一遍。
         private func finalizeAndCommit(owner: DrawingSession.NodeDragOwner, anchor: DrawingAnchor?) {
@@ -564,7 +564,7 @@ public struct ChartContainerView: UIViewRepresentable {
                 // spec `:236`/`:665-667`：D135c 之后这一支**实际不可达**——B 压根选不中（全局选中
                 // 唯一，拖动要求「选择态 + 有选中」，到不了别的面板/线的 `.began` 占槽路径）——
                 // 但 spec 明令**保留为 fail-closed 兜底**：① 将来放宽 D135c（允许拖动中换选中）时，
-                // 这是唯一能在下一次 `.began` 收掉残留槧的地方；② 槧一旦因任何原因残留（终止相位
+                // 这是唯一能在下一次 `.began` 收掉残留槽的地方；② 槽一旦因任何原因残留（终止相位
                 // 丢失、面板视图在拖动中被 SwiftUI 重建导致 Coordinator 换人），Task 7 的十道写入门
                 // 会把底栏永久锁灰，而 `handleDrawingTap` 的 `.select` 分支又被**同一道门**挡住 ⇒
                 // 点图表也解不开，用户只能切模式/退出画线自救——这一支堵住的正是「静默丢掉上一次
@@ -588,12 +588,12 @@ public struct ChartContainerView: UIViewRepresentable {
             case .ended, .cancelled:
                 switch activeNodeDrag() {
                 case .notOurs:
-                    return                                // ① 陈旧回调/别人的槧 —— 不碰任何状态
+                    return                                // ① 陈旧回调/别人的槽 —— 不碰任何状态
                 case .finalized:
-                    return                                // ② 归属不符 —— activeNodeDrag 内部已就地定住 + 清槧
+                    return                                // ② 归属不符 —— activeNodeDrag 内部已就地定住 + 清槽
                 case .ready(let owner, let drawing, let tool, let mapper):
                     // ⭐ 订正 2：无条件终止——先尽力按本帧真实位移算一个锚点，算不出就退回已有的
-                    //   nodeDragCurrent，再清槧、再写（顺序理由同 finalizeAndCommit 头注）。
+                    //   nodeDragCurrent，再清槽、再写（顺序理由同 finalizeAndCommit 头注）。
                     let anchor = DrawingNodeDrag.draggedAnchor(
                         drawing: drawing, anchorIndex: owner.anchorIndex, translation: translation,
                         mapper: mapper, tool: tool) ?? session.nodeDragCurrent
@@ -608,7 +608,7 @@ public struct ChartContainerView: UIViewRepresentable {
             }
         }
 
-        /// 测试入口（照 `handleDrawingTapForTesting`（`:323`）的先例）。
+        /// 测试入口（照 `handleDrawingTapForTesting`（`:335`）的先例）。
         func handleNodeDragForTesting(translation: CGPoint, phase: GesturePhase) {
             handleNodeDrag(translation: translation, phase: phase)
         }

@@ -27,7 +27,7 @@ public enum DrawingNodeDrag {
     /// **是必须的**，⛔ 写掉它线会朝反方向跑。
     ///
     /// `candleStep <= 0`（空图表）→ `nil`：除法会产出 inf/NaN，而 `Int(NaN)` 是 **trap**（进程崩）。
-    /// 既有 `handleDrawingTap` 有同款守卫（`ChartContainerView.swift:337`，另见 `:279` / `:295`）。
+    /// 既有 `handleDrawingTap` 有同款守卫（`ChartContainerView.swift:349`，另见 `:291` / `:307`）。
     public static func anchorDelta(translation: CGPoint, mapper: CoordinateMapper) -> AnchorDelta? {
         let step = mapper.viewport.geometry.candleStep
         let height = mapper.viewport.mainChartFrame.height
@@ -46,7 +46,7 @@ public enum DrawingNodeDrag {
     ///
     /// ⛔ **不要退回「`visibleGeometry != nil`」**：`.straight` 的几何完全不看锚点 x
     /// （`HorizontalLineTool.swift:54-55`）⇒ 锚点被夹到右缘之外时**线照常可见**，而 `marks`
-    /// 会把越界的 x 转成 `.proxy`（`DrawingNodeGeometry.swift:73-74`）、`hitTestNode` 又把 proxy
+    /// 会把越界的 x 转成 `.proxy`（`DrawingNodeGeometry.swift:71-72`）、`hitTestNode` 又把 proxy
     /// 排除在命中集合之外（`:104`）⇒ **线还在、黑点却再也抓不住**。那条判据在 `.straight` 上
     /// 被**空洞地满足**（spec 第 12 轮实证）。
     ///
@@ -55,7 +55,23 @@ public enum DrawingNodeDrag {
     public static func producesRealNode(anchor: DrawingAnchor, in drawing: DrawingObject,
                                         anchorIndex: Int, mapper: CoordinateMapper,
                                         tool: any DrawingTool) -> Bool {
-        guard drawing.anchors.indices.contains(anchorIndex) else { return false }
+        guard let candidate = candidateWithReplacedAnchor(anchor, in: drawing, anchorIndex: anchorIndex)
+        else { return false }
+        let marks = DrawingNodeGeometry.marks(
+            for: candidate, mapper: mapper,
+            isVisible: tool.isVisible(drawing: candidate, mapper: mapper),
+            maxAnchors: tool.requiredAnchors.upperBound)
+        return marks.contains { if case .real(let i, _) = $0 { return i == anchorIndex }; return false }
+    }
+
+    /// 整支评审 M1：`producesRealNode` 的 17 字段手抄（见下方实现）此前只能靠它自己的 `Bool`
+    /// 返回值间接验证——而大多数字段（`thickness`/`colorToken`/`text`/… 共 9 个）不影响几何/
+    /// 可见性判定，漏传它们时 `Bool` 返回值不会变，判别力恒为零。抽成具名 helper，production
+    /// 与下面的 `...ForTesting` 入口**调同一份**，测试才能真的看见手抄构造出来的完整对象，
+    /// 而不是另造一份与 production 脱节、会各自漂移的副本。
+    private static func candidateWithReplacedAnchor(_ anchor: DrawingAnchor, in drawing: DrawingObject,
+                                                     anchorIndex: Int) -> DrawingObject? {
+        guard drawing.anchors.indices.contains(anchorIndex) else { return nil }
         var anchors = drawing.anchors
         anchors[anchorIndex] = anchor
         // ⚠️ `DrawingObject` **没有** `withAnchors`（实测）⇒ 就地用完整成员 init 逐字段拷贝，
@@ -63,7 +79,7 @@ public enum DrawingNodeDrag {
         //    ⛔ 不要为此给 `DrawingObject` 加新 API（YAGNI，且会扩大本片对 Models 的改动面）。
         //    ⚠️ `period` **显式传** `drawing.period`：init 的默认行为是从 `anchors.first?.period` 现取，
         //       候选锚点若周期不同会静默改掉整条线的周期。
-        let candidate = DrawingObject(
+        return DrawingObject(
             id: drawing.id, toolType: drawing.toolType, anchors: anchors,
             isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
             revealTick: drawing.revealTick, period: drawing.period,
@@ -73,11 +89,14 @@ public enum DrawingNodeDrag {
             text: drawing.text, fontSize: drawing.fontSize,
             textColorToken: drawing.textColorToken, textForm: drawing.textForm,
             tailAnchor: drawing.tailAnchor)
-        let marks = DrawingNodeGeometry.marks(
-            for: candidate, mapper: mapper,
-            isVisible: tool.isVisible(drawing: candidate, mapper: mapper),
-            maxAnchors: tool.requiredAnchors.upperBound)
-        return marks.contains { if case .real(let i, _) = $0 { return i == anchorIndex }; return false }
+    }
+
+    /// 测试入口（照 `handleDrawingTapForTesting` 的先例）：暴露 `producesRealNode` 内部那份
+    /// 17 字段手抄构造出来的完整对象，供往返恒等测试用。⛔ 不是另一份构造逻辑——调用的是
+    /// 生产代码里**同一个** `candidateWithReplacedAnchor`。
+    static func candidateWithReplacedAnchorForTesting(_ anchor: DrawingAnchor, in drawing: DrawingObject,
+                                                       anchorIndex: Int) -> DrawingObject? {
+        candidateWithReplacedAnchor(anchor, in: drawing, anchorIndex: anchorIndex)
     }
 
     /// D134d + D137：把一次位移变成**已夹取**的新锚点。

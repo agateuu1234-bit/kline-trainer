@@ -107,7 +107,7 @@ enum DrawingEditRouter {
     ///
     /// `point` 的契约（D134e）：探针传**那一次触摸的按下点**，复核传**候选记下的那个按下点**
     /// ——⇒ 同一个点。坐标空间一律是**本面板视图的局部坐标**，与 `PanelShield.rect`
-    /// （`DrawingSession.swift:168` 注释「面板局部坐标」）和 `handleDrawingTap` 拿到的 `point` 同一空间。
+    /// （`DrawingSession.swift:223` 注释「面板局部坐标」）和 `handleDrawingTap` 拿到的 `point` 同一空间。
     static func nodeDragPreconditions(engine: TrainingEngine, panel: PanelId, point: CGPoint) -> Bool {
         let session = engine.drawingSession
         // ① 选择态：画线态下点图表是落锚、恒不做命中判定（D38），节点也不存在
@@ -115,7 +115,7 @@ enum DrawingEditRouter {
         // ② 本面板就是 selectedPanel：选中是 (selectedPanel, selectedDrawingID) 二元组（D41）。
         //    ⛔ 少了它，选中在上面板时下面板按同一屏幕位置也会拖动上面板的线。
         guard session.selectedPanel == panel else { return false }
-        // ③ 盾：与 handleDrawingTap（ChartContainerView.swift:342-344）**逐字同判据**
+        // ③ 盾：与 handleDrawingTap（ChartContainerView.swift:353-357）**逐字同判据**
         switch session.shield[panel == .upper ? 0 : 1] ?? .unshielded {
         case .unshielded:       break
         case .pending:          return false
