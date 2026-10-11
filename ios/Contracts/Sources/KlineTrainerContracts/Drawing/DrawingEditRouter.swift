@@ -305,12 +305,16 @@ enum DrawingEditRouter {
         // .applyPanelStyleMutationDuringDrag` 钉住，⛔ 本行不是因为那条结论错了才加的）。这里补的门
         // 是**另一件事**：让 G14 的集合等式真正覆盖"函数体内有引擎写入 API 字面调用"这整个定义域，
         // 不依赖"刚好只有一个可达分支、那个分支刚好已经被挡住"这种需要两步推理才看得出的性质。
-        guard !nodeDragInFlight(engine: engine) else { return }
         // D102（1b-ii 撤销 PR）：画线态的一次改样式是**两处写入**（本局默认 + 那条线）。
         // 包在作用域里，两处合并成**一条**撤销记录 —— undo / redo 一并回滚一并重做。
         // ⚠️ 必须包住**整个**函数体，不是只包 `.draw` 分支：将来任何人给别的分支补上
         //    「顺带写默认」的语义时，那一对不会静默拆成两条（守卫 U-G5 钉死这条邻接关系）。
         engine.performDrawingAction {
+            // 整支评审 Important 2 的门放在**作用域内部**（⛔ 不是签名与作用域之间）：
+            // U-G5 钉死「作用域必须**紧跟**签名」这条邻接关系，插在中间会撞红它。放在里面
+            // 同样满足 G14（门仍在本函数体内），且拖动中这次调用退化成一个**空作用域** ——
+            // 实测是真 no-op（`scope.delta == nil && !defaultChanged`，Task 11 评审核过）。
+            guard !nodeDragInFlight(engine: engine) else { return }
         let session = engine.drawingSession
         if session.mode == .draw {
             // **顺序 load-bearing**：先写默认（主语义、必须成功），**再** best-effort 改线
