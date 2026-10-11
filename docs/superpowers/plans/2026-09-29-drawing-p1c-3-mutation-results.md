@@ -1,7 +1,7 @@
 # P1c 第 3 片 Task 14：spec §8.4 变异验证结果（45 条逐条实跑）
 
 > 本文档随跑随写：每测完一批变异就 append 一次并单独 commit，避免配额打断丢失进度。
-> 基线（订正 5）：host 1931（Contracts）+ 173（Persistence）；Catalyst（整个 target）**原 2030，自变异 #9 补测试后变为 2031**（新增 `NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`，host 不受影响，仍 1931）。两者首次运行均实测确认（TEST SUCCEEDED / 0 issues）。⚠️ **交给 Task 15**：本片基线数字已变，若后续任务/验收文档里写死了 2030，需同步改成 2031（已知至少 4 处历史记录引用过旧数字，见下方残留清单）。
+> 基线（订正 5）：host 1931（Contracts）+ 173（Persistence）；Catalyst（整个 target）**原 2030 → 2034**（逐次：#9 补测试 +1 = 2031；Task 15 的 Q26 测试 +1 = 2032；整支评审阻断项的构造性测试 +1 = 2033；整支评审 M-1 的往返恒等测试 +1 = **2034**）；host **1931 → 1932**（只有 M-1 那条是 host-pure）。⚠️ 以上两个数字均由**控制者实测**（新增 `NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`，host 不受影响，仍 1931）。两者首次运行均实测确认（TEST SUCCEEDED / 0 issues）。⚠️ **交给 Task 15**：本片基线数字已变，若后续任务/验收文档里写死了 2030，需同步改成 2031（已知至少 4 处历史记录引用过旧数字，见下方残留清单）。
 > 判据：host 用 `swift test --filter <Suite>`；Catalyst 用 `xcodebuild test -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:...`，三条判据（`** TEST SUCCEEDED/FAILED **` / 是否有 `Failing tests:` 区块 / `Restarting after unexpected exit` 计数为 0）。
 
 ## 结果表（45 条，跑完即填，进行中）
@@ -32,7 +32,7 @@
 | 22 | 复核里去掉身份比对（只留 `nodeDragPreconditions`） | T11④ 后两档（⑤⑥）；前四档预期不红 | 仅 cause⑤（同面板换选中）一处；cause①②③④ 确认不红；cause⑥（跨面板换选中）**未红** | Catalyst | 部分一致，见残留清单 #7（测试文件自身注释已记录该已知结论） |
 | 23 | 复核改成自己抄一份前置条件（不调那个具名函数） | G9 的反向断言 | `G9 探针与复核调同一具名判据…`（`acceptBody.contains("nodeDragPreconditions(")` 断言红）；Catalyst 侧 `NodeDragCandidateTests` 全部 17 个测试确认仍 `** TEST SUCCEEDED **`（行为逐字等价，只是换了写法） | host（+ Catalyst 确认无行为差异） | 是 |
 | 24 | 路由改用 `.began` 的 `location`（不减 `translation`） | T9 的①②两档 | **结构性无法构造**（签名级证据，见残留清单 #14）：`ChartGestureArbiter.handleSinglePan`（`@objc private`，`ChartGestureArbiter.swift:177`）在 `.began` 阶段只调用 `onHasNodeDragCandidate: (() -> Bool)?`（`:47`，零参数），从未把 `g.location(in: g.view)` 或 `g.translation(in: g.view)` 传给这条判断；`acceptNodeDragCandidate()`（`ChartContainerView.swift:449`）同样零参数，只读 `c.grabPoint`。要让"路由改用 `.began` 的 location"，必须先给这两个签名新增一个 `CGPoint` 参数并改造全部 17 个现有测试调用点——跨 3 个文件的生产接口变更，超出范围 | — | **结构性无法构造**，已有签名级证据 |
-| 25 | 节点目标位置改用 `location` 直接当目标（丢掉抓取偏移） | T9④档 | **结构性无法构造**（签名级证据，见残留清单 #14）：`DrawingNodeDrag.draggedAnchor(drawing:anchorIndex:translation:mapper:tool:)`（`DrawingNodeDrag.swift:96`）签名里**只有** `translation: CGPoint`（相对位移），没有任何"当前绝对触摸位置"或"抓取偏移"参数——D134c/D134d 的设计本身就是只用相对 delta 计算（`old.price + d.price`，`:103-104`），根本不触碰屏幕投影，所以"抓取偏移"是**结构性自动保住**的，不是靠某个会被"丢掉"的分量。要构造这条变异必须新增一个绝对坐标参数贯穿调用链，超出范围 | — | **结构性无法构造**，已有签名级证据 |
+| 25 | 节点目标位置改用 `location` 直接当目标（丢掉抓取偏移） | T9④档 | **结构性无法构造**（签名级证据，见残留清单 #14）：`DrawingNodeDrag.draggedAnchor(drawing:anchorIndex:translation:mapper:tool:)`（`DrawingNodeDrag.swift:96`）签名里**只有** `translation: CGPoint`（相对位移），没有任何"当前绝对触摸位置"或"抓取偏移"参数——D134c/D134d 的设计本身就是只用相对 delta 计算（`old.price + d.price`，`:103-104`），根本不触碰屏幕投影，所以「抓取偏移」这个分量在**当前签名下根本不存在** ⇒ 这条变异描述的缺陷形态在当前实现里**无从表达**（⛔ 这**不等于**"已验证这里没有缺陷"，见下方 G 节的措辞纪律）。要构造这条变异必须新增一个绝对坐标参数贯穿调用链，超出范围 | — | **结构性无法构造**，已有签名级证据 |
 | 26 | 探针改成只查 `locked`（即不调 `editableIgnoringGeometry`） | N6 的②③④⑤⑥五档探针层；①locked 档预期不红 | `N6 六档…` 的②（未来顶层字段）③（未来枚举值）④（全局 id 重复）⑤（不可编辑工具）⑥（复盘）共 5 处断言红；①（locked）确认不红；`G4`（host，连带红） | host | 是，与预期逐字相符 |
 | 27 | 探针整个不查非几何门（连 `locked` 也不查） | N6 全部六档的探针层 | `N6 六档…` 全部 6 处断言红（含①locked）；`G4`（host，连带红） | host | 是 |
 | 28 | 夹取整个拿掉（锚点原样写出） | N7 四个方向档 | `clampKeepsNodeReal` + `rayRightEdgeIsFailClosed` + `straightNonPixelAlignedRightEdgeKeepsNodeGrabbable` + `straightLeftEdgeClampsToStartIndexExactly`（N7 全部 4 个测试） | host | 是（更广，符合预期且合理） |

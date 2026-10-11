@@ -580,14 +580,22 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   `.changed` 读到的是新视口算出的锚点，不是 `.began` 时留下的旧值；变异验证：临时让
 #   `activeNodeDrag()` 缓存 `.began` 视口复用 ⇒ 该测试精确变红、其余 18 条不受影响）。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 102 行 UIKit 结果行取自真日志
+#
+#   【划线 P1c 第 3 片 · 整支最终评审修复（本轮）】total 2032→2034（+2），uikit 102→103（+1）：
+#   +1 = 阻断项（spec `:236`/`:665-667` 明令保留的 `.began` 占槽 fail-closed 兜底）的构造性测试
+#        （UIKit 门内 ⇒ 同时计入 uikit 基线）；
+#   +1 = 整支评审 M-1 的往返恒等测试（第三份 17 字段手抄 `candidateWithReplacedAnchor`，host-pure
+#        ⇒ 只计入 total，不进 uikit 基线）。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 103 行 UIKit 结果行取自真日志，
+#   macabi 与 `** TEST SUCCEEDED **` 两个判据锚点均保留）。host 侧 1931→1932（只有 M-1 那条是 host-pure）。
 #   原文，禁手打伪造行）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2032" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 102 / total 2032）→ GATE PASS 且回显 2032 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2034" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 103 / total 2034）→ GATE PASS 且回显 2034 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2032，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2034，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

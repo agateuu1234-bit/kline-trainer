@@ -79,6 +79,7 @@ N4：一次完整拖动（began→changed→ended）⇒ 撤销栈深度恰好1 /
 T4：拖到一半被第二根手指打断（ChartGestureArbiter 对此发 .ended，与抬手同一条收尾路径）⇒ 就地定住：写一次、记一条撤销，定住的锚点 ≠ 起点
 T14⑤ 陈旧回调不得动别人的槧：A 已收尾清槧、B 已占槧 ⇒ 来自 A 面板的陈旧 .changed/.ended 不碰 B 的拖动态/drawingsRevision，且 B 之后仍能正常收尾
 Task14变异#9补测：owner 来源与归属同时失效 ⇒ 陈旧回调绝不能把拖动态写进 owner 记的那条线
+`.began` 占槧时若槧已非空（直调内部 mutator 构造的坏状态）⇒ 旧槧必须先被就地定住（写一次+记一条撤销），新槧随后占成功
 订正2①：归属对得上，但本帧 viewport 失效（candleStep<=0）⇒ `.ended` 仍必须无条件清槧
 订正2②：清槧之后，十道写入门必须真的重新放行（⛔ 只断言 nodeDragOwner==nil 是在测中间变量）
 订正3：拖动进行中，tap 未命中 ⇒ `.select` 整支早退：不换选中、不清空、不丢弃拖动态

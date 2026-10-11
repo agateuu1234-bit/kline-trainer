@@ -167,7 +167,7 @@ D134c 上一稿写的是「目标屏幕点 = 原锚点的**投影** + `translati
 | 门 | 为什么探针不问 |
 |---|---|
 | ④ `anchorIndex` 在范围内 | **构造保证**：探针的返回值就是 `hitTestNode` 给的原下标，它来自 `marks()` 对 `anchors` 的 `enumerated()`（`DrawingNodeGeometry.swift:39-41`）⇒ 恒在范围内。引擎侧保留它是**防越界 trap**（Swift 数组越界是进程崩、`do/catch` 接不住），不是防用户 |
-| ⑤ `anchor.period == old.period` | **构造保证 + 事件兜底**：夹取函数拿的就是本面板当前周期；周期一变就整个作废（D138）。引擎侧保留它是防「构造保证日后被改坏」 |
+| ⑤ `anchor.period == old.period` | **构造保证 + 事件兜底**（⚠️ **整支评审订正**：原先写的理由「夹取函数拿的就是本面板当前周期」**是错的** —— `DrawingNodeDrag.draggedAnchor` 实际是 `DrawingAnchor(period: old.period, …)`，沿用的是**锚点自己的** period，不是本面板当前周期）。不变量仍然成立，但靠的是**另一条链**：`isPeriodConsistent` 守住 `appendDrawing` / `appendReviewDrawing` 两个入口；而「更新版本 app 写入了本构建不认识的周期」这一类由 `LossyDrawingArray` 捕获 ⇒ 门③ `hasKnownFutureEnumValues` 让探针先答「没有可拖节点」，fail-closed。周期一变就整个作废（D138）。引擎侧保留它是防「那条链日后被改坏」。⛔ **不要照原先那句错理由去改 `draggedAnchor`**（例如「既然是本面板当前周期，那就直接传 panelPeriod」）—— 那会把一条「静默修正坏数据」引进来 |
 | ⑥ 内容未变 | **不是拒收门**，是零副作用短路。拖回原处是合法操作，探针当然要放行 |
 
 ⇒ **不变量**：「探针放行 ⇒ 引擎的**非几何**门必然全过」。⛔ 唯一允许的松手失败是**几何**原因（那一类由 D137 的夹取在结构上消灭）。
