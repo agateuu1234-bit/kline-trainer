@@ -26,8 +26,8 @@
 
 | 维度 | 当前版本 | 变更触发 bump 的条件 |
 |---|---|---|
-| `CONTRACT_VERSION`（顶层标识） | `"1.14"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
-| PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
+| `CONTRACT_VERSION`（顶层标识） | `"1.15"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
+| PostgreSQL schema（`schema.sql` migration id） | `0005_schema_version_fail_closed` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `2` | 训练组 schema **结构变更，或字段语义变更导致新旧产物互不可读**；联动顶层（⚠️ 2026-09 切片一起：产物已第 2 代、**App 侧仍为 1**，直到切片二落地） |
 | app.sqlite GRDB migration | `0010_v1.13_drawing_default_style` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.4` | Codable 字段 / 枚举 case 变更；联动顶层 |
@@ -47,9 +47,23 @@
 
 > **bump 记录（2026-09-07，训练组时间戳语义订正 · 切片一 P3c）**：顶层 `CONTRACT_VERSION` `"1.13"` → `"1.14"`。触发 = A 类**两条同时命中**：「改既有语义」（`end_global_index` 由「一律按下一根开盘反算」改为「按每周期 `datetime` 标注语义分流后反算」，非 `3m` 周期**允许重复**）+「跨系统契约字段调整」（该列是后端产物与 App 读取端共享的字段）。**无结构性 DDL 变更**（表 / 列 / 类型 / 约束逐列相同；`training_set_schema_v1.sql` 仅 `PRAGMA user_version` 一行由 `1` 改 `2`），先例 = 2026-05-25 E2「无 DDL 的读取端语义收紧照样 bump 顶层」（`"1.4"` → `"1.5"`）。⚠️ **与 E2 的不同**：E2 是「无 DDL ⇒ 三套 sub-version 全不动」，本次是「无结构性 DDL，**但**训练组 sub-version 必须动」—— 因为本次的判据是**新旧产物能否互读**，不是**列有没有变**。三套 sub-version 里**只有训练组 SQLite 同步 `1` → `2`**；PostgreSQL schema、app.sqlite GRDB migration、Swift 模型版本、P2 journal states **均不变**。
 >
-> ⚠️ **`1.14` 是一个有意的过渡态**：产物已是第 2 代，而 **App 读取端仍钉在第 1 代**（`DownloadAcceptanceRunner.swift` 的 `TRAINING_SET_SCHEMA_VERSION = 1`、`TrainingSessionCoordinator.swift` 写死的 `expectedSchemaVersion: 1` —— 本片一行未改）。⇒ **切片二必须再 bump 一次顶层**（⚠️ **不得与 `1.14` 共号**；**若期间没有别的 PR 动过顶层号，那就是 `"1.15"`** —— ⛔ 这个数**不是**无条件的：当前主线「划线 P1c 七切片」自带 bump 义务，很可能先把号用掉）：`1.14` = 「产物已升第 2 代、App 尚不支持」，`1.15` = 「App 支持第 2 代」。若切片二不再 bump，「读不了库存的中间态 App」与「能读的完成态 App」会共用 `1.14`，跨语言一致性守卫在两种状态下都绿，这个标识就失去兼容性与回滚审计的意义。
+> ⚠️ **`1.14` 是一个有意的过渡态**：产物已是第 2 代，而 **App 读取端仍钉在第 1 代**（`DownloadAcceptanceRunner.swift` 的 `TRAINING_SET_SCHEMA_VERSION = 1`、`TrainingSessionCoordinator.swift` 写死的 `expectedSchemaVersion: 1` —— 本片一行未改）。⇒ **切片二必须再 bump 一次顶层**（⚠️ **不得与 `1.14` 共号**。⛔ **`1.15` 已被 TS1-R1 用掉**（2026-10-07，`schema_version` 去默认值，见下方 bump 记录）—— 原文这里写的「若期间没有别的 PR 动过顶层号，那就是 `"1.15"`」**已不再成立**，正是它自己警告过的「这个数不是无条件的」那种情形。切片二的号以**它落地时的实际顶层号**为准，⛔ 不要在这里再写一个具体数字）：`1.14` = 「产物已升第 2 代、App 尚不支持」。若切片二不再 bump，「读不了库存的中间态 App」与「能读的完成态 App」会共用 `1.14`，跨语言一致性守卫在两种状态下都绿，这个标识就失去兼容性与回滚审计的意义。
 >
 > ⚠️ **连带后果**：`backend/qmt_pilot_db.py` 的闸 1 逐字比对 `pilot_meta` 里的 `contract_version`，bump 后**任何带 `"1.13"` 的既有 QMT pilot 库都会被拒**（抛 `schema_fingerprint_mismatch`，提示用 `--reset` 重建）。当前 4b 的 `qmt_fetch.py` 仍零实现、pilot 出货链未投产，风险低。详见 `docs/superpowers/specs/2026-09-01-trainingset-timestamp-semantics-design.md` §3.3。
+
+> **bump 记录（2026-10-07，TS1-R1 `schema_version` 去默认值）**：顶层 `CONTRACT_VERSION` `"1.14"` → `"1.15"`。触发 = A 类「影响 DDL / 改既有语义」：PostgreSQL migration `0005_schema_version_fail_closed` —— `training_sets.schema_version` 去掉 `DEFAULT 1`、**保留** `NOT NULL`，并加一条列注释说明「刻意不设默认值」。语义变更在**写入端**：此前漏填该列的 `INSERT` 被 PostgreSQL 静默补成 1（第 2 代产物被标成第 1 代，写入方毫无察觉），此后当场报 `violates not-null constraint`（fail-closed）。PG schema sub-version 同步 `0004_qmt_price_double_and_coverage` → `0005_schema_version_fail_closed`。
+>
+> 三套 sub-version 里**只有 PostgreSQL schema 动**；训练组 SQLite `PRAGMA user_version`、app.sqlite GRDB migration、Swift 模型版本、P2 journal states **均不变**。**iOS reader 逻辑零改动**（本片不动 `TrainingSessionCoordinator.swift` 的 `expectedSchemaVersion: 1` 与 `DownloadAcceptanceRunner.swift` 的 `TRAINING_SET_SCHEMA_VERSION = 1` —— 那是设计好的过渡态，属切片二），仅版本常量 + 其测试随顶层 bump 改（Swift 侧 4 处：`Models.swift:7` 常量、`ModelsTests.swift:8` 与 `RenderStateBuilderTests.swift:1260` 两条断言、同文件 `:1238` 的**测试名**）。
+>
+> ⚠️ **本次把 `1.15` 用掉了**。上一条记录（2026-09-07）写「切片二若期间没有别的 PR 动过顶层号，那就是 `"1.15"`」—— 本片就是那个「别的 PR」，故该句已订正。切片二的号以它落地时的实际顶层号为准。
+>
+> ⚠️ **连带后果**：`backend/qmt_pilot_db.py` 的闸 1 逐字比对 `pilot_meta` 里的 `contract_version`，bump 后**任何带 `"1.14"` 的既有 QMT pilot 库都会被拒**（抛 `schema_fingerprint_mismatch`，提示用 `--reset` 重建）。当前 4b 的 `qmt_fetch.py` 仍零实现、pilot 出货链未投产，风险低。
+>
+> ⚠️ **另两处快照随 `schema.sql` 的字节一起重算**（不是版本号，但同一次改动的连带项）：P6b 硬门文件 `docs/runbooks/2026-08-24-qmt-nas-p6b-schema-shape-check.sql` 的头注释 md5（`2e4b074d…` → `b573b453…`）与 `training_sets.schema_version` 默认值格；模块常量 `CANONICAL_SCHEMA_SHA256`（`schema.sql` 字节 sha256，`02c47d43…` → `b3ad4284…`，`create_pilot_database` 在任何副作用之前硬比对它）与 `CANONICAL_BUSINESS_CATALOG_SHA256`（活目录指纹，`e5a87293…` → `0e3f46f4…`，由 `0005/rehearse.sh` 的 Part 4 在真 PostgreSQL 15.12 上重新生成并三方对齐）。
+>
+> ⚠️ **本片不碰 NAS 部署手册**（范围缩减，见计划文档）：「怎么在 NAS 上应用这个迁移」整套写在 `backend/sql/migrations/0005_schema_version_fail_closed/README.md` 里。
+>
+> 详见 `docs/superpowers/specs/2026-10-06-ts1r1-schema-version-fail-closed-design.md`。
 
 **存储表位 速查**（spec L129-131）：
 
