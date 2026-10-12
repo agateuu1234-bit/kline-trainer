@@ -29,7 +29,7 @@
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structured" && bash .github/scripts/catalyst-gate.test.sh | tail -1
 ```
 
-**预期**：最后一行是 `结果：55 通过，0 失败`
+**预期**：最后一行是 `结果：56 通过，0 失败`
 
 **通过 / 不通过**：□ 通过　□ 不通过
 
@@ -71,7 +71,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structured" && bash .github/scripts/catalyst-gate-judgment-check.sh
 ```
 
-**预期**：最后一行是 `✅ 有判别力：停掉 G8 判据后测试台变红，还原后回到『结果：55 通过，0 失败』`
+**预期**：最后一行是 `✅ 有判别力：停掉 G8 判据后测试台变红，还原后回到『结果：56 通过，0 失败』`
 （前面会依次打出三行数字：基线全绿 → 停掉判据后**有失败** → 还原后又全绿）
 
 **通过 / 不通过**：□ 通过　□ 不通过
@@ -87,7 +87,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 > 状态。落成脚本就是为了这个。
 >
 > 脚本跑三遍测试台，大约需要几分钟，期间请不要在同一个目录开第二个终端跑测试台
-> （两份同时跑会互相抢资源、拖得很慢）。
+> （两份同时跑会**互相毁掉备份、可能把闸门留在被改坏的状态** —— 脚本已加锁，第二份会直接拒绝运行）。
 
 ### A4 · 这次 PR 的 Catalyst 检查在 GitHub 上是绿的
 
@@ -130,7 +130,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 | 正向对照：从真档案里删掉 1 条 | **GATE FAIL，并点名**被删的那一条 |
 | **端到端对照**：把真日志里某条测试的「通过」行做成劈字状态 | 改前的闸门 → **假红**（退出码 1）；改后的闸门 → **GATE PASS** |
 | 「函数写法的测试名在结果档案里长什么样」 | **原先我记成「没有样本可验」——这是错的**：真档案 2054 个节点里 495 个就是函数写法。已把其中一个原样搬进样本，加了正反两档钉住 |
-| 七条变异（故意改坏）+ 反向对照 | 13 个新测试档每一档都至少被一条变异杀掉（已逐档对账）；还原后回到 55 通过 0 失败 |
+| 八条变异（故意改坏）+ 反向对照 | 14 个新测试档每一档都至少被一条变异杀掉（已逐档对账）；还原后回到 56 通过 0 失败 |
 
 明细见变异记录那份文件。
 

@@ -891,12 +891,27 @@ rm -rf "$MX_DIR"
 # 元测试：钉住 fixture 配对规则本身（从 Task 3 挪来）。
 # 共享样本会把本该缺失的节点补回来 ⇒ 凡断言「UIKit-gated 测试未执行」的档位
 # **必须**有专属 .tests.json，否则正确实现反而让它通过。靠人记得会漂，这里机械钉住。
+# 取数三条讲究（内部评审 Important #3，2026-10-12，已独立复现）：
+#   ① ⛔ 不猜文件名的字符类。旧写法用 `[a-z0-9.-]+\.log`，带下划线或大写的
+#      fixture 名**一个都扫不到** ⇒ 安全网比它自称的窄（实测 `some_new_fixture.log`
+#      与 `NewFixture.log` 都漏）。而单纯放宽字符类会让它匹配到本段**自己**那行，
+#      于是改成「行首是 expect + 取第 3 个字段」，不做字符类假设。
+#   ② 先把反斜杠续行接起来：expect 调用常跨物理行，不接的话跨行那条扫不到。
+#   ③ 扫到 0 个就判红。这是一条「报 0 违反」的检查，必须先能报非 0 ——
+#      今天至少有 2 个这样的档位，扫出 0 只可能是取数本身坏了（本仓假绿家族头号形状）。
 MISSING_PAIR=""
+PAIR_SCANNED=0
 while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    PAIR_SCANNED=$((PAIR_SCANNED + 1))
     [ -f "$FIX/${f%.log}.tests.json" ] || MISSING_PAIR="$MISSING_PAIR $f"
-done < <(grep -oE 'expect 1 [a-z0-9.-]+\.log[^"]*"UIKit-gated 测试未执行' "$0" | awk '{print $3}' | sort -u)
-if [ -z "$MISSING_PAIR" ]; then
-    echo "  ok   — 元测试：每个断言「UIKit-gated 测试未执行」的 fixture 都有专属 .tests.json"
+done < <(sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$0" \
+         | awk '/^expect /&&/"UIKit-gated 测试未执行/{print $3}' | sort -u)
+if [ "$PAIR_SCANNED" -eq 0 ]; then
+    echo "  FAIL — 元测试：一个断言「UIKit-gated 测试未执行」的 fixture 都没扫到 —— 取数坏了（它本该至少扫到 2 个），这条检查此刻没有判别力"
+    FAILED=$((FAILED + 1))
+elif [ -z "$MISSING_PAIR" ]; then
+    echo "  ok   — 元测试：扫到 ${PAIR_SCANNED} 个断言「UIKit-gated 测试未执行」的 fixture，每个都有专属 .tests.json"
     PASSED=$((PASSED + 1))
 else
     echo "  FAIL — 元测试：这些 fixture 缺专属 .tests.json（共享样本会把节点补回来 → 它们会假绿）：$MISSING_PAIR"
@@ -910,6 +925,32 @@ if grep -qE 'match_str=.*✔ Test' "$GATE"; then
 else
     echo "  ok   — 结构性回归：G8 不再用 '✔ Test … passed after' 文本匹配（改读结构化结果）"
     PASSED=$((PASSED + 1))
+fi
+
+# 结构性守卫（2026-10-12）：禁止 `$VAR` 紧跟非 ASCII 字符。
+# 这个仓的脚本提示语全是中文，而 bash 会把紧跟在 `$VAR` 后面的多字节字节
+# **吃进变量名**，于是 `set -u` 下直接 "unbound variable" 崩在那一行。
+# 本片里我连犯三次（判别力脚本两次、临时实验脚本一次），每次都是在**修完别处之后
+# 新写的那几行**里复发 ⇒ 靠记性拦不住，必须机械钉住。
+# 解法是写 `${VAR}`（花括号把名字括起来）。
+DOLLAR_HITS=$(python3 - "$DIR" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+bad = []
+for f in sorted(root.glob("*.sh")):
+    for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        if re.search(r'\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])', line):
+            bad.append(f"{f.name}:{i}  {line.strip()[:90]}")
+print("\n".join(bad))
+PY
+)
+if [ -z "$DOLLAR_HITS" ]; then
+    echo "  ok   — 结构性守卫：没有 '\$VAR 紧跟非 ASCII 字符' 的写法（bash 会把多字节字节吃进变量名 → unbound variable）"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 结构性守卫：以下位置 \$VAR 紧跟非 ASCII 字符，运行到那行会崩（改写成 \${VAR}）："
+    printf '%s\n' "$DOLLAR_HITS" | sed 's/^/           /'
+    FAILED=$((FAILED + 1))
 fi
 
 echo "结果：$PASSED 通过，$FAILED 失败"
