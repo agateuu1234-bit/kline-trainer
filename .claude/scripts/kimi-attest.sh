@@ -425,7 +425,11 @@ echo "[kimi-attest] invoking kimi (review-only) model=$KIMI_MODEL effort=$KIMI_E
 TMP_OUT=$(mktemp)
 TMP_DIFF=$(mktemp)
 TMP_PATCH=""
-trap 'rm -f "$TMP_OUT" "$TMP_DIFF" ${TMP_PATCH:+"$TMP_PATCH"}' EXIT
+TMP_INPUT=""
+_cleanup_input() {
+    if [ -n "$TMP_INPUT" ]; then rm -rf -- "$TMP_INPUT"; fi
+}
+trap 'rm -f "$TMP_OUT" "$TMP_DIFF" ${TMP_PATCH:+"$TMP_PATCH"}; _cleanup_input' EXIT
 
 # In branch-diff mode the review runs against a frozen checkout, not the live tree,
 # so a verdict always describes an immutable revision.
@@ -443,6 +447,7 @@ if [ "$SCOPE" = "branch-diff" ]; then
         # H4R4: this trap replaces the top-level one, so it must clean everything the
         # top-level trap covered -- TMP_DIFF included, or branch-diff runs leak it.
         rm -f "$TMP_OUT" "$TMP_DIFF" 2>/dev/null || true
+        _cleanup_input
         chmod -R u+w "$WORKTREE" 2>/dev/null || true
         git worktree remove --force "$WORKTREE" 2>/dev/null || true
         rm -rf "$WORKTREE" 2>/dev/null || true
@@ -498,11 +503,146 @@ if [ ! -s "$TMP_DIFF" ]; then
     exit 16
 fi
 
+# Read's optional pagination arguments have been omitted repeatedly by the live
+# reviewer. Supply bounded files that need only Read(path), without narrowing the
+# original frozen diff. Keep this helper in the wrapper's existing trust root.
+TMP_INPUT=$(mktemp -d -t kimi-review-input.XXXXXX)
+TMP_INPUT=$(cd "$TMP_INPUT" && pwd -P)
+chmod 700 "$TMP_INPUT"
+cat > "$TMP_INPUT/coverage.py" <<'COVERAGEPY'
+import hashlib
+import json
+import pathlib
+import sys
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def lines(data):
+    text = data.decode("utf-8")
+    # Refuse representations whose Read rendering changes the original bytes.
+    if "\r" in text or "\x00" in text:
+        raise ValueError("unsupported text encoding")
+    result = text.split("\n")
+    if result[-1] == "":
+        result.pop()
+    if any(len(line) > 2000 for line in result):
+        raise ValueError("line exceeds Read limit")
+    return result
+
+
+def bounded(data):
+    return bool(data) and len(data) <= 64 * 1024 and len(lines(data)) <= 200
+
+
+def package(data):
+    if not data:
+        raise ValueError("empty diff")
+    lines(data)
+    chunks, current = [], b""
+    for line in data.splitlines(keepends=True):
+        if current and not bounded(current + line):
+            chunks.append(current)
+            current = b""
+        if not bounded(line):
+            raise ValueError("line exceeds input limits")
+        current += line
+    if current:
+        chunks.append(current)
+    assert b"".join(chunks) == data
+    records, files, start = [], {}, 1
+    for index, chunk in enumerate(chunks, 1):
+        name = f"part-{index:04d}.diff"
+        end = start + len(lines(chunk)) - 1
+        records.append({"file": name, "sha256": digest(chunk), "bytes": len(chunk),
+                        "start_line": start, "end_line": end})
+        files[name] = chunk
+        start = end + 1
+    manifest = {"version": 1, "diff_sha256": digest(data), "diff_bytes": len(data),
+                "diff_lines": len(lines(data)), "parts": records}
+    encoded = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode()
+    if not bounded(encoded):
+        raise ValueError("manifest exceeds Read limits")
+    return {"manifest.json": encoded, **files}
+
+
+def rendered(data):
+    return "\n".join(f"{index}\t{line}" for index, line in enumerate(lines(data), 1))
+
+
+def verify(data, directory, stream, expected_sha):
+    if digest(data) != expected_sha:
+        raise ValueError("diff changed")
+    files = package(data)
+    expected = {}
+    for name, content in files.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            raise ValueError("review input changed")
+        expected[str(path)] = rendered(content)
+    messages = [json.loads(line) for line in stream.read_text().splitlines() if line.strip()]
+    final = max(i for i, message in enumerate(messages)
+                if message.get("role") == "assistant" and isinstance(message.get("content"), str))
+    calls, results, covered = {}, set(), set()
+    for message in messages[:final]:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls", []):
+                call_id = call["id"]
+                if not isinstance(call_id, str) or not call_id or call_id in calls:
+                    raise ValueError("duplicate or invalid tool ID")
+                function = call["function"]
+                calls[call_id] = None
+                if function["name"] != "Read":
+                    continue
+                args = json.loads(function["arguments"])
+                path = args.get("path")
+                if path not in expected:
+                    continue
+                if args.get("line_offset", 1) != 1:
+                    continue
+                calls[call_id] = path
+        elif message.get("role") == "tool":
+            call_id = message["tool_call_id"]
+            if call_id not in calls or call_id in results:
+                raise ValueError("unmatched or duplicate result")
+            results.add(call_id)
+            path = calls[call_id]
+            if message.get("is_error") or message.get("isError"):
+                continue
+            if path is not None and message.get("content") == expected[path]:
+                covered.add(path)
+    if covered != set(expected):
+        raise ValueError("incomplete Read coverage")
+
+
+if __name__ == "__main__":
+    try:
+        mode, raw_diff, raw_directory, *rest = sys.argv[1:]
+        data = pathlib.Path(raw_diff).read_bytes()
+        directory = pathlib.Path(raw_directory).resolve(strict=True)
+        if mode == "prepare":
+            for name, content in package(data).items():
+                with (directory / name).open("xb") as output:
+                    output.write(content)
+                (directory / name).chmod(0o400)
+            print(digest(data))
+        elif mode == "verify":
+            verify(data, directory, pathlib.Path(rest[0]), rest[1])
+        else:
+            raise ValueError("unknown mode")
+    except (ValueError, KeyError, TypeError, OSError, UnicodeError, AssertionError):
+        print("[kimi-attest] ERROR: incomplete or invalid review input/Read coverage; ledger not updated.", file=sys.stderr)
+        sys.exit(23)
+COVERAGEPY
+INPUT_SHA=$(python3 "$TMP_INPUT/coverage.py" prepare "$TMP_DIFF" "$TMP_INPUT")
+
 # FOCUS is interpolated into the prompt as prose, never as argv. On the codex path a
 # flag-shaped word inside the focus text could be parsed as an option; here the whole
 # prompt is a single argument, so that class of bug cannot occur. The ledger key is
 # the frozen diff fingerprint, untouched by focus text either way.
-PROMPT=$(sed -e "s|__DIFF_FILE__|$TMP_DIFF|g" "$PROMPT_FILE")
+PROMPT=$(sed -e "s|__DIFF_FILE__|$TMP_INPUT/manifest.json|g" "$PROMPT_FILE")
 if [ -n "${FOCUS// /}" ]; then
     PROMPT="$PROMPT
 
@@ -611,6 +751,10 @@ if [ "$VERDICT" != "approve" ]; then
     echo "[kimi-attest] verdict=$VERDICT (not approve); ledger not updated." >&2
     exit 7
 fi
+
+# A verbal approve is not evidence that the complete diff reached the reviewer.
+# Bind successful tool results to their Read calls before any ledger write.
+python3 "$TMP_INPUT/coverage.py" verify "$TMP_DIFF" "$TMP_INPUT" "$TMP_OUT" "$INPUT_SHA"
 
 # Approve path → write ledger
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
