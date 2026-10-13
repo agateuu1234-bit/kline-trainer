@@ -50,6 +50,21 @@ enum DrawingEditRouter {
         return HorizontalLineTool.visibleGeometry(for: drawing, mapper: mapper) != nil
     }
 
+    /// D135d：拖动进行中，选中对象的**所有**写入面一律拒，且控件**真的变灰**。
+    ///
+    /// ⛔ 读的是 **`nodeDragOwner`**（参与 observation 的那一半），⛔ 不得读 `nodeDragCurrent`
+    /// —— 读错了 host 测**照样全绿**（两半的值一致），而真机上 SwiftUI 建不起依赖、控件不变灰。
+    ///
+    /// **⭐ 置灰必须是真的变灰**，不是「亮着、点了没反应」—— 后者在本仓是具名缺陷（1b-i PR-2 交接②）。
+    ///
+    /// P1c 第 3 片 Task 11（订正 3）：由 `private` 放宽到 `internal`（module-wide）——
+    /// `ChartContainerView.Coordinator.handleDrawingTap` 的 `.select` 分支需要复用**这一个**判据
+    /// 挡「拖动进行中 tap 未命中 ⇒ 不得清空选中」（D135c / spec `:253` 的 tap 清空支）。
+    /// ⛔ **不新写一份**「拖动中」判断 —— 同一事实两份副本是本仓记过的缺陷来源。
+    static func nodeDragInFlight(engine: TrainingEngine) -> Bool {
+        engine.drawingSession.nodeDragOwner != nil
+    }
+
     // MARK: 可用性谓词（D65）—— **必须与引擎门逐条对齐**
 
     // ⚠️ `uniqueSelected` 已在 Task 2 Step 4 随本文件建好（`selectionGeometryVisible` 依赖它），**本 Task 不要重复定义**。
@@ -73,7 +88,7 @@ enum DrawingEditRouter {
     ///   不是「这条线能不能改」的属性，由 `applyStyle` 逐次传播失败。）
     /// **抽出来是为了让「现算」与「读提示」两条路径只在几何这一点上不同**（PD2）——
     /// 若各写一份，早晚有一天两边的非几何分量会漂移。
-    private static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+    internal static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
         guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }
@@ -81,6 +96,33 @@ enum DrawingEditRouter {
         guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }
         return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])
             && !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])
+    }
+
+    /// D134e：节点拖动的**非几何前置条件**，探针与 `.began` 的复核**调同一个**。
+    ///
+    /// ⛔ **这是唯一一份清单** —— 上一稿把它写成散文让调用方各自照抄，于是复核只引用了一个
+    /// **子集**，「第二份更弱的副本」立刻长了出来（spec 第 7 轮评审）。
+    ///
+    /// ⛔ **本函数不做几何命中**（`hitTestNode`）：那是几何层，只有探针问，复核**绝不重问**（D140b）。
+    ///
+    /// `point` 的契约（D134e）：探针传**那一次触摸的按下点**，复核传**候选记下的那个按下点**
+    /// ——⇒ 同一个点。坐标空间一律是**本面板视图的局部坐标**，与 `PanelShield.rect`
+    /// （`DrawingSession.swift:223` 注释「面板局部坐标」）和 `handleDrawingTap` 拿到的 `point` 同一空间。
+    static func nodeDragPreconditions(engine: TrainingEngine, panel: PanelId, point: CGPoint) -> Bool {
+        let session = engine.drawingSession
+        // ① 选择态：画线态下点图表是落锚、恒不做命中判定（D38），节点也不存在
+        guard session.drawingModeActive, session.mode == .select else { return false }
+        // ② 本面板就是 selectedPanel：选中是 (selectedPanel, selectedDrawingID) 二元组（D41）。
+        //    ⛔ 少了它，选中在上面板时下面板按同一屏幕位置也会拖动上面板的线。
+        guard session.selectedPanel == panel else { return false }
+        // ③ 盾：与 handleDrawingTap（ChartContainerView.swift:353-357）**逐字同判据**
+        switch session.shield[panel == .upper ? 0 : 1] ?? .unshielded {
+        case .unshielded:       break
+        case .pending:          return false
+        case .rect(let shield): if shield.contains(point) { return false }
+        }
+        // ④ 引擎所有**不需要 mapper 就能判**的拒收门 —— ⛔ 不在这里重抄一份（D134b）
+        return editableIgnoringGeometry(engine: engine)
     }
 
     /// 「删除可用」的**非几何分量** —— 与上者共享 review / 唯一 / `locked` 三个分量，
@@ -121,14 +163,17 @@ enum DrawingEditRouter {
         // 不该把面板整个灰掉。
         guard engine.drawingSession.mode == .select else { return true }
         guard engine.drawingSession.selectedDrawingID != nil else { return true }   // ①
-        return editableIgnoringGeometry(engine: engine)
+        return !nodeDragInFlight(engine: engine)                                    // D135d
+            && editableIgnoringGeometry(engine: engine)
             && engine.drawingSession.selectionGeometryVisible                        // ②
     }
 
     /// **UI 用**：🗑 是否可用。与 `styleControlsEnabled` **刻意不对称**——无选中时 🗑 没有操作对象，
     /// 恒灰（spec §1.1 #1 原文：「无选中时灰」）。几何同样读 observable 提示（理由同上）。
     static func deleteButtonEnabled(engine: TrainingEngine) -> Bool {
-        deletableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
+        !nodeDragInFlight(engine: engine)                              // D135d
+            && deletableIgnoringGeometry(engine: engine)
+            && engine.drawingSession.selectionGeometryVisible
     }
 
     // MARK: D49 面板派生样式（**唯一**一处从 DrawingObject 取 5 个样式字段）
@@ -191,6 +236,7 @@ enum DrawingEditRouter {
     ///   → ③ 才调引擎（引擎自己再把 viewport 无关的六道门跑一遍）。
     @discardableResult
     static func applyStyle(_ style: DrawingDefaultStyle, engine: TrainingEngine) -> Bool {
+        guard !nodeDragInFlight(engine: engine) else { return false }   // D135d
         defer { syncSelectionByState(engine: engine) }
         guard let id = engine.drawingSession.selectedDrawingID,
               let panel = engine.drawingSession.selectedPanel,
@@ -252,11 +298,23 @@ enum DrawingEditRouter {
     ///    选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。
     static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
                                         engine: TrainingEngine) {
+        // 整支评审 Important 2：本函数返回 `Void`、没有 `@discardableResult`，G14 原来按那个标注
+        // 挑函数 ⇒ 对本函数**完全不可见**。今天无害——拖动只可能发生在"选择态+有选中"（D135b/c
+        // 构造性不变量），本函数三分支里只有那一支在拖动期间可达，而那一支只调 `applyStyle`（已有
+        // W1 门）、不碰 `session.defaultStyle`（Task 7 Step 5 的实测结论，`NodeDragEditRouterGateTests
+        // .applyPanelStyleMutationDuringDrag` 钉住，⛔ 本行不是因为那条结论错了才加的）。这里补的门
+        // 是**另一件事**：让 G14 的集合等式真正覆盖"函数体内有引擎写入 API 字面调用"这整个定义域，
+        // 不依赖"刚好只有一个可达分支、那个分支刚好已经被挡住"这种需要两步推理才看得出的性质。
         // D102（1b-ii 撤销 PR）：画线态的一次改样式是**两处写入**（本局默认 + 那条线）。
         // 包在作用域里，两处合并成**一条**撤销记录 —— undo / redo 一并回滚一并重做。
         // ⚠️ 必须包住**整个**函数体，不是只包 `.draw` 分支：将来任何人给别的分支补上
         //    「顺带写默认」的语义时，那一对不会静默拆成两条（守卫 U-G5 钉死这条邻接关系）。
         engine.performDrawingAction {
+            // 整支评审 Important 2 的门放在**作用域内部**（⛔ 不是签名与作用域之间）：
+            // U-G5 钉死「作用域必须**紧跟**签名」这条邻接关系，插在中间会撞红它。放在里面
+            // 同样满足 G14（门仍在本函数体内），且拖动中这次调用退化成一个**空作用域** ——
+            // 实测是真 no-op（`scope.delta == nil && !defaultChanged`，Task 11 评审核过）。
+            guard !nodeDragInFlight(engine: engine) else { return }
         let session = engine.drawingSession
         if session.mode == .draw {
             // **顺序 load-bearing**：先写默认（主语义、必须成功），**再** best-effort 改线
@@ -302,6 +360,9 @@ enum DrawingEditRouter {
     ///    文件里（host 上根本不编译），且「三处保持一致」没有任何机制保证。
     ///
     /// `commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点（源码守卫 G1 / G1b）。
+    /// ⚠️ 本函数自己不调任何引擎写入 API（`session.commitPending`/`clearSelection` 都不是），
+    ///    不在 G14 新定义域里；它经**唯一**调用点 `routeAndSelect` 转调写入 API，而那边已经
+    ///    补了门（见其头注）——拖动中真正的写入发生在那里，这里不需要再挡一次。
     static func commitPendingAndSelect(panel: PanelId, mapper: CoordinateMapper, engine: TrainingEngine) {
         let session = engine.drawingSession
 
@@ -339,6 +400,12 @@ enum DrawingEditRouter {
     /// ⚠️ 生产路径上**只有外层 `commitPendingAndSelect` 一个调用点**（源码守卫 G6）——
     ///    拆内外两层**不得**变成两个生产入口。
     static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine) {
+        // 整支评审 Important 2（同 `applyPanelStyleMutation` 头注）：本函数返回 `Void`，G14 按
+        // `@discardableResult` 挑函数时对它不可见，而它确实调了引擎写入 API（`routeDrawingCommit`）。
+        // 今天无害——生产路径上只能从 `.draw` 模式的提交流程到达，拖动要求 `.select`+有选中，
+        // 两者由 `setMode`/`clearSelection` 的构造性不变量互斥——但补这道门让 G14 的集合等式
+        // 真正覆盖整个写入面，不依赖"调用方永远先经过 `.draw` 模式检查"这条隐式前提。
+        guard !nodeDragInFlight(engine: engine) else { return }
         // ③ 提交**前**的存在性快照。**必须在 ④ 之前求值**：挪到 ④ 之后恒为 true
         //    → 第 ⑥ 步的合取项 ① 恒假 → 自动选中整体失效（变异 M5c）。
         let wasPresent = engine.drawings.contains { $0.id == committed.id }
@@ -374,6 +441,7 @@ enum DrawingEditRouter {
     /// 重算（`canDelete` 内部现算），只在点 🗑 那一刻判是时序 bug（D65 R13-F1 / N19e）。
     @discardableResult
     static func deleteSelected(engine: TrainingEngine) -> Bool {
+        guard !nodeDragInFlight(engine: engine) else { return false }   // D135d
         defer { syncSelectionByState(engine: engine) }
         guard let id = engine.drawingSession.selectedDrawingID else { return false }
         guard canDelete(engine: engine) else { return false }
@@ -398,7 +466,9 @@ enum DrawingEditRouter {
 
     /// **UI 用**：🔒 是否可用。几何读 observable 提示（理由同 `deleteButtonEnabled`）。
     static func lockButtonEnabled(engine: TrainingEngine) -> Bool {
-        lockableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
+        !nodeDragInFlight(engine: engine)                              // D135d
+            && lockableIgnoringGeometry(engine: engine)
+            && engine.drawingSession.selectionGeometryVisible
     }
 
     /// **UI 用**：🔒 图标该显示闭锁还是开锁 —— 只反映选中线的 `locked`，无选中取开锁（中性态）。
@@ -409,6 +479,7 @@ enum DrawingEditRouter {
     /// 切换选中线的锁定态。`setDrawingLocked` 在 `Sources/` 里的**唯一**调用点。
     @discardableResult
     static func toggleLockSelected(engine: TrainingEngine) -> Bool {
+        guard !nodeDragInFlight(engine: engine) else { return false }   // D135d
         defer { syncSelectionByState(engine: engine) }
         guard let id = engine.drawingSession.selectedDrawingID,
               let current = uniqueSelected(engine: engine) else { return false }
@@ -425,6 +496,7 @@ enum DrawingEditRouter {
     ///    恢复回来的线**不自动选中**（与 D37 一致，自动选中 spec §10.1 第 2 条明令）。
     @discardableResult
     static func undo(engine: TrainingEngine) -> Bool {
+        guard !nodeDragInFlight(engine: engine) else { return false }   // D135d
         defer { syncSelectionByState(engine: engine) }
         return engine.undoDrawing()
     }
@@ -432,6 +504,7 @@ enum DrawingEditRouter {
     /// ⑤↪。同上。
     @discardableResult
     static func redo(engine: TrainingEngine) -> Bool {
+        guard !nodeDragInFlight(engine: engine) else { return false }   // D135d
         defer { syncSelectionByState(engine: engine) }
         return engine.redoDrawing()
     }
@@ -440,8 +513,12 @@ enum DrawingEditRouter {
     /// ⚠️ **刻意不含 `selectionGeometryVisible`、也不含任何选中分量** —— 这是本片唯一
     ///    **不**共享几何判据的底栏键。撤销是**会话级**操作：不需要选中任何线，也不需要那条线
     ///    此刻看得见。**后人不要"顺手统一"成和 🔒/🗑 一样的形状**（D78 逐字）。
-    static func undoButtonEnabled(engine: TrainingEngine) -> Bool { engine.canUndoDrawing }
+    static func undoButtonEnabled(engine: TrainingEngine) -> Bool {
+        !nodeDragInFlight(engine: engine) && engine.canUndoDrawing   // D135d
+    }
 
     /// **UI 用**：⑤↪ 是否可用（D78）。理由同上，刻意不对称。
-    static func redoButtonEnabled(engine: TrainingEngine) -> Bool { engine.canRedoDrawing }
+    static func redoButtonEnabled(engine: TrainingEngine) -> Bool {
+        !nodeDragInFlight(engine: engine) && engine.canRedoDrawing   // D135d
+    }
 }

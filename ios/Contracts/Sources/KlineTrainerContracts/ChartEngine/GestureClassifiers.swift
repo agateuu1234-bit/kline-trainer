@@ -267,3 +267,50 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
         return TwoFingerStepResult(emission: nil, state: reset)
     }
 }
+
+// MARK: - 单指路由（P1c 第 3 片 D134）：节点拖动 vs 图表手势
+
+/// 本次单指手势整体走哪条路。**`.began` 决定，其余相位只转发**（D134）。
+enum SinglePanRoute: Equatable, Sendable { case chart, nodeDrag }
+
+/// 单指路由一步的纯决策结果。⭐ **两件事都在这里定**，仲裁器只负责照着做，自己不再做任何判断：
+///   · `forwardToNodeDrag` = 本次回调要不要转发给节点拖动（**含终止相位**：拖动手势的 `.ended` /
+///     `.cancelled` 必须转发出去，否则收尾信号被吞、线永远提交不了——修复第 1 轮 Critical）；
+///   · `route` = 更新后的 per-gesture 路由（终止相位复位为 `.chart`，让下一次手势从干净状态起手）。
+/// ⛔ **不得把「要不要转发」留给调用方自己推**（第 1 轮的 bug 正是仲裁器自己拿「覆盖后的 route」去判断，
+///    而覆盖动作已经把「刚才是不是在拖」这条信息抹掉）——判别力必须落在本纯函数这一层，因为仲裁器
+///    整类在 `#if canImport(UIKit)` 内、host 上不可测。
+struct SinglePanRouteStep: Equatable, Sendable {
+    let forwardToNodeDrag: Bool
+    let route: SinglePanRoute
+}
+
+/// D134：路由 latch 的纯决策。
+///
+/// **为什么必须在 `.began` 分叉**：`singlePanStep` 一旦把手势判成竖直就 latch 成 `.verticalRejected`
+/// （`classifyFromIdle()` 的 `.vertical` 分支），后续即便累积满足水平分类也不再发平移，抬手按
+/// `verticalSwitchThreshold` 发切周期。而拖节点主要就是上下拖 ⇒ **等方向分类器判完，节点已经拖不动了**。
+///
+/// ⛔ **`.changed` 不重新询问**：候选可能在拖动中失效（选中被清 / 周期变），但那要的是
+/// 「作废并忽略后续回调」（D138），**不是**回落成图表平移 —— 后者会让「周期刚切完、手指还没抬」
+/// 变成一次用户没要的平移（D138 末段）。
+///
+/// 四个相位逐一推：
+/// - `.began`：`candidateAccepted` ⇒ 转发本次 `.began`、路由切到 `.nodeDrag`；否则不转发、路由留 `.chart`
+///   （让仲裁器继续跑既有的 `singlePanStep`，行为逐字不变）。
+/// - `.changed`：不重新问，只按 `current` latch 转发——`current == .nodeDrag` 才转发，路由不变。
+/// - `.ended` / `.cancelled`：终止相位**必须**按 `current` 决定是否转发（`current == .nodeDrag` ⇒
+///   把这次终止回调转发出去，拖动才有机会收尾提交），随后**无条件**把路由复位为 `.chart`。
+func singlePanRouteStep(phase: GesturePhase, candidateAccepted: Bool,
+                        current: SinglePanRoute) -> SinglePanRouteStep {
+    switch phase {
+    case .began:
+        return candidateAccepted
+            ? SinglePanRouteStep(forwardToNodeDrag: true, route: .nodeDrag)
+            : SinglePanRouteStep(forwardToNodeDrag: false, route: .chart)
+    case .changed:
+        return SinglePanRouteStep(forwardToNodeDrag: current == .nodeDrag, route: current)
+    case .ended, .cancelled:
+        return SinglePanRouteStep(forwardToNodeDrag: current == .nodeDrag, route: .chart)
+    }
+}
