@@ -65,6 +65,7 @@ if "--version" in sys.argv:
     print("0.36.1")
     sys.exit(0)
 case = os.environ["REVIEW_FIXTURE_CASE"]
+if case == "diagnostic": print("Warning: synthetic CLI diagnostic", file=sys.stderr)
 def emit(value): print(json.dumps(value, ensure_ascii=False))
 if case != "no_reads":
     prompt = sys.argv[sys.argv.index("-p") + 1]
@@ -144,6 +145,13 @@ def test_complete_read_attests_original_branch_fingerprint(review_repo):
     original = subprocess.check_output(["git", "diff", "--no-color", "--no-ext-diff", "main...HEAD"], cwd=repo)
     assert entry["diff_fingerprint"] == "sha256:" + hashlib.sha256(original.rstrip(b"\n")).hexdigest()
     assert "verdict=approve; ledger updated." in result.stdout
+
+
+def test_plain_text_diagnostic_does_not_discard_complete_reads(review_repo):
+    repo, run = review_repo
+    result = run("diagnostic")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (repo / ".claude/state/attest-ledger.json").exists()
 
 
 def test_unreadable_long_line_fails_before_reviewer(review_repo):

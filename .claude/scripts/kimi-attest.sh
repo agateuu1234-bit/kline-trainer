@@ -582,7 +582,10 @@ def verify(data, directory, stream, expected_sha):
         if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
             raise ValueError("review input changed")
         expected[str(path)] = rendered(content)
-    messages = [json.loads(line) for line in stream.read_text().splitlines() if line.strip()]
+    # stderr diagnostics share this capture. Only JSON objects are stream events;
+    # malformed object events still fail closed rather than inventing coverage.
+    messages = [json.loads(line) for line in stream.read_text().splitlines()
+                if line.lstrip().startswith("{")]
     final = max(i for i, message in enumerate(messages)
                 if message.get("role") == "assistant" and isinstance(message.get("content"), str))
     calls, results, covered = {}, set(), set()

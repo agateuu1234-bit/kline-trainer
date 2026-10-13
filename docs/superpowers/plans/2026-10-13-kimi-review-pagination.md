@@ -31,14 +31,32 @@ phase_delivery: true
 4. 运行现有 hook 测试，区分已有失败与新增回归；完成独立审查后进入 PR 流程。
 
 已观察到两个红灯：旧包装器允许无读取 approve；初版覆盖检查接受带错误标记的返回。
-修复后专项测试 19 项通过。整体 hook 测试和真实 reviewer 审查结果另行记录，尚不
-宣称真实审查链路恢复。
+修复后专项测试 20 项通过（新增普通 stderr 诊断行不阻断完整读取的回归测试）。
+整体 hook 首轮为 230 passed、7 failed，失败项与此前基线一致。
+真实 reviewer 首轮读取了 3 个分块，但返回 needs-attention，未写凭证；尚不宣称
+真实批准链路恢复。
+
+### 第一轮审查反馈核实
+
+- 混合日志解析：成立。先用 stderr 普通文本测试复现 exit 23，再允许非对象诊断行；
+  JSON 对象事件仍严格解析，工具结果必须完整匹配。
+- 工具内容格式：实际 CLI 0.36.1 诊断流已核实，tool 对象只有 role、tool_call_id、
+  content，content 为裸编号行字符串，界面状态尾注不在该字符串内。诊断输入为
+  `fixture-line-0001` 至 `fixture-line-1000`，内容严格等于
+  `"\n".join(f"{i}\tfixture-line-{i:04d}" for i in range(1,1001))`。
+  本地诊断流 `/tmp/kline-kimi-pagination-diagnostic-stream.jsonl` 的 SHA256 为
+  `92d8ddce8a53ae63c7b007951b0442a97d674d2bc38d7cf4d7bb3b66845afa13`；
+  content SHA256 为 `915e62d4b0f6f03057fb9c7d1bb94a616ae406b12181bcb23caa8da3097d3609`。
+  此证据支持当前格式，未来 CLI 改变格式会拒绝签发，不作自动兼容推断。
+- 换页符分行：不成立。实现调用 bytes.splitlines，不是 str.splitlines。
+  `python3 -c 'print(b"a\x0cb\x0bc\x1cd".splitlines(keepends=True))'`
+  返回单元素列表，未按所指字符拆分；CR 已被显式拒绝。
 
 ## 验收（非开发者）
 
 | 操作 action | 预期 expected | 判定 pass_fail |
 | --- | --- | --- |
-| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `19 passed` | 全部通过为通过；任一 failed/error 为失败 |
+| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `20 passed` | 全部通过为通过；任一 failed/error 为失败 |
 | 查看上述测试名称和输出中的漏读、错误、篡改案例 | 每个案例通过，表示包装器拒绝写入凭证 | 任一反例仍能写入凭证为失败 |
 | 查看完整读取测试输出 | 完整输入可写凭证，摘要与原始 diff 一致 | 成功案例失败或摘要不同为失败 |
 | 查看独立审查记录及 PR 检查 | 完整读取证据及批准针对最终提交，必需检查通过 | 缺少任一证据时不得视为可合并 |
