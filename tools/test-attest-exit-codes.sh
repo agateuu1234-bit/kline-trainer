@@ -32,9 +32,10 @@ python3 - "$SUBJECT" > "$TMP/traps.sh" <<'PY'
 import re, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 out = []
-for name in ("_cleanup_worktree", "_release_lock_then_cleanup"):
+for name in ("_cleanup_input", "_cleanup_worktree", "_release_lock_then_cleanup"):
     m = re.search(rf"^[ \t]*{name}\(\)[ \t]*\{{", src, re.M)
     if not m:
+        if name == "_cleanup_input": continue  # Kimi-only dependency.
         print(f"MISSING:{name}", file=sys.stderr); sys.exit(1)
     i, depth = m.end() - 1, 0
     while i < len(src):                      # brace-match to the closing }
@@ -65,13 +66,14 @@ set -euo pipefail
 # probe fails loudly rather than silently testing a different code path.
 TMP_OUT=/dev/null
 TMP_DIFF=/dev/null
+TMP_INPUT=/nonexistent-review-input
 WORKTREE=/nonexistent-worktree
 PLUGIN_DATA_DIR=/nonexistent-plugin-data
 # Shims: the real bodies call these; recording them proves both actions still run.
 git() { [ "${1:-}" = "worktree" ] && echo "worktree-cleaned" >> "$MARKER"; return 0; }
 ledger_lock_release() { echo "lock-released" >> "$MARKER"; return 0; }
 chmod() { return 0; }
-rm() { return 0; }
+rm() { if [ "${*: -1}" = "$TMP_INPUT" ]; then echo "input-cleaned" >> "$MARKER"; fi; return 0; }
 find() { return 0; }
 PROBE
     cat "$TMP/traps.sh"
@@ -125,6 +127,15 @@ else bad "worktree was NOT cleaned -- the leak this composition fixes is back"; 
 MARKER="$TMP/marker" WANT=7 LAYER=single bash "$TMP/probe.sh" || true
 if grep -q worktree-cleaned "$TMP/marker"; then ok "single path cleans the worktree (exit 7)"
 else bad "worktree leaked on the non-approve path -- the most common outcome of all"; fi
+
+if grep -q '_cleanup_input()' "$TMP/traps.sh"; then
+    for layer in single composed; do
+        : > "$TMP/marker"
+        MARKER="$TMP/marker" WANT=23 LAYER="$layer" bash "$TMP/probe.sh" || true
+        if grep -q input-cleaned "$TMP/marker"; then ok "$layer path cleans review input"
+        else bad "$layer path leaked review input"; fi
+    done
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then

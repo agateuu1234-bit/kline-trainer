@@ -55,6 +55,16 @@ phase_delivery: true
 的 tool content 均与本地预期编号内容严格相等，覆盖格式已实际验证。
 第二轮仍为 needs-attention（仅分行说明争议），未写入凭证。
 
+### 第三轮及待办
+
+第三轮仍为 needs-attention，达到本轮三次审查上限。清理脚本测试遗漏新 helper 的
+反馈成立：先运行 `bash tools/test-attest-exit-codes.sh` 复现 7/8 失败，再同步提取
+真实 `_cleanup_input`，补充输入目录清理断言。修复后 Kimi 10/10、Codex 8/8 通过。
+
+剩余审查意见：尚缺真实 approve→verify→ledger 端到端成功；有界输入拒绝 CR、
+超长行和超大 manifest 的可用性限制。前者确实尚未完成，后者是已披露的保守设计，
+不以跳过覆盖校验解决。第三轮后的测试修复尚未独立复审，需获准新审查周期后继续。
+
 ## 验收（非开发者）
 
 | 操作 action | 预期 expected | 判定 pass_fail |
