@@ -48,9 +48,12 @@ phase_delivery: true
   `92d8ddce8a53ae63c7b007951b0442a97d674d2bc38d7cf4d7bb3b66845afa13`；
   content SHA256 为 `915e62d4b0f6f03057fb9c7d1bb94a616ae406b12181bcb23caa8da3097d3609`。
   此证据支持当前格式，未来 CLI 改变格式会拒绝签发，不作自动兼容推断。
-- 换页符分行：不成立。实现调用 bytes.splitlines，不是 str.splitlines。
-  `python3 -c 'print(b"a\x0cb\x0bc\x1cd".splitlines(keepends=True))'`
-  返回单元素列表，未按所指字符拆分；CR 已被显式拒绝。
+- 分行语义：第二轮后统一显式使用 `data.split(b"\n")`，重添被分隔的 LF，
+  与行号计算采用完全相同的边界。实现不再依赖 splitlines API 的隐式规则。
+
+第二轮真实流中 manifest.json、part-0001.diff、part-0002.diff、part-0003.diff
+的 tool content 均与本地预期编号内容严格相等，覆盖格式已实际验证。
+第二轮仍为 needs-attention（仅分行说明争议），未写入凭证。
 
 ## 验收（非开发者）
 

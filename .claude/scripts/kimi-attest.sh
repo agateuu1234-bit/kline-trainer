@@ -542,7 +542,12 @@ def package(data):
         raise ValueError("empty diff")
     lines(data)
     chunks, current = [], b""
-    for line in data.splitlines(keepends=True):
+    # Use the same explicit LF boundary as lines(), preserving every byte.
+    raw_lines = data.split(b"\n")
+    input_lines = [line + b"\n" for line in raw_lines[:-1]]
+    if raw_lines[-1]:
+        input_lines.append(raw_lines[-1])
+    for line in input_lines:
         if current and not bounded(current + line):
             chunks.append(current)
             current = b""
