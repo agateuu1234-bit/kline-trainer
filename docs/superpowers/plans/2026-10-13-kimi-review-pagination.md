@@ -32,7 +32,7 @@ phase_delivery: true
 
 已观察到两个红灯：旧包装器允许无读取 approve；初版覆盖检查接受带错误标记的返回。
 修复后专项测试覆盖普通及非 UTF-8 stderr 诊断行、伪造 stderr 事件和工作区模式
-输入清理，共 23 项。
+输入清理及畸形参数诊断，共 24 项。
 整体 hook 首轮为 230 passed、7 failed，失败项与此前基线一致。
 真实 reviewer 首轮读取了 3 个分块，但返回 needs-attention，未写凭证；尚不宣称
 真实批准链路恢复。
@@ -90,11 +90,18 @@ diff 保存于同目录 `original.diff`。未伪造或替换 verdict，未写 le
 目录，仅作诊断展示，绝不进入事件解析。23 项测试包含该注入反例。非 UTF-8 日志
 只在展示时替换非法字节，正式工具流继续严格解析。stderr 随输入目录一起清理。
 
+新周期第三轮仍为 needs-attention，仅剩两项 low：畸形参数触发 AttributeError
+时未统一诊断；输入目录删除失败中断后续 worktree 清理。两项均先复现失败，再
+补充异常捕获和 best-effort 删除。专项测试现为 24 项，Kimi 清理测试 12/12、
+Codex 清理测试 8/8。第三轮前的完整 hook 集为 234 passed、7 failed，失败项与
+原有基线相同。本周期再次达到三轮上限，末次两项修复尚未独立复审，未签发凭证。
+第三轮明确接受已披露的输入范围限制，不再将其列为缺陷。
+
 ## 验收（非开发者）
 
 | 操作 action | 预期 expected | 判定 pass_fail |
 | --- | --- | --- |
-| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `23 passed` | 全部通过为通过；任一 failed/error 为失败 |
+| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `24 passed` | 全部通过为通过；任一 failed/error 为失败 |
 | 查看上述测试名称和输出中的漏读、错误、篡改案例 | 每个案例通过，表示包装器拒绝写入凭证 | 任一反例仍能写入凭证为失败 |
 | 查看完整读取测试输出 | 完整输入可写凭证，摘要与原始 diff 一致 | 成功案例失败或摘要不同为失败 |
 | 查看独立审查记录及 PR 检查 | 完整读取证据及批准针对最终提交，必需检查通过 | 缺少任一证据时不得视为可合并 |

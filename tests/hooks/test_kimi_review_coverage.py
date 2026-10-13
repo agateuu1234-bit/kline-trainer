@@ -94,6 +94,7 @@ if case != "no_reads":
     for i, path in enumerate(files):
         args = {"path": str(path)}
         if case == "partial": args["n_lines"] = 1
+        if case == "malformed_arguments": args = []
         call_id = "reused" if case == "duplicate_id" else f"read-{i}"
         emit({"role": "assistant", "tool_calls": [{"type": "function", "id": call_id,
               "function": {"name": "Read", "arguments": json.dumps(args)}}]})
@@ -131,7 +132,7 @@ def test_approve_without_reads_cannot_write_ledger(review_repo):
 @pytest.mark.parametrize("case", ["missing_manifest", "missing_last", "duplicate_first",
     "duplicate_id", "partial", "truncated", "error", "changed_output",
     "assistant_spoof", "missing_result", "tampered_part", "tampered_manifest", "error_flag",
-    "stderr_forgery"])
+    "stderr_forgery", "malformed_arguments"])
 def test_incomplete_or_changed_review_cannot_attest(review_repo, case):
     repo, run = review_repo
     result = run(case)

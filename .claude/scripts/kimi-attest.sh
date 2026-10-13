@@ -427,7 +427,7 @@ TMP_DIFF=$(mktemp)
 TMP_PATCH=""
 TMP_INPUT=""
 _cleanup_input() {
-    if [ -n "$TMP_INPUT" ]; then rm -rf -- "$TMP_INPUT"; fi
+    if [ -n "$TMP_INPUT" ]; then rm -rf -- "$TMP_INPUT" || true; fi
 }
 trap 'rm -f "$TMP_OUT" "$TMP_DIFF" ${TMP_PATCH:+"$TMP_PATCH"}; _cleanup_input' EXIT
 
@@ -640,7 +640,7 @@ if __name__ == "__main__":
             verify(data, directory, pathlib.Path(rest[0]), rest[1])
         else:
             raise ValueError("unknown mode")
-    except (ValueError, KeyError, TypeError, OSError, UnicodeError, AssertionError):
+    except (ValueError, KeyError, TypeError, AttributeError, OSError, UnicodeError, AssertionError):
         print("[kimi-attest] ERROR: incomplete or invalid review input/Read coverage; ledger not updated.", file=sys.stderr)
         sys.exit(23)
 COVERAGEPY

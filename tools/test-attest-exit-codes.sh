@@ -73,7 +73,13 @@ PLUGIN_DATA_DIR=/nonexistent-plugin-data
 git() { [ "${1:-}" = "worktree" ] && echo "worktree-cleaned" >> "$MARKER"; return 0; }
 ledger_lock_release() { echo "lock-released" >> "$MARKER"; return 0; }
 chmod() { return 0; }
-rm() { if [ "${*: -1}" = "$TMP_INPUT" ]; then echo "input-cleaned" >> "$MARKER"; fi; return 0; }
+rm() {
+    if [ "${*: -1}" = "$TMP_INPUT" ]; then
+        if [ "${RM_FAIL_INPUT:-0}" = 1 ]; then return 1; fi
+        echo "input-cleaned" >> "$MARKER"
+    fi
+    return 0
+}
 find() { return 0; }
 PROBE
     cat "$TMP/traps.sh"
@@ -134,6 +140,14 @@ if grep -q '_cleanup_input()' "$TMP/traps.sh"; then
         MARKER="$TMP/marker" WANT=23 LAYER="$layer" bash "$TMP/probe.sh" || true
         if grep -q input-cleaned "$TMP/marker"; then ok "$layer path cleans review input"
         else bad "$layer path leaked review input"; fi
+        : > "$TMP/marker"
+        RM_FAIL_INPUT=1 MARKER="$TMP/marker" WANT=23 LAYER="$layer" bash "$TMP/probe.sh"
+        got=$?
+        if [ "$got" = 23 ] && grep -q worktree-cleaned "$TMP/marker"; then
+            ok "$layer input cleanup failure preserves exit and worktree cleanup"
+        else
+            bad "$layer input cleanup failure interrupted remaining cleanup (exit $got)"
+        fi
     done
 fi
 
