@@ -587,7 +587,7 @@ def verify(data, directory, stream, expected_sha):
         if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
             raise ValueError("review input changed")
         expected[str(path)] = rendered(content)
-    # stderr diagnostics share this capture. Only JSON objects are stream events;
+    # Only stdout JSON objects are stream events; stderr is captured separately.
     # malformed object events still fail closed rather than inventing coverage.
     messages = [json.loads(line) for line in stream.read_bytes().split(b"\n")
                 if line.lstrip().startswith(b"{")]
@@ -669,9 +669,16 @@ fi
 # `| tee` + PIPESTATUS; this is the same protection, written explicitly.
 set +e
 ( cd "$REVIEW_CWD" && KIMI_CODE_HOME="$KIMI_HOME_RO" \
-    "$KIMI_BIN" -m "$KIMI_MODEL" -p "$PROMPT" --output-format stream-json ) > "$TMP_OUT" 2>&1
+    "$KIMI_BIN" -m "$KIMI_MODEL" -p "$PROMPT" --output-format stream-json ) > "$TMP_OUT" 2> "$TMP_INPUT/stderr.log"
 KIMI_EXIT=$?
 set -e
+
+# Hook diagnostics can contain untrusted tool arguments, including newlines and
+# JSON-looking text. Display them, but never parse them as verdict/coverage events.
+python3 - "$TMP_INPUT/stderr.log" <<'PY'
+import pathlib, sys
+sys.stderr.write(pathlib.Path(sys.argv[1]).read_text(errors="replace"))
+PY
 
 # Extract the verdict from the ASSISTANT TURN ONLY, then apply the codex path's rule
 # verbatim.
