@@ -49,11 +49,13 @@ def review_repo(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith("KIMI_ATTEST_")}
     env.update(HOME=str(home), PATH=f"{bin_dir}:{env['PATH']}",
                KIMI_ATTEST_TEST_MODE="1", KIMI_ATTEST_HOME=str(tmp_path / "review-home"))
-    def run(case="no_reads"):
+    def run(case="no_reads", scope="branch-diff"):
+        args = ["--scope", scope]
+        args += ["--head", "feature", "--base", "main"] if scope == "branch-diff" else ["--review-only"]
         return subprocess.run(
-            ["bash", ".claude/scripts/kimi-attest.sh", "--scope", "branch-diff",
-             "--head", "feature", "--base", "main"], cwd=repo,
-            env={**env, "REVIEW_FIXTURE_CASE": case}, capture_output=True, text=True,
+            ["bash", ".claude/scripts/kimi-attest.sh", *args], cwd=repo,
+            env={**env, "REVIEW_FIXTURE_CASE": case, "REVIEW_SCOPE": scope,
+                 "REVIEW_INPUT_RECORD": str(tmp_path / "input-record")}, capture_output=True, text=True,
         )
     return repo, run
 
@@ -66,15 +68,18 @@ if "--version" in sys.argv:
     sys.exit(0)
 case = os.environ["REVIEW_FIXTURE_CASE"]
 if case == "diagnostic": print("Warning: synthetic CLI diagnostic", file=sys.stderr)
+if case == "binary_diagnostic": os.write(2, b"Warning: synthetic non-UTF8 \xff\n")
 def emit(value): print(json.dumps(value, ensure_ascii=False))
 if case != "no_reads":
     prompt = sys.argv[sys.argv.index("-p") + 1]
     match = re.search(r"`([^`\n]+/manifest.json)`", prompt)
     assert match, "review input manifest missing from prompt"
     manifest_path = Path(match[1])
+    Path(os.environ["REVIEW_INPUT_RECORD"]).write_text(str(manifest_path.parent))
     manifest = json.loads(manifest_path.read_text())
     files = [manifest_path] + [manifest_path.parent / p["file"] for p in manifest["parts"]]
-    original = subprocess.check_output(["git", "diff", "--no-color", "--no-ext-diff", "main...HEAD"])
+    diff_ref = "main...HEAD" if os.environ["REVIEW_SCOPE"] == "branch-diff" else "HEAD"
+    original = subprocess.check_output(["git", "diff", "--no-color", "--no-ext-diff", diff_ref])
     assert b"".join(p.read_bytes() for p in files[1:]) == original
     assert manifest["diff_sha256"] == hashlib.sha256(original).hexdigest()
     for record, path in zip(manifest["parts"], files[1:]):
@@ -147,11 +152,22 @@ def test_complete_read_attests_original_branch_fingerprint(review_repo):
     assert "verdict=approve; ledger updated." in result.stdout
 
 
-def test_plain_text_diagnostic_does_not_discard_complete_reads(review_repo):
+@pytest.mark.parametrize("case", ["diagnostic", "binary_diagnostic"])
+def test_plain_text_diagnostic_does_not_discard_complete_reads(review_repo, case):
     repo, run = review_repo
-    result = run("diagnostic")
+    result = run(case)
     assert result.returncode == 0, result.stdout + result.stderr
     assert (repo / ".claude/state/attest-ledger.json").exists()
+
+
+def test_working_tree_review_cleans_input_without_attesting(review_repo):
+    repo, run = review_repo
+    (repo / "change.txt").write_text("working tree change\n")
+    result = run("complete", "working-tree")
+    assert result.returncode == 20, result.stdout + result.stderr
+    assert not (repo / ".claude/state/attest-ledger.json").exists()
+    input_directory = Path((repo.parent / "input-record").read_text())
+    assert not input_directory.exists()
 
 
 def test_unreadable_long_line_fails_before_reviewer(review_repo):

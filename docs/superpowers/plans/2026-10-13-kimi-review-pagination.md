@@ -31,7 +31,7 @@ phase_delivery: true
 4. 运行现有 hook 测试，区分已有失败与新增回归；完成独立审查后进入 PR 流程。
 
 已观察到两个红灯：旧包装器允许无读取 approve；初版覆盖检查接受带错误标记的返回。
-修复后专项测试 20 项通过（新增普通 stderr 诊断行不阻断完整读取的回归测试）。
+修复后专项测试覆盖普通及非 UTF-8 stderr 诊断行和工作区模式输入清理，共 22 项。
 整体 hook 首轮为 230 passed、7 failed，失败项与此前基线一致。
 真实 reviewer 首轮读取了 3 个分块，但返回 needs-attention，未写凭证；尚不宣称
 真实批准链路恢复。
@@ -65,11 +65,29 @@ phase_delivery: true
 超长行和超大 manifest 的可用性限制。前者确实尚未完成，后者是已披露的保守设计，
 不以跳过覆盖校验解决。第三轮后的测试修复尚未独立复审，需获准新审查周期后继续。
 
+### 用户授权的新审查周期
+
+用户已批准继续。新周期第一轮确认清理测试修复，未发现核心覆盖机制绕过点；
+结论仍为 needs-attention，提出输入上限、日志编码、工作区模式清理测试及真实
+校验成功证据。工作区模式的真实包装器测试确认退出 20、无凭证、输入目录已清理。
+非 UTF-8 普通 stderr 行测试先复现 exit 23，再改为按字节识别 JSON 对象行，
+仅对对象行严格解码解析；不对工具内容做有损解码或放宽全等校验。
+
+本轮运行期间，使用原样保存的真实 stream、完整重组 diff 和实际临时 coverage.py
+执行 `verify`，退出码为 0，stderr 为空。流 SHA256：
+`b215ae8c77ed43170de91b560c1885fd8f8cef94c4e290e889924b7dda5098e2`。
+原始文件保存于本机 `/tmp/kimi-pagination-cycle2-evidence/real-stream.jsonl`，
+diff 保存于同目录 `original.diff`。未伪造或替换 verdict，未写 ledger。
+这直接验证了真实工具流能通过实际校验器；最终 approve→ledger 仍待独立批准。
+
+输入上限是本修复明确保留的范围限制：超限必须拒绝，不发放未经完整读取的凭证。
+任意规模输入的多层清单及编码转换属于后续设计，本分支不加入人工绕过。
+
 ## 验收（非开发者）
 
 | 操作 action | 预期 expected | 判定 pass_fail |
 | --- | --- | --- |
-| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `20 passed` | 全部通过为通过；任一 failed/error 为失败 |
+| 在本分支目录终端粘贴 `python3 -m pytest tests/hooks/test_kimi_review_coverage.py -q` | 末行显示 `22 passed` | 全部通过为通过；任一 failed/error 为失败 |
 | 查看上述测试名称和输出中的漏读、错误、篡改案例 | 每个案例通过，表示包装器拒绝写入凭证 | 任一反例仍能写入凭证为失败 |
 | 查看完整读取测试输出 | 完整输入可写凭证，摘要与原始 diff 一致 | 成功案例失败或摘要不同为失败 |
 | 查看独立审查记录及 PR 检查 | 完整读取证据及批准针对最终提交，必需检查通过 | 缺少任一证据时不得视为可合并 |

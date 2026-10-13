@@ -589,8 +589,8 @@ def verify(data, directory, stream, expected_sha):
         expected[str(path)] = rendered(content)
     # stderr diagnostics share this capture. Only JSON objects are stream events;
     # malformed object events still fail closed rather than inventing coverage.
-    messages = [json.loads(line) for line in stream.read_text().splitlines()
-                if line.lstrip().startswith("{")]
+    messages = [json.loads(line) for line in stream.read_bytes().split(b"\n")
+                if line.lstrip().startswith(b"{")]
     final = max(i for i, message in enumerate(messages)
                 if message.get("role") == "assistant" and isinstance(message.get("content"), str))
     calls, results, covered = {}, set(), set()
