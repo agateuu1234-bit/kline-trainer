@@ -10,6 +10,24 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 GATE="$DIR/catalyst-gate.sh"
 FIX="$DIR/fixtures"
+
+# 本脚本在 .github/scripts/ 下建一批临时夹具，命名统一带**自己的进程号** `-$$`。
+# 正常跑完每处都会显式删掉；**被打断时会泄漏**，于是仓库里多出看不懂的隐藏文件。
+#
+# ⚠️ 归属只认 `-$$`（2026-10-14 codex 评审 medium）：此前是由**调用方**
+#    （catalyst-gate-judgment-check.sh）按「本次运行期间新出现的隐藏条目」推断归属再 rm -rf
+#    —— 那不是归属判据：并发跑的另一个测试台、或编辑器在这几分钟里新建的隐藏文件，
+#    都会被误删。改成**谁造的谁清**，用进程号精确限定，调用方不再猜。
+#    ⛔ 不要把这个 glob 放宽成 `.*`（那就退回成按「以点开头」猜归属了）。
+cleanup_own_artifacts() {
+    local p
+    for p in "$DIR"/.*-$$ "$DIR"/.*-$$.py "$DIR"/.*-$$.txt; do
+        [ -e "$p" ] || continue
+        rm -rf "$p"
+    done
+}
+trap cleanup_own_artifacts EXIT
+trap 'cleanup_own_artifacts; exit 130' INT TERM HUP
 PASSED=0; FAILED=0
 
 expect() {  # expect <期望退出码> <fixture> <期望输出中必须出现的专属子串（通过用例传 ""）> <说明>
@@ -576,8 +594,8 @@ expect 1 echo-only-no-compile.log       "测试 target 根本没被编译" \
 # （空清单/非零退出），闸门绝不能把「没有期望项」误判成「全部通过」。用 UIKIT_EXPECTED_TESTS_SCRIPT
 # 注入一个假的推导脚本，对 pass-ci-format.log（本该 GATE PASS 的真实成功日志）重跑一遍，
 # 断言两种坏情况都必须 FAIL。
-FAKE_EMPTY_SCRIPT="$FIX/../.fake-uikit-expected-empty.py"
-FAKE_CRASH_SCRIPT="$FIX/../.fake-uikit-expected-crash.py"
+FAKE_EMPTY_SCRIPT="$FIX/../.fake-uikit-expected-empty-$$.py"
+FAKE_CRASH_SCRIPT="$FIX/../.fake-uikit-expected-crash-$$.py"
 printf '#!/usr/bin/env python3\n# 测试用：模拟推导脚本返回空清单但退出码 0\n' > "$FAKE_EMPTY_SCRIPT"
 printf '#!/usr/bin/env python3\nimport sys\nprint("boom", file=sys.stderr)\nsys.exit(1)\n' > "$FAKE_CRASH_SCRIPT"
 
@@ -607,7 +625,7 @@ rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
 # 注入一个假的推导脚本，只输出三行、其中两行是同一个（合成、跟真实基线名无关的）名字，
 # 对 pass-ci-format.log 重跑一遍：这个检测在遍历/grep 日志之前就该拦截，所以不需要这些
 # 合成名字真的出现在日志里。
-FAKE_DUP_SCRIPT="$FIX/../.fake-uikit-expected-dup.py"
+FAKE_DUP_SCRIPT="$FIX/../.fake-uikit-expected-dup-$$.py"
 printf '#!/usr/bin/env python3\nprint("DupProbeTestA")\nprint("DupProbeTestA")\nprint("DupProbeTestB")\n' > "$FAKE_DUP_SCRIPT"
 
 out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$FAKE_DUP_SCRIPT" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)

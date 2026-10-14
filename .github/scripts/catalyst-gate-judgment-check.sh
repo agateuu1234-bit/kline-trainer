@@ -69,37 +69,14 @@ fi
 MUTATED=0
 RESTORED=0
 
-# 测试台会在 .github/scripts/ 下建一堆临时产物（按自己的进程号命名），正常跑完自己删；
-# 但**被打断时会留下来**，用户跑完验收会在仓库里看到看不懂的文件。
-#
-# ⚠️ 这里按「隐藏条目（以点开头）」整类清，⛔ 不按前缀逐个列：
-#    实核测试台有 **8 种**前缀（.uikit-baseline-drift-fixture- / .uikit-indented-block-fixture- /
-#    .uikit-r7-polarity-fixture- / .unattributed-test-fixture- / .fake-uikit-expected-{crash,dup,empty} /
-#    .nonexistent-total-baseline- / .noninteger-total-baseline- / .nonexistent-tmpdir-for-f…），
-#    按前缀列必然漏 —— 我第一版只列了 .uikit-*fixture-*，结果 .noninteger-total-baseline-*
-#    照样残留下来（本仓 feedback_fix_the_whole_predicate_family_not_the_reported_site）。
-#    `git ls-files .github/scripts` 实核**没有任何受版本控制的点文件**，所以这条规则安全。
-#
-# 并且只清理「本次运行期间**新出现**的」—— 先记下开跑前已有的，⛔ 不碰别人的
-# （同一目录下可能有并发的测试台在跑）。本脚本自己的锁目录显式排除。
-FIXTURES_BEFORE="$(mktemp "${TMPDIR:-/tmp}/catalyst-gate-fixtures.XXXXXX")"
-list_hidden() { (cd "$DIR" && ls -A . 2>/dev/null | grep '^\.' | grep -vxF "$(basename "$LOCK")" | sort) ; }
-list_hidden >"$FIXTURES_BEFORE" || true
-
-clean_new_fixtures() {
-    [ -f "$FIXTURES_BEFORE" ] || return 0
-    local now; now="$(list_hidden)"
-    local leftover
-    leftover="$(comm -13 "$FIXTURES_BEFORE" <(printf '%s\n' "$now"))"
-    if [ -n "$leftover" ]; then
-        printf '%s\n' "$leftover" | while IFS= read -r d; do
-            case "$d" in ""|.|..) continue ;; esac
-            rm -rf "$DIR/$d"
-        done
-        echo "[清理] 已删除本次运行遗留的测试台临时产物：$(printf '%s' "$leftover" | tr '\n' ' ')"
-    fi
-    rm -f "$FIXTURES_BEFORE"
-}
+# ⚠️ 这里**刻意不清理测试台的临时产物**（2026-10-14 codex 评审 medium）：
+#    此前的做法是「记下开跑前的隐藏条目、跑完把新出现的 rm -rf」——
+#    那是从**创建时间 + 以点开头**推断归属，不是归属：
+#    并发跑的另一个测试台、或编辑器在这几分钟里新建的隐藏文件，都会被误删
+#    （锁只挡其它判别力自检，挡不住普通测试台）。
+#    改成**谁造的谁清**：测试台自己带 trap，按它自己的进程号 `-$$` 精确清理
+#    （见 catalyst-gate.test.sh 顶部的 cleanup_own_artifacts）。
+#    ⛔ 不要在这里重新加"顺手清一下"的逻辑。
 # 幂等，但**按标志判定**，⛔ 不靠「备份文件还在不在」。
 # 内部评审 Important #1（2026-10-12，已复现）：原先拿 `[ -f "$BACKUP" ] || return 0`
 # 当幂等判据 —— 它分不清「已经安全还原过」与「备份被外力删掉了」。
@@ -153,7 +130,7 @@ PY
     echo "[还原] 闸门已还原为原文"
 }
 
-cleanup() { restore; clean_new_fixtures; }
+cleanup() { restore; }
 # ⚠️ 信号处理必须**还原后退出**，不能只还原。
 # 2026-10-09 实测：trap 里只调 restore 时，bash 会在被打断的命令之后**继续往下跑**，
 # 于是用户按了 Ctrl-C 却看到最后那句「✅ 有判别力」——而且变异那次根本没有末行、
