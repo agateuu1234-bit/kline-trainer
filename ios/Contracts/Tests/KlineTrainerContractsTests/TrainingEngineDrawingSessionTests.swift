@@ -100,6 +100,39 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)                                       // ⭐两面板重新回到 .drawing
     }
 
+    // P1c 第 3 片 Task 11（N8）：host-pure——只碰 `engine`/`drawingSession`，不需要 Coordinator/UIKit，
+    // 与上面 N8 周边既有的「D31 真变化」系列测试同夹具/同纪律（`engineMultiPeriod()` + `.toSmaller`，
+    // 原因同 `:76-80` 的既有警告：`preview()` 两个方向都会撞「目标周期无数据 → no-op」恒绿）。
+    @Test("N8：画线时切周期**真的变了** → 正在进行的节点拖动**作废**（D138 末行，与「第二根手指→就地定住」刻意不同）")
+    func realPeriodChangeInvalidatesNodeDrag() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.injectDrawingsForTesting([makeStyledHLine(id: "A", revealTick: 0,
+                                                     period: e.upperPanel.period, candleIndex: 0, price: 10)])
+        e.toggleDrawingMode()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "A", panel: .upper)
+
+        // 直接构造拖动态（@testable 直调 internal mutator，同 NodeDragRenderOverrideTests 先例）——
+        // 不需要真实 Coordinator：本测试只关心 `restoreDrawingSessionAfterPeriodChange` 对
+        // `nodeDragOwner`/`nodeDragCurrent`/`drawings`/`drawingsRevision` 的影响。
+        let owner = DrawingSession.NodeDragOwner(panel: .upper, drawingID: "A", anchorIndex: 0, grabPoint: .zero)
+        e.drawingSession.beginNodeDrag(owner, anchor: DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 99))
+        #expect(e.drawingSession.nodeDragOwner != nil, "前提：拖动态确实在进行")
+        let drawingsBefore = e.drawings
+        let revisionBefore = e.drawingsRevision
+
+        e.switchPeriodCombo(direction: .toSmaller)   // (.m60,.daily) → (.m15,.m60) 真的能切成功
+
+        #expect(e.upperPanel.period == .m15, "防假绿：周期必须真的变了，不是撞了 no-op 守卫")
+        #expect(e.lowerPanel.period == .m60)
+        #expect(e.drawingSession.nodeDragOwner == nil, "拖动态必须被作废")
+        #expect(e.drawingSession.nodeDragCurrent == nil, "两半同生同死（G15）")
+        #expect(e.drawings == drawingsBefore, "作废不写：drawings 一个字节不改，不是「就地定住」")
+        #expect(e.drawingsRevision == revisionBefore, "作废不产生任何撤销记录")
+    }
+
     @Test("D31 no-op（目标周期无数据）：pending 锚**原样保留** —— 判据是「周期变没变」不是「做没做手势」")
     func noOpPeriodSwitchKeepsPendingAnchors() {
         let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()   // 只有 m3/m15/m60/daily，无 weekly
@@ -1011,7 +1044,7 @@ struct TrainingEngineDrawingSessionTests {
     /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
     ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
     ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
-    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 10 处（穷尽性，多一处即红）")
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 11 处（穷尽性，多一处即红）")
     @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
         let code = try squeezedSource(trainingEnginePath)
         let n = engineDrawingsStructuralWrites(code)
@@ -1032,8 +1065,12 @@ struct TrainingEngineDrawingSessionTests {
         //   drawings = ds                         ×1  → injectDrawingsForTesting（测试专用换血口，
         //                                                会让栈里已存的下标必然错位，故它同时是 U-N3a 的靶子）
         //    **不是**「整体赋值不计入」——那句旧注释本身就是本次要修的缺陷，别再抄。
-        #expect(n == 10, """
-            drawings 结构性写入点应为 10，实际 \(n)。
+        // ⚠️ P1c 第 3 片（D136）：10 → 11 —— 新增 `updateDrawingAnchor` 里 `drawings[i] = updated` 那一处
+        //    结构性写入。本条与 `DrawingUndoSourceGuardTests.test_uG4_...` 的 `total` 断言是**同一个事实
+        //    的两份副本**（都调用 `engineDrawingsStructuralWrites`），Task 3 简报只点了前者、漏了这里——
+        //    两份必须同步改，否则本条会在 U-G4 转绿之后单独留红。
+        #expect(n == 11, """
+            drawings 结构性写入点应为 11，实际 \(n)。
             多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
             少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
             """)

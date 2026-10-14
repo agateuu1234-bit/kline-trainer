@@ -573,13 +573,55 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   ⇒ 这条惯例值得再强调一次：**改 catalyst-uikit-baseline.txt 必须同时重裁 fixture 并更新下面的
 #   回显数字**，三者是同一件事的三份副本，漏任何一份都会让这道自测失真。
 #   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 80 行 UIKit 结果行取自真日志原文）。
+#   【划线 P1c 第 3 片 · Task 1-12（节点拖动）+ Task 13（T5 像素证据，本轮）】total 1935→2030（+95），
+#   uikit 80→100（+20）：Task 1-12 落地期间（候选捕获/生命周期/拖动提交/撤销/陈旧回调清槧等）
+#   新增的 UIKit-gated 测试（`NodeDragCandidateTests.swift` 17 档）与四处基线文件**一直没同步**——
+#   本仓"漏一份=本地全绿、CI才红"的那类问题，直到 Task 13 才被发现并补上；Task 13 自身只新增
+#   3 条 UIKit-gated（`NodeDragPixelEvidenceTests.swift` 的 T5 正序 + 正向对照 + 反向对照）。
+#   17+3=20，与 uikit 80→100 精确对账。host 侧（swift test，Contracts target）净增 75 条
+#   （由等式反推：Catalyst total = host − 1〔`DecelerationAnimatorTests.swift:205` 的
+#   `#if !canImport(UIKit)` 专属 host 测试，Catalyst 不编译它〕+ uikit；75+20=95，与
+#   1935→2030 精确对账）。实测 `swift test` 当前 host 总数 1931（Contracts）+ 173（Persistence，
+#   Catalyst 门不跑这个 target）。
+#   同步理由：不同步的话下一轮读到的仍是旧基线 1935，窗口下限锁死在 1935−30=1905，而当前真实
+#   总数已是 2030 ⇒ 从 2030 掉到 1905 都不会报警，等于把这道门「掉 30 条就报警」的设计意图放宽；
+#   且活基线里新增的 20 条 UIKit-gated 测试在旧 fixture 找不到结果行，「活基线覆盖」自测会当场 FAIL。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 100 行 UIKit 结果行取自真日志
+#   原文；另验：把重裁后 fixture 的汇总数字故意改坏 → 本自测确实红且退出码为 1）。
+#   【划线 P1c 第 3 片 · Task 14（变异验证，修复环第 1 轮）】total 2030→2031（+1），
+#   uikit 100→101（+1）：Task 14 为 spec §8.4 变异 #9（D135b 两支判定顺序）补了 1 条永久回归测试
+#   `NodeDragCandidateTests.staleCallbackWithBothSourceAndOwnershipMismatchNeverWrites`（owner
+#   来源与归属同时失效的复合场景；既有矩阵里两者不同时失效，顺序无判别力，这条补上）。
+#   ⚠️ 本轮同时发现并修复一处**跨轮未同步**的旧漂移：Task 13 把 T5 那条测试从「真实顺序」改名为
+#   「真实路径，走 KLineView.draw(_:) 真实派发」后，从未重生成 catalyst-uikit-baseline.txt——
+#   基线里一直留着旧名，直到本轮用 uikit-expected-tests.py 重新生成才被发现（diff 对账零差异后
+#   确认）。两处改动（新增 1 条 + 改名 1 条）合计：uikit 清单净 +1（100→101），内容替换 1 处。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 101 行 UIKit 结果行取自真日志
+#   原文，含 1 处 XCTestOutputBarrier 断行插花未修剪，禁手打伪造行）。
+#   【划线 P1c 第 3 片 · Task 15（Q26 残留闭合）】total 2031→2032（+1），uikit 101→102（+1）：
+#   Task 15 为 spec §10 Q26（夹取用的 mapper 是不是「每帧重取当前 viewport」而不是缓存
+#   `.began` 时的旧值）补了 1 条永久回归测试
+#   `NodeDragCandidateTests.viewportChangeMidDragUsesCurrentMapperNotCachedBeginMapper`
+#   （真实 `rebuildRenderState` 把 bounds 宽度放大 3 倍，使 candleStep 真的改变，证明
+#   `.changed` 读到的是新视口算出的锚点，不是 `.began` 时留下的旧值；变异验证：临时让
+#   `activeNodeDrag()` 缓存 `.began` 视口复用 ⇒ 该测试精确变红、其余 18 条不受影响）。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 102 行 UIKit 结果行取自真日志
+#
+#   【划线 P1c 第 3 片 · 整支最终评审修复（本轮）】total 2032→2034（+2），uikit 102→103（+1）：
+#   +1 = 阻断项（spec `:236`/`:665-667` 明令保留的 `.began` 占槽 fail-closed 兜底）的构造性测试
+#        （UIKit 门内 ⇒ 同时计入 uikit 基线）；
+#   +1 = 整支评审 M-1 的往返恒等测试（第三份 17 字段手抄 `candidateWithReplacedAnchor`，host-pure
+#        ⇒ 只计入 total，不进 uikit 基线）。
+#   pass-main-current.log 已用本轮真冷构建日志逐行重裁（1 行汇总 + 103 行 UIKit 结果行取自真日志，
+#   macabi 与 `** TEST SUCCEEDED **` 两个判据锚点均保留）。host 侧 1931→1932（只有 M-1 那条是 host-pure）。
+#   原文，禁手打伪造行）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1935" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 80 / total 1935）→ GATE PASS 且回显 1935 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "2034" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 103 / total 2034）→ GATE PASS 且回显 2034 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1935，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 2034，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
