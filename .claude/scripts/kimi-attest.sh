@@ -676,8 +676,10 @@ set -e
 # Hook diagnostics can contain untrusted tool arguments, including newlines and
 # JSON-looking text. Display them, but never parse them as verdict/coverage events.
 python3 - "$TMP_INPUT/stderr.log" <<'PY'
-import pathlib, sys
-sys.stderr.write(pathlib.Path(sys.argv[1]).read_text(errors="replace"))
+import json, pathlib, sys
+diagnostic = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+if diagnostic:
+    print("[kimi-attest] CLI diagnostic (escaped): " + json.dumps(diagnostic), file=sys.stderr)
 PY
 
 # Extract the verdict from the ASSISTANT TURN ONLY, then apply the codex path's rule

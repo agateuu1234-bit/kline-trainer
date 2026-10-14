@@ -29,13 +29,14 @@ SUBJECT="${1:-$REPO_ROOT/.claude/scripts/kimi-attest.sh}"
 [ -r "$SUBJECT" ] || { echo "cannot read $SUBJECT" >&2; exit 1; }
 
 python3 - "$SUBJECT" > "$TMP/traps.sh" <<'PY'
-import re, sys
+import pathlib, re, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 out = []
 for name in ("_cleanup_input", "_cleanup_worktree", "_release_lock_then_cleanup"):
     m = re.search(rf"^[ \t]*{name}\(\)[ \t]*\{{", src, re.M)
     if not m:
-        if name == "_cleanup_input": continue  # Kimi-only dependency.
+        if name == "_cleanup_input" and pathlib.Path(sys.argv[1]).name == "codex-attest.sh":
+            continue  # Explicitly absent only in the Codex wrapper.
         print(f"MISSING:{name}", file=sys.stderr); sys.exit(1)
     i, depth = m.end() - 1, 0
     while i < len(src):                      # brace-match to the closing }
