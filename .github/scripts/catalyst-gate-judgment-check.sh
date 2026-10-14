@@ -29,6 +29,18 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 GATE="$DIR/catalyst-gate.sh"
 HARNESS="$DIR/catalyst-gate.test.sh"
+
+# 从测试台末行「结果：N 通过，M 失败」里取出 M。取不到就什么都不输出，调用方 fail-closed。
+#
+# ⚠️ 为什么不能用 `case "$line" in *"0 失败")`（2026-10-14 实测踩到）：
+#    那是**对数字做后缀匹配** —— 「1**0 失败**」「2**0 失败**」「10**0 失败**」
+#    统统以「0 失败」结尾，全被判成「全绿」。
+#    我撞到的现场：变异杀掉 10 档（真的有判别力），脚本却报「判别力为零」。
+#    更危险的是基线那处：方向相反，basement 有 10 个失败会被判成全绿而**继续往下跑**，
+#    整个结论建立在一个坏基线上（fail-open）。两处同根，必须一起改成数值比较。
+fail_count() {  # fail_count <测试台末行> → 失败数（取不到则无输出）
+    printf '%s\n' "${1:-}" | grep -oE '[0-9]+ 失败' | grep -oE '[0-9]+' | tail -1
+}
 # 目录锁：mkdir 是原子的，已存在就失败 ⇒ 天然互斥（⛔ 不用 flock，macOS 没有）
 LOCK="$DIR/.catalyst-gate-judgment.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -103,7 +115,10 @@ restore() {
         # ⚠️ 只在「闸门里恰好有 1 处变异体」时才这么做：0 处说明早已还原，
         #    多于 1 处说明文件状态不是我们造成的，⛔ 不猜、不动手。
         local n
-        n=$(grep -cF -- "$MUTANT" "$GATE" 2>/dev/null || echo 0)
+        # ⚠️ `grep -c` 找不到时**既打印 0 又退出 1** ⇒ 写 `|| echo 0` 会得到 "0\n0"，
+        #    下面的 `[ "$n" -eq 1 ]` 会报语法错（非阻断⑧，2026-10-13 评审指出）。
+        n=$(grep -cF -- "$MUTANT" "$GATE" 2>/dev/null || true)
+        n=${n:-0}
         if [ "$n" -eq 1 ] && python3 - "$GATE" "$MUTANT" "$PREDICATE" <<'PY'
 import sys
 path, mutant, predicate = sys.argv[1:4]
@@ -165,10 +180,15 @@ fi
 echo "① 先跑没有变异的测试台（基线）"
 BASE_LINE=$(bash "$HARNESS" | tail -1)
 echo "   $BASE_LINE"
-case "$BASE_LINE" in
-    *"0 失败") ;;
-    *) echo "⛔ 基线就不是全绿，变异结果无法解读——先把基线修绿" >&2; exit 3 ;;
-esac
+BASE_FAILS=$(fail_count "$BASE_LINE")
+if [ -z "$BASE_FAILS" ]; then
+    echo "⛔ 读不出基线的失败数（末行:『${BASE_LINE}』）—— 结论无法成立" >&2
+    exit 3
+fi
+if [ "$BASE_FAILS" -ne 0 ]; then
+    echo "⛔ 基线就不是全绿（${BASE_FAILS} 个失败），变异结果无法解读——先把基线修绿" >&2
+    exit 3
+fi
 
 echo "② 把 G8 判据停掉（恒接受），再跑一次"
 python3 - "$GATE" "$PREDICATE" "$MUTANT" <<'PY'
@@ -207,11 +227,15 @@ if [ -z "${MUT_LINE}" ] || [ -z "${AFTER_LINE}" ]; then
     echo "⛔ 测试台没有产出末行（变异那次:『${MUT_LINE}』，还原那次:『${AFTER_LINE}』）—— 结论无法成立" >&2
     exit 7
 fi
-case "$MUT_LINE" in
-    *"0 失败")
-        echo "⛔ 判别力为零：把 G8 判据停掉之后测试台照样全绿 —— 那些测试没在看 G8" >&2
-        exit 5 ;;
-esac
+MUT_FAILS=$(fail_count "$MUT_LINE")
+if [ -z "$MUT_FAILS" ]; then
+    echo "⛔ 读不出变异那次的失败数（末行:『${MUT_LINE}』）—— 结论无法成立" >&2
+    exit 7
+fi
+if [ "$MUT_FAILS" -eq 0 ]; then
+    echo "⛔ 判别力为零：把 G8 判据停掉之后测试台照样全绿 —— 那些测试没在看 G8" >&2
+    exit 5
+fi
 if [ "$AFTER_LINE" != "$BASE_LINE" ]; then
     echo "⛔ 还原后与基线不一致（基线『${BASE_LINE}』，现在『${AFTER_LINE}』）" >&2
     echo "   这意味着 $GATE 可能没被正确还原。" >&2

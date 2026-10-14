@@ -149,7 +149,11 @@ RESULT_TESTS_SCRIPT="${CATALYST_RESULT_TESTS_SCRIPT:-$SCRIPT_DIR/catalyst-result
 set +e
 RESULT_TESTS_JSON=$(bash "$RESULT_TESTS_SCRIPT" "$LOG" 2>&1)
 RESULT_TESTS_STATUS=$?
-set -e
+# ⛔ 这里**不要**写 `set -e`：本脚本 `:22` 是 `set -uo pipefail`，errexit 从头就没开过，
+#    写 `set -e` 等于把它**打开**，从此对后半截一直生效（2026-10-13 对抗性评审查出）。
+#    后果形状：后半截将来任何一条返回非 0 的命令会让闸门直接 exit 1，而**不打印
+#    `GATE FAIL:`** —— 必需检查红了、页面上却没有任何原因。上面的 `set +e` 保留，
+#    它记录的是「这条命令要自己取 $?，不许中止」这个要求。
 # 四档 fail-closed：⛔「拿不到数据」绝不等于「没问题」——那正是本仓最常踩的 fail-open。
 if [ "$RESULT_TESTS_STATUS" -ne 0 ]; then
     fail "结构化结果取数失败（${RESULT_TESTS_SCRIPT} exit=${RESULT_TESTS_STATUS}）：${RESULT_TESTS_JSON}"
@@ -189,7 +193,7 @@ if total == 0:
 print("\n".join(out))
 ' 2>&1)
 RESULT_PARSE_STATUS=$?
-set -e
+# ⛔ 同上，不要在这里 `set -e`（理由见上一处注释）。
 case "$RESULT_PARSE_STATUS" in
     0) ;;
     3) fail "结构化结果里没有任何测试节点（nodeType == \"Test Case\" 计数为 0）—— 门是空的" ;;
@@ -225,6 +229,13 @@ while IFS= read -r uikit_test; do
     # RESULT_PASSED_NAMES 只收 `result == "Passed"`（白名单，spec §4.2）⇒ 「没有节点」
     # 与「有节点但 result 不是 Passed（含未见过的取值）」都落到同一条失败，这是刻意的：
     # 两种情形都不足以判「这条测试真的跑过并通过」，⛔不许「不等于 Failed 就放行」。
+    # ⚠️ 这里用 here-string（`<<<`）**不属于** F1 禁掉的那种用法（非阻断④，2026-10-13 评审）：
+    #    F1 禁的是拿 here-string **喂 while 循环**（`done <<<"$LIST"`）—— 清单取不到时循环
+    #    静默跑 0 次 = fail-open。这里只是对一个**已在内存里的字符串**做一次 grep，
+    #    而「它为空」这件事上面已经单独 fail-closed 过（取数空输出那一档）；
+    #    空字符串在这里只会匹配不上 ⇒ 判红，方向是 fail-closed。
+    #    测试台 `:731` 那条守卫刻意只钉 `<<<"$UIKIT_EXPECTED_TESTS"`（喂循环的那个变量），
+    #    ⛔ 不是漏了这一处。
     if ! grep -qxF -- "$uikit_test" <<<"$RESULT_PASSED_NAMES"; then
         fail "UIKit-gated 测试未执行：${uikit_test} —— 结构化结果里没有它的 'Passed' 节点（要么这条测试没跑，要么它的 result 不是 Passed）。判据读的是 xcodebuild 结果包、不是 stdout 文本，所以日志里出现同名文字不算数；源码推导清单见 uikit-expected-tests.py"
     fi
@@ -239,10 +250,23 @@ fi
 #
 # ⚠️ G7 **刻意不迁移**到结构化结果（2026-10-07，spec §4.1 已定，⛔ 不是遗漏、⛔ 不要
 #    "顺手统一"）。下一个读到「G8 读结构化、G7 读文本」的人一定会觉得不一致——三条理由：
-#    ① 汇总行除 `✔` 外全是 ASCII 与数字、**不含任何测试名** ⇒ 并发劈字伤不到它。
-#       本缺陷的受害者只有 G8（它要逐条比对含中文的测试名）。
-#    ② 迁移它会连带搞坏 5 档既有负向回归——那些档位的变异是加在**文本**上的
-#       （删汇总行 / 伪造汇总行 / 改数字），迁走之后它们全部失效。
+#    ① 汇总行**不含任何测试名**，除 `✔` 外全是 ASCII 与数字 ⇒ 暴露面小得多。
+#       ⚠️ 2026-10-13 订正：原文写「劈字**伤不到它**」是错的绝对化断言。G7 的正则
+#       （见下方 SUMMARY_RAW）**要求那个 `✔`**，而 `✔` = U+2714 = **3 个字节**，
+#       正是会被劈开的那类字符；实核它也是汇总行里**唯一**的非 ASCII 字符。
+#       它一旦被劈，G7 会报「找不到 swift-testing 汇总行」⇒ 同一类随机假红的残留。
+#       量级差别才是真理由：G7 的暴露面是 **1 行 × 1 个多字节字符**，
+#       而 G8 原先是约 2000 行 ✔ 结果行、每行还带含中文的测试名。
+#       ⇒ 不迁移是**代价/收益**判断，不是「它不可能被影响」。残留记在 spec §7 R6。
+#    ② 迁移它会连带搞坏一批既有回归。⚠️ 2026-10-13 订正：原文写「5 档负向」是
+#       spec 阶段**读代码估的**数，已被本片自己的变异实测否掉。实测（变异 G）：
+#       **既有 10 档受影响** —— 其中 **4 档负向**（判据彻底失去失败条件）：
+#       `zero-tests`（门是空的）/ `missing-summary-line`（汇总行缺失）/
+#       `summary-stdout-spoof`（伪造汇总行）/ `total-baseline-above-delta`（高于上限）；
+#       另 **6 档正向**（本该放行却被误伤）。
+#       ⛔ 注意不要把 `too-few-tests` 与 `total-baseline-below-delta` 算进负向那一类：
+#       它们断言「低于下限」，而迁移后节点数（28 或 80）仍然低于下限 1377
+#       ⇒ 失败条件**完好无损**。权威度量见 docs/acceptance/…-mutation-log.md §一。
 #    ③ 不迁移就不必处理 1935 vs 2054 的口径差（文本汇总行只数 swift-testing，
 #       结构化结果里 XCTest 与 swift-testing 混在一起）。
 #    机械化版本见 catalyst-gate.test.sh 里「G7 仍读文本汇总行」那一档。

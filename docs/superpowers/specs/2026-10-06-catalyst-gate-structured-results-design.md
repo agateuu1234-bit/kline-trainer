@@ -120,9 +120,20 @@ Test Plan: 1   Unit test bundle: 1   Test Suite: 234   Test Case: 2054
 2. **迁移 G7 的代价是连带搬一批既有回归**（spec 阶段读 `catalyst-gate.test.sh` 估为 5 档负向；
    ⚠️ 实施期用变异实测为 **既有 10 档受影响**，其中负向 4 档、正向 6 档 —— 估**低**了，
    权威度量见 `docs/acceptance/2026-10-07-…-mutation-log.md` §一，⛔ 别在这里再抄一份数字）：
-   `missing-summary-line` / `summary-stdout-spoof` / `too-few-tests` /
-   `total-baseline-below-delta` / `total-baseline-above-delta` —— 它们的变异都加在**文本**上，
-   G7 一改读 JSON，这 5 档的变异就不再喂给判据，**失去失败条件**（= 判别力归零）。
+   ⚠️ **2026-10-13 订正：下面这份枚举原先错了**（错列 2 条、漏列 1 条，对抗性评审 B2(b)
+   指出，我已逐档实测复核）。真正**失去失败条件**（= 判别力归零）的是这 4 档：
+   - `zero-tests`（断言「门是空的」；迁移后节点数 28 ≠ 0 ⇒ 分支再也走不到）
+   - `missing-summary-line`（断言「找不到汇总行」；迁移后总能合成出一个数 ⇒ 走不到）
+   - `summary-stdout-spoof`（同上，伪造汇总行那档）
+   - `total-baseline-above-delta`（断言「高于上限」；28 不高于 1437 ⇒ 走不到）
+
+   ⛔ **原枚举里这 2 条要去掉**：`too-few-tests` 与 `total-baseline-below-delta` 断言的是
+   「低于下限」，而迁移后节点数（28 或 80）**仍然低于**下限 1377 ⇒ 它们的失败条件
+   **完好无损**，不属于判别力归零。把它们算进来会高估"负向档"的数量。
+
+   另有 **6 档正向**（本该放行却被误伤）：`pass-new-scheme` / `pass-ci-format`（两处断言）/
+   `too-few-tests` 的 F3 下限内隔离 / 活基线覆盖 / 正常路径。
+   ⇒ 既有受影响总数 **10 档**。权威度量见 `docs/acceptance/2026-10-07-…-mutation-log.md` §一。
 3. 口径差异（1935 vs 2054）在不迁移时**根本不需要处理**。
 
 ⛔ 原先写的「从包里只取 swift-testing 那部分」已撤销。**也不采用「改基线为 2054」**
@@ -283,6 +294,14 @@ bash .github/scripts/catalyst-gate.test.sh
 - **R4 · 本片不改 `app-build.yml`**：实核（2026-10-06）它跑的是 `xcodebuild build`（`:41`）+
   「BUILD SUCCEEDED + 无 error」门（`:47`），**根本不执行测试** ⇒ 没有逐条测试名匹配，
   不受本缺陷影响。全文唯一含 `GATE PASS` 的是 `:52`，与 UIKit-gated 判据无关。
+- **R6 · G7 仍有同一类假红的残留**（2026-10-13 对抗性评审 B2(c) 指出，已实核）：
+  §4.1 理由① 原写「汇总行除 `✔` 外全是 ASCII ⇒ 劈字**伤不到它**」—— 这是错的绝对化断言。
+  G7 的正则**要求那个 `✔`**（`grep -oE '✔ Test run with …'`），而 `✔` = U+2714 = **3 字节**，
+  正是会被劈开的那类字符；实核它也是汇总行里**唯一**的非 ASCII 字符。
+  它被劈 ⇒ G7 报「找不到 swift-testing 汇总行……测试没被执行」= 同一类随机假红。
+  **不迁移的真理由是量级**：G7 暴露面 = 1 行 × 1 个多字节字符；G8 原先 ≈ 2000 行 ✔ 结果行、
+  每行还带含中文的测试名。⇒ 本片**明确不处理** G7 这条残留（迁移它的代价见 §4.1 理由②），
+  但⛔ 不许再把它描述成「不可能发生」。真发作时的症状就是上面那句失败消息。
 
 ---
 

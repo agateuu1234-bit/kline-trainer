@@ -728,7 +728,14 @@ fi
 rm -rf "$BROKEN_TMPDIR" 2>/dev/null || true
 
 # F1 结构性回归：防止未来有人把实现改回有 fail-open 隐患的 here-string 写法而没人发现。
-if grep -qE '<<<[[:space:]]*"\$UIKIT_EXPECTED_TESTS"' "$GATE"; then
+#
+# ⚠️ 必须**先剔掉注释行**再扫（2026-10-13）：这条守卫是按**文本**找被禁的写法，
+#    而闸门里有一段注释**引用了**这个写法的字面量来解释「为什么禁它」——
+#    不剔注释的话，守卫会命中那句解释文字、报一个假红。
+#    （我这次就真踩了：补完说明注释后它立刻变红，而代码一个字没改。
+#     本仓 feedback_source_guard_text_source_discipline：守卫读哪份文本本身就是判据的一部分。）
+#    只剔「整行是注释」的行；`代码 ... # 尾注释` 这种行照样会被扫到。
+if sed -e 's/^[[:space:]]*#.*$//' "$GATE" | grep -qE '<<<[[:space:]]*"\$UIKIT_EXPECTED_TESTS"'; then
     echo "  FAIL — 结构性回归：catalyst-gate.sh 又出现了 here-string 喂 UIKIT_EXPECTED_TESTS 的写法"
     FAILED=$((FAILED + 1))
 else
@@ -786,19 +793,60 @@ G8_TARGET='§5.3 #14 drawDrawings with empty list calls no render'
 MX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/catalyst-gate-mx.XXXXXX")"
 
 # 按需从共享样本派生变体：删节点 / 改 result。变体由**真实样本**派生，⛔ 不手造节点。
+#
+# ⚠️ 这里必须**递归**找节点，⛔ 不许写 `d["testNodes"][0]["children"][0]["children"]`。
+# 2026-10-13 对抗性评审 B1：原先那种硬编码路径只在「把套件层拍平」的假树上成立。
+# 真包是四层（Test Plan → Unit test bundle → Test Suite 234 → Test Case 2054），
+# 而且有 20 条 Test Case **直挂 bundle**（不在任何套件下）—— 两种深度同时存在。
+# 样本改成真实树形后，硬编码路径会取到套件节点而不是用例节点，变异会悄悄落在错的地方。
 mx_variant() {  # mx_variant <out.json> <mode: drop|result> <目标名> [新 result]
     python3 - "$FIX/all-passed.tests.json" "$1" "$2" "$3" "${4:-}" <<'PY'
 import json, sys
 src, dst, mode, target, newres = sys.argv[1:6]
 d = json.load(open(src))
-kids = d["testNodes"][0]["children"][0]["children"]
+
+def is_case(n, name=None):
+    return (isinstance(n, dict) and n.get("nodeType") == "Test Case"
+            and (name is None or n.get("name") == name))
+
+def count(node):
+    n = 1 if is_case(node, target) else 0
+    if isinstance(node, dict):
+        for v in node.values(): n += count(v)
+    elif isinstance(node, list):
+        for v in node: n += count(v)
+    return n
+
+before = count(d)
+assert before == 1, f"目标用例在样本里出现 {before} 次（应为 1）：{target}"
+
+def walk(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("children"), list):
+            node["children"] = [c for c in node["children"] if not is_case(c, target)] \
+                               if mode == "drop" else node["children"]
+            for c in node["children"]:
+                if mode == "result" and is_case(c, target):
+                    c["result"] = newres
+        for v in node.values(): walk(v)
+    elif isinstance(node, list):
+        for v in node: walk(v)
+
+walk(d)
+after = count(d)
 if mode == "drop":
-    d["testNodes"][0]["children"][0]["children"] = [k for k in kids if k.get("name") != target]
-    assert len(d["testNodes"][0]["children"][0]["children"]) == len(kids) - 1, "drop 没生效"
+    assert after == 0, f"drop 没生效（目标仍在 {after} 处）"
 else:
-    hit = [k for k in kids if k.get("name") == target]
-    assert len(hit) == 1, "result 目标不唯一"
-    hit[0]["result"] = newres
+    assert after == 1, "result 模式不该删掉节点"
+    found = []
+    def chk(n):
+        if is_case(n, target): found.append(n.get("result"))
+        if isinstance(n, dict):
+            for v in n.values(): chk(v)
+        elif isinstance(n, list):
+            for v in n: chk(v)
+    chk(d)
+    assert found == [newres], f"result 没改上: {found}"
 json.dump(d, open(dst, "w"), ensure_ascii=False)
 PY
 }
@@ -828,6 +876,7 @@ mx_case() {  # mx_case <json> <log> <期望退出码> <期望专属子串> <说�
 mx_variant "$MX_DIR/m1.json"  drop   "$G8_TARGET"
 mx_variant "$MX_DIR/m2.json"  result "$G8_TARGET" Failed
 mx_variant "$MX_DIR/m3.json"  result "$G8_TARGET" Flaky
+mx_variant "$MX_DIR/m3b.json" result "$G8_TARGET" Skipped
 
 mx_case "$MX_DIR/m1.json" pass-ci-format.log 1 "$G8_TARGET" \
     "M1：结构化结果里缺该 baseline 测试的节点 → G8 必须 FAIL 并点名"
@@ -835,6 +884,12 @@ mx_case "$MX_DIR/m2.json" pass-ci-format.log 1 "$G8_TARGET" \
     "M2：节点在但 result=Failed → G8 必须 FAIL 并点名"
 mx_case "$MX_DIR/m3.json" pass-ci-format.log 1 "$G8_TARGET" \
     "M3：节点在但 result 是**未知取值** Flaky → 白名单必须 FAIL（⛔ 不许'不等于 Failed 就放行'）"
+# M3b（2026-10-13 对抗性评审非阻断③）：`Skipped` 这个取值要单独一档。
+# 它恰好是 G8 存在理由里点名的那个场景（见 catalyst-gate.sh 的 G8 注：
+# 「不是编译了但被跳过」）。实测：把白名单放宽成 `in ("Passed","Skipped")`
+# 之前，测试台 **零档被杀** —— M3 只钉住了「未知取值」这一类，钉不住这个**具名**取值。
+mx_case "$MX_DIR/m3b.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M3b：节点在但 result=Skipped（编译了却被跳过，正是 G8 要防的场景）→ 必须 FAIL 并点名"
 
 # M5a/M5b：防伪造。stdout-spoof.log 里有一条没有 ✔ 前缀的**伪造**通过文本。
 # 两档方向相反，缺一不可（spec §6.1 / codex spec-R2）：
@@ -885,6 +940,20 @@ mx_case_with_list "$FIX/uikit-expected-tests-frozen-plus-funcform.py" \
 
 mx_case "$FIX/only-frozen-28.tests.json" pass-ci-format.log 0 "" \
     "G7 仍读文本汇总行：结构化只有 28 个节点、文本说 1407 → 必须 PASS（⛔ G7 刻意不迁移）"
+
+# B1（2026-10-13 对抗性评审，已复现）：钉死 `nodeType == "Test Case"` 这条过滤器。
+# 它防的是闸门自己头注释记过的那个**历史上真被利用过的假绿**：只看「套件报告通过」
+# 不能证明套件里每个测试都跑了 —— 删掉套件内某个测试，套件照样 passed。
+#
+# ⚠️ 为什么本片之前没测到它：我造的 6 份样本把生产的套件层**整层拍平**了
+#    （样本 0 个 Test Suite vs 真包 234 个），样本世界里不存在需要被滤掉的节点
+#    ⇒ 把过滤器整条改宽，测试台仍然全绿、零档被杀（实测）。
+#    现在样本已按真实四层树形重建，这一档用「同名套件顶替被删的测试」直接打那条过滤器。
+# 样本里那个套件节点是从真包的 DrawDrawingsDispatchTests **原样复制**后只改 name/children，
+# ⛔ 不手造字段（本仓 feedback_fixtures_must_match_production_format）。
+mx_case_with_list "$FIX/uikit-expected-tests-frozen.py" \
+    "$FIX/suite-name-collision.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "B1：目标测试的节点被删、换成一个**同名的 Test Suite**（result=Passed）→ 必须 FAIL 并点名（⛔ 套件级通过不等于套件里每个测试都跑了）"
 
 rm -rf "$MX_DIR"
 
@@ -937,7 +1006,7 @@ DOLLAR_HITS=$(python3 - "$DIR" <<'PY'
 import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 bad = []
-for f in sorted(root.glob("*.sh")):
+for f in sorted(root.rglob("*.sh")):   # rglob：连 fixtures/ 下的脚本一起扫（非阻断⑤）
     for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
         if re.search(r'\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])', line):
             bad.append(f"{f.name}:{i}  {line.strip()[:90]}")
