@@ -137,42 +137,107 @@ UIKIT_EXPECTED_COUNT=$(printf '%s\n' "$UIKIT_EXPECTED_TESTS" | grep -c '.' || tr
 UIKIT_LIST_FILE="$(mktemp "${TMPDIR:-/tmp}/catalyst-gate-uikit-expected.XXXXXX" 2>&1)" || fail "无法创建临时文件写入 UIKit-gated 期望测试清单（TMPDIR 不可写/已满？):${UIKIT_LIST_FILE}"
 printf '%s\n' "$UIKIT_EXPECTED_TESTS" >"$UIKIT_LIST_FILE" || fail "写入 UIKit-gated 期望测试清单临时文件失败：$UIKIT_LIST_FILE"
 
+# ── 结构化结果取数（2026-10-06 spec §3；G8 的数据来源，替代读 stdout 文本）──
+# 为什么不再读 stdout：并发写同一 fd 会把一个多字节 UTF-8 字符劈开，接收方把残字节
+# 转义成八进制（实测 `✔ Test "…\342\206\222…" passed after`）。baseline 80 条**全部**
+# 含非 ASCII ⇒ 一旦劈字落在某条被匹配的名字上，闸门就误判「未执行」= 随机假红。
+# 结构化结果由测试运行器自己记账，不经过那条 racy 的文本流。
+#
+# 取数独立成脚本是为了可注入（测试喂 fixture JSON，真跑读 .xcresult 包）。
+# 契约见 catalyst-result-tests.sh 的头注释。
+RESULT_TESTS_SCRIPT="${CATALYST_RESULT_TESTS_SCRIPT:-$SCRIPT_DIR/catalyst-result-tests.sh}"
+set +e
+RESULT_TESTS_JSON=$(bash "$RESULT_TESTS_SCRIPT" "$LOG" 2>&1)
+RESULT_TESTS_STATUS=$?
+# ⛔ 这里**不要**写 `set -e`：本脚本 `:22` 是 `set -uo pipefail`，errexit 从头就没开过，
+#    写 `set -e` 等于把它**打开**，从此对后半截一直生效（2026-10-13 对抗性评审查出）。
+#    后果形状：后半截将来任何一条返回非 0 的命令会让闸门直接 exit 1，而**不打印
+#    `GATE FAIL:`** —— 必需检查红了、页面上却没有任何原因。上面的 `set +e` 保留，
+#    它记录的是「这条命令要自己取 $?，不许中止」这个要求。
+# 四档 fail-closed：⛔「拿不到数据」绝不等于「没问题」——那正是本仓最常踩的 fail-open。
+if [ "$RESULT_TESTS_STATUS" -ne 0 ]; then
+    fail "结构化结果取数失败（${RESULT_TESTS_SCRIPT} exit=${RESULT_TESTS_STATUS}）：${RESULT_TESTS_JSON}"
+fi
+if [ -z "$RESULT_TESTS_JSON" ]; then
+    fail "结构化结果为空（取数脚本退出码 0 但没有任何输出）—— 无法据此判定测试是否执行"
+fi
+# 解析与节点计数交给 python3（闸门已依赖它跑 uikit-expected-tests.py，⛔ 不引入 jq）。
+# 只依赖「字段是否存在」，⛔ 不依赖 xcresulttool 的版本号字符串：
+# CI（Xcode 16.4）报 "format version 3.53"、本机（Xcode 27）报 "schema version 0.4.0"，
+# 而 2026-10-07 CI 探针实测两边**输出结构逐项相同**。
+set +e
+RESULT_PASSED_NAMES=$(printf '%s' "$RESULT_TESTS_JSON" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception as exc:
+    print(f"PARSE_ERROR {exc}", file=sys.stderr)
+    sys.exit(2)
+total = 0
+out = []
+def walk(node):
+    global total
+    if isinstance(node, dict):
+        if node.get("nodeType") == "Test Case":
+            total += 1
+            if node.get("result") == "Passed":
+                out.append(node.get("name", ""))
+        for val in node.values():
+            walk(val)
+    elif isinstance(node, list):
+        for val in node:
+            walk(val)
+walk(doc)
+if total == 0:
+    sys.exit(3)
+print("\n".join(out))
+' 2>&1)
+RESULT_PARSE_STATUS=$?
+# ⛔ 同上，不要在这里 `set -e`（理由见上一处注释）。
+case "$RESULT_PARSE_STATUS" in
+    0) ;;
+    3) fail "结构化结果里没有任何测试节点（nodeType == \"Test Case\" 计数为 0）—— 门是空的" ;;
+    *) fail "结构化结果解析失败（python3 exit=${RESULT_PARSE_STATUS}）：${RESULT_PASSED_NAMES}" ;;
+esac
+
 UIKIT_CHECKED_COUNT=0
 while IFS= read -r uikit_test; do
     [ -z "$uikit_test" ] && continue
     UIKIT_CHECKED_COUNT=$((UIKIT_CHECKED_COUNT + 1))
-    # F3（codex R5 finding）：swift-testing 对两种 @Test 写法打印格式不同——
-    # `@Test("显示名")` 收尾行带字面引号（`Test "显示名" passed`），而 `@Test func 名字()`
-    # （无显示名）直接印函数签名、不带引号（`Test 名字() passed`，已用真实 CI 日志核实）。
-    # uikit-expected-tests.py 用「名字末尾是不是 "()"」来标记是哪种形式，这里据此决定
-    # 要不要在匹配串两侧补引号。
+    # ⬇⬇ 2026-10-07：本判据**不再读 stdout 文本**，改查结构化结果（spec §3）。
+    # 为什么换（治的是真缺陷，不是重构）：两个并发进程写同一 fd 会把 ✔ 结果行里的
+    # 多字节 UTF-8 字符劈开，接收方把残字节转义成八进制（`\342\206\222`）⇒ 测试名
+    # 对不上 ⇒ 明明通过的测试被判「未执行」。偶发假红，重跑就好，所以极易被当成玄学。
+    # 文本匹配治不了它：转义点随机、改判据只会在「漏放」和「误伤」之间换边（spec §4.3
+    # 明令⛔不许写成「日志里不许有转义」——转义本身不是违规，M7 那档钉住这一点）。
     #
-    # F4（codex R9 finding，2026-07-15，实测可利用）：match_str 此前是裸子串
-    # `Test "<名>" passed`——grep -qF 不锚定行首、不看前缀，只要日志任何位置出现这串字符
-    # 就算数。实测复现：删掉某 UIKit 测试的真实 ✔ 结果行，改在日志别处插一条**普通缩进
-    # stdout**（如 `  some test stdout: Test "<名>" passed`，模拟另一个测试自己打印的调试
-    # 信息碰巧含有这串文字）——闸门照样 GATE PASS，该测试根本没跑却被判"跑过"。
-    # 根治：把 swift-testing 真实结果行的专属前缀 `✔ Test ` 和收尾 ` passed after ` 都纳入
-    # 匹配串——真结果行固定长这样（`✔ Test "显示名" passed after 1.714 seconds.`），
-    # 普通 stdout 不会同时带这两处标记。
-    # 不锚定行首（不要求 `^✔`）是刻意的：真实 CI 日志里 XCTest 自身的 XCTestOutputBarrier
-    # 诊断文本有时会跟 swift-testing 的 ✔ 结果行粘连在同一物理行（两个并发进程写同一 fd
-    # 时的输出交织，✔ 结果行本身没被截断，只是前面偶尔粘着上一条尚未换行的残留文本，
-    # 例如 `XCT✔ Test contractVersionIs1_11() passed after …`，已在 ci-catalyst-real.log
-    # 抓到 7 次真实样本）——若严格要求 ✔ 必须是该行第 1 个字符，会把这些真实通过的测试
-    # 误判成未执行（fail-open 换了个方向变成误伤真实通过）。只要求 `✔ Test ` 这段连续
-    # 子串存在，既挡住了本 finding 的伪造 stdout（没有 ✔ 字符），又不受这种真实交织
-    # 噪声影响。
-    case "$uikit_test" in
-        *'()')
-            match_str="✔ Test ${uikit_test} passed after "
-            ;;
-        *)
-            match_str="✔ Test \"${uikit_test}\" passed after "
-            ;;
-    esac
-    if ! grep -qF "$match_str" "$LOG"; then
-        fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到真实结果行 '✔ Test ... passed after ...'（不锚定行首但必须带 ✔ 前缀；伪造/普通 stdout 里出现同样文字不算数；UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
+    # 换成结构化结果后，原先两条文本层 finding 自动消失、但它们的**意图**仍被测试钉着：
+    #   F3（codex R5）：`@Test("显示名")` 日志行带字面引号、`@Test func 名字()` 不带 ⇒
+    #     过去要分两种拼法。结构化结果的 `name` 字段**就是裸名字、不带引号**（2026-10-07
+    #     实核：冻结清单 28 条逐字命中、活清单 80 条经 CI 探针逐条对账 0 缺失）⇒ 拼法
+    #     问题消失，逐字相等即可。✅ 两种写法都已实测（2026-10-11 本机真结果包）：
+    #     2054 个节点里 495 个是函数形式，`name` 就是 `名字()`（源码 `@Test func 名字()`，
+    #     文本日志印作 `✔ Test 名字() passed after`）⇒ 与 uikit-expected-tests.py 的输出
+    #     逐字相同。该节点已原样搬进 fixture，由测试台「R5 正向/反向」两档钉住。
+    #     ⚠️ 当前全树还没有函数形式的 **UIKit-gated** 测试，所以那条路径只有 fixture 覆盖、
+    #     没有真机端到端样本；真新增一条而本判据报「未执行」时，先看那两档，别急着放宽判据。
+    #   F4（codex R9）：裸子串匹配可被普通 stdout 伪造（日志别处印出同样文字就算数）。
+    #     结构化结果取自 xcodebuild 自己写的结果包，测试没跑就没有节点，stdout 冒充不了
+    #     ⇒ M5a/M5b 两档（方向相反）钉住「伪造挡得住」且「游离 stdout 不造成假红」。
+    #
+    # 判据：该测试必须在结构化结果里有一个 result == "Passed" 的节点（整行相等）。
+    # RESULT_PASSED_NAMES 只收 `result == "Passed"`（白名单，spec §4.2）⇒ 「没有节点」
+    # 与「有节点但 result 不是 Passed（含未见过的取值）」都落到同一条失败，这是刻意的：
+    # 两种情形都不足以判「这条测试真的跑过并通过」，⛔不许「不等于 Failed 就放行」。
+    # ⚠️ 这里用 here-string（`<<<`）**不属于** F1 禁掉的那种用法（非阻断④，2026-10-13 评审）：
+    #    F1 禁的是拿 here-string **喂 while 循环**（`done <<<"$LIST"`）—— 清单取不到时循环
+    #    静默跑 0 次 = fail-open。这里只是对一个**已在内存里的字符串**做一次 grep，
+    #    而「它为空」这件事上面已经单独 fail-closed 过（取数空输出那一档）；
+    #    空字符串在这里只会匹配不上 ⇒ 判红，方向是 fail-closed。
+    #    测试台 `:731` 那条守卫刻意只钉 `<<<"$UIKIT_EXPECTED_TESTS"`（喂循环的那个变量），
+    #    ⛔ 不是漏了这一处。
+    if ! grep -qxF -- "$uikit_test" <<<"$RESULT_PASSED_NAMES"; then
+        fail "UIKit-gated 测试未执行：${uikit_test} —— 结构化结果里没有它的 'Passed' 节点（要么这条测试没跑，要么它的 result 不是 Passed）。判据读的是 xcodebuild 结果包、不是 stdout 文本，所以日志里出现同名文字不算数；源码推导清单见 uikit-expected-tests.py"
     fi
 done <"$UIKIT_LIST_FILE"
 rm -f "$UIKIT_LIST_FILE"
@@ -182,6 +247,29 @@ if [ "$UIKIT_CHECKED_COUNT" -ne "$UIKIT_EXPECTED_COUNT" ]; then
 fi
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
+#
+# ⚠️ G7 **刻意不迁移**到结构化结果（2026-10-07，spec §4.1 已定，⛔ 不是遗漏、⛔ 不要
+#    "顺手统一"）。下一个读到「G8 读结构化、G7 读文本」的人一定会觉得不一致——三条理由：
+#    ① 汇总行**不含任何测试名**，除 `✔` 外全是 ASCII 与数字 ⇒ 暴露面小得多。
+#       ⚠️ 2026-10-13 订正：原文写「劈字**伤不到它**」是错的绝对化断言。G7 的正则
+#       （见下方 SUMMARY_RAW）**要求那个 `✔`**，而 `✔` = U+2714 = **3 个字节**，
+#       正是会被劈开的那类字符；实核它也是汇总行里**唯一**的非 ASCII 字符。
+#       它一旦被劈，G7 会报「找不到 swift-testing 汇总行」⇒ 同一类随机假红的残留。
+#       量级差别才是真理由：G7 的暴露面是 **1 行 × 1 个多字节字符**，
+#       而 G8 原先是约 2000 行 ✔ 结果行、每行还带含中文的测试名。
+#       ⇒ 不迁移是**代价/收益**判断，不是「它不可能被影响」。残留记在 spec §7 R6。
+#    ② 迁移它会连带搞坏一批既有回归。⚠️ 2026-10-13 订正：原文写「5 档负向」是
+#       spec 阶段**读代码估的**数，已被本片自己的变异实测否掉。实测（变异 G）：
+#       **既有 10 档受影响** —— 其中 **4 档负向**（判据彻底失去失败条件）：
+#       `zero-tests`（门是空的）/ `missing-summary-line`（汇总行缺失）/
+#       `summary-stdout-spoof`（伪造汇总行）/ `total-baseline-above-delta`（高于上限）；
+#       另 **6 档正向**（本该放行却被误伤）。
+#       ⛔ 注意不要把 `too-few-tests` 与 `total-baseline-below-delta` 算进负向那一类：
+#       它们断言「低于下限」，而迁移后节点数（28 或 80）仍然低于下限 1377
+#       ⇒ 失败条件**完好无损**。权威度量见 docs/acceptance/…-mutation-log.md §一。
+#    ③ 不迁移就不必处理 1935 vs 2054 的口径差（文本汇总行只数 swift-testing，
+#       结构化结果里 XCTest 与 swift-testing 混在一起）。
+#    机械化版本见 catalyst-gate.test.sh 里「G7 仍读文本汇总行」那一档。
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
 #     而 CI 的 macos-15 输出 'Test run with N tests passed'（没有 "in M suites"）。
 #     两种格式都要接受，否则 CI 上永远匹配不到（真实咬过一次，见 fixtures/pass-ci-format.log）。

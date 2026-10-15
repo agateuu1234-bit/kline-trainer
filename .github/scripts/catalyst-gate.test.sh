@@ -10,6 +10,24 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 GATE="$DIR/catalyst-gate.sh"
 FIX="$DIR/fixtures"
+
+# 本脚本在 .github/scripts/ 下建一批临时夹具，命名统一带**自己的进程号** `-$$`。
+# 正常跑完每处都会显式删掉；**被打断时会泄漏**，于是仓库里多出看不懂的隐藏文件。
+#
+# ⚠️ 归属只认 `-$$`（2026-10-14 codex 评审 medium）：此前是由**调用方**
+#    （catalyst-gate-judgment-check.sh）按「本次运行期间新出现的隐藏条目」推断归属再 rm -rf
+#    —— 那不是归属判据：并发跑的另一个测试台、或编辑器在这几分钟里新建的隐藏文件，
+#    都会被误删。改成**谁造的谁清**，用进程号精确限定，调用方不再猜。
+#    ⛔ 不要把这个 glob 放宽成 `.*`（那就退回成按「以点开头」猜归属了）。
+cleanup_own_artifacts() {
+    local p
+    for p in "$DIR"/.*-$$ "$DIR"/.*-$$.py "$DIR"/.*-$$.txt; do
+        [ -e "$p" ] || continue
+        rm -rf "$p"
+    done
+}
+trap cleanup_own_artifacts EXIT
+trap 'cleanup_own_artifacts; exit 130' INT TERM HUP
 PASSED=0; FAILED=0
 
 expect() {  # expect <期望退出码> <fixture> <期望输出中必须出现的专属子串（通过用例传 ""）> <说明>
@@ -241,6 +259,14 @@ rm -rf "$R7_ROOT" 2>/dev/null || true
 # 真实 xcodebuild 日志（workflow 里的真跑）不设这个环境变量，仍走 catalyst-gate.sh 的
 # 默认值——对当前源码做实时推导，源码推导的保护完全没丢（见本文件末尾的独立验证）。
 export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
+
+# 结构化结果同理解耦（2026-10-07）：G8 改读 xcresult 结构化结果后，闸门每次都要取数，
+# 而 fixture 只有日志、没有二进制 .xcresult 包（它不能签进 git）。
+# ⇒ 经 CATALYST_RESULT_TESTS_SCRIPT 把取数换成桩：按 <name>.log → <name>.tests.json 配对，
+#   找不到就回退共享的 all-passed.tests.json。配对规则与陷阱见桩脚本头注释。
+# 真实 xcodebuild 日志（workflow 里的真跑）不设这个环境变量，仍走 catalyst-result-tests.sh
+# 的默认值去读真包——取数路径的保护完全没丢。
+export CATALYST_RESULT_TESTS_SCRIPT="$FIX/result-tests-stub.sh"
 
 # total 基线同理解耦（2026-07-18）：下面的 fixture 用例测的是「G7 total 判据逻辑」，
 # 不是「main 当前真实总数」。若让它们读活 catalyst-total-baseline.txt，任何大幅增减
@@ -610,8 +636,8 @@ expect 1 echo-only-no-compile.log       "测试 target 根本没被编译" \
 # （空清单/非零退出），闸门绝不能把「没有期望项」误判成「全部通过」。用 UIKIT_EXPECTED_TESTS_SCRIPT
 # 注入一个假的推导脚本，对 pass-ci-format.log（本该 GATE PASS 的真实成功日志）重跑一遍，
 # 断言两种坏情况都必须 FAIL。
-FAKE_EMPTY_SCRIPT="$FIX/../.fake-uikit-expected-empty.py"
-FAKE_CRASH_SCRIPT="$FIX/../.fake-uikit-expected-crash.py"
+FAKE_EMPTY_SCRIPT="$FIX/../.fake-uikit-expected-empty-$$.py"
+FAKE_CRASH_SCRIPT="$FIX/../.fake-uikit-expected-crash-$$.py"
 printf '#!/usr/bin/env python3\n# 测试用：模拟推导脚本返回空清单但退出码 0\n' > "$FAKE_EMPTY_SCRIPT"
 printf '#!/usr/bin/env python3\nimport sys\nprint("boom", file=sys.stderr)\nsys.exit(1)\n' > "$FAKE_CRASH_SCRIPT"
 
@@ -641,7 +667,7 @@ rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
 # 注入一个假的推导脚本，只输出三行、其中两行是同一个（合成、跟真实基线名无关的）名字，
 # 对 pass-ci-format.log 重跑一遍：这个检测在遍历/grep 日志之前就该拦截，所以不需要这些
 # 合成名字真的出现在日志里。
-FAKE_DUP_SCRIPT="$FIX/../.fake-uikit-expected-dup.py"
+FAKE_DUP_SCRIPT="$FIX/../.fake-uikit-expected-dup-$$.py"
 printf '#!/usr/bin/env python3\nprint("DupProbeTestA")\nprint("DupProbeTestA")\nprint("DupProbeTestB")\n' > "$FAKE_DUP_SCRIPT"
 
 out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$FAKE_DUP_SCRIPT" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
@@ -762,7 +788,14 @@ fi
 rm -rf "$BROKEN_TMPDIR" 2>/dev/null || true
 
 # F1 结构性回归：防止未来有人把实现改回有 fail-open 隐患的 here-string 写法而没人发现。
-if grep -qE '<<<[[:space:]]*"\$UIKIT_EXPECTED_TESTS"' "$GATE"; then
+#
+# ⚠️ 必须**先剔掉注释行**再扫（2026-10-13）：这条守卫是按**文本**找被禁的写法，
+#    而闸门里有一段注释**引用了**这个写法的字面量来解释「为什么禁它」——
+#    不剔注释的话，守卫会命中那句解释文字、报一个假红。
+#    （我这次就真踩了：补完说明注释后它立刻变红，而代码一个字没改。
+#     本仓 feedback_source_guard_text_source_discipline：守卫读哪份文本本身就是判据的一部分。）
+#    只剔「整行是注释」的行；`代码 ... # 尾注释` 这种行照样会被扫到。
+if sed -e 's/^[[:space:]]*#.*$//' "$GATE" | grep -qE '<<<[[:space:]]*"\$UIKIT_EXPECTED_TESTS"'; then
     echo "  FAIL — 结构性回归：catalyst-gate.sh 又出现了 here-string 喂 UIKIT_EXPECTED_TESTS 的写法"
     FAILED=$((FAILED + 1))
 else
@@ -779,6 +812,273 @@ if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out"; then
     PASSED=$((PASSED + 1))
 else
     echo "  FAIL — 正常路径本该 PASS，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+
+# ── M8/M9（2026-10-07）：结构化结果取数的 fail-closed 四档 ──
+# 背景：G8 改读 xcresult 结构化结果（spec 2026-10-06 §3）。取数这一步有四种坏情况，
+# 每一种都必须 FAIL，⛔ 不许因为"拿不到数据"就放行——那正是本仓最常踩的 fail-open。
+# 注入缝沿用本文件上方 UIKIT_EXPECTED_TESTS_SCRIPT 的同款模式（环境变量 + 默认值）。
+RT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/catalyst-gate-rt.XXXXXX")"
+RT_CRASH="$RT_DIR/crash.sh";   printf '#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n'            > "$RT_CRASH"
+RT_EMPTY="$RT_DIR/empty.sh";   printf '#!/usr/bin/env bash\nexit 0\n'                             > "$RT_EMPTY"
+RT_BADJSON="$RT_DIR/bad.sh";   printf '#!/usr/bin/env bash\necho "not json at all {{{"\n'         > "$RT_BADJSON"
+RT_NONODE="$RT_DIR/nonode.sh"; printf '#!/usr/bin/env bash\necho %s\n' "'{\"testNodes\":[]}'"     > "$RT_NONODE"
+chmod +x "$RT_CRASH" "$RT_EMPTY" "$RT_BADJSON" "$RT_NONODE"
+
+rt_case() {  # rt_case <脚本> <期望专属子串> <说明>
+    local script="$1" match="$2" desc="$3" out got
+    out=$(CATALYST_RESULT_TESTS_SCRIPT="$script" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+    got=$?
+    if [ "$got" -eq 1 ] && grep -qF -- "$match" <<<"$out"; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=1 且输出含 \"$match\"，实得 exit=$got)"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+rt_case "$RT_CRASH"   "结构化结果取数失败"           "M8a fail-closed：取数脚本非零退出 → 必须 FAIL，不能当成'没有数据所以放行'"
+rt_case "$RT_EMPTY"   "结构化结果为空"               "M8b fail-closed：取数脚本输出为空 → 必须 FAIL"
+rt_case "$RT_BADJSON" "结构化结果解析失败"           "M8c fail-closed：输出不是合法 JSON → 必须 FAIL"
+rt_case "$RT_NONODE"  "结构化结果里没有任何测试节点" "M9 fail-closed：JSON 合法但零个 Test Case 节点 → 门是空的，必须 FAIL"
+
+rm -rf "$RT_DIR"
+
+# ── M1/M2/M3/M5/M6/M7（2026-10-07）：G8 改读结构化结果后的判别力矩阵 ──
+# spec 2026-10-06 §6。每档都必须红在 **G8 专属** 的失败信息上（点名具体测试），
+# ⛔ 不许只看退出码——本文件开头的「教训 2」就是为此。
+G8_TARGET='§5.3 #14 drawDrawings with empty list calls no render'
+MX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/catalyst-gate-mx.XXXXXX")"
+
+# 按需从共享样本派生变体：删节点 / 改 result。变体由**真实样本**派生，⛔ 不手造节点。
+#
+# ⚠️ 这里必须**递归**找节点，⛔ 不许写 `d["testNodes"][0]["children"][0]["children"]`。
+# 2026-10-13 对抗性评审 B1：原先那种硬编码路径只在「把套件层拍平」的假树上成立。
+# 真包是四层（Test Plan → Unit test bundle → Test Suite 234 → Test Case 2054），
+# 而且有 20 条 Test Case **直挂 bundle**（不在任何套件下）—— 两种深度同时存在。
+# 样本改成真实树形后，硬编码路径会取到套件节点而不是用例节点，变异会悄悄落在错的地方。
+mx_variant() {  # mx_variant <out.json> <mode: drop|result> <目标名> [新 result]
+    python3 - "$FIX/all-passed.tests.json" "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, sys
+src, dst, mode, target, newres = sys.argv[1:6]
+d = json.load(open(src))
+
+def is_case(n, name=None):
+    return (isinstance(n, dict) and n.get("nodeType") == "Test Case"
+            and (name is None or n.get("name") == name))
+
+def count(node):
+    n = 1 if is_case(node, target) else 0
+    if isinstance(node, dict):
+        for v in node.values(): n += count(v)
+    elif isinstance(node, list):
+        for v in node: n += count(v)
+    return n
+
+before = count(d)
+assert before == 1, f"目标用例在样本里出现 {before} 次（应为 1）：{target}"
+
+def walk(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("children"), list):
+            node["children"] = [c for c in node["children"] if not is_case(c, target)] \
+                               if mode == "drop" else node["children"]
+            for c in node["children"]:
+                if mode == "result" and is_case(c, target):
+                    c["result"] = newres
+        for v in node.values(): walk(v)
+    elif isinstance(node, list):
+        for v in node: walk(v)
+
+walk(d)
+after = count(d)
+if mode == "drop":
+    assert after == 0, f"drop 没生效（目标仍在 {after} 处）"
+else:
+    assert after == 1, "result 模式不该删掉节点"
+    found = []
+    def chk(n):
+        if is_case(n, target): found.append(n.get("result"))
+        if isinstance(n, dict):
+            for v in n.values(): chk(v)
+        elif isinstance(n, list):
+            for v in n: chk(v)
+    chk(d)
+    assert found == [newres], f"result 没改上: {found}"
+json.dump(d, open(dst, "w"), ensure_ascii=False)
+PY
+}
+
+mx_stub() {  # mx_stub <out.sh> <json>
+    printf '#!/usr/bin/env bash\nexec cat %q\n' "$2" > "$1"
+    chmod +x "$1"
+}
+
+mx_case() {  # mx_case <json> <log> <期望退出码> <期望专属子串> <说明>
+    local json="$1" log="$2" want="$3" match="$4" desc="$5" stub out got
+    stub="$MX_DIR/stub-$RANDOM.sh"; mx_stub "$stub" "$json"
+    out=$(CATALYST_RESULT_TESTS_SCRIPT="$stub" bash "$GATE" "$FIX/$log" 2>&1)
+    got=$?
+    if [ "$got" -eq "$want" ] && { [ -z "$match" ] || grep -qF -- "$match" <<<"$out"; }; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=$want${match:+ 且含 \"$match\"}，实得 exit=$got)"
+        # 把闸门原话打出来：退出码对不上时，必须看得见红在**哪一条**判据，
+        # 否则「别的判据碰巧也拦下了它」会被当成本档通过/失败（归因必须单独核）。
+        echo "         闸门末行: $(tail -1 <<<"$out")"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+mx_variant "$MX_DIR/m1.json"  drop   "$G8_TARGET"
+mx_variant "$MX_DIR/m2.json"  result "$G8_TARGET" Failed
+mx_variant "$MX_DIR/m3.json"  result "$G8_TARGET" Flaky
+mx_variant "$MX_DIR/m3b.json" result "$G8_TARGET" Skipped
+
+mx_case "$MX_DIR/m1.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M1：结构化结果里缺该 baseline 测试的节点 → G8 必须 FAIL 并点名"
+mx_case "$MX_DIR/m2.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M2：节点在但 result=Failed → G8 必须 FAIL 并点名"
+mx_case "$MX_DIR/m3.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M3：节点在但 result 是**未知取值** Flaky → 白名单必须 FAIL（⛔ 不许'不等于 Failed 就放行'）"
+# M3b（2026-10-13 对抗性评审非阻断③）：`Skipped` 这个取值要单独一档。
+# 它恰好是 G8 存在理由里点名的那个场景（见 catalyst-gate.sh 的 G8 注：
+# 「不是编译了但被跳过」）。实测：把白名单放宽成 `in ("Passed","Skipped")`
+# 之前，测试台 **零档被杀** —— M3 只钉住了「未知取值」这一类，钉不住这个**具名**取值。
+mx_case "$MX_DIR/m3b.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M3b：节点在但 result=Skipped（编译了却被跳过，正是 G8 要防的场景）→ 必须 FAIL 并点名"
+
+# M5a/M5b：防伪造。stdout-spoof.log 里有一条没有 ✔ 前缀的**伪造**通过文本。
+# 两档方向相反，缺一不可（spec §6.1 / codex spec-R2）：
+mx_case "$MX_DIR/m1.json" stdout-spoof.log 1 "$G8_TARGET" \
+    "M5a：节点被删 + stdout 伪造该测试的通过行 → 必须 FAIL（stdout 冒充不了未执行的测试）"
+mx_case "$FIX/all-passed.tests.json" stdout-spoof.log 0 "" \
+    "M5b 对照：节点在且 Passed + 同一条伪造 stdout → 必须 PASS（游离 stdout 不造成假红）"
+
+# M6/M7：本片要治的那个病，以及"别治过头"。
+mx_case "$FIX/all-passed.tests.json" uikit-tick-escaped.log 0 "" \
+    "M6：baseline 某条的 ✔ 行被八进制转义（真日志定点改写）→ 必须 PASS（假红已治）"
+mx_case "$FIX/all-passed.tests.json" uikit-started-escaped.log 0 "" \
+    "M7：转义落在不参与匹配的 ◇ started 行 → 必须 PASS（⛔ 别把'有转义'本身当违规）"
+
+mx_case "$FIX/superstring-name.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "M10：结果里只有该测试名的**超串**（'…no render AND MORE STUFF'）→ 必须 FAIL（判据要整行相等，⛔ 子串匹配会放行）"
+
+# G7 仍读文本汇总行（spec §4.1 的机械化版本）：结构化结果里只有 28 个节点，
+# 而文本汇总行说 1407（在冻结基线 1407±30 内）。G7 读文本 ⇒ GATE PASS。
+# 有人把 G7 改成数结构化节点 ⇒ 28 远低于下限 ⇒ 这一档立刻变红 = 红旗。
+# R5 闭合（2026-10-11）：函数形式（末尾 "()"）的测试名，结构化 name 与期望清单逐字相同。
+# 交付时全树没有函数形式的 UIKit-gated 测试 ⇒ 原本只能记成残留。实测真包发现 2054 个节点里
+# 有 495 个是函数形式（源码 `@Test func 名字()`、文本日志印作 `✔ Test 名字() passed after`、
+# 结构化 name 就是 `名字()`），于是把那个节点**原样搬进** fixture，正反两档钉死。
+# ⇒ 将来真有人加一条函数形式的 UIKit-gated 测试，这两档已经覆盖了它。
+mx_case_with_list() {  # mx_case_with_list <清单脚本> <json> <log> <期望退出码> <期望子串> <说明>
+    local list="$1" json="$2" log="$3" want="$4" match="$5" desc="$6" stub out got
+    stub="$MX_DIR/stub-list-$RANDOM.sh"; mx_stub "$stub" "$json"
+    out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$list" CATALYST_RESULT_TESTS_SCRIPT="$stub" bash "$GATE" "$FIX/$log" 2>&1)
+    got=$?
+    if [ "$got" -eq "$want" ] && { [ -z "$match" ] || grep -qF -- "$match" <<<"$out"; }; then
+        echo "  ok   — $desc (exit=$got)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL — $desc (期望 exit=$want${match:+ 且含 \"$match\"}，实得 exit=$got)"
+        echo "         闸门末行: $(tail -1 <<<"$out")"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+FUNCFORM='g3_replayBaseline_captures_all_include_defaultStyle()'
+mx_case_with_list "$FIX/uikit-expected-tests-frozen-plus-funcform.py" \
+    "$FIX/frozen-28-plus-funcform.tests.json" pass-ci-format.log 0 "" \
+    "R5 正向：期望清单含一条**函数形式**的测试，结构化结果里有同名 Passed 节点 → 必须 PASS（逐字相等对两种写法都成立）"
+mx_case_with_list "$FIX/uikit-expected-tests-frozen-plus-funcform.py" \
+    "$FIX/only-frozen-28.tests.json" pass-ci-format.log 1 "$FUNCFORM" \
+    "R5 反向：同一清单，但结构化结果里**没有**那条函数形式 → 必须 FAIL 并点名它（⛔ 别因为带括号就匹配不上还放行）"
+
+mx_case "$FIX/only-frozen-28.tests.json" pass-ci-format.log 0 "" \
+    "G7 仍读文本汇总行：结构化只有 28 个节点、文本说 1407 → 必须 PASS（⛔ G7 刻意不迁移）"
+
+# B1（2026-10-13 对抗性评审，已复现）：钉死 `nodeType == "Test Case"` 这条过滤器。
+# 它防的是闸门自己头注释记过的那个**历史上真被利用过的假绿**：只看「套件报告通过」
+# 不能证明套件里每个测试都跑了 —— 删掉套件内某个测试，套件照样 passed。
+#
+# ⚠️ 为什么本片之前没测到它：我造的 6 份样本把生产的套件层**整层拍平**了
+#    （样本 0 个 Test Suite vs 真包 234 个），样本世界里不存在需要被滤掉的节点
+#    ⇒ 把过滤器整条改宽，测试台仍然全绿、零档被杀（实测）。
+#    现在样本已按真实四层树形重建，这一档用「同名套件顶替被删的测试」直接打那条过滤器。
+# 样本里那个套件节点是从真包的 DrawDrawingsDispatchTests **原样复制**后只改 name/children，
+# ⛔ 不手造字段（本仓 feedback_fixtures_must_match_production_format）。
+mx_case_with_list "$FIX/uikit-expected-tests-frozen.py" \
+    "$FIX/suite-name-collision.tests.json" pass-ci-format.log 1 "$G8_TARGET" \
+    "B1：目标测试的节点被删、换成一个**同名的 Test Suite**（result=Passed）→ 必须 FAIL 并点名（⛔ 套件级通过不等于套件里每个测试都跑了）"
+
+rm -rf "$MX_DIR"
+
+# 元测试：钉住 fixture 配对规则本身（从 Task 3 挪来）。
+# 共享样本会把本该缺失的节点补回来 ⇒ 凡断言「UIKit-gated 测试未执行」的档位
+# **必须**有专属 .tests.json，否则正确实现反而让它通过。靠人记得会漂，这里机械钉住。
+# 取数三条讲究（内部评审 Important #3，2026-10-12，已独立复现）：
+#   ① ⛔ 不猜文件名的字符类。旧写法用 `[a-z0-9.-]+\.log`，带下划线或大写的
+#      fixture 名**一个都扫不到** ⇒ 安全网比它自称的窄（实测 `some_new_fixture.log`
+#      与 `NewFixture.log` 都漏）。而单纯放宽字符类会让它匹配到本段**自己**那行，
+#      于是改成「行首是 expect + 取第 3 个字段」，不做字符类假设。
+#   ② 先把反斜杠续行接起来：expect 调用常跨物理行，不接的话跨行那条扫不到。
+#   ③ 扫到 0 个就判红。这是一条「报 0 违反」的检查，必须先能报非 0 ——
+#      今天至少有 2 个这样的档位，扫出 0 只可能是取数本身坏了（本仓假绿家族头号形状）。
+MISSING_PAIR=""
+PAIR_SCANNED=0
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    PAIR_SCANNED=$((PAIR_SCANNED + 1))
+    [ -f "$FIX/${f%.log}.tests.json" ] || MISSING_PAIR="$MISSING_PAIR $f"
+done < <(sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$0" \
+         | awk '/^expect /&&/"UIKit-gated 测试未执行/{print $3}' | sort -u)
+if [ "$PAIR_SCANNED" -eq 0 ]; then
+    echo "  FAIL — 元测试：一个断言「UIKit-gated 测试未执行」的 fixture 都没扫到 —— 取数坏了（它本该至少扫到 2 个），这条检查此刻没有判别力"
+    FAILED=$((FAILED + 1))
+elif [ -z "$MISSING_PAIR" ]; then
+    echo "  ok   — 元测试：扫到 ${PAIR_SCANNED} 个断言「UIKit-gated 测试未执行」的 fixture，每个都有专属 .tests.json"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 元测试：这些 fixture 缺专属 .tests.json（共享样本会把节点补回来 → 它们会假绿）：$MISSING_PAIR"
+    FAILED=$((FAILED + 1))
+fi
+
+# 结构性回归：G8 不得退回读 stdout 文本。
+if grep -qE 'match_str=.*✔ Test' "$GATE"; then
+    echo "  FAIL — 结构性回归：catalyst-gate.sh 的 G8 又出现了 '✔ Test … passed after' 文本匹配"
+    FAILED=$((FAILED + 1))
+else
+    echo "  ok   — 结构性回归：G8 不再用 '✔ Test … passed after' 文本匹配（改读结构化结果）"
+    PASSED=$((PASSED + 1))
+fi
+
+# 结构性守卫（2026-10-12）：禁止 `$VAR` 紧跟非 ASCII 字符。
+# 这个仓的脚本提示语全是中文，而 bash 会把紧跟在 `$VAR` 后面的多字节字节
+# **吃进变量名**，于是 `set -u` 下直接 "unbound variable" 崩在那一行。
+# 本片里我连犯三次（判别力脚本两次、临时实验脚本一次），每次都是在**修完别处之后
+# 新写的那几行**里复发 ⇒ 靠记性拦不住，必须机械钉住。
+# 解法是写 `${VAR}`（花括号把名字括起来）。
+DOLLAR_HITS=$(python3 - "$DIR" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+bad = []
+for f in sorted(root.rglob("*.sh")):   # rglob：连 fixtures/ 下的脚本一起扫（非阻断⑤）
+    for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        if re.search(r'\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])', line):
+            bad.append(f"{f.name}:{i}  {line.strip()[:90]}")
+print("\n".join(bad))
+PY
+)
+if [ -z "$DOLLAR_HITS" ]; then
+    echo "  ok   — 结构性守卫：没有 '\$VAR 紧跟非 ASCII 字符' 的写法（bash 会把多字节字节吃进变量名 → unbound variable）"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 结构性守卫：以下位置 \$VAR 紧跟非 ASCII 字符，运行到那行会崩（改写成 \${VAR}）："
+    printf '%s\n' "$DOLLAR_HITS" | sed 's/^/           /'
     FAILED=$((FAILED + 1))
 fi
 
