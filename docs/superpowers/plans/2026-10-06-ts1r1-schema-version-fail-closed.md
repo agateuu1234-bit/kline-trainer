@@ -820,9 +820,10 @@ ssh $NAS "cat $DIR/sql/schema.sql" | diff -q - "$WT/backend/sql/schema.sql" && e
 - ✅ 三条分别打印 `FORWARD_SYNCED` / `P6B_SNAPSHOT_SYNCED` / `SCHEMA_SYNCED`
 - ❌ 哪条没打印出哨兵 ⇒ **停止**，那份文件没同步成功（或 `$DIR` 写错了）
 
-> ⚠️ 用 `diff -q` 而不是比 md5：NAS（群晖）上有没有 `md5sum` / `sha256sum` 不一定，
-> 而 `cat` 一定有。`diff` 不一致时退出码非 0 ⇒ `&&` 后面的哨兵**不会**被打印 ——
-> 与手册里 `QUERY_OK` / `CHMOD_OK` 是同一个套路。
+> ⚠️ 用 `diff -q` 而不是比哈希：这台 NAS 是**飞牛（fnOS）**，而我**没有实测过**它上面
+> 有没有 `md5sum` / `sha256sum`（部署手册里从未在 NAS 上跑过这两个命令），
+> 而 `cat` 一定有 —— 所以这里不去赌。`diff` 不一致时退出码非 0 ⇒
+> `&&` 后面的哨兵**不会**被打印 —— 与手册里 `QUERY_OK` / `CHMOD_OK` 是同一个套路。
 
 ### 第三步：应用迁移
 
