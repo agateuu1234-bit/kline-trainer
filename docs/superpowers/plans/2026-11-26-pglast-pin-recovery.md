@@ -113,7 +113,7 @@ Expected: FAIL（`test_dev_requirements_has_no_version_ranges` 因现有正则�
 - [ ] **Step 3: 收紧 `_EXACT_PIN_RE` 并实现 `_assert_shared_pins_match` 与 `_assert_dev_pins_match_test`**
 
 在 `backend/tests/test_requirements_api.py`：
-1. 将 `_EXACT_PIN_RE` 收紧为 `re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*(?:\+[A-Za-z0-9.]+)?)$")`，拒绝通配符 `*`、复合约束 `,`、`!=`、`>=`、环境标记 `;` 等；
+1. 将 `_EXACT_PIN_RE` 收紧为匹配单一 PEP 440 精确 pin（支持可选 epoch `1!`、连字符预发布 `2.0-rc1`、`post`/`dev` 与 `+local`），拒绝无数字伪版本（`latest`）、通配符 `*`、复合约束 `,`、`!=`、`>=`、环境标记 `;` 等；
 2. 实现 `_assert_shared_pins_match(left_name: str, left: dict[str, str], right_name: str, right: dict[str, str]) -> None`：若交集为空则抛 `AssertionError`；遍历共享包逐一断言 `left[name] == right[name]`；
 3. 实现 `_assert_dev_pins_match_test(dev: dict[str, str], test: dict[str, str]) -> None`：校验 `dev` 非空、`"pglast" in dev`、`missing = sorted(set(dev) - set(test))` 为空（否则报错并列出 `missing`），再调用 `_assert_shared_pins_match("requirements-dev.txt", dev, "requirements-test.txt", test)`；
 4. 让 `test_api_and_test_requirements_pins_match` 也复用 `_assert_shared_pins_match`。

@@ -28,9 +28,17 @@ DEV_REQS = BACKEND_DIR / "requirements-dev.txt"
 
 EXPECTED_API_PACKAGES = {"fastapi", "uvicorn", "asyncpg"}
 
-# 只认单一精确 pin：`name==version`。拒绝 >= / <= / ~= / > / <、通配符（7.*）与复合多约束。
+# 只认单一 PEP 440 精确 pin：`name==version`（含可选 epoch `1!`、预发布 `2.0-rc1`、`post`/`dev` 与 `+local`）；
+# 拒绝无数字的伪版本（`latest`）、>= / <= / ~= / > / <、通配符（7.*）与复合多约束。
 _EXACT_PIN_RE = re.compile(
-    r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*(?:\+[A-Za-z0-9.]+)?)$"
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)==("
+    r"(?:\d+!)?"
+    r"\d+(?:\.\d+)*"
+    r"(?i:[-._]?(?:a|b|c|rc|alpha|beta|pre|preview)\d*)?"
+    r"(?i:(?:-\d+)|[-._]?(?:post|rev|r)\d*)?"
+    r"(?i:[-._]?dev\d*)?"
+    r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?"
+    r")$"
 )
 
 
@@ -164,10 +172,25 @@ def test_root_dev_and_test_requirements_pins_match():
 
 
 def test_dev_requirements_has_no_version_ranges(tmp_path: Path):
-    """两份 dev 清单只允许单一精确 == pin，拒绝区间、通配符与复合约束。"""
+    """两份 dev 清单只允许单一精确 == pin，拒绝区间、通配符、复合约束与无数字伪版本，同时接受合法 PEP 440 精确写法。"""
     _parse(DEV_REQS)
     _parse(ROOT_DEV_REQS)
-    for bad_line in ("foo>=1.0\n", "foo==1.*\n", "foo==1.0,!=1.1\n"):
+    valid_file = tmp_path / "requirements-valid.txt"
+    valid_file.write_text(
+        "pkg-epoch==1!2.0\npkg-rc==2.0-rc1\npkg-local==1.0+local.1\n",
+        encoding="utf-8",
+    )
+    assert _parse(valid_file) == {
+        "pkg-epoch": "1!2.0",
+        "pkg-rc": "2.0-rc1",
+        "pkg-local": "1.0+local.1",
+    }
+    for bad_line in (
+        "foo>=1.0\n",
+        "foo==1.*\n",
+        "foo==1.0,!=1.1\n",
+        "foo==latest\n",
+    ):
         req_file = tmp_path / "requirements-bad.txt"
         req_file.write_text(bad_line, encoding="utf-8")
         with pytest.raises(AssertionError):

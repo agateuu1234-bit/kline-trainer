@@ -25,8 +25,8 @@
 - **实际执行者**：Antigravity（执行模型；因后端 `qmt_fsroot` 测试需在工作区外访问 `/private` 路径，经沙盒确认后按统一命令切出沙盒完成全套实测）。
 - **测试环境**：macOS（arm64）新建干净隔离虚拟环境 Python `3.11.15`（`--no-cache-dir` 安装）。
 - **导入版本实测**：`pglast: v7.24`、`pytest: 8.4.2`。
-- **守卫专项测试**：`tests/test_requirements_api.py` 共 **13 条全部通过**（`13 passed in 0.02s`）。
-- **完整后端测试套件**：`tests/` 共 **1736 passed / 0 skipped / 0 failed / 0 errors**（用时 226.38s，JUnit XML 核验确认无任何跳过或报错）。
+- **守卫专项测试**：`tests/test_requirements_api.py` 共 **13 条全部通过**（`13 passed in 0.01s`）。
+- **完整后端测试套件**：`tests/` 共 **1736 passed / 0 skipped / 0 failed / 0 errors**（用时 227.08s，JUnit XML 核验确认无任何跳过或报错）。
 - **全部清单解析核对**：根目录 `requirements-dev.txt`（1 项）、`backend/requirements.txt`（6 项）、`backend/requirements-api.txt`（3 项）、`backend/requirements-test.txt`（9 项）、`backend/requirements-dev.txt`（5 项）均通过严格精确 pin 解析校验。
 - **PyPI Linux x86_64 安装包核查**：已核对 `https://pypi.org/pypi/pglast/7.24/json` 元数据，确认 CI 使用的两个 Python 版本均存在预编译 Linux x86_64 wheel：
   - Python 3.11：`pglast-7.24-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl`
