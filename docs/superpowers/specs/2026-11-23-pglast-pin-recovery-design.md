@@ -16,21 +16,25 @@
 其他可选路线是升级到 v8，或取消精确版本约束；两者都会扩大此次恢复 CI 的兼容性范围，
 当前没有必要。生产依赖清单、SQL 语义、版本守卫和 workflow 行为不变。
 
-运行时差异仅限：
+改动范围仅限：
 
-- `backend/requirements-test.txt` 和 `backend/requirements-dev.txt` 的 pglast 版本；
-- `backend/tests/test_insert_schema_version_guard.py` 中对应注释。
+- `backend/requirements-test.txt` 和 `backend/requirements-dev.txt` 的 `pglast` 精确版本（`7.13 → 7.24`）；
+- `backend/tests/test_insert_schema_version_guard.py` 中对应注释；
+- `backend/tests/test_requirements_api.py` 新增结构化的共享依赖版本一致守卫与负向单元测试：
+  - 校验 `requirements-dev.txt` 与 `requirements-test.txt` 均只使用精确 `==` pin；
+  - 校验 `requirements-dev.txt` 非空、其包集合是 `requirements-test.txt` 的子集（并显式包含 `pglast`）；
+  - 校验两份清单所有同名包（含 `pglast`）的版本号逐字一致；
+  - 补充负向单测证明：共享包版本漂移、交集为空或出现版本区间（如 `>=`）时均抛出 `AssertionError` 失败（不在测试中硬编码 `"7.24"` 版本字符串）。
 
-历史 spec、验收记录里的旧版本描述保留其历史含义，不全仓替换。
-本次不新增只断言版本字符串的测试；现有 SQL 解析、迁移与版本守卫测试验证兼容性。
+历史 spec、验收记录里的旧版本描述保留其历史含义，不全仓替换；现有 SQL 解析、迁移与版本守卫测试用于验证 `pglast==7.24` 兼容性。
 
 ## 完成标准
 
-1. 在独立 Python 3.11 环境，按两份清单完成依赖安装，并确认实际导入的 pglast 为 v7.24。
-2. 在该环境运行完整 `backend/tests`，退出码 0、无失败或跳过；记录实际条数。
-3. 验证 PyPI 为 v7.24 提供 Linux x86_64 的 CPython 3.11、3.12 安装包。
-   本机验证不能替代 PR 最终 HEAD 在两个 CI Python 版本上的真实安装与执行。
-4. 最终提交通过正式 codex 对抗性评审及 GitHub 必需检查；验收说明写明实际执行者。
+1. 在独立 Python 3.11 干净虚拟环境中，按 `requirements-dev.txt` 与 `requirements-test.txt` 完成依赖安装，并确认实际导入的 `pglast.__version__` 为 `7.24`（或 `v7.24`）。
+2. 在该环境运行完整 `backend/tests/`，退出码 0、0 failed、0 errored、0 skipped；记录实际通过条数。
+3. 验证 PyPI 为 `pglast==7.24` 提供 Linux x86_64 的 CPython 3.11、3.12 安装包（`manylinux` wheel）。本机 macOS Python 3.11 验证不能替代 PR 最终 HEAD 在两个 CI Python 版本上的真实安装与执行。
+4. `backend/tests/test_requirements_api.py` 新增的 dev/test 共享 pin 守卫与负向单元测试全部通过。
+5. Spec、实施计划与完整分支 Diff 均通过正式 Codex 对抗性评审（`codex:adversarial-review`），交付中文非程序员验收清单（写明实际执行者），最终通过 GitHub 必需检查。
 
 ## 边界
 
