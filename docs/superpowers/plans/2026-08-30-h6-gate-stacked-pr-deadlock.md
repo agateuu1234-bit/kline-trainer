@@ -589,7 +589,7 @@ gh pr create --base main --head fix/h6-gate-stacked-pr --title "修复 hardening
 | 1 | 敲 `git rev-list --count main..HEAD` | 一个数字。它应当**正好比动手改代码之前大 2**（因为只多了 Task 1、Task 2 两次提交）。**不要对照本文里写死的数字** —— main 和本分支都可能因评审又长了提交 | ☐ / ☐ |
 | 2 | 敲 `git diff --name-only main...HEAD`（**三个点**） | **恰好 3 行**：一个 `.github/workflows/hardening_6_gate.yml`，一个 specs 下的文件，一个 plans 下的文件 | ☐ / ☐ |
 | 3 | 敲 `git status --short` | **一个字都不输出**（空白） | ☐ / ☐ |
-| 4 | 敲 `grep -c 'branches: \[main\]' .github/workflows/hardening_6_gate.yml` | 数字 **0**（那行已删掉） | ☐ / ☐ |
+| 4 | 敲 `grep -c '^    branches: \[main\]$' .github/workflows/hardening_6_gate.yml` | 数字 **0**（那行配置已删掉；加行首行尾锚定以避免误命中第 10 行头注释里的说明文本） | ☐ / ☐ |
 | 5 | 敲 `grep -c 'types: \[opened, synchronize, reopened, edited\]' .github/workflows/hardening_6_gate.yml` | 数字 **1**（新那行已加上） | ☐ / ☐ |
 | 6 | 敲 `grep -c 'depth=50' .github/workflows/hardening_6_gate.yml` | 数字 **0**（浅化那行已删掉） | ☐ / ☐ |
 | 7 | 敲 `grep -c 'git diff --name-only origin/main' .github/workflows/hardening_6_gate.yml` | 数字 **1**（紧挨着的那行**没被误删**） | ☐ / ☐ |
