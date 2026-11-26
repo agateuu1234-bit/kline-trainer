@@ -123,7 +123,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 
 ---
 
-## 二、我已经跑过并记录的证据（你不必重跑，但可以抽查）
+## 二、我已经跑过并记录的证据（本机早先基线快照：1935 用例 / 2054 节点 / 80 条 UIKit 基线，供对照）
 
 | 做了什么 | 实得结果 |
 |---|---|
@@ -168,7 +168,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/catalyst-gate-structu
 
 ## 五、执行记录
 
-PR：https://github.com/agateuu1234-bit/kline-trainer/pull/210 （head `f78596df`）
+PR：https://github.com/agateuu1234-bit/kline-trainer/pull/210 （下述实证运行时 head 为 `f78596df`；后续同步最新 `main` 后在 head `d311e99c` / run `45839187682` 亦再次通过 `GATE PASS`）
 
 ### 真 CI 实证（本片最关键的一条，也是唯一本机无法替代的一条）
 
@@ -191,6 +191,7 @@ run `38765579991` / job `116527786225`。
 而 `GATE PASS` **不可能**在其中任何一条成立时打出 ⇒ 它必然依次完成了：
 结果包存在 → 取数成功 → JSON 解析成功 → 节点数非 0 →
 **103 条基线测试逐条找到且 `result == "Passed"`**。
+（注：§二本机快照为 80 条基线 / 1935 用例 / 2054 节点；随后因 `main` 推进新增 23 条 UIKit-gated 基线测试，提交 `3483205f` 已按新基线重建样本，故 CI 上对应长到 103 条基线 / 2034 用例 / 2153 节点。）
 
 其它佐证：
 - 真跑了测试：`TEST SUCCEEDED` ×3，汇总行 `✔ Test run with 2034 tests passed`
@@ -225,12 +226,9 @@ plan 原本要求：另开一个丢弃型 PR，在**真 CI** 上把某条 baseli
 ### 其余待勾项
 
 - [ ] A1 ～ A5 由 user 逐条跑过并勾选（命令与预期见第一节，每条我都在目标目录原样跑过）
-- [x] 整支对抗性评审 approve，账本已核：
-      key `branch:fix/catalyst-gate-structured-results@f78596df…`、
-      `base_sha=bd29700e…`（与当时 origin/main 吻合）、**无 override**、**无 focus**、
-      reviewer `codex/v1.0.3@11a720b7`。
-      ⚠️ 它自陈的覆盖缺口：**只读沙箱里没跑运行时测试** —— 核的是 shell 语法与
-      七份 JSON 样本（确认覆盖全部 103 条基线测试）；测试台与 Xcode 由本机实跑 + 上面的 CI 补上。
+- [x] 代码/脚本/样本本体已通过整支对抗性评审 `approve`（账本 key `branch:fix/catalyst-gate-structured-results@f78596df…`、`base_sha=bd29700e…`、**无 override**、**无 focus**、reviewer `codex/v1.0.3@11a720b7`）：
+      ⚠️ **HEAD 演进与复审边界如实说明**：`f78596df` 已包含全部 `.github/scripts/**`、workflow 与 7 份 JSON 样本改动；其后的 `9f31995e`（回填本验收记录）、同步 `main` 以及本条文档口径修正提交**均未改动任何代码或样本**，故最终合并 HEAD 高于 `f78596df`（`f78596df` 对应账本条目不再绑定后续文档提交）。因该 7 份单行压缩 JSON 样本超出 `kimi-attest.sh` 单行 2,000 字符 Read 保护上限，无法对整支重跑 `kimi-attest.sh`，改由 `kimi-attest.sh --review-only` 对 `f78596df` 之后的纯文档增量做独立对抗复审。
+      ⚠️ Codex 自陈的覆盖缺口：**只读沙箱里没跑运行时测试** —— 核的是 shell 语法与七份 JSON 样本（确认覆盖全部 103 条基线测试）；测试台与 Xcode 由本机实跑 + 上面的 CI 补上。
       ⚠️ 前四轮判决都不能用：第 1 轮撞额度无判决；第 2、3 轮 needs-attention；
       第 4 轮虽 approve 但 `base_sha` 不等于当时 origin/main（main 期间前进三次），
       且评审看到的是混了噪声的两点 diff（最严重一次 −11499 行）。
