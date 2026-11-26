@@ -15,12 +15,15 @@ from pathlib import Path
 
 import pytest
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = REPO_ROOT / "backend"
 MAIN_REQS = BACKEND_DIR / "requirements.txt"
 API_REQS = BACKEND_DIR / "requirements-api.txt"
 # CI（.github/workflows/backend-tests.yml）装的是这一份，不是 requirements.txt。
 TEST_REQS = BACKEND_DIR / "requirements-test.txt"
-# hardening_6_gate.yml（Python 3.12）与 openapi-smoke.yml 装的是这一份。
+# hardening_6_gate.yml（Python 3.12）会依次安装根目录 requirements-dev.txt 与 backend/requirements-dev.txt；
+# openapi-smoke.yml 亦安装 backend/requirements-dev.txt。
+ROOT_DEV_REQS = REPO_ROOT / "requirements-dev.txt"
 DEV_REQS = BACKEND_DIR / "requirements-dev.txt"
 
 EXPECTED_API_PACKAGES = {"fastapi", "uvicorn", "asyncpg"}
@@ -36,6 +39,10 @@ def _parse(path: Path) -> dict[str, str]:
 
     不容忍无法解析的行：解析不了就抛，避免「读进来是空的 → 断言恒真」。
     """
+    try:
+        label = path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        label = path.name
     pins: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -44,7 +51,7 @@ def _parse(path: Path) -> dict[str, str]:
         match = _EXACT_PIN_RE.match(line)
         if match is None:
             raise AssertionError(
-                f"{path.name} 里这一行不是精确 pin（name==version）: {raw!r}"
+                f"{label} 里这一行不是精确 pin（name==version）: {raw!r}"
             )
         pins[match.group(1).lower()] = match.group(2)
     return pins
@@ -93,16 +100,20 @@ def _assert_shared_pins_match(
 def _assert_dev_pins_match_test(
     dev: dict[str, str],
     test: dict[str, str],
+    *,
+    dev_name: str = "backend/requirements-dev.txt",
+    require_pglast: bool = True,
 ) -> None:
-    """校验 requirements-dev.txt 为 requirements-test.txt 子集、含 pglast 且共享版本一致。"""
-    assert dev, "requirements-dev.txt 解析结果为空 —— 判据已失效"
-    assert "pglast" in dev, "requirements-dev.txt 缺少 pglast"
+    """校验 dev 清单非空、为 backend/requirements-test.txt 子集且共享版本一致。"""
+    assert dev, f"{dev_name} 解析结果为空 —— 判据已失效"
+    if require_pglast:
+        assert "pglast" in dev, f"{dev_name} 缺少 pglast"
     missing = sorted(set(dev) - set(test))
     assert not missing, (
-        f"requirements-dev.txt 中的包未出现在 requirements-test.txt: {missing}"
+        f"{dev_name} 中的包未出现在 backend/requirements-test.txt: {missing}"
     )
     _assert_shared_pins_match(
-        "requirements-dev.txt", dev, "requirements-test.txt", test
+        dev_name, dev, "backend/requirements-test.txt", test
     )
 
 
@@ -138,13 +149,24 @@ def test_api_requirements_excludes_pandas_ta():
 
 
 def test_dev_and_test_requirements_pins_match():
-    """CI 的 dev 清单与 full-suite test 清单共享包（含 pglast）版本必须逐字一致。"""
+    """CI 的 backend dev 清单与 full-suite test 清单共享包（含 pglast）版本必须逐字一致。"""
     _assert_dev_pins_match_test(_parse(DEV_REQS), _parse(TEST_REQS))
 
 
+def test_root_dev_and_test_requirements_pins_match():
+    """仓库根目录 requirements-dev.txt（同样由 hardening_6_gate.yml 安装）也必须全精确 pin 且为 test 子集。"""
+    _assert_dev_pins_match_test(
+        _parse(ROOT_DEV_REQS),
+        _parse(TEST_REQS),
+        dev_name="requirements-dev.txt",
+        require_pglast=False,
+    )
+
+
 def test_dev_requirements_has_no_version_ranges(tmp_path: Path):
-    """requirements-dev.txt 只允许单一精确 == pin，拒绝区间、通配符与复合约束。"""
+    """两份 dev 清单只允许单一精确 == pin，拒绝区间、通配符与复合约束。"""
     _parse(DEV_REQS)
+    _parse(ROOT_DEV_REQS)
     for bad_line in ("foo>=1.0\n", "foo==1.*\n", "foo==1.0,!=1.1\n"):
         req_file = tmp_path / "requirements-bad.txt"
         req_file.write_text(bad_line, encoding="utf-8")

@@ -39,10 +39,11 @@ phase_delivery: true
 | `backend/requirements-dev.txt` | 已由 `3e97faa1` 修改 | `pglast==7.13` → `pglast==7.24` |
 | `backend/requirements-test.txt` | 已由 `3e97faa1` 修改 | `pglast==7.13` → `pglast==7.24` |
 | `backend/tests/test_insert_schema_version_guard.py` | 已由 `3e97faa1` 修改 | 注释 `pglast==7.13` → `pglast==7.24` |
-| `docs/superpowers/specs/2026-11-23-pglast-pin-recovery-design.md` | 修改（Task 1 Step 0 提交） | 补充 dev/test 共享 pin 守卫范围、负向单测与评审通道记录 |
-| `docs/superpowers/plans/2026-11-26-pglast-pin-recovery.md` | 新建（Task 1 Step 0 提交） | 本实施计划文档 |
-| `backend/tests/test_requirements_api.py` | 修改（Task 2） | 收紧 `_EXACT_PIN_RE`、新增 `DEV_REQS`、`_assert_shared_pins_match`、`_assert_dev_pins_match_test`、`test_dev_and_test_requirements_pins_match` 及负向单测 |
-| `docs/acceptance/2026-11-26-pglast-pin-recovery.md` | 新建（Task 3） | 中文非程序员可执行验收清单（含实测记录与二元通过判定） |
+| `requirements-dev.txt` | 修改（Gate 3 finding 修复） | `pytest>=7.4` → `pytest==8.4.2`，消除根目录 dev 清单非精确 pin 盲区 |
+| `docs/superpowers/specs/2026-11-23-pglast-pin-recovery-design.md` | 修改 | 补充 dev/test 共享 pin 守卫范围、根目录 `requirements-dev.txt`、`kimi-attest` Gate 3 授权记录 |
+| `docs/superpowers/plans/2026-11-26-pglast-pin-recovery.md` | 新建 | 本实施计划文档 |
+| `backend/tests/test_requirements_api.py` | 修改 | 收紧 `_EXACT_PIN_RE`、新增 `ROOT_DEV_REQS`、`DEV_REQS`、`_assert_shared_pins_match`、`_assert_dev_pins_match_test`、`test_dev_and_test_requirements_pins_match`、`test_root_dev_and_test_requirements_pins_match` 及负向单测 |
+| `docs/acceptance/2026-11-26-pglast-pin-recovery.md` | 新建 | 中文非程序员可执行验收清单（含实测记录与二元通过判定） |
 
 ---
 
@@ -87,12 +88,12 @@ Expected: `pglast` 版本为 `v7.24`（或 `7.24`），`cp311` 与 `cp312` Linux
 ### Task 2: 在 `backend/tests/test_requirements_api.py` 补齐严格 Pin 解析与 dev/test 共享守卫（TDD）
 
 **Files:**
-- Modify: `backend/tests/test_requirements_api.py`
+- Modify: `requirements-dev.txt`, `backend/tests/test_requirements_api.py`
 - Test: `backend/tests/test_requirements_api.py`
 
 **Interfaces:**
 - Consumes: Task 1 创建的 `/tmp/pglast-724-venv/bin/python`；现有 `BACKEND_DIR`, `TEST_REQS`, `_parse(path: Path) -> dict[str, str]`
-- Produces: `DEV_REQS = BACKEND_DIR / "requirements-dev.txt"`, 严格正则 `_EXACT_PIN_RE`, `_assert_shared_pins_match(left_name: str, left: dict[str, str], right_name: str, right: dict[str, str]) -> None`, `_assert_dev_pins_match_test(dev: dict[str, str], test: dict[str, str]) -> None`
+- Produces: `REPO_ROOT`, `ROOT_DEV_REQS = REPO_ROOT / "requirements-dev.txt"`, `DEV_REQS = BACKEND_DIR / "requirements-dev.txt"`, 严格正则 `_EXACT_PIN_RE`, `_assert_shared_pins_match(...)`, `_assert_dev_pins_match_test(..., dev_name=..., require_pglast=...)`, `test_root_dev_and_test_requirements_pins_match`
 
 - [ ] **Step 1: 写失败测试（TDD）**
 
@@ -138,7 +139,7 @@ Expected: PASS（全部新增与既有测试均为 `PASSED`）。
 Run:
 1. `cd backend && PYTHONDONTWRITEBYTECODE=1 /tmp/pglast-724-venv/bin/python -m pytest tests/ -q -rs --junitxml=/tmp/pytest-pglast724.xml`
 2. 解析 `/tmp/pytest-pglast724.xml` 断言 `skipped == 0`、`failures == 0`、`errors == 0`，记录准确 `passed` 总数。
-3. 用 `test_requirements_api._parse`（仅检查非空、非注释行）解析全部 4 份 `backend/requirements*.txt` 清单以验证均为严格精确 `==` pin（避免误报 `requirements-api.txt` 注释中的 `*`），并断言 `len(_parse(DEV_REQS)) >= 5`。
+3. 用 `test_requirements_api._parse`（仅检查非空、非注释行）解析全部 5 份清单（根目录 `requirements-dev.txt` 及 4 份 `backend/requirements*.txt`）以验证均为严格精确 `==` pin（避免误报 `requirements-api.txt` 注释中的 `*`），并断言 `len(_parse(DEV_REQS)) >= 5`。
 4. 清理 `/tmp/pglast-724-venv`、`/tmp/pglast-724.json`、`/tmp/pytest-pglast724.xml`。
 Expected: 退出码 0，`0 skipped / 0 failed / 0 errored`，`passed > 0`（并记录准确实测通过条数）。
 
@@ -165,11 +166,11 @@ Expected: 工作树干净，提交落在 `fix/pglast-pin-7.24-recovery` 上，�
 
 **Interfaces:**
 - Consumes: Task 3 提交后的干净分支（与 `origin/main` 的完整 diff）
-- Produces: Gate 3 `codex-attest` approve 账本条目、已推送的 `origin/fix/pglast-pin-7.24-recovery` 分支、Open PR、以及最终 PR HEAD 上的远端 GitHub Actions CI 实测结果记录
+- Produces: Gate 3 `kimi-attest`（用户授权替代配额耗尽的本地 Codex）approve 账本条目、已推送的 `origin/fix/pglast-pin-7.24-recovery` 分支、Open PR、以及最终 PR HEAD 上的远端 GitHub Actions CI 实测结果记录
 
 - [ ] **Step 1: 运行 Pre-PR 完整分支对抗性评审（Gate 3）**
 
-Run: `bash .claude/scripts/codex-attest.sh --scope branch-diff --head fix/pglast-pin-7.24-recovery --base origin/main`（不传 `--focus` 或任何窄化参数；该分支相对 `origin/main` 的 diff 同时涵盖 Spec、实施计划、测试代码与验收清单，与 Spec 完成标准第 5 条完全一致：Gate 1/2/3 本地均以 `codex-attest.sh` 收口，远端 PR 仍由 `codex-review-verify` 工作流上报 `codex-verify-pass` 做二层 Codex 校验）。
+Run: `bash .claude/scripts/kimi-attest.sh --scope branch-diff --head fix/pglast-pin-7.24-recovery --base origin/main`（不传 `--focus` 或任何窄化参数；该分支相对 `origin/main` 的 diff 同时涵盖 Spec、实施计划、测试代码、根目录/后端依赖清单与验收清单。因本地 Codex ChatGPT Pro 配额于 14:28 耗尽且需至 19:04 重置，经用户明确授权 Gate 3 改用本地 `kimi-attest.sh` 收口；远端 PR 仍由 `codex-review-verify` 工作流上报 `codex-verify-pass` 做二层 Codex 校验）。
 若返回 `needs-attention`，修复所有有效 finding 并重新跑通受影响验证后提交，再重跑本命令直至 `approve`。**拿到 `approve` 后禁止再产生任何新提交**（否则 HEAD SHA 变更会使账本失效）。
 
 - [ ] **Step 2: 推送分支并创建 Pull Request**

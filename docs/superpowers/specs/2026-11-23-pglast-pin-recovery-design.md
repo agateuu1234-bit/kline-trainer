@@ -19,11 +19,12 @@
 改动范围仅限：
 
 - `backend/requirements-test.txt` 和 `backend/requirements-dev.txt` 的 `pglast` 精确版本（`7.13 → 7.24`）；
+- 仓库根目录 `requirements-dev.txt`（`pytest>=7.4 → pytest==8.4.2`，消除 `hardening_6_gate.yml` 中根目录 dev 清单非精确 pin 及与 `backend/requirements-test.txt` 漂移的盲区）；
 - `backend/tests/test_insert_schema_version_guard.py` 中对应注释；
 - `backend/tests/test_requirements_api.py` 新增结构化的共享依赖版本一致守卫与负向单元测试：
-  - 校验 `requirements-dev.txt` 与 `requirements-test.txt` 均只使用精确 `==` pin；
-  - 校验 `requirements-dev.txt` 非空、其包集合是 `requirements-test.txt` 的子集（并显式包含 `pglast`）；
-  - 校验两份清单所有同名包（含 `pglast`）的版本号逐字一致；
+  - 校验 `backend/requirements-dev.txt`、根目录 `requirements-dev.txt` 与 `backend/requirements-test.txt` 均只使用精确 `==` pin；
+  - 校验两份 `dev` 清单均非空、各自包集合是 `backend/requirements-test.txt` 的子集（且 `backend/requirements-dev.txt` 显式包含 `pglast`）；
+  - 校验共享同名包（含 `pglast`）的版本号逐字一致；
   - 补充负向单测证明：共享包版本漂移、交集为空、dev 存在 test 缺失的包、dev 缺少 `pglast`、或出现非精确约束（范围 `>=`、通配符 `==1.*`、复合约束 `,!=...`）时均抛出 `AssertionError` 失败（不在测试中硬编码 `"7.24"` 版本字符串）。
 
 历史 spec、验收记录里的旧版本描述保留其历史含义，不全仓替换；现有 SQL 解析、迁移与版本守卫测试用于验证 `pglast==7.24` 兼容性。
@@ -34,7 +35,7 @@
 2. 在该环境运行完整 `backend/tests/`，退出码 0、0 failed、0 errored、0 skipped；记录实际通过条数。
 3. 验证 PyPI 为 `pglast==7.24` 提供 Linux x86_64 的 CPython 3.11、3.12 安装包（`manylinux` wheel）。本机 macOS Python 3.11 验证不能替代 PR 最终 HEAD 在两个 CI Python 版本上的真实安装与执行。
 4. `backend/tests/test_requirements_api.py` 新增的 dev/test 共享 pin 守卫与负向单元测试全部通过。
-5. 对抗性评审与交付：Spec（Gate 1）、实施计划确认收口（Gate 2，`--review-only`，不写本地账本）与提交前完整分支 Diff（Gate 3，`--scope branch-diff`，覆盖 Spec、实施计划、测试代码与验收清单并写入本地账本）均通过本地 `codex-attest.sh` 正式对抗性评审；交付中文非程序员验收清单（写明实际执行者），并在最终 PR HEAD 通过 GitHub Actions 的 `codex-verify-pass`（由 `codex-review-verify` 工作流上报的 Codex 二层校验）及全部必需检查。
+5. 对抗性评审与交付：Spec（Gate 1）与实施计划确认收口（Gate 2，`--review-only`，不写本地账本）已通过本地 `codex-attest.sh` 正式对抗性评审；提交前完整分支 Diff（Gate 3，`--scope branch-diff`，覆盖 Spec、实施计划、测试代码、依赖清单与验收清单并写入本地账本）因本地 Codex ChatGPT Pro 配额于 14:28 耗尽（需 19:04 重置），经用户明确授权改由本地 `kimi-attest.sh`（`kimi-code/k3`、`high`）完成正式对抗性评审；交付中文非程序员验收清单（写明实际执行者），并在最终 PR HEAD 通过 GitHub Actions 的 `codex-verify-pass`（由 `codex-review-verify` 工作流上报的 Codex 二层校验）及全部必需检查。
 
 ## 边界
 
