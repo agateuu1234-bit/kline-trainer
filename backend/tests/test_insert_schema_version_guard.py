@@ -646,7 +646,7 @@ def test_every_executable_insert_carries_schema_version():
 #     Python 绑定）说这条语句的列清单到底是什么，守卫必须与它逐条一致。
 #
 # ⚠️ `pglast` 在本仓**已是被证明可用的 CI 依赖**：`requirements-test.txt:4` 固定
-#    `pglast==7.13`，`.github/workflows/backend-tests.yml:37` 装的正是它，且
+#    `pglast==7.24`，`.github/workflows/backend-tests.yml:37` 装的正是它，且
 #    `test_migrations.py` / `test_schema.py` 早已在用 —— ⛔ 不是新引入的可选依赖。
 # ─────────────────────────────────────────────────────────────────────────────
 

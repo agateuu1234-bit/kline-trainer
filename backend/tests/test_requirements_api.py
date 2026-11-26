@@ -1,5 +1,5 @@
 # backend/tests/test_requirements_api.py
-"""C1-1 / T1：API 容器依赖清单必须裁剪且与主清单 pin 一致。
+"""C1-1 / T1：API 容器依赖清单必须裁剪且与主清单 pin 一致；兼守卫 CI dev/test 共享 pin。
 
 为什么要裁剪（spec §4-D2）：`requirements.txt` 含 `pandas-ta==0.3.14b1`，
 那是数据导入脚本用的，且是已知的安装陷阱。API 运行只需 fastapi / uvicorn / asyncpg
@@ -7,22 +7,43 @@
 
 为什么要双向锁 pin：两份清单各自漂移会让「本地 pytest 用的版本」与
 「容器里真跑的版本」悄悄分家 —— 那是最难查的一类线上问题。
+
+同时守卫 CI 使用的 `backend/requirements-dev.txt` 与仓库根目录 `requirements-dev.txt`：
+两者均只允许 PEP 440 单一精确 `==` pin、须为 `backend/requirements-test.txt` 的非空子集
+（且 `backend/requirements-dev.txt` 必须包含 `pglast`），所有共享包版本逐字一致。
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = REPO_ROOT / "backend"
 MAIN_REQS = BACKEND_DIR / "requirements.txt"
 API_REQS = BACKEND_DIR / "requirements-api.txt"
 # CI（.github/workflows/backend-tests.yml）装的是这一份，不是 requirements.txt。
 TEST_REQS = BACKEND_DIR / "requirements-test.txt"
+# hardening_6_gate.yml（Python 3.12）会依次安装根目录 requirements-dev.txt 与 backend/requirements-dev.txt；
+# openapi-smoke.yml 亦安装 backend/requirements-dev.txt。
+ROOT_DEV_REQS = REPO_ROOT / "requirements-dev.txt"
+DEV_REQS = BACKEND_DIR / "requirements-dev.txt"
 
 EXPECTED_API_PACKAGES = {"fastapi", "uvicorn", "asyncpg"}
 
-# 只认精确 pin：`name==version`。任何 >= / <= / ~= / > / < 都不算。
-_EXACT_PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)$")
+# 只认单一 PEP 440 精确 pin：`name==version`（含可选 epoch `1!`、预发布 `2.0-rc1`、`post`/`dev` 与 `+local`）；
+# 拒绝无数字的伪版本（`latest`）、>= / <= / ~= / > / <、通配符（7.*）与复合多约束。
+_EXACT_PIN_RE = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)==("
+    r"(?:\d+!)?"
+    r"\d+(?:\.\d+)*"
+    r"(?i:[-._]?(?:a|b|c|rc|alpha|beta|pre|preview)\d*)?"
+    r"(?i:(?:-\d+)|[-._]?(?:post|rev|r)\d*)?"
+    r"(?i:[-._]?dev\d*)?"
+    r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?"
+    r")$"
+)
 
 
 def _parse(path: Path) -> dict[str, str]:
@@ -30,6 +51,10 @@ def _parse(path: Path) -> dict[str, str]:
 
     不容忍无法解析的行：解析不了就抛，避免「读进来是空的 → 断言恒真」。
     """
+    try:
+        label = path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        label = path.name
     pins: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -38,7 +63,7 @@ def _parse(path: Path) -> dict[str, str]:
         match = _EXACT_PIN_RE.match(line)
         if match is None:
             raise AssertionError(
-                f"{path.name} 里这一行不是精确 pin（name==version）: {raw!r}"
+                f"{label} 里这一行不是精确 pin（name==version）: {raw!r}"
             )
         pins[match.group(1).lower()] = match.group(2)
     return pins
@@ -65,6 +90,45 @@ def test_api_requirements_pins_match_main_requirements():
         )
 
 
+def _assert_shared_pins_match(
+    left_name: str,
+    left: dict[str, str],
+    right_name: str,
+    right: dict[str, str],
+) -> None:
+    """校验两份清单交集非空且所有共享包的精确版本逐字一致。"""
+    shared = sorted(set(left) & set(right))
+    assert shared, (
+        f"{left_name} 与 {right_name} 没有任何同名包 —— "
+        "下面的循环恒真通过，本条判据已失效"
+    )
+    for name in shared:
+        assert left[name] == right[name], (
+            f"{name} 版本不一致: {left_name}={left[name]} / "
+            f"{right_name}={right[name]}"
+        )
+
+
+def _assert_dev_pins_match_test(
+    dev: dict[str, str],
+    test: dict[str, str],
+    *,
+    dev_name: str = "backend/requirements-dev.txt",
+    require_pglast: bool = True,
+) -> None:
+    """校验 dev 清单非空、为 backend/requirements-test.txt 子集且共享版本一致。"""
+    assert dev, f"{dev_name} 解析结果为空 —— 判据已失效"
+    if require_pglast:
+        assert "pglast" in dev, f"{dev_name} 缺少 pglast"
+    missing = sorted(set(dev) - set(test))
+    assert not missing, (
+        f"{dev_name} 中的包未出现在 backend/requirements-test.txt: {missing}"
+    )
+    _assert_shared_pins_match(
+        dev_name, dev, "backend/requirements-test.txt", test
+    )
+
+
 def test_api_and_test_requirements_pins_match():
     """CI 真正安装的是 requirements-test.txt —— 这条把那一侧也锁上。
 
@@ -78,18 +142,12 @@ def test_api_and_test_requirements_pins_match():
     公共包目前就 fastapi 一个 —— 下面那句防空转断言就是用来在「哪天交集变空了」
     时当场报错的，否则循环会静默地一条都不比。
     """
-    api = _parse(API_REQS)
-    test = _parse(TEST_REQS)
-    shared = sorted(set(api) & set(test))
-    assert shared, (
-        "requirements-api.txt 与 requirements-test.txt 没有任何同名包 —— "
-        "下面的循环恒真通过，本条判据已失效"
+    _assert_shared_pins_match(
+        "requirements-api.txt",
+        _parse(API_REQS),
+        "requirements-test.txt",
+        _parse(TEST_REQS),
     )
-    for name in shared:
-        assert api[name] == test[name], (
-            f"{name} 版本不一致: requirements-api.txt={api[name]} / "
-            f"requirements-test.txt={test[name]}"
-        )
 
 
 def test_api_requirements_has_no_version_ranges():
@@ -100,3 +158,74 @@ def test_api_requirements_has_no_version_ranges():
 def test_api_requirements_excludes_pandas_ta():
     """C1-1 的意图档：那个已知安装陷阱绝不能溜进 API 镜像。"""
     assert "pandas-ta" not in _parse(API_REQS)
+
+
+def test_dev_and_test_requirements_pins_match():
+    """CI 的 backend dev 清单与 full-suite test 清单共享包（含 pglast）版本必须逐字一致。"""
+    _assert_dev_pins_match_test(_parse(DEV_REQS), _parse(TEST_REQS))
+
+
+def test_root_dev_and_test_requirements_pins_match():
+    """仓库根目录 requirements-dev.txt（同样由 hardening_6_gate.yml 安装）也必须全精确 pin 且为 test 子集。"""
+    _assert_dev_pins_match_test(
+        _parse(ROOT_DEV_REQS),
+        _parse(TEST_REQS),
+        dev_name="requirements-dev.txt",
+        require_pglast=False,
+    )
+
+
+def test_dev_requirements_has_no_version_ranges(tmp_path: Path):
+    """两份 dev 清单只允许单一精确 == pin，拒绝区间、通配符、复合约束与无数字伪版本，同时接受合法 PEP 440 精确写法。"""
+    _parse(DEV_REQS)
+    _parse(ROOT_DEV_REQS)
+    valid_file = tmp_path / "requirements-valid.txt"
+    valid_file.write_text(
+        "pkg-epoch==1!2.0\npkg-rc==2.0-rc1\npkg-local==1.0+local.1\n",
+        encoding="utf-8",
+    )
+    assert _parse(valid_file) == {
+        "pkg-epoch": "1!2.0",
+        "pkg-rc": "2.0-rc1",
+        "pkg-local": "1.0+local.1",
+    }
+    for bad_line in (
+        "foo>=1.0\n",
+        "foo==1.*\n",
+        "foo==1.0,!=1.1\n",
+        "foo==latest\n",
+    ):
+        req_file = tmp_path / "requirements-bad.txt"
+        req_file.write_text(bad_line, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            _parse(req_file)
+
+
+def test_shared_pins_guard_rejects_version_drift():
+    """共享包版本一旦在两份清单中分叉，守卫必须抛出含包名的 AssertionError。"""
+    with pytest.raises(AssertionError, match="pkg"):
+        _assert_shared_pins_match(
+            "left.txt", {"pkg": "1.0"}, "right.txt", {"pkg": "2.0"}
+        )
+
+
+def test_shared_pins_guard_rejects_empty_overlap():
+    """交集为空时守卫必须报错，防止比对循环一次都不执行而假绿。"""
+    with pytest.raises(AssertionError):
+        _assert_shared_pins_match(
+            "left.txt", {"alpha": "1.0"}, "right.txt", {"beta": "1.0"}
+        )
+
+
+def test_dev_pins_guard_rejects_missing_package_from_test():
+    """dev 清单出现 test 清单缺少的包时，必须失败并点名缺失包。"""
+    with pytest.raises(AssertionError, match="extra-pkg"):
+        _assert_dev_pins_match_test(
+            {"pglast": "1.0", "extra-pkg": "2.0"}, {"pglast": "1.0"}
+        )
+
+
+def test_dev_pins_guard_requires_pglast():
+    """dev 清单缺少 pglast 时，守卫必须明确拒绝。"""
+    with pytest.raises(AssertionError, match="pglast"):
+        _assert_dev_pins_match_test({"pytest": "1.0"}, {"pytest": "1.0"})
