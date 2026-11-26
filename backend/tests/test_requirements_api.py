@@ -1,5 +1,5 @@
 # backend/tests/test_requirements_api.py
-"""C1-1 / T1：API 容器依赖清单必须裁剪且与主清单 pin 一致。
+"""C1-1 / T1：API 容器依赖清单必须裁剪且与主清单 pin 一致；兼守卫 CI dev/test 共享 pin。
 
 为什么要裁剪（spec §4-D2）：`requirements.txt` 含 `pandas-ta==0.3.14b1`，
 那是数据导入脚本用的，且是已知的安装陷阱。API 运行只需 fastapi / uvicorn / asyncpg
@@ -7,6 +7,10 @@
 
 为什么要双向锁 pin：两份清单各自漂移会让「本地 pytest 用的版本」与
 「容器里真跑的版本」悄悄分家 —— 那是最难查的一类线上问题。
+
+同时守卫 CI 使用的 `backend/requirements-dev.txt` 与仓库根目录 `requirements-dev.txt`：
+两者均只允许 PEP 440 单一精确 `==` pin、须为 `backend/requirements-test.txt` 的非空子集
+（且 `backend/requirements-dev.txt` 必须包含 `pglast`），所有共享包版本逐字一致。
 """
 from __future__ import annotations
 
