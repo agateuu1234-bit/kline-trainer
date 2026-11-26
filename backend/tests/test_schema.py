@@ -250,3 +250,81 @@ def test_klines_has_price_integrity_checks():
         assert f"{col} <> 'infinity'::double precision" in seg, f"{col} 缺 Infinity 排除"
     assert "greatest(open, close)" in seg
     assert "least(open, close)" in seg
+
+
+def test_training_sets_schema_version_has_no_default():
+    """TS1-R1 的核心契约：`schema_version` **刻意不设默认值**。
+
+    为什么必须有东西钉死它：有 `DEFAULT 1` 时，漏填该列的 INSERT 会被 PostgreSQL
+    静默补成 1 —— 第 2 代产物被标成第 1 代，而写入方毫无察觉。去掉默认值 + 保留
+    NOT NULL ⇒ 漏填当场报 `violates not-null constraint`（fail-closed）。
+    这条测试防的是「以后有人为了方便又把默认值加回来」。
+    """
+    stmts = _parse_schema()
+    training_sets = next(
+        s.stmt
+        for s in stmts
+        if isinstance(s.stmt, CreateStmt)
+        and s.stmt.relation.relname == "training_sets"
+    )
+    col = next(
+        e for e in training_sets.tableElts
+        if hasattr(e, "colname") and e.colname == "schema_version"
+    )
+    defaults = [
+        c for c in (col.constraints or ())
+        if getattr(c, "contype", None) == pglast.enums.ConstrType.CONSTR_DEFAULT
+    ]
+    assert not defaults, (
+        "training_sets.schema_version 不得有 DEFAULT —— 漏填必须当场失败，"
+        f"不能被静默标成第 1 代；实际解析到 {len(defaults)} 个默认值约束")
+
+
+def test_training_sets_schema_version_is_still_not_null():
+    """⚠️ 与上一条是**一对**，缺一不可。
+
+    去掉 DEFAULT 的 fail-closed 效果**完全依赖** NOT NULL 还在：
+    只去默认值、同时把 NOT NULL 也去掉，漏填会安静地写成 NULL —— 那比写成 1 更糟
+    （下游 reader 拿到 NULL 不是「错的代号」而是「没有代号」）。
+    这条测试把「两个条件同时成立」钉住，而不是只钉一半。
+    """
+    stmts = _parse_schema()
+    training_sets = next(
+        s.stmt
+        for s in stmts
+        if isinstance(s.stmt, CreateStmt)
+        and s.stmt.relation.relname == "training_sets"
+    )
+    col = next(
+        e for e in training_sets.tableElts
+        if hasattr(e, "colname") and e.colname == "schema_version"
+    )
+    not_null = any(
+        getattr(c, "contype", None) == pglast.enums.ConstrType.CONSTR_NOTNULL
+        for c in (col.constraints or ())
+    )
+    assert not_null, "schema_version 必须保留 NOT NULL，否则漏填会写成 NULL"
+
+
+def test_p6b_snapshot_records_the_actual_schema_md5():
+    """P6b 硬门文件头注释里记着 `schema.sql md5 = …`，本测试钉它与实际 md5 相等。
+
+    ⚠️ 这条漏是 TS1-R1 查出来的：在本片之前，那个 md5 **只活在注释里，没有任何
+    测试钉它**（`git grep` 该 md5 只命中注释本身一处）⇒ 谁改了 schema.sql 却忘记
+    重新生成 P6b 快照，**不会有任何东西变红**，而症状要等到 NAS 部署跑 P6b
+    那一刻才出现（而且长得像「部署坏了」而不是「快照过期」）。
+    本片恰好要改 schema.sql，是封这条漏的自然时机。
+    """
+    import hashlib
+    actual = hashlib.md5(SCHEMA_PATH.read_bytes()).hexdigest()
+    gate = (Path(__file__).parent.parent.parent / "docs" / "runbooks"
+            / "2026-08-24-qmt-nas-p6b-schema-shape-check.sql")
+    text = gate.read_text(encoding="utf-8")
+    # ⚠️ 判据先算成一个布尔量再断言。直接写 `assert f"…" in text, …` 时，
+    #    pytest 的断言改写会把 `text` 整个打进失败信息 —— 实测那是**整份闸门文件**
+    #    （数百行 SQL），真正有用的那两行 md5 被埋在里面看不见。
+    recorded = f"schema.sql md5 = {actual}" in text
+    assert recorded, (
+        f"P6b 快照文件头注释里记的 md5 与 schema.sql 实际 md5 不符。\n"
+        f"  实际 md5：{actual}\n"
+        f"  改了 schema.sql 就必须重新生成 {gate.name} 并同步这一行。")

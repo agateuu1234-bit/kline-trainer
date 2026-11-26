@@ -12,6 +12,7 @@ import pglast
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "sql" / "migrations"
 MIG_0004 = MIGRATIONS_DIR / "0004_qmt_price_double_and_coverage"
+MIG_0005 = MIGRATIONS_DIR / "0005_schema_version_fail_closed"
 
 
 def _sql_normalized(path: Path) -> str:
@@ -134,17 +135,26 @@ def test_rehearse_script_braces_vars_before_cjk():
 
     这是**真跑才会暴露**的一类 bug：`bash -n` 与 `shellcheck` 都查不出来（语法完全合法）。
     实测中它让脚本在加载迁移前 schema 那一步直接崩掉。修法是一律写成 `${VAR}`。
-    本测试把这个运行期陷阱变成静态可检，防止以后写中文提示时复发。"""
+    本测试把这个运行期陷阱变成静态可检，防止以后写中文提示时复发。
+
+    ⚠️ TS1-R1 起**遍历所有迁移目录**，不再只钉 0004：原来写死一个目录，
+    于是新加的 0005/rehearse.sh 犯同样的错不会有任何东西变红 ——
+    「守卫只钉它被写出来时存在的那一个对象」是本仓反复踩的一类假绿。
+    """
     import re
-    script = (MIG_0004 / "rehearse.sh").read_text(encoding="utf-8")
+    scripts = sorted(MIGRATIONS_DIR.glob("*/rehearse.sh"))
+    assert len(scripts) >= 2, (
+        f"只找到 {len(scripts)} 个 rehearse.sh —— 本仓至少有 0004 与 0005 两个，"
+        "glob 坏了（防空转）")
     bad = [
-        (i, line) for i, line in enumerate(script.splitlines(), 1)
+        (path.parent.name, i, line)
+        for path in scripts
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]", line)
     ]
     assert not bad, (
         "以下位置 `$VAR` 紧跟全角字符，bash 会把它当成变量名的一部分，请改用 ${VAR}：\n"
-        + "\n".join(f"  第 {i} 行: {line.strip()}" for i, line in bad)
-    )
+        + "\n".join(f"  {d}/rehearse.sh 第 {i} 行: {line.strip()}" for d, i, line in bad))
 
 
 def test_migration_0004_rollback_has_destructive_guard():
@@ -178,3 +188,63 @@ def test_migration_0004_does_not_touch_ticket_index():
         # 用**去注释后的正文**断言：forward.sql 的说明注释里合法地提到了 ticket_index
         sql = _sql_normalized(MIG_0004 / name)
         assert "ticket_index" not in sql, f"{name} 正文不得对 ticket_index 做任何 DDL"
+
+
+def test_migration_0005_has_forward_and_rollback():
+    """m01 §Migration Rollback：每个 migration 必须是 forward+rollback 成对。"""
+    assert (MIG_0005 / "forward.sql").is_file(), "缺 forward.sql"
+    assert (MIG_0005 / "rollback.sql").is_file(), "缺 rollback.sql"
+
+
+def test_migration_0005_forward_is_valid_postgres():
+    sql = (MIG_0005 / "forward.sql").read_text(encoding="utf-8")
+    assert len(pglast.parse_sql(sql)) > 0
+
+
+def test_migration_0005_rollback_is_valid_postgres():
+    sql = (MIG_0005 / "rollback.sql").read_text(encoding="utf-8")
+    assert len(pglast.parse_sql(sql)) > 0
+
+
+def test_migration_0005_forward_drops_the_default():
+    """本片的全部目的。判据钉到**具体那一列** —— 只判「含 DROP DEFAULT」
+    会被「对别的列 DROP DEFAULT」喂饱。"""
+    sql = _sql_normalized(MIG_0005 / "forward.sql")
+    assert "alter table training_sets alter column schema_version drop default" in sql, \
+        "forward.sql 没有对 training_sets.schema_version 执行 DROP DEFAULT"
+
+
+def test_migration_0005_rollback_restores_the_default():
+    """回滚必须真的把默认值装回去（否则回滚后的库与回滚前不是同一个形状，
+    而 P6b 闸门只认一种形状 ⇒ 回滚完闸门照样红）。"""
+    sql = _sql_normalized(MIG_0005 / "rollback.sql")
+    assert "alter table training_sets alter column schema_version set default 1" in sql, \
+        "rollback.sql 没有把 DEFAULT 1 装回去"
+    assert "comment on column training_sets.schema_version is null" in sql, \
+        "rollback.sql 没有把列注释置空 —— 回滚后库里会留下一条说谎的注释"
+
+
+def test_migration_0005_comment_text_is_byte_identical_to_schema_sql():
+    """⚠️ 同一句注释有**两份副本**：`schema.sql`（新建库走这条）与
+    `0005/forward.sql`（既有库走这条）。两份不一致时，两种来源的库注释不同，
+    而**注释不被任何闸门覆盖**（P6b 查列/约束/索引，不查 comment）⇒ 无人发现。
+    本仓记过「同一事实 N 份副本 ⇒ 每轮修复造下一个回声」，所以这里直接钉逐字相等。
+
+    判据取**注释字符串字面量本身**（单引号之间那段），不比对整条语句 ——
+    两份文件的换行与缩进排布可以不同，说谎的是文字内容。
+    """
+    import re
+    pat = re.compile(
+        r"COMMENT\s+ON\s+COLUMN\s+training_sets\.schema_version\s+IS\s+'([^']*)'",
+        re.IGNORECASE)
+    schema_text = (MIGRATIONS_DIR.parent / "schema.sql").read_text(encoding="utf-8")
+    fwd_text = (MIG_0005 / "forward.sql").read_text(encoding="utf-8")
+    m_schema = pat.search(schema_text)
+    m_fwd = pat.search(fwd_text)
+    assert m_schema, "schema.sql 里找不到 schema_version 的列注释"
+    assert m_fwd, "0005/forward.sql 里找不到 schema_version 的列注释"
+    assert m_schema.group(1) == m_fwd.group(1), (
+        "两份列注释文字不一致 —— 从 schema.sql 新建的库与跑过迁移的库会带不同注释，"
+        "而没有任何闸门查注释。\n"
+        f"  schema.sql：{m_schema.group(1)!r}\n"
+        f"  forward.sql：{m_fwd.group(1)!r}")

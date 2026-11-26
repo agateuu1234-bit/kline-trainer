@@ -118,6 +118,13 @@ struct DrawingSessionSourceGuardTests {
             #expect(!code.contains("public " + m),
                     "\(m) 不得为 public —— 包外能直接改会话就绕开了 begin/endDrawingSession，漂移会回来")
         }
+        // 穷尽负向断言（Task4 修复环①）：上面的手写名单只能证明「名单里的都不是 public」，
+        // 抓不住「名单外新增了一个 public func」（存在性检查表达不了穷尽性，同一族老坑）。
+        // 用 "\n    public func " 缩进锚定 4 空格的类体成员层：`source()` 剥注释但保留缩进，
+        // 本类型全部 mutator 都在这一层；嵌套类型（NodeDragOwner 等）的 init/字段缩进更深（8 空格），
+        // 字符串里也没有 "func" 这个词，不会被误伤。
+        #expect(!code.contains("\n    public func "),
+                "DrawingSession 出现了名单外的 public func —— mutator 一律 internal 的纪律被破了")
         // 只读态则必须仍是 public（TrainingView / 未来底栏要读）
         #expect(code.contains("public private(set) var drawingModeActive"))
         #expect(code.contains("public private(set) var selectedDrawingID"))

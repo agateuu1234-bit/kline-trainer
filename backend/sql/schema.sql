@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS training_sets (
     stock_name VARCHAR(50) NOT NULL,
     start_datetime BIGINT NOT NULL,
     end_datetime BIGINT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1,
+    schema_version INTEGER NOT NULL,
     file_path TEXT NOT NULL,
     content_hash CHAR(8) NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
@@ -107,5 +107,7 @@ COMMENT ON COLUMN training_sets.content_hash
   IS 'zip 文件 CRC32 十六进制（8 字符，小写），由 B2 生成、P2 校验。';
 COMMENT ON COLUMN training_sets.status
   IS '状态机：unsent → reserved → sent（详见 modules v1.4 M0.1 状态机不变量表）。';
+COMMENT ON COLUMN training_sets.schema_version
+  IS '产物代号。⛔ 刻意不设默认值：漏填必须当场失败，不能被静默标成第 1 代。';
 
 COMMIT;

@@ -70,19 +70,19 @@ jobs:
       # v1.4 M0.1 runtime invariant smoke tests (codex round 8)
       - name: Reject uppercase content_hash (ck_content_hash_crc32_lowercase)
         run: |
-          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('X', 'Y', 0, 0, 'f', 'ABCDEF12');"
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('X', 'Y', 0, 0, 1, 'f', 'ABCDEF12');"
       - name: Reject non-enum status (ck_status_enum)
         run: |
-          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'bogus');"
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 1, 'f', 'abcdef12', 'bogus');"
       - name: Reject unsent row with lease populated (ck_lease_state_invariant)
         run: |
-          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status, lease_id, lease_expires_at, reserved_at) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'unsent', '00000000-0000-0000-0000-000000000001', NOW(), NOW());"
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash, status, lease_id, lease_expires_at, reserved_at) VALUES ('X', 'Y', 0, 0, 1, 'f', 'abcdef12', 'unsent', '00000000-0000-0000-0000-000000000001', NOW(), NOW());"
       - name: Reject reserved row without lease (ck_lease_state_invariant)
         run: |
-          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'reserved');"
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 1, 'f', 'abcdef12', 'reserved');"
       - name: Accept a valid unsent row (positive control)
         run: |
-          psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('TEST', 'T', 0, 0, '/tmp/f.zip', 'abcdef12');"
+          psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, schema_version, file_path, content_hash) VALUES ('TEST', 'T', 0, 0, 1, '/tmp/f.zip', 'abcdef12');"
           COUNT=$(psql -tAc "SELECT count(*) FROM training_sets WHERE stock_code='TEST';")
           [[ "$COUNT" == "1" ]] || { echo "FAIL: valid insert did not persist"; exit 1; }
 

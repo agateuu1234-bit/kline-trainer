@@ -1715,3 +1715,536 @@ def test_atomic_write_json_and_write_bytes_agree_on_the_encoding(tmp_path: Path)
     finally:
         os.close(root)
     assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# fix round 11 · codex R9 [medium]：收尾时关描述符失败，不许顶替在途的那个异常
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 评审点名 `parent_fd_under` 与 `open_under`：逐段无跟随走到一半撞
+# `PathEscapeError`（信任边界被绕过 ⇒ 必须停机）时，`finally` 里关中间目录描述符
+# 若失败，那个裸 `OSError` 会**顶替**掉逃逸信号 —— 而 `qmt_fetch` 契约 §4 第 10 条
+# 允许调用方把裸 `OSError` 当「这一只股不行」跳过。
+#
+# 本节**按判据穷尽本模块**，不只修被点名的两个函数：BASE 上 14 个 `os.close` 里
+# 有 12 个落在异常展开路径上，本节给这 12 个各配一条。另外 2 个
+# （`_open_root_impl` 逐段走成功路径上那句、`open_root` 交还前关 `parent_fd`）
+# 不在任何 `try` 的异常展开路径上，源码里各写了一行可核实的理由，不为它们造测试。
+import qmt_fsroot
+
+
+def _explode_close(monkeypatch, *, when, note="打桩：关描述符撞 EIO"):
+    """`when(fd)` **首次**为真的那次 `os.close` 先真关掉、再抛 `EIO`；其余原样放行。
+
+    返回 `(fired, after)`：
+      · `fired` —— 被打中的那个 fd。**「注入到底有没有生效」这句前提断言全靠它**；
+        没有它，「逃出来的仍是原异常」可能只是因为压根没注入成功（恒真）。
+      · `after` —— 打中**之后**还被尝试关过的每一个 fd。「第一个失败不吃掉后面的」
+        这条判据靠它，而不是靠读代码。
+
+    「先真关掉」是刻意的（与 `test_qmt_fetch` 里同名助手同规格）：真实世界里
+    `close()` 报错之后描述符通常已被回收；测试若不关，泄漏的 fd 会污染后面的用例。
+    """
+    fired: list[int] = []
+    after: list[int] = []
+    real_close = os.close
+
+    def spy(fd):
+        if not fired and when(fd):
+            fired.append(fd)
+            real_close(fd)
+            raise OSError(errno.EIO, note)
+        if fired:
+            after.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "close", spy)
+    return fired, after
+
+
+def _notes(exc) -> str:
+    return "\n".join(getattr(exc, "__notes__", []))
+
+
+def _gate_after_path_escape(monkeypatch):
+    """返回一个 `when(fd)`：`_raise_walk_error` 已经抛出过 `PathEscapeError` 之后才为真。
+
+    比「按 fd 号挑」稳当：逐段走过程中 fd 号会被复用，而本节要钉的恰恰是
+    「**在途有逃逸信号时**的那一次关闭」，不是某个具体号码。
+    """
+    escaped = {"on": False}
+    real = qmt_fsroot._raise_walk_error
+
+    def spy(*a, **kw):
+        try:
+            real(*a, **kw)
+        except PathEscapeError:
+            escaped["on"] = True
+            raise
+
+    monkeypatch.setattr(qmt_fsroot, "_raise_walk_error", spy)
+    return lambda fd: escaped["on"]
+
+
+_ESCAPE_MSG = (
+    "关中间目录描述符那次 EIO 没有被降成诊断 ⇒ 它顶替掉了 `PathEscapeError`："
+    "一次信任边界被绕过会以裸 `OSError` 的样子到达调用方，而 `qmt_fetch` 契约 "
+    "§4 第 10 条允许把裸 `OSError` 当「这一只股不行」跳过 ⇒ 必须停机被降级成跳过"
+)
+
+
+# ── ①/② 评审点名的两处：open_under 与 parent_fd_under 的中间描述符 ──
+
+def test_open_under_keeps_path_escape_when_closing_an_intermediate_fails(
+        tmp_path: Path, monkeypatch):
+    root = open_root(str(tmp_path))
+    try:
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        (tmp_path / "a" / "b" / "c").symlink_to(tmp_path / "a")
+        when = _gate_after_path_escape(monkeypatch)
+        fired, after = _explode_close(monkeypatch, when=when)
+
+        with pytest.raises(PathEscapeError) as ei:
+            open_under(root, "a/b/c/leaf.csv", flags=os.O_RDONLY)
+
+        assert fired, "前提不成立：在途有逃逸信号时压根没发生过关闭，注入没生效"
+        assert not isinstance(ei.value, OSError), _ESCAPE_MSG
+        assert "关描述符失败" in _notes(ei.value), _ESCAPE_MSG
+        assert len(after) == 1, (
+            f"两个中间描述符里第一个关闭失败之后，第二个没有被尝试关到（实测 {after}）"
+            "——第一个失败吃掉了后面的收尾项")
+    finally:
+        os.close(root)
+
+
+def test_parent_fd_under_keeps_path_escape_when_closing_an_intermediate_fails(
+        tmp_path: Path, monkeypatch):
+    """评审做过隔离故障注入的正是这一处（`qmt_fetch.py:418-424` 的被调方）。"""
+    root = open_root(str(tmp_path))
+    try:
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        (tmp_path / "a" / "b" / "c").symlink_to(tmp_path / "a")
+        when = _gate_after_path_escape(monkeypatch)
+        fired, after = _explode_close(monkeypatch, when=when)
+
+        with pytest.raises(PathEscapeError) as ei:
+            parent_fd_under(root, "a/b/c/leaf.csv")
+
+        assert fired, "前提不成立：注入没生效"
+        assert not isinstance(ei.value, OSError), _ESCAPE_MSG
+        assert "关描述符失败" in _notes(ei.value), _ESCAPE_MSG
+        assert len(after) == 1, (
+            f"第一个中间描述符关闭失败之后，第二个没有被尝试关到（实测 {after}）")
+    finally:
+        os.close(root)
+
+
+# ── ③ _open_root_impl 外层：逐段走撞逃逸时关那个游标描述符 ──
+
+def test_open_root_keeps_path_escape_when_closing_the_walk_fd_fails(
+        tmp_path: Path, monkeypatch):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    when = _gate_after_path_escape(monkeypatch)
+    fired, after = _explode_close(monkeypatch, when=when)
+
+    with pytest.raises(PathEscapeError) as ei:
+        open_root(str(tmp_path / "link" / "x"))
+
+    assert fired, "前提不成立：注入没生效"
+    assert not isinstance(ei.value, OSError), _ESCAPE_MSG
+    assert "关描述符失败" in _notes(ei.value), _ESCAPE_MSG
+
+
+# ── ④ _open_root_impl：刚建好的目录没通过「确实是我刚造的那个空目录」 ──
+
+def test_open_root_create_leaf_keeps_boundary_error_when_closing_the_new_dir_fails(
+        tmp_path: Path, monkeypatch):
+    boom = BoundaryError("打桩：mkdir 与 open 之间目录被换掉了")
+    seen: dict = {}
+
+    def exploding(dir_fd, abs_path):
+        seen["fd"] = dir_fd
+        raise boom
+
+    monkeypatch.setattr(qmt_fsroot, "_assert_freshly_created", exploding)
+    fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+    with pytest.raises(BoundaryError) as ei:
+        open_root(str(tmp_path / "dest"), create_leaf=True)
+
+    assert fired == [seen["fd"]], f"前提不成立：注入没打在新建目录描述符上（{fired}）"
+    assert ei.value is boom, (
+        "关新建目录描述符那次 EIO 顶替掉了 `BoundaryError` ⇒ 「目录在 mkdir 与 open "
+        "之间被调包、拒绝启动」被降级成一次普通 I/O 错误")
+    assert "关描述符失败" in _notes(boom)
+
+
+# ── ⑤ _open_regular_probe：确认类型那一段失败之后关探测描述符 ──
+
+def test_open_regular_probe_keeps_the_original_error_when_closing_fails(
+        tmp_path: Path, monkeypatch):
+    (tmp_path / "m.json").write_bytes(b"{}")
+    root = open_root(str(tmp_path))
+    try:
+        boom = OSError(errno.EIO, "打桩：fstat 撞 EIO")
+        seen: dict = {}
+
+        def exploding_fstat(fd):
+            seen["fd"] = fd
+            raise boom
+
+        monkeypatch.setattr(os, "fstat", exploding_fstat)
+        fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+        with pytest.raises(OSError) as ei:
+            open_regular_probe(root, "m.json", flags=os.O_RDONLY)
+
+        assert fired == [seen["fd"]], f"前提不成立：注入没打在探测描述符上（{fired}）"
+        assert ei.value is boom, (
+            "关探测描述符那次 EIO 顶替掉了在途的那个异常。这一处在途的只可能是裸 "
+            "`OSError` 与 `BaseException` 族：前者族籍不变但 errno 与身份被换掉"
+            "（操作者看到的原因换了一个），后者（Ctrl-C）则是实打实的族籍降级")
+        assert "关描述符失败" in _notes(boom)
+    finally:
+        os.close(root)
+
+
+# ── ⑥ acquire_lock：锁纪律不过时关锁描述符 ──
+
+def test_acquire_lock_keeps_lock_discipline_error_when_closing_fails(
+        tmp_path: Path, monkeypatch):
+    (tmp_path / ".staging.lock").write_bytes(b"")
+    os.link(tmp_path / ".staging.lock", tmp_path / "elsewhere")   # nlink = 2
+    root = open_root(str(tmp_path))
+    try:
+        seen: dict = {}
+        real_probe = qmt_fsroot._open_regular_probe
+
+        def spy_probe(dir_fd, name, *, flags, mode=0o600):
+            fd, st = real_probe(dir_fd, name, flags=flags, mode=mode)
+            seen["fd"] = fd
+            return fd, st
+
+        monkeypatch.setattr(qmt_fsroot, "_open_regular_probe", spy_probe)
+        fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+        with pytest.raises(LockDisciplineError) as ei:
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+
+        assert fired == [seen["fd"]], f"前提不成立：注入没打在锁描述符上（{fired}）"
+        assert "硬链接" in str(ei.value), "前提不成立：撞的不是硬链接那一档"
+        assert not isinstance(ei.value, OSError), (
+            "关锁描述符那次 EIO 顶替掉了 `LockDisciplineError` ⇒ 「拒绝启动、"
+            "一个字节都不写」被降级成一次普通 I/O 错误")
+        assert "关描述符失败" in _notes(ei.value)
+    finally:
+        os.close(root)
+
+
+# ── ⑦ probe_unclaimed_dir：锁文件不是普通文件时关锁描述符 ──
+
+def test_probe_unclaimed_dir_keeps_lock_discipline_error_when_closing_fails(
+        tmp_path: Path, monkeypatch):
+    os.mkfifo(tmp_path / ".staging.lock")
+    root = open_root(str(tmp_path))
+    try:
+        seen: dict = {}
+        real_probe = qmt_fsroot._open_regular_probe
+
+        def spy_probe(dir_fd, name, *, flags, mode=0o600):
+            fd, st = real_probe(dir_fd, name, flags=flags, mode=mode)
+            seen["fd"] = fd
+            return fd, st
+
+        monkeypatch.setattr(qmt_fsroot, "_open_regular_probe", spy_probe)
+        fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+        with pytest.raises(LockDisciplineError) as ei:
+            probe_unclaimed_dir(root, ".staging.lock")
+
+        assert fired == [seen["fd"]], f"前提不成立：注入没打在锁描述符上（{fired}）"
+        assert "不是普通文件" in str(ei.value), "前提不成立：撞的不是类型那一档"
+        assert not isinstance(ei.value, OSError), (
+            "关锁描述符那次 EIO 顶替掉了 `LockDisciplineError`")
+        assert "关描述符失败" in _notes(ei.value)
+    finally:
+        os.close(root)
+
+
+# ── ⑧ _atomic_write_bytes：写内容失败之后关临时文件描述符 ──
+
+def test_atomic_write_keeps_the_write_error_when_closing_the_tmp_fd_fails(
+        tmp_path: Path, monkeypatch):
+    root = open_root(str(tmp_path))
+    try:
+        boom = OSError(errno.ENOSPC, "打桩：写内容撞 ENOSPC")
+        seen: dict = {}
+
+        def exploding_write_all(fd, data):
+            seen["fd"] = fd
+            raise boom
+
+        monkeypatch.setattr(qmt_fsroot, "_write_all", exploding_write_all)
+        fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+        with pytest.raises(OSError) as ei:
+            atomic_write_json(root, "m.json", {"a": 1})
+
+        assert fired == [seen["fd"]], f"前提不成立：注入没打在临时文件描述符上（{fired}）"
+        assert ei.value is boom, (
+            "关临时文件描述符那次 EIO 顶替掉了 `ENOSPC` ⇒ 操作者看到的是「I/O 错误」"
+            "而不是「磁盘满」，两者的出路完全不同")
+        assert "关描述符失败" in _notes(boom)
+        assert list(tmp_path.iterdir()) == [], (
+            "临时文件仍须被清掉——诊断化不得让外层那条失败收尾路径落空")
+    finally:
+        os.close(root)
+
+
+# ── ⑨ verify_owner_marker：标记读到一半超限之后关读描述符 ──
+
+def test_verify_owner_marker_keeps_marker_invalid_when_closing_fails(
+        tmp_path: Path, monkeypatch):
+    (tmp_path / ".owner.json").write_bytes(b"x" * (64 * 1024 + 1))
+    root = open_root(str(tmp_path))
+    try:
+        seen: dict = {}
+        real_probe = qmt_fsroot._open_regular_probe
+
+        def spy_probe(dir_fd, name, *, flags, mode=0o600):
+            fd, st = real_probe(dir_fd, name, flags=flags, mode=mode)
+            seen["fd"] = fd
+            return fd, st
+
+        monkeypatch.setattr(qmt_fsroot, "_open_regular_probe", spy_probe)
+        fired, after = _explode_close(monkeypatch, when=lambda fd: fd == seen.get("fd"))
+
+        with pytest.raises(MarkerInvalidError) as ei:
+            verify_owner_marker(root, ".owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+
+        assert fired == [seen["fd"]], f"前提不成立：注入没打在读描述符上（{fired}）"
+        assert "上限" in str(ei.value), "前提不成立：撞的不是读取中超限那一档"
+        assert not isinstance(ei.value, OSError), (
+            "关读描述符那次 EIO 顶替掉了 `MarkerInvalidError` ⇒ 调用方那条 "
+            "`except MarkerInvalidError` 分支（「这个目录不属于本工具」）够不着了")
+        assert "关描述符失败" in _notes(ei.value)
+    finally:
+        os.close(root)
+
+
+# ── ⑩⑪⑫ claim_dir 的三个关闭点：lock_fd / dir_fd / parent_fd ──
+
+def _claim_dir_probe(monkeypatch):
+    """让 `claim_dir` 在**取锁之后、发布归属之前**那道反查上撞一次 `BoundaryError`，
+    并交出它手里的三个描述符（`dir` / `parent` / `lock`）与那个在途异常。"""
+    fds: dict = {}
+    real_impl = qmt_fsroot._open_root_impl
+
+    def spy_impl(abs_path, *, create_leaf):
+        dir_fd, parent_fd, leaf = real_impl(abs_path, create_leaf=create_leaf)
+        fds["dir"] = dir_fd
+        fds["parent"] = parent_fd
+        return dir_fd, parent_fd, leaf
+
+    monkeypatch.setattr(qmt_fsroot, "_open_root_impl", spy_impl)
+
+    real_lock = qmt_fsroot.acquire_lock
+
+    def spy_lock(dir_fd, lock_name, *, tool):
+        fd = real_lock(dir_fd, lock_name, tool=tool)
+        fds["lock"] = fd
+        return fd
+
+    monkeypatch.setattr(qmt_fsroot, "acquire_lock", spy_lock)
+
+    boom = BoundaryError("打桩：取锁之后那个名字已经不再指向我们建的那个目录")
+
+    def exploding(parent_fd, leaf, dir_fd, abs_path, *, when):
+        raise boom
+
+    monkeypatch.setattr(qmt_fsroot, "_assert_leaf_still_is", exploding)
+    return fds, boom
+
+
+def test_claim_dir_keeps_boundary_error_when_closing_the_lock_fd_fails(
+        tmp_path: Path, monkeypatch):
+    target = tmp_path / "dest"
+    fds, boom = _claim_dir_probe(monkeypatch)
+    fired, after = _explode_close(monkeypatch, when=lambda fd: fd == fds.get("lock"))
+
+    with pytest.raises(BoundaryError) as ei:
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target)})
+
+    assert fired == [fds["lock"]], f"前提不成立：注入没打在锁描述符上（{fired}）"
+    assert ei.value is boom, (
+        "关锁描述符那次 EIO 顶替掉了 `BoundaryError` ⇒ 「目录被换掉了、拒绝」"
+        "被降级成一次普通 I/O 错误")
+    assert "关描述符失败" in _notes(boom)
+    assert after == [fds["dir"], fds["parent"]], (
+        f"锁描述符关闭失败之后，dir_fd 与 parent_fd 没有被逐个关到（实测 {after}）"
+        "——第一个失败吃掉了后面两个收尾项，连 `raise` 本身都到不了")
+
+
+def test_claim_dir_keeps_boundary_error_when_closing_the_dir_fd_fails(
+        tmp_path: Path, monkeypatch):
+    target = tmp_path / "dest"
+    fds, boom = _claim_dir_probe(monkeypatch)
+    fired, after = _explode_close(monkeypatch, when=lambda fd: fd == fds.get("dir"))
+
+    with pytest.raises(BoundaryError) as ei:
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target)})
+
+    assert fired == [fds["dir"]], f"前提不成立：注入没打在目录描述符上（{fired}）"
+    assert ei.value is boom, "关目录描述符那次 EIO 顶替掉了 `BoundaryError`"
+    assert "关描述符失败" in _notes(boom)
+    assert after == [fds["parent"]], (
+        f"目录描述符关闭失败之后，parent_fd 没有被关到（实测 {after}）")
+
+
+def test_claim_dir_keeps_boundary_error_when_closing_the_parent_fd_fails(
+        tmp_path: Path, monkeypatch):
+    target = tmp_path / "dest"
+    fds, boom = _claim_dir_probe(monkeypatch)
+    fired, after = _explode_close(monkeypatch, when=lambda fd: fd == fds.get("parent"))
+
+    with pytest.raises(BoundaryError) as ei:
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target)})
+
+    assert fired == [fds["parent"]], f"前提不成立：注入没打在父目录描述符上（{fired}）"
+    assert ei.value is boom, (
+        "关父目录描述符那次 EIO 顶替掉了 `BoundaryError`——这一处此前是个裸 "
+        "`finally`，而 `finally` 拿不到在途异常，只能盲目地关")
+    assert "关描述符失败" in _notes(boom)
+    assert after == [], "前提不成立：父目录描述符不是这条路径上最后一个关闭点"
+
+
+# ── ⑬ 捕获宽度：`Exception` 而不是 `BaseException` ──
+
+def test_close_or_note_lets_keyboard_interrupt_escape(tmp_path: Path, monkeypatch):
+    """`_close_or_note` 的捕获宽度是 `Exception`，与 `qmt_fetch` 同规格：
+    关描述符时抛 `KeyboardInterrupt`（用户按 Ctrl-C）不是「这次关闭失败了」，
+    **不许被当成诊断咽掉** —— 它必须原样逃出去，哪怕代价是顶替掉在途的
+    `PathEscapeError`（这条代价是刻意选的：中断意味着人已经要求停机）。
+
+    判别力：把宽度放宽成 `except BaseException`，本条立刻红（逃出来的会变回
+    `PathEscapeError`，而中断被记成一条 `__notes__` 诊断）。
+    """
+    root = open_root(str(tmp_path))
+    try:
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "b").symlink_to(tmp_path / "a")
+        gate = _gate_after_path_escape(monkeypatch)
+
+        seen: list[int] = []
+        real_close = os.close
+
+        def spy(fd):
+            if not seen and gate(fd):
+                seen.append(fd)
+                real_close(fd)
+                raise KeyboardInterrupt()
+            return real_close(fd)
+
+        monkeypatch.setattr(os, "close", spy)
+
+        with pytest.raises(KeyboardInterrupt) as ei:
+            parent_fd_under(root, "a/b/leaf.csv")
+
+        assert seen, "前提不成立：在途有逃逸信号时压根没发生过关闭，注入没生效"
+        assert not isinstance(ei.value, Exception), (
+            "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+        assert not any("关描述符失败" in n
+                       for n in getattr(ei.value, "__notes__", [])), (
+            "中断被记进了诊断，说明关闭失败那一格把它当成「这次关闭失败了」顺手咽掉，"
+            "而不是原样放行")
+    finally:
+        os.close(root)
+
+
+# ── ⑭ 没有异常在途那一档：仍然原样上抛，但不许吃掉后面的收尾项 ──
+
+def test_close_all_or_note_still_closes_the_rest_when_nothing_is_in_flight(
+        tmp_path: Path, monkeypatch):
+    """成功走完一条 `a/b/leaf.csv` 之后关中间描述符失败：**没有异常在途**，
+    所以这次失败是这条路径自己的结果、原样上抛（不咽）；但「上抛」不许发生在
+    把其余描述符关完**之前** —— 第一个失败吃掉后面的，是本轮要消灭的第二条漏法。
+    """
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "leaf.csv").write_bytes(b"x")
+    root = open_root(str(tmp_path))
+    try:
+        fired, after = _explode_close(monkeypatch, when=lambda fd: True)
+
+        with pytest.raises(OSError) as ei:
+            parent_fd_under(root, "a/b/leaf.csv")
+
+        assert fired, "前提不成立：注入没生效"
+        assert ei.value.errno == errno.EIO
+        assert len(after) == 1, (
+            f"第一个中间描述符关闭失败之后，第二个没有被尝试关到（实测 {after}）")
+    finally:
+        os.close(root)
+
+
+# ══════════════════════════════════════════════════════════════════
+# fix round 12：`_close_all_or_note` 自己那圈 `for` 循环的捕获宽度
+# ══════════════════════════════════════════════════════════════════
+#
+# `_close_or_note`（本节 ⑬）与 `_close_all_or_note` 的 for 循环里各有一处
+# `except Exception as e:`——判据是同一条（`KeyboardInterrupt`/`SystemExit`
+# 不许被当成「这一项关闭失败了」），但这是**两处**独立的捕获点：`_close_or_note`
+# 那处此前已有测试（⑬），`_close_all_or_note` 自己 for 循环里那处（约 :257）
+# 此前一条守卫都没有——即使 `_close_or_note` 本身守住了宽度，`_close_all_or_note`
+# 仍可能把 `_close_or_note` 放出来的 `KeyboardInterrupt` 自己接住。
+#
+# 判据放宽成 `except BaseException` 之后，`KeyboardInterrupt` 逃出来的**类型不变**
+# （`first = e` 之后原样 `raise first`），单看类型断不出来；真正的判别力在于
+# **循环还继续了没有**：判据正确时中断必须当场打断循环，第二个中间描述符压根
+# 不会被尝试关闭；判据被放宽后循环会把它当成一次普通失败记下、继续关下一个。
+
+def test_close_all_or_note_lets_keyboard_interrupt_stop_the_loop(
+        tmp_path: Path, monkeypatch):
+    """走一条 `a/b/leaf.csv`（两个中间描述符），第一个关闭时抛
+    `KeyboardInterrupt`：中断必须原样逃出、**当场打断**这圈 `for` 循环，
+    第二个中间描述符不许被尝试关闭。
+
+    判别力：把 `_close_all_or_note` 那处 `except Exception` 放宽成
+    `except BaseException`，中断会被当成 `first` 接住、循环继续关第二个
+    ——`after` 不再是空的，本条立刻红。
+    """
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "leaf.csv").write_bytes(b"x")
+    root = open_root(str(tmp_path))
+    try:
+        real_close = os.close
+        fired: list[int] = []
+        after: list[int] = []
+
+        def spy(fd):
+            if not fired:
+                fired.append(fd)
+                real_close(fd)
+                raise KeyboardInterrupt()
+            after.append(fd)
+            return real_close(fd)
+
+        monkeypatch.setattr(os, "close", spy)
+
+        with pytest.raises(KeyboardInterrupt) as ei:
+            parent_fd_under(root, "a/b/leaf.csv")
+
+        assert fired, "前提不成立：注入没生效"
+        assert after == [], (
+            f"第一个中间描述符关闭抛出 `KeyboardInterrupt` 之后，第二个仍然被"
+            f"尝试关闭（实测 {after}）——说明中断被当成「这一项关闭失败了」接住，"
+            "循环没有被当场打断")
+        assert not isinstance(ei.value, Exception), (
+            "`KeyboardInterrupt` 不是 `Exception` 的子类——本条断言本身就是判据所在")
+        assert not any("关描述符失败" in n
+                       for n in getattr(ei.value, "__notes__", [])), (
+            "中断被记进了诊断，说明它被更宽的捕获接住、当成了「这一项没关成」"
+            "顺手咽掉，而不是原样放行")
+    finally:
+        os.close(root)

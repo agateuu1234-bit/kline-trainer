@@ -567,6 +567,64 @@ async def _register_training_set(conn, gts: GeneratedTrainingSet) -> Optional[in
         gts.schema_version, str(gts.path), gts.content_hash)
 
 
+@dataclass(frozen=True)
+class GatingInputs:
+    """`generate_one_training_set` 与 P4 重建入口共用的门控输入（spec §3.1 的精神：
+    同一件事只许有一份实现 —— 本切片的根缺陷正是「两侧各写一份」）。"""
+    period_bars: dict
+    trading_dates: list
+    dense_dates: set
+    dropped: frozenset
+    month_boundaries: list
+
+
+async def load_gating_inputs(conn, stock_code: str) -> GatingInputs:
+    """读 coverage + 六周期 bars，重建交易日历并与权威天数交叉校验，求月边界。
+
+    ⛔ **只读**：全部是 SELECT，且包在 repeatable_read + readonly 的快照事务里
+       —— coverage 与六周期 bars 分属两次读，`repeatable_read` 让它们看到**同一个
+       提交时点**的快照，不会被并发写者（比如同时在跑的 B1 导入）撕成两半
+       （coverage 是新写的、bars 还是旧的，或反过来）。
+    ⛔ 不含 `_fetch_existing_starts` —— 那是生产路径独有的「起点去重」，P4 重建要的
+       恰恰是【已登记的那三个起点】，带上它会把目标起点自己排除掉。
+    """
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
+            conn, stock_code)
+        if start_date is None or end_date is None:
+            raise GenerateSkipException(
+                f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
+
+        period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
+        for p, bars in period_bars.items():
+            if bars.empty:
+                raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
+
+    daily = period_bars["daily"]
+    trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
+    dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
+    if not dense_dates:
+        raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
+
+    # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
+    # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
+    # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
+    # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
+    # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
+    if dense_day_count is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
+    if len(dense_dates) != int(dense_day_count):
+        raise GenerateSkipException(
+            f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
+            f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
+
+    month_boundaries = period_boundaries(daily, "monthly")
+    return GatingInputs(period_bars=period_bars, trading_dates=trading_dates,
+                        dense_dates=dense_dates, dropped=frozenset(dropped),
+                        month_boundaries=month_boundaries)
+
+
 def _stock_name_of(stock_code: str) -> str:
     """训练组生成不查 stocks 表，stock_name 简化为 code（B3/前端用 stocks.name 显示）。"""
     return stock_code
@@ -610,41 +668,12 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把
         # 每只股票的六个周期全历史 `SELECT ... FROM klines` 读进 pandas 再扔掉——
         # 这条检查只需要 stock_coverage 那一行是否存在，不依赖 period_bars 里的任何东西。
-        #
-        # Plan 3 Task4：coverage + 六周期读包进 RR 只读快照事务——两次读看到同一
-        # 提交时点，不被并发写者撕成两半。
-        async with conn.transaction(isolation="repeatable_read", readonly=True):
-            start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
-                conn, stock_code)
-            if start_date is None or end_date is None:
-                raise GenerateSkipException(
-                    f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
-
-            period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
-            for p, bars in period_bars.items():
-                if bars.empty:
-                    raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
-
-        daily = period_bars["daily"]
-        trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
-        dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
-        if not dense_dates:
-            raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
-
-        # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
-        # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
-        # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
-        # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
-        # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
-        if dense_day_count is None:
-            raise GenerateSkipException(
-                f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
-        if len(dense_dates) != int(dense_day_count):
-            raise GenerateSkipException(
-                f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
-                f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
-
-        month_boundaries = period_boundaries(daily, "monthly")
+        gi = await load_gating_inputs(conn, stock_code)
+        period_bars = gi.period_bars
+        trading_dates = gi.trading_dates
+        dense_dates = gi.dense_dates
+        dropped = gi.dropped
+        month_boundaries = gi.month_boundaries
         exclude = await _fetch_existing_starts(conn, stock_code)
 
         # R8-F1：候选预算必须 ≥ 导入门，否则 fail-closed 保证是假的。build_stock_import 的

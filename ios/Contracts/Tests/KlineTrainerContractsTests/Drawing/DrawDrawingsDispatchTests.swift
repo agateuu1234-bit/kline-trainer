@@ -191,6 +191,93 @@ struct DrawDrawingsDispatchTests {
                           selectedDrawingID: nil, tools: [.horizontal: spy])
         #expect(spy.received.map(\.isSelected) == [false])
     }
+
+    @Test("N1：两条同价位重合的线 —— 只有被选中的那条画节点（选中项在数组首/尾各验一次）")
+    func onlySelectedLineDrawsNodes() {
+        let mapper = makeMapperFixture()        // frame 320×200, candleStep 8, price 100...200, scale 1
+        let yLine = Int(mapper.priceToY(150))   // 100
+        let xA = Int(mapper.indexToX(10)), xB = Int(mapper.indexToX(30))   // 80 / 240
+        // 同价位 ⇒ 两条线的 y 相同、视觉上完全重合；锚点落在不同 K 线上 ⇒ 节点 x 可分辨
+        let a = DrawingObject(id: "A", toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m60, candleIndex: 10, price: 150)],
+                              isExtended: false, panelPosition: 0)
+        let b = DrawingObject(id: "B", toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m60, candleIndex: 30, price: 150)],
+                              isExtended: false, panelPosition: 0)
+
+        /// 渲染一次，返回「A 的锚点处 / B 的锚点处」是否有纯黑 ink（= 节点）。
+        /// 线是出厂橙、节点是纯黑 ⇒ 用纯黑把节点从线里区分出来。
+        func inkAt(selecting id: DrawingID) -> (atA: Bool, atB: Bool) {
+            let w = 320, h = 200
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            // 复现 `KLineView.draw` 的真实先后：先画线，再（在所有持久内容之后）画选中节点。
+            // ⛔ 只调 drawDrawings 是画不出节点的 —— 节点已提成 draw 的独立阶段（R6）。
+            let view = makeViewFixture()
+            view.drawDrawings(ctx: ctx, mapper: mapper, drawings: [a, b], period: .m60,
+                              scheme: .light, selectedDrawingID: id,
+                              tools: [.horizontal: HorizontalLineTool()])
+            view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [a, b],
+                                    scheme: .light, selectedDrawingID: id,
+                                    tools: [.horizontal: HorizontalLineTool()])
+            let snap = data                      // 先快照，避免与 CGContext 的 inout 访问重叠
+            func isInk(_ x: Int) -> Bool {
+                let i = ((h - 1 - yLine) * w + x) * 4   // ⛔ bottom-up（Step 0 实测）
+                let al = CGFloat(snap[i+3]) / 255
+                guard al > 0.5 else { return false }
+                return CGFloat(snap[i])/255/al < 0.12 && CGFloat(snap[i+1])/255/al < 0.12
+                    && CGFloat(snap[i+2])/255/al < 0.12
+            }
+            return (isInk(xA), isInk(xB))
+        }
+
+        // ① 选中数组【首位】—— R6 把节点提成 draw 的独立阶段后，「被后画的线盖掉」在结构上
+        //    已不可能；本档现在守的是**另一件事**：节点只认选中项，不受同价位重合线干扰。
+        let first = inkAt(selecting: "A")
+        #expect(first.atA, "选中数组首位时它的节点必须画出来")
+        #expect(!first.atB, "未选中的 B 不得有节点 —— 哪怕它与 A 同价位、视觉上完全重合")
+        // ② 选中数组【末位】—— 与 ① 对照：只测这一档抓不到覆盖问题
+        let last = inkAt(selecting: "B")
+        #expect(last.atB, "选中数组末位时必须有节点")
+        #expect(!last.atA, "未选中的 A 不得有节点")
+    }
+
+    @Test("⭐T10：裁剪只作用于节点 —— 贴主图下沿的粗线必须仍有一部分画在框外")
+    func nodeClippingDoesNotThinTheLine() {
+        // frame 高 200，bitmap 高 240 ⇒ 框外（CG y > 200）有 40pt 的空间可供观察。
+        // 线 price = 100（= priceRange.min）⇒ CG y = frame.maxY = 200，thickness 5 ⇒ 线宽 3.5pt
+        // ⇒ 不裁剪时线覆盖 CG y ∈ [198.25, 201.75]，有约 1.75pt 落在框外。
+        let w = 320, h = 240
+        let mapper = makeMapperFixture()                    // mainChartFrame = 320×200
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let d = DrawingObject(id: "L", toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m60, candleIndex: 10, price: 100)],
+                              isExtended: false, panelPosition: 0, thickness: 5)
+        let view = makeViewFixture()
+        view.drawDrawings(ctx: ctx, mapper: mapper, drawings: [d], period: .m60,
+                          scheme: .light, selectedDrawingID: "L",
+                          tools: [.horizontal: HorizontalLineTool()])
+        view.drawSelectionNodes(ctx: ctx, mapper: mapper, drawings: [d],      // 选中 ⇒ 节点也会画
+                                scheme: .light, selectedDrawingID: "L",
+                                tools: [.horizontal: HorizontalLineTool()])
+        let snap = data
+        // ⛔ 不假设 data 行序（见 Step 0）：只数「哪些行有成片的墨」，再看跨度落在哪一端。
+        // 远离节点：节点在 x ≈ 80，故只统计 x ≥ 200 的区域，避免把节点像素算成线。
+        let inkRows = (0..<h).filter { row in
+            (200..<w).reduce(0) { acc, x in acc + (snap[(row * w + x) * 4 + 3] > 128 ? 1 : 0) } >= 50
+        }
+        #expect(!inkRows.isEmpty, "前提：线必须真的画出来了（否则下面的断言恒真）")
+        let minRow = inkRows.min()!, maxRow = inkRows.max()!
+        // frame.maxY = 200。top-down 时框外行 > 200；bottom-up 时框外行 < h-1-200 = 39。
+        // 两端各查一次 ⇒ 不依赖行序，且裁剪一旦扩大到整条线，两端都不成立。
+        #expect(maxRow > 200 || minRow < 39,
+                "线必须有一部分落在主图框外（证明裁剪没波及线）：inkRows=[\(minRow)…\(maxRow)]")
+    }
 }
 
 // MARK: - Spies / fixtures
@@ -207,6 +294,8 @@ private final class SpyDrawingTool: DrawingTool {
         received.append((drawing, scheme, isSelected))
     }
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
+    // D131：这三个 mock 的测试目的与可见性无关，恒可见即可。
+    func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool { true }
 }
 
 @MainActor

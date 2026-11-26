@@ -447,6 +447,13 @@ public final class TrainingEngine {
     private func restoreDrawingSessionAfterPeriodChange() {
         guard drawingSession.drawingModeActive, let tool = drawingSession.activeDrawingTool else { return }
         if !drawingSession.pendingAnchors.isEmpty { drawingSession.discardPendingAnchors() }
+        // P1c 第 3 片 Task 11（N8）：周期组合真的变了 ⇒ 正在进行的节点拖动**作废**（D138 末行，
+        // 与「第二根手指落下→就地定住」刻意不同）——新周期下写进去的锚点与旧周期坐标系对不上，
+        // 正是 N8 禁止的混周期坏数据，作废不写。⚠️ 下面 `clearSelection()` 内部本就会连带调
+        // `endNodeDrag()`（D135c：没有选中 ⇒ 不可能有拖动），这里显式再调一次是为了让「周期变化
+        // 作废拖动」这件事不依赖「选中清空」这个旁系副作用来兑现——与 `discardPendingAnchors()`
+        // 并排、各自独立表达各自的善后语义，不许任何一者被悄悄删掉或挪位而让另一者失效。
+        drawingSession.endNodeDrag()
         // ③ D54 clause 3 / D57 表格末行（1b-i PR-3）：**结构性不可见 → 清空选中**。
         //    锚点绑在旧周期的 candleIndex 上，换了周期坐标系就错了；而且 D29 周期绑定下，这条线
         //    可能已经**迁到另一个面板**去渲染了 —— 它的 id 仍在 `drawings` 里（存在性谓词判"保留"），
@@ -1251,6 +1258,58 @@ extension TrainingEngine {
             tailAnchor: old.tailAnchor)
         drawings[i] = updated
         recordDrawingUndoDelta(.replaced(before: old, after: updated, at: i))       // D75
+        drawingsRevision += 1
+        return true
+    }
+
+    /// D136（P1c 第 3 片）：`drawings` 的**第 5 个**写入面 —— 改某条线的某个锚点。
+    /// 唯一生产调用点 = 节点拖动的收尾路径（`ChartContainerView.Coordinator`）。
+    ///
+    /// **门列表**（逐条对照既有写入面重新论证，⛔ 不照抄）：
+    ///   ⓪ 非复盘（D34 纵深，同 `updateDrawingStyle` / `deleteDrawing(id:)`）
+    ///   ① id 非空 + 全局**恰好**一条（D66）
+    ///   ② `!old.locked`（D60）——⚠️ 这是**第二层**，第一层在探针（D139）
+    ///   ②b 工具门（本构建不懂其样式语义的工具，同样不懂它的锚点语义）
+    ///   ③ raw-aware 两道（D61）：改锚点是「部分改写」，与删整条性质不同
+    ///   ④ `anchorIndex` 在范围内 —— Swift 数组越界是 **trap**，`do/catch` 接不住
+    ///   ⑤ `anchor.period == old.period`（D29 + N8）：混周期锚点 = 后续 candleIndex 被按错误周期解释
+    ///   ⑥ **内容未变 ⇒ 返 `true` 且零副作用**（D80）
+    ///
+    /// ⛔ **本接口不含、也不声称含几何门** —— 引擎没有 mapper（同 `deleteDrawing(id:)` 头注）。
+    /// 夹回边界发生在界面层（D137）。
+    @discardableResult
+    func updateDrawingAnchor(id: DrawingID, anchorIndex: Int, anchor: DrawingAnchor) -> Bool {
+        guard flow.mode != .review else { return false }                       // ⓪
+        guard !id.isEmpty else { return false }                                // ①
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }  // ①
+        let old = drawings[i]
+        guard !old.locked else { return false }                                // ②
+        guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }  // ②b
+        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
+              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }   // ③
+        guard old.anchors.indices.contains(anchorIndex) else { return false }  // ④
+        guard anchor.period == old.period else { return false }                // ⑤
+        var anchors = old.anchors
+        anchors[anchorIndex] = anchor
+        // 逐字段拷贝，只换 anchors。⚠️ `isExtended` 由 lineSubType 派生、**不由锚点派生**
+        //（`Models.swift:260` / `:320-322`）⇒ 拷贝即可；`period` **显式传 old.period**
+        //（⛔ 不让 init 从 anchors.first 现取——那会让门 ⑤ 变成摆设）。
+        let updated = DrawingObject(
+            id: old.id, toolType: old.toolType, anchors: anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition,
+            revealTick: old.revealTick, period: old.period,
+            lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: old.thickness, colorToken: old.colorToken,
+            labelMode: old.labelMode, locked: old.locked,
+            text: old.text, fontSize: old.fontSize,
+            textColorToken: old.textColorToken, textForm: old.textForm,
+            tailAnchor: old.tailAnchor)
+        // ⑥ D80：**短路的条件是「相等」**（生产范式 `guard updated != old else { return true }`，`:1219`）。
+        // ⛔ 写反成「不相等就短路」会恰好覆盖所有真正改变锚点的拖动 ⇒ 松手报成功却没写、线当场弹回。
+        guard updated != old else { return true }
+        drawings[i] = updated
+        recordDrawingUndoDelta(.replaced(before: old, after: updated, at: i))
         drawingsRevision += 1
         return true
     }

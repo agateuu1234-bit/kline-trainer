@@ -42,4 +42,6 @@ private final class SignatureGuardTool: DrawingTool {
     var requiredAnchors: ClosedRange<Int> { 1...2 }
     func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme, isSelected: Bool) {}
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
+    // D131：这三个 mock 的测试目的与可见性无关，恒可见即可。
+    func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool { true }
 }

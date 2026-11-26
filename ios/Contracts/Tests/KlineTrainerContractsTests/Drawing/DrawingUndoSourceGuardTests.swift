@@ -292,6 +292,7 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
             "deleteDrawing":           2,   // (at index:) 1 处 + (id:) 1 处 —— 两个重载同名，合并计数
             "appendDrawing":           1,
             "updateDrawingStyle":      1,
+            "updateDrawingAnchor":     1,   // P1c 第 3 片新增（D136）：一次写入，紧贴 recordDrawingUndoDelta
             "setDrawingLocked":        1,
             "applyUndoEntry":          3,   // remove + insert + 下标赋值
             // 整支终审②（Important-4）：整体赋值 `drawings = <表达式>` 现已计入结构性写入
@@ -312,7 +313,7 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
                        新增写入面必须先归入 D79 第一层那张表（入栈 / 作废 / 都不做，三选一），
                        再回来改本守卫 —— 不许直接改数字。
                        """)
-        XCTAssertEqual(total, 10, "权威分类表的合计是 10（见计划 Task 4 那张表 + 整支终审②补的整体赋值 2 处）")
+        XCTAssertEqual(total, 11, "权威分类表的合计是 11（P1c 第 3 片新增 updateDrawingAnchor，D136）")
     }
 
     /// U-G4 的**双向自检**：合成一段「写入落在表外函数里」的样本必须被判出来。

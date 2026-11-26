@@ -261,7 +261,8 @@ struct ChartContainerViewDrawingSessionTests {
         #expect(upperV.renderState.selectedDrawingID == nil, "清空后渲染态也必须立刻不再高亮")
     }
 
-    @Test("D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）")
+
+    @Test("D41/D108 端到端：tap 命中 → 线仍是自己的颜色 + 画出节点（像素级，不只是状态位）")
     func selectedLineActuallyRendersHighlighted() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
@@ -282,21 +283,48 @@ struct ChartContainerViewDrawingSessionTests {
         let before = Self.litPixels(of: upperV)
         #expect(!before.isEmpty, "对照组必须真的画出了线（否则下面的差异断言恒真）")
 
+        // P1c 第 2 片 Task 5：只看**锚点投影的那一个点**，不看整张图 ——
+        // 整图会把轴标签（暗色 0.92）与 MACD DIF（纯白 1.0）误判成节点（codex plan-R2）。
+        // renderState.viewport 就是这一帧真正渲染用过的视口（PR-4 已钉死它与实际渲染逐字相等）。
+        let mp = CoordinateMapper(viewport: upperV.renderState.viewport, displayScale: 1)
+        let anchor0 = engine.drawings[0].anchors[0]
+        let ax = Int(mp.indexToX(anchor0.candleIndex)), ay = Int(mp.priceToY(anchor0.price))
+        let beforeAtAnchor = Self.pixelAt(upperV, x: ax, y: ay)
+
         upperC.handleDrawingTapForTesting(at: p)                   // 选择态命中
         #expect(engine.drawingSession.selectedDrawingID == engine.drawings[0].id)   // 前提成立
 
         let after = Self.litPixels(of: upperV)
         #expect(!after.isEmpty, "选中后线仍要画出来（不能因为高亮反而消失）")
-        // ⚠️ 不假设测试环境的 scheme（`KLineView.draw` 取 `themeController.resolve(trait:)`，
-        //    CI 上是 light 还是 dark 不由本测试决定）→ 两套选中色都认，判据仍然有力：
-        //    两者都 ≠ 任何 DrawingColorToken 的解析结果（`selectionColorIsOutsideTokenRange` 已钉死）。
-        let sels = [DrawingColorResolver.selectionRGBA(scheme: .light),
-                    DrawingColorResolver.selectionRGBA(scheme: .dark)]
+// D108：线**不再变色** —— 选中前后都必须能找到它自己的 colorToken 色（本例出厂橙）。
+        let expOrange = DrawingColorResolver.resolve(.orange, scheme: .light)
+        let expOrangeDark = DrawingColorResolver.resolve(.orange, scheme: .dark)
         #expect(after.contains { px in
-            sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.g - CGFloat($0.green)) < 0.06
-                          && abs(px.b - CGFloat($0.blue)) < 0.06 }
-        }, "选中的线必须以选中色画出（D55）")
+            [expOrange, expOrangeDark].contains { e in
+                abs(px.r - CGFloat(e.red)) < 0.06 && abs(px.g - CGFloat(e.green)) < 0.06
+                && abs(px.b - CGFloat(e.blue)) < 0.06 }
+        }, "选中后线必须仍是它自己的颜色（D108 取消变蓝）")
         #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
+
+        // P1c 第 2 片 Task 5：受控点对比 —— 靠「橙 → ink」的转变，不靠绝对亮度
+        let afterAtAnchor = Self.pixelAt(upperV, x: ax, y: ay)
+        // 出厂橙昼夜同值（`DrawingColorResolver.swift:10` 逐字：legacy 默认，昼夜同）⇒ 只需一套
+        let orange = DrawingColorResolver.resolve(.orange, scheme: .light)
+        func isOrange(_ px: Px?) -> Bool {
+            guard let px else { return false }
+            return abs(px.r - CGFloat(orange.red)) < 0.06 && abs(px.g - CGFloat(orange.green)) < 0.06
+                && abs(px.b - CGFloat(orange.blue)) < 0.06
+        }
+        // ink 判据收紧到 0.06 / 0.94：⛔ 不能用 0.12 —— 暗色背景蓝通道正好是 0.12，会擦边翻转
+        func isInk(_ px: Px?) -> Bool {
+            guard let px else { return false }
+            return (px.r < 0.06 && px.g < 0.06 && px.b < 0.06)
+                || (px.r > 0.94 && px.g > 0.94 && px.b > 0.94)
+        }
+        #expect(isOrange(beforeAtAnchor),
+                "前提：未选中时锚点处画的是线自己的橙色（否则下面「变成 ink」的断言无从谈起）")
+        #expect(isInk(afterAtAnchor), "选中后锚点处必须被节点覆盖成 ink（纯黑或纯白）")
+        #expect(!isOrange(afterAtAnchor), "选中后该点不得还是橙色 —— 那说明节点没画上去")
     }
 
     @Test("D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings")
@@ -384,6 +412,27 @@ struct ChartContainerViewDrawingSessionTests {
     /// 要等到 Catalyst 闸门才炸。（既有的 `HorizontalLineToolTests.litColumn` 返回元组数组是安全的，
     /// 因为那边只 `contains {…}` 逐元素比，从不比整个数组。）
     private struct Px: Equatable { let r: CGFloat; let g: CGFloat; let b: CGFloat }
+
+    /// 取 `view` 当前渲染后、某个**精确像素**的颜色（反 premultiplied）。
+    /// 与 `litPixels(of:)` 同一条渲染链（renderState → drawDrawings → …），
+    /// 区别只在于**保留坐标**，因而不会把别处的轴标签 / 指标线误当成节点。
+    @MainActor
+    private static func pixelAt(_ view: KLineView, x: Int, y: Int) -> Px? {
+        let w = Int(view.bounds.width), h = Int(view.bounds.height)
+        guard x >= 0, x < w, y >= 0, y < h else { return nil }
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        UIGraphicsPushContext(ctx)
+        view.draw(view.bounds)
+        UIGraphicsPopContext()
+        // ⛔ 行序是 bottom-up（已实测）：内存行 = h - 1 - CG的y
+        let i = ((h - 1 - y) * w + x) * 4
+        let a = CGFloat(data[i+3]) / 255
+        guard a > 0.3 else { return nil }
+        return Px(r: CGFloat(data[i])/255/a, g: CGFloat(data[i+1])/255/a, b: CGFloat(data[i+2])/255/a)
+    }
 
     /// 把 `view` 当前 renderState 画进一张 bitmap，返回线像素的（反 premultiplied）颜色。
     /// 与 `HorizontalLineToolTests.litColumn` 同思路，但走的是**真实 `KLineView.draw(_:)` 派发链**

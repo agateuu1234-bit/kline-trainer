@@ -15,10 +15,18 @@ import CoreGraphics
 public protocol DrawingTool {
     static var type: DrawingToolType { get }
     var requiredAnchors: ClosedRange<Int> { get }
-    /// `isSelected`（D55，1b-i PR-3）：该条是否处于选中态。**瞬时 UI 状态**，由渲染 dispatch 按
+    /// `isSelected`（D55 引入，D108 改义）：该条是否处于选中态。**瞬时 UI 状态**，由渲染 dispatch 按
     /// `KLineRenderState.selectedDrawingID` 逐条派发，不来自 `DrawingObject` 任何持久化字段。
+    /// ⚠️ **P1c 第 2 片起它不再表示「画成选中蓝」** —— 选中的视觉是**节点**（由 `KLineView.draw` 的
+    /// 独立阶段 `drawSelectionNodes` 统一画，见 `DrawingNodeGeometry` / `DrawingNodeRenderer`），
+    /// 各 tool 的 `render` 通常**不需要**用它；参数保留是为了让将来确有需要的工具能拿到这一位。
     /// 源码 API 面破坏按 D28 不 bump `CONTRACT_VERSION`、不留 shim（仓内模块、无外部 conformer）。
     func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject,
                 scheme: AppColorScheme, isSelected: Bool)
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool
+    /// D131（P1c 第 2 片）：这条线此刻**画不画得出来**。
+    /// **节点的渲染与命中共用它** —— 各 tool 必须让它与自己的 `render` / `hitTest` 走**同一个判据**
+    /// （水平线三者共用 `visibleGeometry`），使「命中集合 ≡ 渲染集合」在结构上不可能分叉。
+    /// ⛔ 新工具不得为它单写一份可见性逻辑。
+    func isVisible(drawing: DrawingObject, mapper: CoordinateMapper) -> Bool
 }

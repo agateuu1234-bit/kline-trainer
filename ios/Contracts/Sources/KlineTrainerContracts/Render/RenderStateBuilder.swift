@@ -82,10 +82,44 @@ public enum RenderStateBuilder {
     /// 删除**渲染在另一个面板上**的线。
     @MainActor
     static func visibleDrawings(engine: TrainingEngine, panel: PanelId, tick: Int) -> [DrawingObject] {
-        (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : [])).filter { drawing in
-            belongsToPanel(drawing, panel: panel,
-                           upperPeriod: engine.upperPanel.period, lowerPeriod: engine.lowerPanel.period)
-                && drawing.revealTick <= tick
+        let base = (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : []))
+            .filter { drawing in
+                belongsToPanel(drawing, panel: panel,
+                               upperPeriod: engine.upperPanel.period, lowerPeriod: engine.lowerPanel.period)
+                    && drawing.revealTick <= tick
+            }
+        return applyNodeDragOverride(base, engine: engine, panel: panel)
+    }
+
+    /// D135 第 2 条：把**正在被拖**的那一条替换成拖动中的样子。落在这一处（而不是只落渲染路径），
+    /// 是为了让 D40「命中集合 ≡ 渲染集合」在拖动的**每一个瞬间**都字面成立。
+    ///
+    /// ⛔⛔ **本函数零写入**（D135b 末段 / G10）：不变量不成立时**只是不施加覆盖**（fail-closed 读）。
+    /// 「就地定住」是**写入**，只允许发生在手势回调里 —— 在渲染求值里写状态会造成
+    /// 「写 → 失效 → 再渲染」的循环（同 `DrawingSession.swift:57-59` 记录的那条陷阱）。
+    @MainActor
+    private static func applyNodeDragOverride(_ list: [DrawingObject], engine: TrainingEngine,
+                                              panel: PanelId) -> [DrawingObject] {
+        let session = engine.drawingSession
+        guard let owner = session.nodeDragOwner, let current = session.nodeDragCurrent,
+              owner.panel == panel,
+              owner.panel == session.selectedPanel,
+              owner.drawingID == session.selectedDrawingID           // D135b 不变量
+        else { return list }
+        return list.map { d in
+            guard d.id == owner.drawingID, d.anchors.indices.contains(owner.anchorIndex) else { return d }
+            var anchors = d.anchors
+            anchors[owner.anchorIndex] = current
+            return DrawingObject(
+                id: d.id, toolType: d.toolType, anchors: anchors,
+                isExtended: d.isExtended, panelPosition: d.panelPosition,
+                revealTick: d.revealTick, period: d.period,
+                lineSubType: d.lineSubType, lineStyle: d.lineStyle,
+                thickness: d.thickness, colorToken: d.colorToken,
+                labelMode: d.labelMode, locked: d.locked,
+                text: d.text, fontSize: d.fontSize,
+                textColorToken: d.textColorToken, textForm: d.textForm,
+                tailAnchor: d.tailAnchor)
         }
     }
 

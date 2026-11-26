@@ -61,8 +61,13 @@ S1 的验收须包含「同一套原语能同时表达 `--dest` 与 `--output` �
 | **S1 共享地基** | 逐段无跟随打开器、锁纪律、耐久提交、归属标记与认领协议 | 无 | §4.1 + §4.5 的锁/耐久两小节 |
 | **S2 manifest** | manifest 结构、读侧闭合校验、`manifest_version` 三档、`stopped_reason`/`fetch_fatal_error` 生命周期 | S1（原子写要用耐久提交） | §4.5 读侧校验 + §4.4 manifest 字段 |
 | **S3 预筛 + 分层储备池** | 三条预筛判据、按层 seeded shuffle、冻结宇宙、`cursor`/`pool_order`/`failures` 语义 | S2（结构定义） | §4.2 §4.3 §4.4 |
-| **S4 拷贝引擎** | 按股事务、`.part`→`replace`、`.inflight.json` 三档恢复、`--max-bytes` 流式硬限 | S1 S2 S3 | §4.5 |
+| **S4a 单股事务** | 字节预算与流式拷贝（含逐块记账与回滚退还）、幂等四象限、`.inflight.json` 的**形状与写删**、两次 `os.replace` + 耐久 `fsync`、按股 `commit_stock` 提交、失败按**股**清理 `.part` | S1 S2 S3 | **`2026-09-18-qmt-4b-s4a-contract.md`** |
+| **S4b 运行编排** | 由 `Slot` 解析出两条相对路径、`begin_run` 启动序列、`.inflight.json` 的**形状校验与三档恢复**、续跑循环、`--max-bytes` 终止策略、staged `export_log.csv` 落盘与计账、`stopped_reason`/`fetch_fatal_error` 收尾 | S4a | §4.5 + 上述契约的「交接」节 |
 | **S5 源边界闸 + CLI** | 七条边界闸、立基准/比对双模式、可注入挂载表、收尾复校与三级定级、`qmt_fetch` 命令行 | S1–S4 | §4.6 + §4.4 的 `source_verification` |
+
+**⚠️ S4 已于 2026-09-17 实拆成 S4a / S4b**（由 user 拍板**预先**拆，推翻了 S1 那条
+「由评审结果决定，不预先拆」的惯例）。切点在**「一只股怎么拷」与「一次运行怎么编排」之间**。
+**S4a 的契约、证据与交接清单在 `2026-09-18-qmt-4b-s4a-contract.md`**，不在本文件也不在大 spec 里。
 
 **⚠️ S1 可能需要再拆成两个 PR**：它含约 10 个原语，而按切分图的统计「路径·锁信任边界」在 spec 层就吃掉 47 条 finding 里的 8 条，是被 codex 挖得最狠的部分之一。若第一轮对抗性评审的 finding 集中在锁/归属这一半，就地拆成 S1a（纯路径原语 + 耐久）与 S1b（锁 + 归属标记 + 三分支探测 + 只读/重叠/分叉检查）。**由评审结果决定，不预先拆。**
 

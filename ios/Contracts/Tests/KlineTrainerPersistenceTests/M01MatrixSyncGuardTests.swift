@@ -49,7 +49,7 @@ final class M01MatrixSyncGuardTests: XCTestCase {
     func test_m01_matrix_three_rows_are_in_sync() throws {
         let r = Self.rows(try matrixSection())
         XCTAssertGreaterThanOrEqual(r.count, 5, "只解析出 \(r.count) 行 —— 表解析坏了（防空转）")
-        XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.14\"`", "m01 顶层版本行未同步")
+        XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.15\"`", "m01 顶层版本行未同步")
         XCTAssertEqual(r["app.sqlite GRDB migration"], "`0010_v1.13_drawing_default_style`",
                        "m01 app.sqlite migration 行未同步")
         XCTAssertEqual(r["Swift 模型版本（`M0.3`）"], "`1.4`", "m01 Swift 模型版本行未同步")

@@ -20,7 +20,8 @@ import CoreGraphics   // ← 1a-iii Task2：PanelShield.rect(CGRect)
 
 /// **访问级别是 load-bearing 的（codex plan-R5-high）**：类与**状态**是 `public`（只读，`private(set)`），
 /// 但**所有 mutator 一律 internal**（`activate` / `deactivate` / `addAnchor` / `discardPendingAnchors` /
-/// `commitPending` / `setDefaultStyle` 前面**没有** `public`，别手贱加上）。理由：`TrainingEngine.drawingSession` 是 `public let`，
+/// `commitPending` / `setDefaultStyle` / `beginNodeDrag` / `updateNodeDragCurrent` / `endNodeDrag`
+/// 前面**没有** `public`，别手贱加上）。理由：`TrainingEngine.drawingSession` 是 `public let`，
 /// 若 mutator 也 public，包外任何 client 都能 `engine.drawingSession.deactivate()` —— 绕过
 /// `beginDrawingSession` / `endDrawingSessionIfActive` 这两个**唯一会同时更新两个面板 reducer** 的入口，
 /// 于是「会话关了但面板还在 .drawing」/「会话开着但面板是 autoTracking」**又回来了**，正是本期要消灭的漂移。
@@ -88,6 +89,13 @@ public final class DrawingSession {
         selectionGeometryVisible = v
     }
 
+    /// D135c：**拖动进行中，点击不改选中**。
+    /// 「B 在 A 的拖动进行中被选中」结构上不可表达 ⇒「两条拖动重叠」「陈旧回调提交了别人的拖动」
+    /// 这两个问题**写不出来**（spec 第 7 / 9 / 10 轮连出三条，两条 high，根源都是它）。
+    /// ⛔ 两个入口**各自保留自己的守卫**调本谓词，不得合并成一个带参数的函数
+    ///（与本文件 `setSelection` / `setCommittedSelection` 共用 `assignSelection` 但各自守卫的既有纪律同形）。
+    private func tapSelectionAllowed() -> Bool { nodeDragOwner == nil }
+
     /// D54：建立选中。**fail-closed**：非选择态 / 无会话一律拒——这让「画线态里挂着一个选中」
     /// 这个坏状态**不可表达**（而不是靠每个调用点自觉先 setMode）。internal（同容器 mutator 纪律）。
     /// **空 id 同样拒**（1b-i PR-3 whole-branch fix，同 D66「id 唯一非空是写入边界不变量」）：
@@ -95,6 +103,7 @@ public final class DrawingSession {
     /// `appendDrawing` 的 `!id.isEmpty` 门 → 磁盘上一条坏 id 的线可解码进 `drawings`，若放行会让
     /// 渲染 dispatch 按 `drawing.id == selectedDrawingID` 逐条判、把**所有**空 id 的线一起高亮。
     func setSelection(id: DrawingID, panel: PanelId) {
+        guard tapSelectionAllowed() else { return }                 // D135c：拖动进行中点击不改选中
         guard drawingModeActive, mode == .select, !id.isEmpty else { return }
         assignSelection(id: id, panel: panel)
     }
@@ -112,6 +121,7 @@ public final class DrawingSession {
     /// internal（同容器 mutator 纪律，见文件顶部大注释：mutator 一旦 public，包外就能绕过
     /// `beginDrawingSession` / `endDrawingSessionIfActive` 这两个唯一收口点）。
     func setCommittedSelection(id: DrawingID, panel: PanelId) {
+        guard tapSelectionAllowed() else { return }                 // D135c：画线态不可能有拖动态，对称保留
         guard drawingModeActive, mode == .draw, !id.isEmpty else { return }
         assignSelection(id: id, panel: panel)
     }
@@ -120,6 +130,7 @@ public final class DrawingSession {
     /// **两个入口各自保留自己的守卫**）。抽出来让「两个入口的函数体一致」由**构造**保证，
     /// 而不是靠两份三行代码日后不漂移这个承诺。
     private func assignSelection(id: DrawingID, panel: PanelId) {
+        endNodeDrag()                              // D135c：「换了选中 ⇒ 不可能有节点拖动」，语义恒等式由构造保证
         selectedDrawingID = id
         selectedPanel = panel
         selectionGeometryVisible = true            // 命中即证明此刻几何可见（hitTest 内部就是 visibleGeometry != nil，D40）
@@ -129,6 +140,7 @@ public final class DrawingSession {
     /// ⚠️ 判据一律是**状态**（态变了 / 结构性不可见 / id 不在 `drawings` 里），
     /// **绝不是**「某个写入 API 返回了 false」（D64；写入 API 的接线属 PR-4）。
     func clearSelection() {
+        endNodeDrag()                              // D135c：「没有选中 ⇒ 不可能有节点拖动」，节点只存在于选中的线上
         selectedDrawingID = nil
         selectedPanel = nil
         selectionGeometryVisible = false           // 没有选中就没有可操作对象（🗑 与样式控件一并回灰）
@@ -149,6 +161,49 @@ public final class DrawingSession {
 
     /// D31/D42：pending 锚的**归属面板** = 落锚时被点击的面板。**与 activePanel 无关**。
     public private(set) var pendingAnchorPanel: PanelId?
+
+    /// D135（P1c 第 3 片）：节点拖动的**瞬时态**，与 `pendingAnchors` 同族 —— 瞬时、**绝不落盘**、
+    /// 退出画线即清。⛔ 拖动期间**不碰** `engine.drawings`：`drawingsRevision` 每 +1 就触发一次
+    /// `autosave(immediate: true)`（`UI/TrainingView.swift:49-50`）⇒ 逐帧写正式数组 = 每秒约 60 次写盘。
+    ///
+    /// **按「写入频率」拆两半**（⭐ 不是把同一个事实存两份：归属是**每次手势**一个事实，
+    /// 当前锚点是**每帧**一个事实，两者不相交）：
+    public struct NodeDragOwner: Equatable, Sendable {
+        public let panel: PanelId
+        public let drawingID: DrawingID
+        public let anchorIndex: Int
+        /// D134e：盾判据要用的**按下点**（本面板局部坐标）
+        public let grabPoint: CGPoint
+        public init(panel: PanelId, drawingID: DrawingID, anchorIndex: Int, grabPoint: CGPoint) {
+            self.panel = panel; self.drawingID = drawingID
+            self.anchorIndex = anchorIndex; self.grabPoint = grabPoint
+        }
+    }
+
+    /// **参与 observation**：每次拖动只写 2 次（占槽 / 清槽）⇒ 建得起 SwiftUI 依赖、又不会造成
+    /// 「写 → 失效 → 再更新 → 再写」的循环。D135d 的五个 `...Enabled` 谓词读的就是它。
+    public private(set) var nodeDragOwner: NodeDragOwner?
+
+    /// **`@ObservationIgnored` 是 load-bearing 的**：每帧都写，理由与 `viewportMappers`（`:57-59`）逐字相同。
+    @ObservationIgnored public private(set) var nodeDragCurrent: DrawingAnchor?
+
+    /// 占槽。**两半同时赋值**（G15 钉死「同生同死」）。
+    func beginNodeDrag(_ owner: NodeDragOwner, anchor: DrawingAnchor) {
+        nodeDragOwner = owner
+        nodeDragCurrent = anchor
+    }
+
+    /// 每帧更新。⛔ 没占槽时 no-op —— fail-closed：「有 current 没有 owner」这个坏状态不可表达。
+    func updateNodeDragCurrent(_ anchor: DrawingAnchor) {
+        guard nodeDragOwner != nil else { return }
+        nodeDragCurrent = anchor
+    }
+
+    /// 清槽。**两半同时清**（G15）。幂等。
+    func endNodeDrag() {
+        nodeDragOwner = nil
+        nodeDragCurrent = nil
+    }
 
     /// 1a-iii：设置卡片写入的「下一条线」默认样式（单一真相，提交路径读它）。
     public private(set) var defaultStyle = DrawingDefaultStyle()
