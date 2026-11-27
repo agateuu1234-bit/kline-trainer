@@ -354,7 +354,7 @@ bash /tmp/h6plan/assert.sh
 
 ---
 
-- [ ] **Step 3: 再跑断言，确认七条全绿**
+- [ ] **Step 3: 再跑断言，确认九条全绿**
 
 ```bash
 bash /tmp/h6plan/assert.sh
