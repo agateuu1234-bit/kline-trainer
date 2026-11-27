@@ -66,11 +66,17 @@ jobs:
             -scheme KlineTrainerContracts-Package \
             -destination 'platform=macOS,variant=Mac Catalyst' \
             -only-testing:KlineTrainerContractsTests \
-            -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log
+            -derivedDataPath /tmp/derived \
+            -resultBundlePath /tmp/catalyst.xcresult 2>&1 | tee /tmp/catalyst-build.log
 
       # 闸门判据实现在 .github/scripts/catalyst-gate.sh（含 fixture 单元测试，见上一步）。
       # 判据摘要：TEST SUCCEEDED 标记 / 编译器 error（锚定 .swift:行:列 格式，免疫 xctest 运行期
       # 的 CoreData NSXPCConnection 噪声）/ Sources/ 零警告 / **自证**：测试 target 真被编译、
       # UIKit-gated 金丝雀真被编译、swift-testing 真跑了非 0 个用例。
+      # ⚠️ 2026-10-07 起，「UIKit-gated 逐条测试真跑过」这一条判据读的是上一步
+      #    `-resultBundlePath` 产出的**结构化结果包** /tmp/catalyst.xcresult，
+      #    不再 grep 日志文本（治并发劈字导致的偶发假红，见 catalyst-gate.sh 的 G8 注）。
+      #    ⇒ 谁把上一步的 `-resultBundlePath` 删掉，闸门会 fail-closed 报「结果包不存在」，
+      #      ⛔ 那不是闸门坏了，是取数的输入没了。
       - name: Gate — 闸门判据
         run: bash .github/scripts/catalyst-gate.sh /tmp/catalyst-build.log
