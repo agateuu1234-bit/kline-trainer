@@ -544,9 +544,15 @@ cat > /tmp/h6plan/pr-body.md <<'BODY'
 | 删掉 `git fetch` 后 `origin/main` 仍可解析 | ✅ 同上，本 PR 的「Detect relevant changes」步骤成功即为证据 |
 | **叠罗汉 PR 现在能拿到 `acceptance`** | ⚠️ **未实证 · 待下一个叠罗汉 PR 验证**（本 PR 自己的 base 就是 main，走的是改动前后行为相同的路径） |
 
-## 评审
+## ⚠️ 残留风险 R9 与评审 / override 声明
 
-- spec：codex `adversarial-review` **R2 真 approve**（R1 挖出 1 条 high，成立并已修；同时更正了 spec 的一处事实错误）
+- **评审状态（不含糊）**：
+  - spec 阶段：codex `adversarial-review` **R2 真 approve**（R1 挖出 1 条 high，成立并已修；同时更正了 spec 的一处事实错误）；
+  - 实施阶段：**R3 / R4 / R5 的 findings 均成立且已修**；**R6 / R7 / R8** 中 codex 连续报同一条 `[high]`（残留风险 **R9**：retarget 发生到 `edited` 触发新运行挂起之间有约 3 秒竞态窗口，理论上可滑过合并），本 PR 未采纳其改造建议，经 user override 收口（**实施阶段无 codex approve 账本条目**）。
+- **为何接受 R9（已量化）**：
+  - 竞态窗口约 **3 秒**，而历史实测「retarget → 合并」间隔为 **431 秒**（#172）与 **833 秒**（#170），大两个数量级；
+  - 本仓从未启用 auto-merge，分支保护规则集无合并队列，无自动化路径会踩中这 3 秒窗口；acceptance 脚本零 base 假设，窗口前后检验树内容相同；
+  - 否决 codex 替代方案（保留 `branches` 或非 main 用非必需别名）的原因：会把 `edited` 变成硬依赖，事件丢失即复发已踩过两次的永久死锁，不能用真实故障换取极低概率竞态。
 - 设计 spec：`docs/superpowers/specs/2026-08-25-h6-gate-stacked-pr-deadlock-design.md`
 - 实施计划：`docs/superpowers/plans/2026-08-30-h6-gate-stacked-pr-deadlock.md`
 BODY
