@@ -139,7 +139,7 @@ printf '%s\n' "$UIKIT_EXPECTED_TESTS" >"$UIKIT_LIST_FILE" || fail "写入 UIKit-
 
 # ── 结构化结果取数（2026-10-06 spec §3；G8 的数据来源，替代读 stdout 文本）──
 # 为什么不再读 stdout：并发写同一 fd 会把一个多字节 UTF-8 字符劈开，接收方把残字节
-# 转义成八进制（实测 `✔ Test "…\342\206\222…" passed after`）。baseline 80 条**全部**
+# 转义成八进制（实测 `✔ Test "…\342\206\222…" passed after`）。baseline 当前 103 条（早先 80 条）**全部**
 # 含非 ASCII ⇒ 一旦劈字落在某条被匹配的名字上，闸门就误判「未执行」= 随机假红。
 # 结构化结果由测试运行器自己记账，不经过那条 racy 的文本流。
 #
@@ -265,7 +265,7 @@ fi
 #       `summary-stdout-spoof`（伪造汇总行）/ `total-baseline-above-delta`（高于上限）；
 #       另 **6 档正向**（本该放行却被误伤）。
 #       ⛔ 注意不要把 `too-few-tests` 与 `total-baseline-below-delta` 算进负向那一类：
-#       它们断言「低于下限」，而迁移后节点数（28 或 80）仍然低于下限 1377
+#       它们断言「低于下限」，而迁移后节点数（如 28 或 103）仍然远低于下限（如 1377 / 当前 2034−30=2004）
 #       ⇒ 失败条件**完好无损**。权威度量见 docs/acceptance/…-mutation-log.md §一。
 #    ③ 不迁移就不必处理 1935 vs 2054 的口径差（文本汇总行只数 swift-testing，
 #       结构化结果里 XCTest 与 swift-testing 混在一起）。
@@ -317,7 +317,7 @@ MIN_TESTS=$((TOTAL_BASELINE - DELTA))
 MAX_TESTS=$((TOTAL_BASELINE + DELTA))
 # 对称区间（codex R8 finding，2026-07-15）：只卡下限不够——若 -only-testing 被放大、
 # 测试被重复执行、或 scheme 选择意外变宽，总数可以停在下限之上、同时跳过一大批本该跑的
-# 目标测试，门却仍绿。G8 只证明 28 个 UIKit 测试跑了，这个总数判据是其余 ~1379 个测试的
+# 目标测试，门却仍绿。G8 只证明 UIKit-gated 基线测试（早先 28 条，当前 103 条）跑了，这个总数判据是其余测试（当前总基线 2034）的
 # 唯一 backstop，所以必须双向卡。下限/上限分成两个分支，各带专属失败信息（便于测试绑定）。
 if [ "$N_TESTS" -lt "$MIN_TESTS" ]; then
     fail "swift-testing 只执行了 ${N_TESTS} 个用例，低于下限 ${MIN_TESTS}（基线 ${TOTAL_BASELINE}，见 ${TOTAL_BASELINE_FILE}，delta=${DELTA}，${SUMMARY}）—— 可能是 -only-testing 被收窄或用例被大批跳过；若为有意的大幅增减测试，请同步更新 catalyst-total-baseline.txt 并在 PR 说明"

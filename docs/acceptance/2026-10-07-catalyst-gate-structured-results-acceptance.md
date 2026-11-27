@@ -227,7 +227,7 @@ plan 原本要求：另开一个丢弃型 PR，在**真 CI** 上把某条 baseli
 
 - [ ] A1 ～ A5 由 user 逐条跑过并勾选（命令与预期见第一节，每条我都在目标目录原样跑过）
 - [x] 代码/脚本/样本本体已通过整支对抗性评审 `approve`（账本 key `branch:fix/catalyst-gate-structured-results@f78596df…`、`base_sha=bd29700e…`、**无 override**、**无 focus**、reviewer `codex/v1.0.3@11a720b7`）：
-      ⚠️ **HEAD 演进与复审边界如实说明**：`f78596df` 已包含全部 `.github/scripts/**`、workflow 与 7 份 JSON 样本改动；其后的 `9f31995e`（回填本验收记录）、同步 `main` 以及本条文档口径修正提交**均未改动任何代码或样本**，故最终合并 HEAD 高于 `f78596df`（`f78596df` 对应账本条目不再绑定后续文档提交）。因该 7 份单行压缩 JSON 样本超出 `kimi-attest.sh` 单行 2,000 字符 Read 保护上限，无法对整支重跑 `kimi-attest.sh`，改由 `kimi-attest.sh --review-only` 对 `f78596df` 之后的纯文档增量做独立对抗复审。
+      ⚠️ **HEAD 演进与复审边界如实说明**：`f78596df` 已包含全部 `.github/scripts/**`、workflow 与 7 份 JSON 样本功能改动；其后的 `9f31995e`（回填本验收记录）、同步 `main` 以及本条注释/文档口径修正提交（`catalyst-gate.sh` 仅同步 3 处历史基线注释数字，零逻辑改动）均将 HEAD 前移到 `f78596df` 之上，故 `f78596df` 账本条目不再覆盖后续增量。因 7 份单行压缩 JSON 样本超出 `kimi-attest.sh` 单行 2,000 字符 Read 保护上限，无法以 `--base origin/main` 对整支重跑 `kimi-attest.sh`，故改用 `kimi-attest.sh --scope branch-diff --base f78596df` 对 `f78596df...HEAD` 全部后续增量（文档与注释修正）做正式对抗性复审并写入本地增量账本。
       ⚠️ Codex 自陈的覆盖缺口：**只读沙箱里没跑运行时测试** —— 核的是 shell 语法与七份 JSON 样本（确认覆盖全部 103 条基线测试）；测试台与 Xcode 由本机实跑 + 上面的 CI 补上。
       ⚠️ 前四轮判决都不能用：第 1 轮撞额度无判决；第 2、3 轮 needs-attention；
       第 4 轮虽 approve 但 `base_sha` 不等于当时 origin/main（main 期间前进三次），
